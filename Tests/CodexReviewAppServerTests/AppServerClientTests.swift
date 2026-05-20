@@ -121,6 +121,44 @@ struct AppServerClientTests {
         }
     }
 
+    @Test func processTransportProcessesChunkedStdoutBeforeEOF() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-stdout-order-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let executable = directory.appending(path: "app-server-stub.sh")
+        let script = """
+        #!/bin/sh
+        IFS= read -r request
+        printf '{"jsonrpc":"2.0","id":1,"result":{"value":'
+        sleep 0.05
+        printf '"done"}}\\n'
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let transport = try AppServerProcessTransport(configuration: .init(
+            executable: executable.path,
+            arguments: [],
+            environment: [
+                "HOME": directory.path,
+                "PATH": "/bin:/usr/bin",
+            ]
+        ))
+
+        let data = try await transport.send(JSONRPCRequest(
+            id: 1,
+            method: "test/request",
+            params: Data("{}".utf8)
+        ))
+        await transport.close()
+
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["value"] as? String == "done")
+    }
+
     @Test func processTransportMapsNullJSONRPCResultToEmptyPayload() throws {
         let data = try AppServerProcessTransport.responsePayloadData(from: NSNull())
 

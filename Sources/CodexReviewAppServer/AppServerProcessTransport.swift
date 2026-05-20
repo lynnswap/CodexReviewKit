@@ -37,6 +37,8 @@ package actor AppServerProcessTransport: JSONRPCTransport {
     private let stdin: Pipe
     private let stdout: Pipe
     private let stderr: Pipe
+    private let stdoutEvents: AppServerPipeReadEventSource
+    private let stderrEvents: AppServerPipeReadEventSource
     private var framer = JSONRPCFramer()
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPCNotification, Error>.Continuation] = [:]
@@ -63,24 +65,31 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
+        let stdoutEvents = AppServerPipeReadEventSource(
+            fileHandle: stdout.fileHandleForReading,
+            label: "com.lynnpd.CodexReviewKit.app-server.stdout"
+        )
+        let stderrEvents = AppServerPipeReadEventSource(
+            fileHandle: stderr.fileHandleForReading,
+            label: "com.lynnpd.CodexReviewKit.app-server.stderr"
+        )
+        self.stdoutEvents = stdoutEvents
+        self.stderrEvents = stderrEvents
         logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
         logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
         logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard data.isEmpty == false else {
-                Task { await self?.finishReceiving() }
-                return
+        Task { [weak self, events = stdoutEvents.events] in
+            for await event in events {
+                await self?.receiveStdout(event)
             }
-            Task { await self?.receive(data) }
         }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard data.isEmpty == false else {
-                return
+        Task { [weak self, events = stderrEvents.events] in
+            for await event in events {
+                await self?.receiveStderr(event)
             }
-            Task { await self?.receiveStderr(data) }
         }
+        stdoutEvents.start()
+        stderrEvents.start()
     }
 
     package func send(_ request: JSONRPCRequest) async throws -> Data {
@@ -132,14 +141,23 @@ package actor AppServerProcessTransport: JSONRPCTransport {
             return
         }
         closed = true
-        stdout.fileHandleForReading.readabilityHandler = nil
-        stderr.fileHandleForReading.readabilityHandler = nil
+        stdoutEvents.cancel()
+        stderrEvents.cancel()
         try? stdin.fileHandleForWriting.close()
         if terminateProcess {
             logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
             await process.terminateAndWait()
         }
         finishAll(throwing: JSONRPCError.closed)
+    }
+
+    private func receiveStdout(_ event: AppServerPipeReadEvent) async {
+        switch event {
+        case .data(let data):
+            receive(data)
+        case .end:
+            await finishReceiving()
+        }
     }
 
     private func receive(_ data: Data) {
@@ -149,7 +167,10 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         }
     }
 
-    private func receiveStderr(_ data: Data) {
+    private func receiveStderr(_ event: AppServerPipeReadEvent) {
+        guard case .data(let data) = event else {
+            return
+        }
         guard let text = String(data: data, encoding: .utf8) else {
             logger.error("codex app-server stderr emitted \(data.count, privacy: .public) undecodable bytes")
             return
@@ -283,6 +304,69 @@ private struct AppServerProcessLaunch {
     var stdin: Pipe
     var stdout: Pipe
     var stderr: Pipe
+}
+
+private enum AppServerPipeReadEvent: Sendable {
+    case data(Data)
+    case end
+}
+
+private final class AppServerPipeReadEventSource: @unchecked Sendable {
+    let events: AsyncStream<AppServerPipeReadEvent>
+
+    private let fileHandle: FileHandle
+    private let queue: DispatchQueue
+    private let continuationLock = NSLock()
+    private var continuation: AsyncStream<AppServerPipeReadEvent>.Continuation?
+
+    init(fileHandle: FileHandle, label: String) {
+        self.fileHandle = fileHandle
+        self.queue = DispatchQueue(label: label)
+        var continuation: AsyncStream<AppServerPipeReadEvent>.Continuation?
+        self.events = AsyncStream(bufferingPolicy: .unbounded) { streamContinuation in
+            continuation = streamContinuation
+        }
+        self.continuation = continuation
+    }
+
+    func start() {
+        fileHandle.readabilityHandler = { [weak self] handle in
+            self?.queue.async { [weak self] in
+                guard let self else {
+                    return
+                }
+                let data = handle.availableData
+                if data.isEmpty {
+                    finish(with: .end)
+                    return
+                }
+                yield(.data(data))
+            }
+        }
+    }
+
+    func cancel() {
+        fileHandle.readabilityHandler = nil
+        finish()
+    }
+
+    private func yield(_ event: AppServerPipeReadEvent) {
+        continuationLock.lock()
+        let continuation = continuation
+        continuationLock.unlock()
+        continuation?.yield(event)
+    }
+
+    private func finish(with finalEvent: AppServerPipeReadEvent? = nil) {
+        continuationLock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        continuationLock.unlock()
+        if let finalEvent {
+            continuation?.yield(finalEvent)
+        }
+        continuation?.finish()
+    }
 }
 
 private final class AppServerSpawnedProcess: @unchecked Sendable {
