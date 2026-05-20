@@ -210,14 +210,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
                         let shouldEmitNotification: Bool
                         if decoded.events.count == 1,
-                           case .started(let turnID, _, _) = decoded.events[0]
+                           case .started(let turnID, let reviewThreadID, _) = decoded.events[0]
                         {
+                            let matchesDetachedReviewThread = run.reviewThreadID != nil
+                                && run.reviewThreadID != run.threadID
+                                && reviewThreadID == run.reviewThreadID
+                            guard trackedTurnIDs.isEmpty
+                                || trackedTurnIDs.contains(turnID)
+                                || matchesDetachedReviewThread
+                            else {
+                                continue
+                            }
                             trackedTurnIDs.insert(turnID)
                             shouldEmitNotification = emittedStartedTurnIDs.insert(turnID).inserted
                         } else if let turnID = decoded.turnID {
                             if trackedTurnIDs.contains(turnID) == false {
                                 let preservesReviewModeCompletion = awaitingReviewExit
-                                    && (decoded.finishesReviewMode || decoded.events.contains(where: \.isTerminal))
+                                    && decoded.finishesReviewMode
                                 if decoded.startsReviewMode || trackedTurnIDs.isEmpty {
                                     trackedTurnIDs.insert(turnID)
                                 } else if preservesReviewModeCompletion {
@@ -781,7 +790,12 @@ private func decodeReviewNotification(
         case "notLoaded":
             events = [.failed("Review thread is no longer loaded.")]
         case "systemError":
-            events = [.failed("Review thread entered a system error state.")]
+            events = [.logEntry(
+                kind: .diagnostic,
+                text: "Review thread entered a system error state.",
+                groupID: payload.turnID,
+                replacesGroup: false
+            )]
         default:
             return nil
         }
