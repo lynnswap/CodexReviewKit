@@ -36,6 +36,17 @@ struct CodexReviewStoreCommandTests {
         ))))
     }
 
+    @Test func forceStartWhileRunningInvokesBackendRestartPath() async {
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+
+        await store.start()
+        await store.start()
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(backend.startRequests == [false, true])
+    }
+
     @Test func reviewStartPassesEffectiveSettingsModelToBackend() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -364,6 +375,40 @@ struct CodexReviewStoreCommandTests {
             .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
             .init(message: "Stop")
         )))
+    }
+
+    @Test func sessionScopedCancelRejectsJobFromDifferentSession() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let result = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+        )
+        await backend.waitForEventStream()
+
+        await #expect(throws: (any Error).self) {
+            try await store.cancelReview(
+                jobID: "job-1",
+                sessionID: "session-2",
+                cancellation: .mcpClient(message: "Stop")
+            )
+        }
+        #expect(try store.readReview(jobID: "job-1").cancellable)
+
+        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+        _ = try await result
+
+        let commands = await backend.recordedCommands()
+        #expect(commands.contains {
+            if case .interruptReview = $0 {
+                return true
+            }
+            return false
+        } == false)
     }
 
     @Test func cancelledReviewStaysCancelledWhenStreamClosesWithError() async throws {

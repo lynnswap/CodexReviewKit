@@ -91,8 +91,12 @@ public final class CodexReviewStore {
         switch serverState {
         case .stopped, .failed:
             break
-        case .starting, .running:
+        case .starting:
             return
+        case .running where forceRestartIfNeeded == false:
+            return
+        case .running:
+            break
         }
         serverState = .starting
         serverURL = nil

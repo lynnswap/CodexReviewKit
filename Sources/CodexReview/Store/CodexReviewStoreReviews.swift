@@ -239,10 +239,13 @@ extension CodexReviewStore {
 
     package func cancelReview(
         jobID: String,
-        sessionID _: String,
+        sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> ReviewCancelOutcome {
-        try await cancelReview(jobID: jobID, cancellation: cancellation)
+        guard let job = job(id: jobID), job.sessionID == sessionID else {
+            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+        }
+        return try await cancelReview(jobID: jobID, cancellation: cancellation)
     }
 
     @discardableResult

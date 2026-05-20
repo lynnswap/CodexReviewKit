@@ -3,10 +3,14 @@ import Foundation
 extension CodexReviewStore {
     package func completeCancellationLocally(
         jobID: String,
-        sessionID _: String,
+        sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) throws {
         guard let job = job(id: jobID)
+        else {
+            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+        }
+        guard job.sessionID == sessionID
         else {
             throw ReviewError.jobNotFound("Job \(jobID) was not found.")
         }
@@ -27,10 +31,14 @@ extension CodexReviewStore {
 
     package func recordCancellationFailure(
         jobID: String,
-        sessionID _: String,
+        sessionID: String,
         message: String
     ) throws {
         guard let job = job(id: jobID)
+        else {
+            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+        }
+        guard job.sessionID == sessionID
         else {
             throw ReviewError.jobNotFound("Job \(jobID) was not found.")
         }

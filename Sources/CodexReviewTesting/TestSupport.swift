@@ -299,6 +299,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var currentSettingsSnapshot: CodexReviewSettingsSnapshot
     package private(set) var isActive = false
+    package private(set) var startRequests: [Bool] = []
 
     package init(
         reviewBackend: FakeCodexReviewBackend,
@@ -315,7 +316,8 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func attachStore(_: CodexReviewStore) {}
 
-    package func start(store: CodexReviewStore, forceRestartIfNeeded _: Bool) async {
+    package func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async {
+        startRequests.append(forceRestartIfNeeded)
         isActive = true
         store.transitionToRunning(serverURL: nil)
     }
