@@ -73,6 +73,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = "26"
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
+
+          candidates = candidates.reject do |path|
+            pre_release_xcode_path?(path)
+          end
+
+          def version_components(path)
+            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
+            version.to_s.split(".").map(&:to_i)
+          end
+
+          selected = candidates.max_by { |path| version_components(path) }
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
       - name: Xcode version
         run: xcodebuild -version
 

@@ -332,6 +332,88 @@ struct CodexReviewHostTests {
         ])
     }
 
+    @Test func liveStoreAddAccountActivatesNewLoginWhenPersistedAccountsHaveNoActiveAccount() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            accounts: ["existing@example.com"]
+        )
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(InitializeResponse(), for: "initialize")
+        try await transport.enqueue(AccountReadResponse(), for: "account/read")
+        try await transport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
+        try await transport.enqueue(
+            LoginAccountResponse.chatgpt(
+                loginID: "login-new",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(CompleteLoginAccountResponse(), for: "account/login/complete")
+        try await transport.enqueue(
+            AccountReadResponse(account: .chatgpt(email: "new@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAccountRateLimitsResponse(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            transportFactory: { codexHomeURL in
+                #expect(codexHomeURL == mainCodexHomeURL)
+                return transport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        #expect(store.auth.selectedAccount == nil)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["existing@example.com"])
+
+        await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.ReviewMonitor.auth://callback?code=1")!)
+        await waitUntil {
+            store.auth.selectedAccount?.accountKey == "new@example.com"
+                && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
+        }
+
+        #expect(store.auth.persistedActiveAccountKey == "new@example.com")
+        #expect(try activeAccountKey(homeURL: homeURL) == "new@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [
+            "new@example.com",
+            "existing@example.com",
+        ])
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/login/complete",
+            "account/read",
+            "account/rateLimits/read",
+        ])
+    }
+
     @Test func liveStoreAddAccountSetupFailureRecordsAuthenticationFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)

@@ -295,10 +295,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func addAccount(auth: CodexReviewAuthModel) async {
         let activeAccountKey = auth.persistedActiveAccountKey ?? auth.selectedAccount?.accountKey
-        let shouldPreserveActiveAccount = activeAccountKey != nil || auth.persistedAccounts.isEmpty == false
         await startLogin(
             auth: auth,
-            activation: shouldPreserveActiveAccount
+            activation: activeAccountKey != nil
                 ? .preserveActiveAccount(activeAccountKey)
                 : .activateAuthenticatedAccount
         )
