@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package-tests:
+    name: Package Tests
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = "26"
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
+
+          candidates = candidates.reject do |path|
+            pre_release_xcode_path?(path)
+          end
+
+          def version_components(path)
+            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
+            version.to_s.split(".").map(&:to_i)
+          end
+
+          selected = candidates.max_by { |path| version_components(path) }
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Run Swift package tests
+        run: swift test --build-system swiftbuild --no-parallel
+
+      - name: Run monitor app tests
+        run: |
+          xcodebuild test \
+            -project Tools/ReviewMonitor/ReviewMonitor.xcodeproj \
+            -scheme ReviewMonitor \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+  release:
+    name: Package and Publish
+    needs:
+      - package-tests
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve latest stable Xcode
+        run: |
+          xcode_app="$(ruby <<'RUBY'
+          xcode_major = "26"
+          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
+
+          def pre_release_xcode_path?(path)
+            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
+            labels.any? do |label|
+              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
+            end
+          end
+
+          candidates = candidates.reject do |path|
+            pre_release_xcode_path?(path)
+          end
+
+          def version_components(path)
+            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
+            version.to_s.split(".").map(&:to_i)
+          end
+
+          selected = candidates.max_by { |path| version_components(path) }
+          abort("No stable Xcode #{xcode_major} installation found") unless selected
+          puts selected
+          RUBY
+          )"
+          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Resolved Xcode: ${xcode_app}"
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build release artifacts
+        run: bash scripts/build-release.sh --version "${GITHUB_REF_NAME}" --dist-root dist
+
+      - name: Package release archive
+        run: bash scripts/package-release.sh --version "${GITHUB_REF_NAME}" --dist-root dist --output-dir release
+
+      - name: Publish Draft GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        with:
+          files: release/ReviewMonitor_*.dmg
+          draft: true
+          generate_release_notes: true
