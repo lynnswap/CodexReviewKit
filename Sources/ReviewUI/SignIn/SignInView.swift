@@ -1,0 +1,89 @@
+import SwiftUI
+import CodexReview
+
+struct SignInView: View {
+    let store: CodexReviewStore
+
+    var body: some View {
+        ContentUnavailableView {
+            Text("Welcome to ReviewMonitor")
+                .font(.largeTitle)
+                .fontDesign(.rounded)
+                .fontWidth(.compressed)
+                .fontWeight(.semibold)
+                .scenePadding(.bottom)
+            
+            Button(role: store.auth.isAuthenticating ? .cancel : .confirm) {
+                Task { @MainActor in
+                    await store.performPrimaryAuthenticationAction()
+                }
+            } label: {
+                LabeledContent {
+                    if store.auth.isAuthenticating {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                } label: {
+                    Text(store.auth.isAuthenticating ? "Cancel" : "Sign in with ChatGPT")
+                }
+                .padding(.vertical, 4)
+            }
+            .buttonSizing(.flexible)
+            .buttonBorderShape(.capsule)
+            .buttonStyle(.glassProminent)
+            .tint(store.auth.isAuthenticating ? .clear : .none)
+            .disabled(store.canPerformPrimaryAuthenticationAction == false)
+            .animation(.default,value:store.canPerformPrimaryAuthenticationAction)
+            .accessibilityIdentifier("review-monitor.sign-in-button")
+            
+        } description: {
+            if let descriptionText {
+                Text(descriptionText)
+            }
+        }
+        .animation(.default, value: store.auth.isAuthenticating)
+        .scenePadding()
+    }
+
+    private var descriptionText: String? {
+        store.auth.progress?.detail ?? store.auth.errorMessage ?? serverFailureMessage
+    }
+
+    private var serverFailureMessage: String? {
+        guard case .failed(let message) = store.serverState else {
+            return nil
+        }
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedMessage.isEmpty ? nil : trimmedMessage
+    }
+}
+
+#if DEBUG
+#Preview("Signed Out") {
+    SignInView(store: makeSignInPreviewStore())
+}
+
+#Preview("Authenticating") {
+    SignInView(store: makeAuthenticatingSignInPreviewStore())
+}
+
+@MainActor
+func makeSignInPreviewStore() -> CodexReviewStore {
+    ReviewMonitorPreviewContent.makeStore()
+}
+
+@MainActor
+func makeAuthenticatingSignInPreviewStore() -> CodexReviewStore {
+    let store = makeSignInPreviewStore()
+    store.auth.updatePhase(
+        .signingIn(
+            .init(
+                title: "Sign in with ChatGPT",
+                detail: "Open the browser to continue.",
+                browserURL: "https://auth.openai.com/oauth/authorize"
+            )
+        )
+    )
+    return store
+}
+#endif
