@@ -50,15 +50,14 @@ final class ReviewMonitorRootViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        setContentViewController(uiState.contentKind, animated: false)
         bindWindowState()
         bindWindowAttachment()
     }
 
     private func bindWindowState() {
-        observationScope.observe(uiState) { [weak self] _, uiState in
+        observationScope.observe(uiState) { [weak self] event, uiState in
             let kind = uiState.contentKind
-            self?.setContentViewController(kind, animated: true)
+            self?.setContentViewController(kind, animated: event.kind != .initial)
         }
     }
 

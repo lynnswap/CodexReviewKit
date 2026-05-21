@@ -46,7 +46,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         super.viewDidLoad()
         configureHierarchy()
         bindObservation()
-        updatePresentation(selection: uiState.selection)
     }
 
     override func performTextFinderAction(_ sender: Any?) {
@@ -91,12 +90,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func bindObservation() {
         uiStateObservationScope.cancelAll()
-        uiStateObservationScope.observe(uiState) { [weak self] _, uiState in
+        uiStateObservationScope.observe(uiState) { [weak self] event, uiState in
             let selection = uiState.selection
             guard let self else {
                 return
             }
-            guard self.selectionRequiresPresentationUpdate(selection) else {
+            guard event.kind == .initial || self.selectionRequiresPresentationUpdate(selection) else {
                 return
             }
             self.updatePresentation(selection: selection)

@@ -17,7 +17,6 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
 
         automaticallyAppliesContentInsets = true
         view = NSHostingView(rootView: StatusView(store: store))
-        updateVisibility(animated: false)
         bindObservation()
     }
 
@@ -27,20 +26,13 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
     }
 
     private func bindObservation() {
-        observationScope.observe(uiState) { [weak self] _, uiState in
+        observationScope.observe(uiState) { [weak self] event, uiState in
             let shouldHide = uiState.sidebarSelection == .account
             guard let self else {
                 return
             }
-            self.updateVisibility(shouldHide: shouldHide, animated: true)
+            self.updateVisibility(shouldHide: shouldHide, animated: event.kind != .initial)
         }
-    }
-
-    private func updateVisibility(animated: Bool) {
-        updateVisibility(
-            shouldHide: uiState.sidebarSelection == .account,
-            animated: animated
-        )
     }
 
     private func updateVisibility(shouldHide: Bool, animated: Bool) {

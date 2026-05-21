@@ -32,18 +32,13 @@ final class ReviewMonitorAddAccountToolbarItem: NSToolbarItem {
         overflowMenuItem.action = #selector(handleOverflowAction(_:))
 
         bindObservation()
-        updateForAuthState(animated: false)
     }
 
     private func bindObservation() {
-        observationScope.observe(auth) { [weak self] _, auth in
+        observationScope.observe(auth) { [weak self] event, auth in
             let progress = auth.progress
-            self?.updateForAuthState(progress: progress, animated: true)
+            self?.updateForAuthState(progress: progress, animated: event.kind != .initial)
         }
-    }
-
-    private func updateForAuthState(animated: Bool) {
-        updateForAuthState(progress: auth.progress, animated: animated)
     }
 
     private func updateForAuthState(

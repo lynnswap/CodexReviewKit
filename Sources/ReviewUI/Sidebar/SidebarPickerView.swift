@@ -31,7 +31,6 @@ final class ReviewMonitorSidebarPickerToolbarItem: NSToolbarItem {
         segmentedControl.action = #selector(handleSegmentedControl(_:))
         configureOverflowMenu()
         bindObservation()
-        updateSelection(uiState.sidebarSelection)
     }
 
     private static func makeSegmentedControl() -> NSSegmentedControl {

@@ -131,7 +131,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             bindToolbarState()
         }
         window.layoutIfNeeded()
-        updateAddAccountToolbarVisibility()
         applyWindowTitle(Self.windowTitlePresentation(for: uiState.selection))
     }
 

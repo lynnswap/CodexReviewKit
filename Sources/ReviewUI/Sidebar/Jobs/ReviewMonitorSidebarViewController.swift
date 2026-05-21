@@ -128,9 +128,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         super.viewDidLoad()
         configureHierarchy()
         configureOutlineView()
-        reloadOutline(workspaces: store.orderedWorkspaces)
         bindObservation()
-        applySidebarPresentation(currentSidebarPresentation())
     }
 
     override func viewDidLayout() {
