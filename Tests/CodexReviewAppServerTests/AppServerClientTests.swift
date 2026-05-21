@@ -772,9 +772,12 @@ struct AppServerClientTests {
         #expect(params.ephemeral == true)
         #expect(params.approvalPolicy == "never")
         #expect(params.permissions == .profileID(":danger-full-access"))
-        #expect(params.threadSource == "user")
+        #expect(params.sessionStartSource == .startup)
+        #expect(params.threadSource == .user)
         #expect(params.sandbox == nil)
         #expect(object["permissions"] as? String == ":danger-full-access")
+        #expect(object["sessionStartSource"] as? String == "startup")
+        #expect(object["threadSource"] as? String == "user")
         #expect(object["sandbox"] == nil)
     }
 
@@ -800,6 +803,7 @@ struct AppServerClientTests {
         let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
         #expect(params["sandbox"] as? String == "danger-full-access")
         #expect(params["permissions"] == nil)
+        #expect(params["sessionStartSource"] as? String == "startup")
         #expect(params["threadSource"] as? String == "user")
     }
 
@@ -838,9 +842,12 @@ struct AppServerClientTests {
 
         #expect(first["permissions"] as? String == ":danger-full-access")
         #expect(first["sandbox"] == nil)
+        #expect(first["sessionStartSource"] as? String == "startup")
+        #expect(first["threadSource"] as? String == "user")
         #expect(permissions["type"] as? String == "profile")
         #expect(permissions["id"] as? String == ":danger-full-access")
         #expect(second["sandbox"] == nil)
+        #expect(second["sessionStartSource"] as? String == "startup")
         #expect(second["threadSource"] as? String == "user")
     }
 
@@ -880,6 +887,7 @@ struct AppServerClientTests {
         ) as? [String: Any])
         #expect(fallback["sandbox"] as? String == "danger-full-access")
         #expect(fallback["permissions"] == nil)
+        #expect(fallback["sessionStartSource"] as? String == "startup")
         #expect(fallback["threadSource"] as? String == "user")
     }
 
@@ -918,6 +926,7 @@ struct AppServerClientTests {
         #expect(first["sandbox"] == nil)
         #expect(fallback["sandbox"] as? String == "danger-full-access")
         #expect(fallback["permissions"] == nil)
+        #expect(fallback["sessionStartSource"] as? String == "startup")
         #expect(fallback["threadSource"] as? String == "user")
     }
 

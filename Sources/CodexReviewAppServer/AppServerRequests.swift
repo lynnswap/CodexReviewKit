@@ -90,7 +90,9 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
     package var approvalPolicy: String?
     package var sandbox: String?
     package var permissions: ThreadStartPermissions?
-    package var threadSource: String?
+    // Session start source drives lifecycle hooks; thread source is analytics classification.
+    package var sessionStartSource: ThreadStartSource?
+    package var threadSource: ThreadSource?
 
     package init(
         cwd: String,
@@ -99,7 +101,8 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
         approvalPolicy: String? = nil,
         sandbox: String? = nil,
         permissions: ThreadStartPermissions? = nil,
-        threadSource: String? = nil
+        sessionStartSource: ThreadStartSource? = nil,
+        threadSource: ThreadSource? = nil
     ) {
         self.cwd = cwd
         self.model = model
@@ -107,8 +110,20 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
         self.approvalPolicy = approvalPolicy
         self.sandbox = sandbox
         self.permissions = permissions
+        self.sessionStartSource = sessionStartSource
         self.threadSource = threadSource
     }
+}
+
+package enum ThreadStartSource: String, Codable, Equatable, Sendable {
+    case startup
+    case clear
+}
+
+package enum ThreadSource: String, Codable, Equatable, Sendable {
+    case user
+    case subagent
+    case memoryConsolidation = "memory_consolidation"
 }
 
 package enum ThreadStartPermissions: Codable, Equatable, Sendable {

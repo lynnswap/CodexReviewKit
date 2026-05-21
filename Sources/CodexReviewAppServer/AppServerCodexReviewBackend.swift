@@ -199,7 +199,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             ephemeral: true,
             approvalPolicy: "never",
             permissions: permissions,
-            threadSource: "user"
+            sessionStartSource: .startup,
+            threadSource: .user
         )
     }
 
@@ -210,7 +211,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             ephemeral: true,
             approvalPolicy: "never",
             sandbox: "danger-full-access",
-            threadSource: "user"
+            sessionStartSource: .startup,
+            threadSource: .user
         )
     }
 
