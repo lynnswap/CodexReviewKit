@@ -10,6 +10,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         package var arguments: [String]
         package var environment: [String: String]
         package var codexHomeURL: URL
+        package var threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
 
         package init(
             executable: String? = nil,
@@ -18,14 +19,30 @@ package actor AppServerProcessTransport: JSONRPCTransport {
             codexHomeURL: URL? = nil
         ) {
             let resolvedCodexHomeURL = codexHomeURL ?? AppServerCodexHome.url(environment: environment)
-            let resolvedCommand = CodexAppServerExecutable.resolve(environment: environment)
-            self.executable = executable ?? resolvedCommand.executable
-            self.arguments = arguments ?? resolvedCommand.arguments
+            let resolvedExecutable = executable ?? CodexAppServerExecutable.resolveExecutable(
+                environment: environment
+            )
+            let supportsSessionSource: Bool
+            if let arguments {
+                supportsSessionSource = arguments.contains("--session-source")
+            } else {
+                supportsSessionSource = CodexAppServerExecutable.supportsAppServerSessionSource(
+                    executable: resolvedExecutable,
+                    environment: environment
+                )
+            }
+            self.executable = resolvedExecutable
+            self.arguments = arguments ?? CodexAppServerExecutable.appServerArguments(
+                supportsSessionSource: supportsSessionSource
+            )
             self.environment = AppServerCodexHome.environment(
                 environment,
                 codexHomeURL: resolvedCodexHomeURL
             )
             self.codexHomeURL = resolvedCodexHomeURL
+            self.threadStartPermissionStrategy = supportsSessionSource
+                ? .modernPermissions
+                : .legacySandbox
         }
     }
 
@@ -249,7 +266,6 @@ package actor AppServerProcessTransport: JSONRPCTransport {
 
     package static func unsupportedServerRequestPayload(id: Any, method: String) throws -> Data {
         var data = try JSONSerialization.data(withJSONObject: [
-            "jsonrpc": "2.0",
             "id": id,
             "error": [
                 "code": -32601,
@@ -690,32 +706,56 @@ package enum CodexAppServerExecutable {
     package static let fileBackedAuthConfiguration = #"cli_auth_credentials_store="file""#
 
     package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Command {
+        let executable = resolveExecutable(environment: environment)
+        return .init(
+            executable: executable,
+            arguments: appServerArguments(for: executable, environment: environment)
+        )
+    }
+
+    package static func resolveExecutable(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
         let requestedCommand = [
             environment["CODEX_REVIEW_CODEX_EXECUTABLE"],
             environment["CODEX_EXECUTABLE"],
         ].compactMap(\.self).first ?? "codex"
 
-        if let candidate = resolveExecutable(
+        if let candidate = findExecutable(
             requestedCommand,
             environment: environment
         ) {
-            return .init(
-                executable: candidate,
-                arguments: appServerArguments()
-            )
+            return candidate
         }
 
-        return .init(
-            executable: requestedCommand,
-            arguments: appServerArguments()
+        return requestedCommand
+    }
+
+    package static func appServerArguments(
+        for executable: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String] {
+        appServerArguments(
+            supportsSessionSource: supportsAppServerSessionSource(
+                executable: executable,
+                environment: environment
+            )
         )
     }
 
-    package static func appServerArguments() -> [String] {
-        ["-c", fileBackedAuthConfiguration, "app-server", "--listen", "stdio://"]
+    package static func appServerArguments(supportsSessionSource: Bool = false) -> [String] {
+        var arguments = [
+            "-c", fileBackedAuthConfiguration,
+            "app-server",
+            "--listen", "stdio://",
+        ]
+        if supportsSessionSource {
+            arguments.append(contentsOf: ["--session-source", "app-server"])
+        }
+        return arguments
     }
 
-    private static func resolveExecutable(
+    private static func findExecutable(
         _ requestedCommand: String,
         environment: [String: String]
     ) -> String? {
@@ -735,6 +775,44 @@ package enum CodexAppServerExecutable {
             }
         }
         return nil
+    }
+
+    package static func supportsAppServerSessionSource(
+        executable: String,
+        environment: [String: String]
+    ) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["app-server", "--help"]
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(2)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard process.isRunning == false else {
+            process.terminate()
+            return false
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let help = String(decoding: data, as: UTF8.self)
+        // Deprecated compatibility: installed Codex builds can reject this newer app-server flag.
+        // Remove the probe once the packaged Codex app-server consistently accepts --session-source.
+        return help.contains("--session-source")
     }
 
     package static func pathSearchDirectories(environment: [String: String]) -> [String] {
@@ -760,7 +838,6 @@ package enum CodexAppServerExecutable {
 private func makeRequestPayload(_ request: JSONRPCRequest) throws -> Data {
     let params = try JSONSerialization.jsonObject(with: request.params)
     let object: [String: Any] = [
-        "jsonrpc": "2.0",
         "id": request.id,
         "method": request.method,
         "params": params,
@@ -773,7 +850,6 @@ private func makeRequestPayload(_ request: JSONRPCRequest) throws -> Data {
 private func makeNotificationPayload(_ notification: JSONRPCNotification) throws -> Data {
     let params = try JSONSerialization.jsonObject(with: notification.params)
     let object: [String: Any] = [
-        "jsonrpc": "2.0",
         "method": notification.method,
         "params": params,
     ]
