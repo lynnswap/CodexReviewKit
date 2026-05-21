@@ -430,6 +430,30 @@ struct ReviewUIShellTests {
         #expect(window.toolbar != nil)
     }
 
+    @Test func windowControllerUsesDefaultContentSizeWithoutSavedFrame() {
+        let store = CodexReviewStore.makePreviewStore()
+        let autosaveName = NSWindow.FrameAutosaveName(
+            "ReviewMonitor.MainWindow.Tests.\(UUID().uuidString)"
+        )
+        let windowController = ReviewMonitorWindowController(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            frameAutosaveName: autosaveName
+        )
+        guard let window = windowController.window else {
+            Issue.record("ReviewMonitorWindowController did not create a window.")
+            return
+        }
+        defer {
+            window.close()
+            NSWindow.removeFrame(usingName: autosaveName)
+        }
+
+        let contentSize = window.contentView?.bounds.size ?? .zero
+        #expect(abs(contentSize.width - 600) < 0.5)
+        #expect(abs(contentSize.height - 400) < 0.5)
+    }
+
     @Test func windowControllerKeepsSplitViewForUnsavedCurrentSession() {
         let store = CodexReviewStore.makePreviewStore()
         let currentAccount = CodexAccount(email: "current@example.com", planType: "pro")

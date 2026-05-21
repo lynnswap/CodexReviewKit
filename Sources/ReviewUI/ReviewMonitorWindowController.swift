@@ -15,6 +15,7 @@ func configureReviewMonitorWindowBase(_ window: NSWindow) {
 
 @Observable
 public final class ReviewMonitorWindowController: NSWindowController {
+    private static let defaultContentSize = NSSize(width: 600, height: 400)
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")
     private let rootViewController: ReviewMonitorRootViewController
 
@@ -25,9 +26,21 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    init(
+    convenience init(
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator
+    ) {
+        self.init(
+            store: store,
+            contentTransitionAnimator: contentTransitionAnimator,
+            frameAutosaveName: Self.frameAutosaveName
+        )
+    }
+
+    init(
+        store: CodexReviewStore,
+        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
+        frameAutosaveName: NSWindow.FrameAutosaveName
     ) {
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let rootViewController = ReviewMonitorRootViewController(
@@ -36,19 +49,20 @@ public final class ReviewMonitorWindowController: NSWindowController {
             contentTransitionAnimator: contentTransitionAnimator
         )
         let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: NSSize(width: 900, height: 600)),
+            contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         configureReviewMonitorWindowBase(window)
         window.contentViewController = rootViewController
+        window.setContentSize(Self.defaultContentSize)
 
         self.rootViewController = rootViewController
         super.init(window: window)
 
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName(Self.frameAutosaveName)
+        window.setFrameAutosaveName(frameAutosaveName)
     }
 
     @available(*, unavailable)
