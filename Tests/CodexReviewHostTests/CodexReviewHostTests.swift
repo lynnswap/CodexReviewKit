@@ -59,36 +59,118 @@ struct CodexReviewHostTests {
     @Test func hostStartPreservesBackendAccountID() async {
         let backend = FakeCodexReviewBackend(auth: .init(
             accounts: [
-                .init(id: .init("api-key"), label: "API Key", isActive: true),
+                .init(id: .init("review@example.com"), label: "review@example.com", isActive: true),
             ],
-            activeAccountID: .init("api-key")
+            activeAccountID: .init("review@example.com")
         ))
         let host = CodexReviewHost(backend: backend)
 
         await host.start()
         await host.store.refreshAuthentication()
 
-        #expect(host.store.auth.selectedAccount?.accountKey == "api-key")
-        #expect(host.store.auth.selectedAccount?.email == "API Key")
-        #expect(host.store.auth.persistedActiveAccountKey == "api-key")
+        #expect(host.store.auth.selectedAccount?.accountKey == "review@example.com")
+        #expect(host.store.auth.selectedAccount?.email == "review@example.com")
+        #expect(host.store.auth.persistedActiveAccountKey == "review@example.com")
     }
 
-    @Test func liveStoreKeepsNonEmailAppServerAccountAuthenticated() async throws {
+    @Test func liveStoreLoadsPersistedRegistryAccountKind() throws {
+        let homeURL = try temporaryHome()
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            records: [
+                [
+                    "accountKey": "review@example.com",
+                    "kind": "chatgpt",
+                    "email": "review@example.com",
+                    "planType": "pro",
+                ],
+                [
+                    "accountKey": "api-key",
+                    "kind": "apiKey",
+                    "email": "API Key",
+                    "planType": "pro",
+                ],
+            ]
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: FakeJSONRPCTransport()
+        )
+
+        let reviewAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == "review@example.com"
+        })
+        let providerAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == "api-key"
+        })
+
+        #expect(reviewAccount.kind == .chatGPT)
+        #expect(reviewAccount.capabilities.supportsRateLimitRefresh)
+        #expect(providerAccount.kind == .apiKey)
+        #expect(providerAccount.capabilities.supportsRateLimitRefresh == false)
+    }
+
+    @Test func liveStoreInfersMissingPersistedRegistryKind() throws {
+        let homeURL = try temporaryHome()
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            records: [
+                [
+                    "accountKey": "review@example.com",
+                    "email": "review@example.com",
+                    "planType": "pro",
+                ],
+                [
+                    "accountKey": "api-key",
+                    "email": "API Key",
+                    "planType": "pro",
+                ],
+                [
+                    "accountKey": "amazon-bedrock",
+                    "email": "Amazon Bedrock",
+                    "planType": "pro",
+                ],
+            ]
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transport: FakeJSONRPCTransport()
+        )
+
+        let reviewAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == "review@example.com"
+        })
+        let apiKeyAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == "api-key"
+        })
+        let bedrockAccount = try #require(store.auth.persistedAccounts.first {
+            $0.accountKey == "amazon-bedrock"
+        })
+
+        #expect(reviewAccount.kind == .chatGPT)
+        #expect(reviewAccount.capabilities.supportsRateLimitRefresh)
+        #expect(apiKeyAccount.kind == .apiKey)
+        #expect(apiKeyAccount.capabilities.supportsRateLimitRefresh == false)
+        #expect(bedrockAccount.kind == .amazonBedrock)
+        #expect(bedrockAccount.capabilities.supportsRateLimitRefresh == false)
+    }
+
+    @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(InitializeResponse(), for: "initialize")
-        try await transport.enqueue(AccountReadResponse(account: .apiKey), for: "account/read")
+        try await transport.enqueue(
+            TestAccountReadResponse(account: .init(type: "apiKey")),
+            for: "account/read"
+        )
         try await transport.enqueue(
             ConfigReadResponse(config: .init(model: "gpt-5")),
             for: "config/read"
         )
         try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
-        try await transport.enqueue(
-            AppServerAccountRateLimitsResponse(rateLimits: .init(
-                limitID: "codex",
-                primary: .init(usedPercent: 10, windowDurationMins: 300)
-            )),
-            for: "account/rateLimits/read"
-        )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -96,10 +178,17 @@ struct CodexReviewHostTests {
         )
 
         await store.start(forceRestartIfNeeded: true)
+        await transport.waitForRequestCount(4)
+        await store.refreshAccountRateLimits(accountKey: "api-key")
+        await Task.yield()
 
-        #expect(store.auth.selectedAccount?.accountKey == "api-key")
-        #expect(store.auth.selectedAccount?.email == "API Key")
-        #expect(store.auth.persistedActiveAccountKey == "api-key")
+        #expect(store.auth.selectedAccount?.kind == .apiKey)
+        #expect(await transport.recordedRequests().map(\.method) == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+        ])
     }
 
     @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
@@ -208,7 +297,7 @@ struct CodexReviewHostTests {
         try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
         try await mainTransport.enqueue(
             AccountReadResponse(
-                account: .chatgpt(email: "active@example.com", planType: "pro")
+                account: .init(email: "active@example.com", planType: "pro")
             ),
             for: "account/read"
         )
@@ -237,7 +326,7 @@ struct CodexReviewHostTests {
         )
         try await authTransport.enqueue(
             AccountReadResponse(
-                account: .chatgpt(email: "new@example.com", planType: "plus")
+                account: .init(email: "new@example.com", planType: "plus")
             ),
             for: "account/read"
         )
@@ -358,7 +447,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(CompleteLoginAccountResponse(), for: "account/login/complete")
         try await transport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "new@example.com", planType: "plus")),
+            AccountReadResponse(account: .init(email: "new@example.com", planType: "plus")),
             for: "account/read"
         )
         try await transport.enqueue(
@@ -425,7 +514,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
         try await mainTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await mainTransport.enqueue(
@@ -496,7 +585,7 @@ struct CodexReviewHostTests {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(InitializeResponse(), for: "initialize")
         try await transport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await transport.enqueue(
@@ -559,7 +648,7 @@ struct CodexReviewHostTests {
         let firstTransport = FakeJSONRPCTransport()
         try await firstTransport.enqueue(InitializeResponse(), for: "initialize")
         try await firstTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "first@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "first@example.com", planType: "pro")),
             for: "account/read"
         )
         try await firstTransport.enqueue(
@@ -581,7 +670,7 @@ struct CodexReviewHostTests {
         let secondTransport = FakeJSONRPCTransport()
         try await secondTransport.enqueue(InitializeResponse(), for: "initialize")
         try await secondTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "second@example.com", planType: "plus")),
+            AccountReadResponse(account: .init(email: "second@example.com", planType: "plus")),
             for: "account/read"
         )
         try await secondTransport.enqueue(
@@ -637,7 +726,7 @@ struct CodexReviewHostTests {
         let firstTransport = FakeJSONRPCTransport()
         try await firstTransport.enqueue(InitializeResponse(), for: "initialize")
         try await firstTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await firstTransport.enqueue(AccountReadResponse(), for: "account/read")
@@ -714,7 +803,7 @@ struct CodexReviewHostTests {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(InitializeResponse(), for: "initialize")
         try await transport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "first@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "first@example.com", planType: "pro")),
             for: "account/read"
         )
         try await transport.enqueue(
@@ -835,7 +924,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
         try await mainTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await mainTransport.enqueue(
@@ -916,7 +1005,7 @@ struct CodexReviewHostTests {
         let firstTransport = FakeJSONRPCTransport()
         try await firstTransport.enqueue(InitializeResponse(), for: "initialize")
         try await firstTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await firstTransport.enqueue(
@@ -1004,7 +1093,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
         try await mainTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await mainTransport.enqueue(
@@ -1056,7 +1145,7 @@ struct CodexReviewHostTests {
         let mainTransport = FakeJSONRPCTransport()
         try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
         try await mainTransport.enqueue(
-            AccountReadResponse(account: .chatgpt(email: "active@example.com", planType: "pro")),
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
             for: "account/read"
         )
         try await mainTransport.enqueue(
@@ -1186,6 +1275,20 @@ private struct TestLoginCompletedNotification: Encodable, Sendable {
     }
 }
 
+private struct TestAccountReadResponse: Encodable, Sendable {
+    var account: TestAccount
+    var requiresOpenAIAuth = false
+
+    enum CodingKeys: String, CodingKey {
+        case account
+        case requiresOpenAIAuth = "requiresOpenaiAuth"
+    }
+}
+
+private struct TestAccount: Encodable, Sendable {
+    var type: String
+}
+
 private struct TestRateLimitsUpdatedNotification: Encodable, Sendable {
     var rateLimits: AppServerRateLimitSnapshotPayload
 }
@@ -1300,6 +1403,25 @@ private func writeRegistry(
     activeAccountKey: String?,
     accounts: [String]
 ) throws {
+    try writeRegistryRecords(
+        homeURL: homeURL,
+        activeAccountKey: activeAccountKey,
+        records: accounts.map { email in
+            [
+                "accountKey": email,
+                "kind": "chatgpt",
+                "email": email,
+                "planType": "pro",
+            ]
+        }
+    )
+}
+
+private func writeRegistryRecords(
+    homeURL: URL,
+    activeAccountKey: String?,
+    records: [[String: Any]]
+) throws {
     let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
     let registryURL = codexHomeURL
         .appendingPathComponent("accounts", isDirectory: true)
@@ -1308,13 +1430,6 @@ private func writeRegistry(
         at: registryURL.deletingLastPathComponent(),
         withIntermediateDirectories: true
     )
-    let records = accounts.map { email in
-        [
-            "accountKey": email,
-            "email": email,
-            "planType": "pro",
-        ]
-    }
     let data = try JSONSerialization.data(withJSONObject: [
         "activeAccountKey": activeAccountKey as Any,
         "accounts": records,

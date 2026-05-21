@@ -55,7 +55,9 @@ public final class CodexAccount: Identifiable, Hashable {
     nonisolated public let id: String
     public package(set) var email: String
     public package(set) var maskedEmail: String
+    package private(set) var kind: BackendAccountKind
     public var planType: String?
+    package private(set) var capabilities: BackendAccountCapabilities
     public package(set) var rateLimits: [CodexRateLimitWindow] = []
     public package(set) var isSwitching = false
     public package(set) var lastRateLimitFetchAt: Date?
@@ -65,10 +67,26 @@ public final class CodexAccount: Identifiable, Hashable {
         id
     }
 
-    public init(
+    public convenience init(
         accountKey: String? = nil,
         email: String,
         planType: String? = nil
+    ) {
+        self.init(
+            accountKey: accountKey,
+            email: email,
+            planType: planType,
+            kind: .chatGPT,
+            capabilities: .supportsCodexRateLimits
+        )
+    }
+
+    package init(
+        accountKey: String? = nil,
+        email: String,
+        planType: String? = nil,
+        kind: BackendAccountKind = .chatGPT,
+        capabilities: BackendAccountCapabilities? = nil
     ) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         precondition(trimmedEmail.isEmpty == false, "CodexAccount email must not be empty.")
@@ -80,11 +98,15 @@ public final class CodexAccount: Identifiable, Hashable {
         self.id = resolvedAccountKey
         self.email = trimmedEmail
         self.maskedEmail = maskedReviewAccountEmail(trimmedEmail)
+        self.kind = kind
         self.planType = planType
+        self.capabilities = capabilities ?? kind.capabilities
     }
     package func apply(_ payload: CodexSavedAccountPayload) {
         self.updateEmail(payload.email)
+        self.updateKind(payload.kind)
         self.updatePlanType(payload.planType)
+        self.updateCapabilities(payload.capabilities)
         self.updateRateLimits(payload.rateLimits)
         self.updateRateLimitFetchMetadata(
             fetchedAt: payload.lastRateLimitFetchAt,
@@ -103,6 +125,20 @@ public final class CodexAccount: Identifiable, Hashable {
         self.planType = planType
     }
 
+    package func updateKind(
+        _ kind: BackendAccountKind,
+        capabilities: BackendAccountCapabilities? = nil
+    ) {
+        self.kind = kind
+        self.capabilities = capabilities ?? kind.capabilities
+        clearRateLimitStateIfUnsupported()
+    }
+
+    package func updateCapabilities(_ capabilities: BackendAccountCapabilities) {
+        self.capabilities = capabilities
+        clearRateLimitStateIfUnsupported()
+    }
+
     package func updateIsSwitching(_ isSwitching: Bool) {
         guard self.isSwitching != isSwitching else {
             return
@@ -113,6 +149,10 @@ public final class CodexAccount: Identifiable, Hashable {
     package func updateRateLimits(
         _ rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)]
     ) {
+        guard capabilities.supportsRateLimitRefresh else {
+            clearRateLimits()
+            return
+        }
         let validRateLimitsByDuration = rateLimits.reduce(
             into: [Int: (windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)]()
         ) { result, rateLimit in
@@ -149,6 +189,11 @@ public final class CodexAccount: Identifiable, Hashable {
         fetchedAt: Date?,
         error: String?
     ) {
+        guard capabilities.supportsRateLimitRefresh else {
+            lastRateLimitFetchAt = nil
+            lastRateLimitError = nil
+            return
+        }
         lastRateLimitFetchAt = fetchedAt
         lastRateLimitError = error?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
@@ -156,12 +201,23 @@ public final class CodexAccount: Identifiable, Hashable {
     package func clearRateLimits() {
         rateLimits.removeAll()
     }
+
+    private func clearRateLimitStateIfUnsupported() {
+        guard capabilities.supportsRateLimitRefresh == false else {
+            return
+        }
+        clearRateLimits()
+        lastRateLimitFetchAt = nil
+        lastRateLimitError = nil
+    }
 }
 
 package struct CodexSavedAccountPayload: Sendable {
     package var accountKey: String
     package var email: String
+    package var kind: BackendAccountKind
     package var planType: String?
+    package var capabilities: BackendAccountCapabilities
     package var rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)]
     package var lastRateLimitFetchAt: Date?
     package var lastRateLimitError: String?
@@ -169,14 +225,18 @@ package struct CodexSavedAccountPayload: Sendable {
     package init(
         accountKey: String,
         email: String,
+        kind: BackendAccountKind = .chatGPT,
         planType: String?,
+        capabilities: BackendAccountCapabilities = .supportsCodexRateLimits,
         rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)],
         lastRateLimitFetchAt: Date?,
         lastRateLimitError: String?
     ) {
         self.accountKey = accountKey
         self.email = email
+        self.kind = kind
         self.planType = planType
+        self.capabilities = capabilities
         self.rateLimits = rateLimits
         self.lastRateLimitFetchAt = lastRateLimitFetchAt
         self.lastRateLimitError = lastRateLimitError
@@ -188,7 +248,9 @@ package func makeCodexAccount(from payload: CodexSavedAccountPayload) -> CodexAc
     let account = CodexAccount(
         accountKey: payload.accountKey,
         email: payload.email,
-        planType: payload.planType
+        planType: payload.planType,
+        kind: payload.kind,
+        capabilities: payload.capabilities
     )
     account.apply(payload)
     return account
@@ -199,7 +261,9 @@ package func savedAccountPayload(from account: CodexAccount) -> CodexSavedAccoun
     .init(
         accountKey: account.accountKey,
         email: account.email,
+        kind: account.kind,
         planType: account.planType,
+        capabilities: account.capabilities,
         rateLimits: account.rateLimits.map {
             (
                 windowDurationMinutes: $0.windowDurationMinutes,
