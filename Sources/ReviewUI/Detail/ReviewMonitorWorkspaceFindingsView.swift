@@ -22,22 +22,16 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
 
     private final class FindingsTextView: NSTextView {
         var threadCharacterRanges: [NSRange] = []
-        var threadBackgroundColor: NSColor = .textBackgroundColor
 
-        override func drawBackground(in rect: NSRect) {
-            super.drawBackground(in: rect)
-            drawThreadBackgrounds(in: rect)
-        }
-
-        private func drawThreadBackgrounds(in dirtyRect: NSRect) {
+        func threadBackgroundRects() -> [NSRect] {
             guard let layoutManager,
                   let textContainer
             else {
-                return
+                return []
             }
 
-            threadBackgroundColor.setFill()
-            for characterRange in threadCharacterRanges {
+            layoutManager.ensureLayout(for: textContainer)
+            return threadCharacterRanges.compactMap { characterRange in
                 let glyphRange = layoutManager.glyphRange(
                     forCharacterRange: characterRange,
                     actualCharacterRange: nil
@@ -49,19 +43,9 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
                         layoutManager: layoutManager
                       )
                 else {
-                    continue
+                    return nil
                 }
-                guard dirtyRect.intersects(backgroundRect)
-                else {
-                    continue
-                }
-
-                NSBezierPath(
-                    roundedRect: backgroundRect,
-                    xRadius: Layout.threadBackgroundCornerRadius,
-                    yRadius: Layout.threadBackgroundCornerRadius
-                )
-                .fill()
+                return backgroundRect
             }
         }
 
@@ -176,6 +160,7 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
     private let scrollView = NSScrollView()
     private let documentContainerView = DocumentContainerView()
     private let textView: FindingsTextView
+    private var threadBackgroundViews: [NSVisualEffectView] = []
     private let storage: NSTextStorage
     private let layoutManager: NSLayoutManager
     private let textContainer: NSTextContainer
@@ -210,6 +195,10 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
         self.textView = textView
         super.init(frame: frameRect)
         configureHierarchy()
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     @available(*, unavailable)
@@ -318,6 +307,7 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
         ])
 
         clear()
+        observeAccessibilityDisplayOptions()
     }
 
     private func replaceText(with renderedText: RenderedText) {
@@ -328,10 +318,9 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
         )
         storage.endEditing()
         textView.threadCharacterRanges = renderedText.threadRanges
-        textView.threadBackgroundColor = threadBackgroundColor
-        textView.needsDisplay = true
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
+        syncThreadBackgroundViews()
         scrollToTopRespectingContentInsets()
     }
 
@@ -393,6 +382,66 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
         }
         if rectsAreNearlyEqual(textView.frame, documentContainerView.bounds) == false {
             textView.frame = documentContainerView.bounds
+        }
+        syncThreadBackgroundViews()
+    }
+
+    private func syncThreadBackgroundViews() {
+        let rects = textView.threadBackgroundRects()
+        while threadBackgroundViews.count < rects.count {
+            let backgroundView = makeThreadBackgroundView()
+            documentContainerView.addSubview(backgroundView, positioned: .below, relativeTo: textView)
+            threadBackgroundViews.append(backgroundView)
+        }
+        while threadBackgroundViews.count > rects.count {
+            threadBackgroundViews.removeLast().removeFromSuperview()
+        }
+        for (backgroundView, rect) in zip(threadBackgroundViews, rects) {
+            if rectsAreNearlyEqual(backgroundView.frame, rect) == false {
+                backgroundView.frame = rect
+            }
+        }
+        syncThreadBackgroundAppearance()
+    }
+
+    private func makeThreadBackgroundView() -> NSVisualEffectView {
+        let backgroundView = NSVisualEffectView()
+        backgroundView.material = .contentBackground
+        backgroundView.blendingMode = .withinWindow
+        backgroundView.alphaValue = threadBackgroundAlpha
+        backgroundView.state = .active
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = Layout.threadBackgroundCornerRadius
+        backgroundView.layer?.masksToBounds = true
+        return backgroundView
+    }
+
+    private var threadBackgroundAlpha: CGFloat {
+        let workspace = NSWorkspace.shared
+        if workspace.accessibilityDisplayShouldReduceTransparency ||
+            workspace.accessibilityDisplayShouldIncreaseContrast {
+            return 1
+        }
+        return 0.3
+    }
+
+    private func observeAccessibilityDisplayOptions() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange(_:)),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange(_ notification: Notification) {
+        syncThreadBackgroundAppearance()
+    }
+
+    private func syncThreadBackgroundAppearance() {
+        let alpha = threadBackgroundAlpha
+        for backgroundView in threadBackgroundViews {
+            backgroundView.alphaValue = alpha
         }
     }
 
@@ -570,7 +619,7 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
     private var sectionTitleAttributes: [NSAttributedString.Key: Any] {
         [
             .font: sectionTitleFont,
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle(paragraphSpacingAfter: Layout.sectionTitleSpacing),
         ]
     }
@@ -616,15 +665,6 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
         return color.withAlphaComponent(0.8)
     }
 
-    private var threadBackgroundColor: NSColor {
-        let workspace = NSWorkspace.shared
-        if workspace.accessibilityDisplayShouldIncreaseContrast ||
-            workspace.accessibilityDisplayShouldReduceTransparency {
-            return .unemphasizedSelectedContentBackgroundColor
-        }
-        return NSColor.unemphasizedSelectedContentBackgroundColor.withAlphaComponent(0.18)
-    }
-
     private var titleFont: NSFont {
         NSFont.preferredFont(forTextStyle: .headline)
     }
@@ -646,21 +686,12 @@ final class ReviewMonitorWorkspaceFindingsView: NSView {
     ) -> [NSAttributedString.Key: Any] {
         [
             .font: bodyFont,
-            .foregroundColor: bodyTextColor,
+            .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraphStyle(
                 lineSpacing: Layout.bodyLineSpacing,
                 paragraphSpacingAfter: paragraphSpacingAfter
             ),
         ]
-    }
-
-    private var bodyTextColor: NSColor {
-        let workspace = NSWorkspace.shared
-        if workspace.accessibilityDisplayShouldIncreaseContrast ||
-            workspace.accessibilityDisplayShouldReduceTransparency {
-            return .labelColor
-        }
-        return NSColor.labelColor.withAlphaComponent(0.8)
     }
 
     private func metadataAttributes(
