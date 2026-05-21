@@ -1,37 +1,47 @@
 # CodexReviewKit
 
-CodexReviewKit provides ReviewMonitor, a native macOS app for running and
-monitoring Codex review. ReviewMonitor owns the local MCP endpoint used by
-Codex clients.
+CodexReviewKit is the native macOS companion app for Codex review.
+
+Launch `ReviewMonitor.app`, register its MCP endpoint with Codex, then run
+reviews through the `codex_review` tools while the app keeps the review state
+visible.
 
 ## Quick Start
 
 1. Launch `ReviewMonitor.app`.
 
-2. Register the app-managed MCP endpoint in your client if needed:
+2. Register the local MCP endpoint in the client you use.
+
+   Codex CLI:
 
    ```bash
    codex mcp add codex_review --url http://localhost:9417/mcp
    ```
 
-3. Call one of the exposed review tools:
+   Claude Code:
+
+   ```bash
+   claude mcp add --transport http codex_review http://localhost:9417/mcp
+   ```
+
+3. Use the review tools from Codex:
 
    - `review_start`
    - `review_list`
    - `review_read`
    - `review_cancel`
 
-### Runtime home
+## What Runs Locally
 
-ReviewMonitor launches `codex app-server` as the live backend for review tools
-and owns the Streamable HTTP MCP endpoint at `http://localhost:9417/mcp`.
+- `ReviewMonitor.app` shows review jobs, output, and findings.
+- `http://localhost:9417/mcp` is the app-managed MCP endpoint.
+- `codex app-server` runs behind ReviewMonitor as the live review backend.
+- `~/.codex_review` is the dedicated Codex home used by ReviewMonitor.
 
-### Codex CLI timeout note
+## Timeout Setup
 
-`codex mcp add` does not currently expose MCP timeout flags. If you expect
-long-running reviews, add the timeout values manually in your client Codex
-config after registration. This client-side MCP entry is separate from the
-ReviewMonitor backend home described above:
+Long reviews can exceed the default MCP client timeout. `codex mcp add` does
+not currently expose timeout flags, so add them manually after registration:
 
 ```toml
 [mcp_servers.codex_review]
@@ -40,13 +50,12 @@ startup_timeout_sec = 1200.0
 tool_timeout_sec = 1200.0
 ```
 
-Use your normal `codex mcp add ...` command first, then edit the generated
-entry to include the timeout values.
+This config belongs to the Codex client that calls the MCP server. It is
+separate from ReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
-## Architecture
+## More Detail
 
-For a concise architecture summary and diagrams, see [Docs/architecture.md](Docs/architecture.md).
-
-## MCP Details
-
-For tool schemas, discovery resources, resource templates, session behavior, and runtime files, see [Docs/mcp.md](Docs/mcp.md).
+- [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
+  test responsibilities.
+- [MCP reference](Docs/mcp.md): tool schemas, discovery resources, session
+  behavior, and runtime files.
