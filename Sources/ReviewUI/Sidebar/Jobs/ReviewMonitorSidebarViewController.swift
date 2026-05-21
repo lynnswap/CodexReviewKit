@@ -1,5 +1,4 @@
 import AppKit
-import Observation
 import ObservationBridge
 import CodexReview
 import SwiftUI
@@ -9,9 +8,8 @@ package enum SidebarLayout {
 }
 
 @MainActor
-@Observable
 final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    enum PresentationForTesting: Equatable {
+    enum SidebarKind: Equatable {
         case unavailable
         case empty
         case jobList
@@ -90,6 +88,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let dropChildIndex: Int
     }
 
+    private struct SidebarWorkspaceTopology {
+        let workspace: CodexReviewWorkspace
+        let jobs: [CodexReviewJob]
+    }
+
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let scrollView = NSScrollView()
@@ -99,7 +102,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let unavailableView: NSHostingView<MCPServerUnavailableView>
     private let rowHeights: SidebarRowHeights
 
-    @ObservationIgnored private let storeObservationScope = ObservationScope()
+    private let sidebarObservationScope = ObservationScope()
     private var isReconcilingSelection = false
 #if DEBUG
     private var fullReloadCountForTesting = 0
@@ -130,9 +133,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         super.viewDidLoad()
         configureHierarchy()
         configureOutlineView()
-        reloadOutline(workspaces: store.orderedWorkspaces)
         bindObservation()
-        applySidebarPresentation(sidebarPresentation)
     }
 
     override func viewDidLayout() {
@@ -221,28 +222,43 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func bindObservation() {
-        storeObservationScope.update {
-            observe(\.sidebarPresentation) { [weak self] presentation in
-                self?.applySidebarPresentation(presentation)
+        sidebarObservationScope.observe(store) { [weak self] _, _ in
+            guard let self else {
+                return
             }
-            .store(in: storeObservationScope)
-
-            store.observe([\.workspaces]) { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.applyWorkspaceMembershipChange(store.orderedWorkspaces)
-            }
-            .store(in: storeObservationScope)
-
-            store.observe([\.jobs]) { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.applyJobMembershipChange(store.orderedWorkspaces)
-            }
-            .store(in: storeObservationScope)
+            self.applySidebarKind(self.sidebarKind)
         }
+
+        sidebarObservationScope.observe(store) { [weak self] _, _ in
+            guard let self else {
+                return
+            }
+            self.applySidebarTopology(self.sidebarWorkspaceTopologies)
+        }
+    }
+
+    private var sidebarKind: SidebarKind {
+        if uiState.sidebarSelection == .account {
+            return .accountList
+        }
+        if case .failed = store.serverState {
+            return .unavailable
+        }
+        return store.hasReviewJobs ? .jobList : .empty
+    }
+
+    private var sidebarWorkspaceTopologies: [SidebarWorkspaceTopology] {
+        store.orderedWorkspaces.map { workspace in
+            SidebarWorkspaceTopology(
+                workspace: workspace,
+                jobs: store.orderedJobs(in: workspace)
+            )
+        }
+    }
+
+    private func applySidebarTopology(_ workspaceTopologies: [SidebarWorkspaceTopology]) {
+        applyWorkspaceMembershipChange(workspaceTopologies.map(\.workspace))
+        applyJobMembershipChange(workspaceTopologies)
     }
 
     private func applyWorkspaceMembershipChange(_ workspaces: [CodexReviewWorkspace]) {
@@ -257,14 +273,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         reconcileSelectionAfterOutlineMutation()
     }
 
-    private func applyJobMembershipChange(_ workspaces: [CodexReviewWorkspace]) {
+    private func applyJobMembershipChange(_ workspaceTopologies: [SidebarWorkspaceTopology]) {
+        let workspaces = workspaceTopologies.map(\.workspace)
         clearSelectionIfNeeded(for: workspaces)
         for workspace in displayedWorkspaces() {
-            guard workspaces.contains(where: { $0 === workspace }) else {
+            guard let topology = workspaceTopologies.first(where: { $0.workspace === workspace }) else {
                 continue
             }
             let displayedJobs = displayedJobs(in: workspace)
-            let targetJobs = store.orderedJobs(in: workspace)
+            let targetJobs = topology.jobs
             guard hasSameIdentityOrder(displayedJobs, targetJobs) == false else {
                 continue
             }
@@ -339,18 +356,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         isReconcilingSelection = wasReconcilingSelection
     }
 
-    private var sidebarPresentation: PresentationForTesting {
-        if uiState.sidebarSelection == .account {
-            return .accountList
-        }
-        if case .failed = store.serverState {
-            return .unavailable
-        }
-        return totalJobCount() > 0 ? .jobList : .empty
-    }
-
-    private func applySidebarPresentation(_ presentation: PresentationForTesting) {
-        switch presentation {
+    private func applySidebarKind(_ kind: SidebarKind) {
+        switch kind {
         case .unavailable:
             unavailableView.isHidden = false
             scrollView.isHidden = true
@@ -564,10 +571,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if outlineView.selectedRow != -1 {
             outlineView.deselectAll(nil)
         }
-    }
-
-    private func totalJobCount() -> Int {
-        store.totalJobCount()
     }
 
     @discardableResult
@@ -1242,8 +1245,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 #if DEBUG
 @MainActor
 extension ReviewMonitorSidebarViewController {
-    var presentationForTesting: PresentationForTesting {
-        sidebarPresentation
+    var sidebarKindForTesting: SidebarKind {
+        sidebarKind
     }
 
     var accountsViewControllerForTesting: ReviewMonitorAccountsViewController {

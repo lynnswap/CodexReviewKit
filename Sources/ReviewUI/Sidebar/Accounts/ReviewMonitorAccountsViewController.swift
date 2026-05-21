@@ -46,7 +46,10 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        presentAccountPromptsIfNeeded()
+        presentAccountPromptsIfNeeded(
+            pendingAccountAction: auth.pendingAccountAction,
+            accountActionAlert: auth.accountActionAlert
+        )
     }
 
     private var auth: CodexReviewAuthModel {
@@ -115,32 +118,56 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func bindObservation() {
-        authObservationScope.update {
-            auth.observe(\.accounts) { [weak self] _ in
-                self?.reloadAccounts()
-            }
-            .store(in: authObservationScope)
+        authObservationScope.observe(auth) { [weak self] _, auth in
+            let accounts = auth.accounts
+            let selectedAccount = auth.selectedAccount
+            self?.reloadAccounts(
+                accounts: accounts,
+                selectedAccount: selectedAccount
+            )
+        }
 
-            auth.observe([\.selectedAccount]) { [weak self] in
-                self?.reconcileSelection()
-            }
-            .store(in: authObservationScope)
+        authObservationScope.observe(auth) { [weak self] _, auth in
+            let accounts = auth.accounts
+            let selectedAccount = auth.selectedAccount
+            self?.reconcileSelection(
+                selectedAccount: selectedAccount,
+                accounts: accounts
+            )
+        }
 
-            auth.observe([\.pendingAccountAction, \.accountActionAlert]) { [weak self] in
-                self?.presentAccountPromptsIfNeeded()
-            }
-            .store(in: authObservationScope)
+        authObservationScope.observe(auth) { [weak self] _, auth in
+            let pendingAccountAction = auth.pendingAccountAction
+            let accountActionAlert = auth.accountActionAlert
+            self?.presentAccountPromptsIfNeeded(
+                pendingAccountAction: pendingAccountAction,
+                accountActionAlert: accountActionAlert
+            )
         }
     }
 
-    private func reloadAccounts() {
+    private func reloadAccounts(
+        accounts: [CodexAccount],
+        selectedAccount: CodexAccount?
+    ) {
         outlineView.reloadData()
-        reconcileSelection()
+        reconcileSelection(selectedAccount: selectedAccount, accounts: accounts)
     }
 
     private func reconcileSelection() {
-        guard let selectedAccount = auth.selectedAccount,
-              let row = row(forAccountKey: selectedAccount.accountKey)
+        reconcileSelection(selectedAccount: auth.selectedAccount)
+    }
+
+    private func reconcileSelection(selectedAccount: CodexAccount?) {
+        reconcileSelection(selectedAccount: selectedAccount, accounts: accounts)
+    }
+
+    private func reconcileSelection(
+        selectedAccount: CodexAccount?,
+        accounts: [CodexAccount]
+    ) {
+        guard let selectedAccount,
+              let row = row(forAccountKey: selectedAccount.accountKey, accounts: accounts)
         else {
             if outlineView.selectedRow != -1 {
                 outlineView.deselectAll(nil)
@@ -180,12 +207,24 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func presentAccountPromptsIfNeeded() {
-        presentPendingAccountActionIfNeeded()
-        presentAccountActionAlertIfNeeded()
+        presentAccountPromptsIfNeeded(
+            pendingAccountAction: auth.pendingAccountAction,
+            accountActionAlert: auth.accountActionAlert
+        )
     }
 
-    private func presentPendingAccountActionIfNeeded() {
-        guard let action = auth.pendingAccountAction else {
+    private func presentAccountPromptsIfNeeded(
+        pendingAccountAction: CodexReviewAuthModel.PendingAccountAction?,
+        accountActionAlert: CodexReviewAuthModel.AccountActionAlert?
+    ) {
+        presentPendingAccountActionIfNeeded(pendingAccountAction)
+        presentAccountActionAlertIfNeeded(accountActionAlert)
+    }
+
+    private func presentPendingAccountActionIfNeeded(
+        _ action: CodexReviewAuthModel.PendingAccountAction?
+    ) {
+        guard let action else {
             presentedPendingAccountAction = nil
             return
         }
@@ -224,8 +263,10 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         }
     }
 
-    private func presentAccountActionAlertIfNeeded() {
-        guard let accountActionAlert = auth.accountActionAlert else {
+    private func presentAccountActionAlertIfNeeded(
+        _ accountActionAlert: CodexReviewAuthModel.AccountActionAlert?
+    ) {
+        guard let accountActionAlert else {
             presentedAccountActionAlert = nil
             reconcileSelection()
             return
@@ -292,6 +333,13 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func row(forAccountKey accountKey: String) -> Int? {
+        row(forAccountKey: accountKey, accounts: accounts)
+    }
+
+    private func row(
+        forAccountKey accountKey: String,
+        accounts: [CodexAccount]
+    ) -> Int? {
         guard let account = accounts.first(where: { $0.accountKey == accountKey }) else {
             return nil
         }

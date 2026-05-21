@@ -1,12 +1,10 @@
 import AppKit
 import Combine
 import Foundation
-import Observation
 import ObservationBridge
 import CodexReview
 
 @MainActor
-@Observable
 final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDelegate {
     private static let autosaveName = NSSplitView.AutosaveName("CodexReviewKit.ReviewMonitorSplitView")
     private static let sidebarPickerToolbarItemIdentifier = NSToolbarItem.Identifier(
@@ -25,7 +23,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var toolbar: NSToolbar?
     private var sidebarPickerToolbarItem: ReviewMonitorSidebarPickerToolbarItem?
     private var addAccountToolbarItem: ReviewMonitorAddAccountToolbarItem?
-    @ObservationIgnored private let toolbarObservationScope = ObservationScope()
+    private let toolbarObservationScope = ObservationScope()
     private var sidebarCollapseObservation: NSKeyValueObservation?
     private var windowCancellable: AnyCancellable?
     private weak var attachedWindow: NSWindow?
@@ -133,8 +131,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             bindToolbarState()
         }
         window.layoutIfNeeded()
-        setShowingAddAccount(isShowingAddAccountButton)
-        updateWindowTitleAndSubtitle()
+        applyWindowTitle(Self.windowTitlePresentation(for: uiState.selection))
     }
 
     func detachFromWindow() {
@@ -144,24 +141,22 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
     private func bindToolbarState() {
         toolbarObservationScope.cancelAll()
-        toolbarObservationScope.update {
-            observe(\.isShowingAddAccountButton) { [weak self] _ in
-                guard let self else {
-                    return
-                }
-                setShowingAddAccount(isShowingAddAccountButton)
-            }
-            .store(in: toolbarObservationScope)
 
-            uiState.observe(\.selection) { [weak self] _ in
-                self?.updateWindowTitleAndSubtitle()
+        toolbarObservationScope.observe(uiState) { [weak self] _, uiState in
+            guard let self else {
+                return
             }
-            .store(in: toolbarObservationScope)
+            let isShowingAddAccount = Self.isShowingAddAccountToolbarItem(
+                sidebarSelection: uiState.sidebarSelection,
+                isSidebarCollapsed: self.isSidebarCollapsed,
+                isAuthenticating: uiState.auth.isAuthenticating
+            )
+            self.setShowingAddAccount(isShowingAddAccount)
+        }
 
-            uiState.observe([\.selectedJobEntry?.targetSummary, \.selectedJobEntry?.cwd]) { [weak self] in
-                self?.updateWindowTitleAndSubtitle()
-            }
-            .store(in: toolbarObservationScope)
+        toolbarObservationScope.observe(uiState) { [weak self] _, uiState in
+            let presentation = Self.windowTitlePresentation(for: uiState.selection)
+            self?.applyWindowTitle(presentation)
         }
     }
 
@@ -180,26 +175,38 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         }
     }
 
-    private func updateWindowTitleAndSubtitle() {
+    private struct WindowTitlePresentation {
+        var title: String
+        var subtitle: String
+    }
+
+    private static func windowTitlePresentation(
+        for selection: ReviewMonitorSelection?
+    ) -> WindowTitlePresentation {
+        switch selection {
+        case .workspace(let workspace):
+            WindowTitlePresentation(
+                title: workspace.displayTitle,
+                subtitle: workspace.cwd
+            )
+        case .job(let job):
+            WindowTitlePresentation(
+                title: job.targetSummary,
+                subtitle: job.cwd
+            )
+        case nil:
+            WindowTitlePresentation(title: "", subtitle: "")
+        }
+    }
+
+    private func applyWindowTitle(_ presentation: WindowTitlePresentation) {
         guard let attachedWindow else {
             return
         }
-        let title: String
-        let subtitle: String
-        switch uiState.selection {
-        case .workspace(let workspace):
-            title = workspace.displayTitle
-            subtitle = workspace.cwd
-        case .job(let job):
-            title = job.targetSummary
-            subtitle = job.cwd
-        case nil:
-            title = ""
-            subtitle = ""
-        }
-        attachedWindow.title = title
-        attachedWindow.subtitle = subtitle
-        attachedWindow.titleVisibility = (title.isEmpty && subtitle.isEmpty) ? .hidden : .visible
+        attachedWindow.title = presentation.title
+        attachedWindow.subtitle = presentation.subtitle
+        attachedWindow.titleVisibility =
+            (presentation.title.isEmpty && presentation.subtitle.isEmpty) ? .hidden : .visible
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -286,11 +293,25 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         return item
     }
 
-    private var isShowingAddAccountButton: Bool {
-        if store.auth.isAuthenticating {
+    private func updateAddAccountToolbarVisibility() {
+        setShowingAddAccount(
+            Self.isShowingAddAccountToolbarItem(
+                sidebarSelection: uiState.sidebarSelection,
+                isSidebarCollapsed: isSidebarCollapsed,
+                isAuthenticating: uiState.auth.isAuthenticating
+            )
+        )
+    }
+
+    private static func isShowingAddAccountToolbarItem(
+        sidebarSelection: SidebarPickerSelection,
+        isSidebarCollapsed: Bool,
+        isAuthenticating: Bool
+    ) -> Bool {
+        if isAuthenticating {
             return true
         }
-        return uiState.sidebarSelection == .account && isSidebarCollapsed == false
+        return sidebarSelection == .account && isSidebarCollapsed == false
     }
 
     private func setSidebarCollapsed(_ isCollapsed: Bool) {
@@ -298,7 +319,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             return
         }
         isSidebarCollapsed = isCollapsed
-        setShowingAddAccount(isShowingAddAccountButton)
+        updateAddAccountToolbarVisibility()
     }
 
     private func setShowingAddAccount(_ isShowing: Bool) {
@@ -353,7 +374,7 @@ extension ReviewMonitorSplitViewController {
     }
 
     var sidebarPresentationForTesting: SidebarPresentationForTesting {
-        switch sidebarViewControllerForTesting.presentationForTesting {
+        switch sidebarViewControllerForTesting.sidebarKindForTesting {
         case .jobList, .empty:
             return .jobList
         case .accountList:
