@@ -24,6 +24,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
+    @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
 
     package init(
         backend: any CodexReviewStoreBackend = PreviewCodexReviewStoreBackend(),
@@ -57,6 +58,10 @@ public final class CodexReviewStore {
             auth.selectPersistedAccount(initialActiveAccountKey)
         }
         backend.attachStore(self)
+    }
+
+    isolated deinit {
+        accountRateLimitAutoRefreshDriver?.cancel()
     }
 
     public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
@@ -103,6 +108,7 @@ public final class CodexReviewStore {
         writeDiagnosticsIfNeeded()
         await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
         await settingsService.refreshIfRunning(serverState: serverState)
+        startAccountRateLimitAutoRefresh()
     }
 
     public func stop() async {

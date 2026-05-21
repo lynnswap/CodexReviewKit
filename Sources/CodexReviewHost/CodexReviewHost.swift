@@ -274,7 +274,13 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard label.isEmpty == false, accountKey.isEmpty == false else {
                 return nil
             }
-            return CodexAccount(accountKey: accountKey, email: label, planType: account.planType)
+            return CodexAccount(
+                accountKey: accountKey,
+                email: label,
+                planType: account.planType,
+                kind: account.kind,
+                capabilities: account.capabilities
+            )
         }
         let activeAccountKey = snapshot.activeAccountID
             .map { normalizedReviewAccountEmail(email: $0.rawValue) }

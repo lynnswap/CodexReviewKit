@@ -327,13 +327,39 @@ struct AppServerClientTests {
         #expect(await transport.recordedNotifications().map(\.method) == ["initialized"])
     }
 
-    @Test func accountReadResponseDecodesCodexOpenAIAuthKey() throws {
+    @Test func accountReadResponseDecodesChatGPTAccountAuthRequirement() throws {
         let data = Data("""
         {"account":{"type":"chatgpt","email":"review@example.com","planType":"pro"},"requiresOpenaiAuth":true}
         """.utf8)
         let response = try JSONDecoder().decode(AccountReadResponse.self, from: data)
 
         #expect(response.requiresOpenAIAuth)
+        #expect(response.account?.id == .init("review@example.com"))
+        #expect(response.account?.kind == .chatGPT)
+        #expect(response.account?.label == "review@example.com")
+        #expect(response.account?.planType == "pro")
+        #expect(response.account?.capabilities.supportsRateLimitRefresh == true)
+    }
+
+    @Test func accountReadResponseNormalizesProviderAccountCapabilities() throws {
+        let apiKeyData = Data("""
+        {"account":{"type":"apiKey"},"requiresOpenaiAuth":false}
+        """.utf8)
+        let bedrockData = Data("""
+        {"account":{"type":"amazonBedrock"},"requiresOpenaiAuth":false}
+        """.utf8)
+
+        let apiKeyResponse = try JSONDecoder().decode(AccountReadResponse.self, from: apiKeyData)
+        let bedrockResponse = try JSONDecoder().decode(AccountReadResponse.self, from: bedrockData)
+
+        #expect(apiKeyResponse.account?.id == .init("api-key"))
+        #expect(apiKeyResponse.account?.kind == .apiKey)
+        #expect(apiKeyResponse.account?.label == "API Key")
+        #expect(apiKeyResponse.account?.capabilities.supportsRateLimitRefresh == false)
+        #expect(bedrockResponse.account?.id == .init("amazon-bedrock"))
+        #expect(bedrockResponse.account?.kind == .amazonBedrock)
+        #expect(bedrockResponse.account?.label == "Amazon Bedrock")
+        #expect(bedrockResponse.account?.capabilities.supportsRateLimitRefresh == false)
     }
 
     @Test func accountRateLimitsResponseResolvesCodexLimitWindows() throws {

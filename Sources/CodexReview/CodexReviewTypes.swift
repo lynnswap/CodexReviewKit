@@ -55,22 +55,61 @@ package struct BackendAccountID: Codable, Hashable, Sendable {
     }
 }
 
+package enum BackendAccountKind: String, Codable, Equatable, Sendable {
+    case chatGPT = "chatgpt"
+    case apiKey
+    case amazonBedrock
+}
+
+package struct BackendAccountCapabilities: Codable, Equatable, Sendable {
+    package var supportsRateLimitRefresh: Bool
+
+    package init(supportsRateLimitRefresh: Bool = true) {
+        self.supportsRateLimitRefresh = supportsRateLimitRefresh
+    }
+
+    package static var supportsCodexRateLimits: Self {
+        .init(supportsRateLimitRefresh: true)
+    }
+
+    package static var noCodexRateLimits: Self {
+        .init(supportsRateLimitRefresh: false)
+    }
+}
+
+package extension BackendAccountKind {
+    var capabilities: BackendAccountCapabilities {
+        switch self {
+        case .chatGPT:
+            .supportsCodexRateLimits
+        case .apiKey, .amazonBedrock:
+            .noCodexRateLimits
+        }
+    }
+}
+
 package struct BackendAccountSnapshot: Codable, Equatable, Sendable, Identifiable {
     package var id: BackendAccountID
+    package var kind: BackendAccountKind
     package var label: String
     package var isActive: Bool
     package var planType: String?
+    package var capabilities: BackendAccountCapabilities
 
     package init(
         id: BackendAccountID,
+        kind: BackendAccountKind = .chatGPT,
         label: String,
         isActive: Bool = false,
-        planType: String? = nil
+        planType: String? = nil,
+        capabilities: BackendAccountCapabilities? = nil
     ) {
         self.id = id
+        self.kind = kind
         self.label = label
         self.isActive = isActive
         self.planType = planType
+        self.capabilities = capabilities ?? kind.capabilities
     }
 }
 

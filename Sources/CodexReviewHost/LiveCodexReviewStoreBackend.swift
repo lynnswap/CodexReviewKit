@@ -771,6 +771,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let persistedAccount: CodexAccount
         if let index = persistedAccounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
             persistedAccounts[index].updateEmail(account.email)
+            persistedAccounts[index].updateKind(account.kind, capabilities: account.capabilities)
             persistedAccounts[index].updatePlanType(account.planType)
             persistedAccount = persistedAccounts[index]
         } else {
@@ -1011,6 +1012,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard let selectedAccount = auth.selectedAccount else {
                 return
             }
+            guard selectedAccount.capabilities.supportsRateLimitRefresh else {
+                return
+            }
             guard AppServerAccountRateLimitsResponse.isCodexRateLimit(payload.rateLimits.limitID) else {
                 return
             }
@@ -1037,6 +1041,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func refreshRateLimits(for account: CodexAccount, auth: CodexReviewAuthModel) async {
+        guard account.capabilities.supportsRateLimitRefresh else {
+            return
+        }
         guard auth.persistedActiveAccountKey == account.accountKey else {
             await refreshSavedAccountRateLimits(for: account)
             return
@@ -1175,7 +1182,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard label.isEmpty == false, accountKey.isEmpty == false else {
             return nil
         }
-        return CodexAccount(accountKey: accountKey, email: label, planType: snapshot.planType)
+        return CodexAccount(
+            accountKey: accountKey,
+            email: label,
+            planType: snapshot.planType,
+            kind: snapshot.kind,
+            capabilities: snapshot.capabilities
+        )
     }
 
     private static func authenticationURL(from challenge: BackendLoginChallenge) throws -> URL {
@@ -1248,12 +1261,102 @@ private enum CodexReviewAccountRegistry {
 
     private struct Entry: Codable {
         var accountKey: String?
+        var kind: Kind
         var email: String
         var planType: String?
         var lastActivatedAt: Date?
         var lastRateLimitFetchAt: Date?
         var lastRateLimitError: String?
         var cachedRateLimits: [SavedRateLimitWindow]?
+
+        enum CodingKeys: String, CodingKey {
+            case accountKey
+            case kind
+            case email
+            case planType
+            case lastActivatedAt
+            case lastRateLimitFetchAt
+            case lastRateLimitError
+            case cachedRateLimits
+        }
+
+        init(
+            accountKey: String?,
+            kind: Kind,
+            email: String,
+            planType: String?,
+            lastActivatedAt: Date?,
+            lastRateLimitFetchAt: Date?,
+            lastRateLimitError: String?,
+            cachedRateLimits: [SavedRateLimitWindow]?
+        ) {
+            self.accountKey = accountKey
+            self.kind = kind
+            self.email = email
+            self.planType = planType
+            self.lastActivatedAt = lastActivatedAt
+            self.lastRateLimitFetchAt = lastRateLimitFetchAt
+            self.lastRateLimitError = lastRateLimitError
+            self.cachedRateLimits = cachedRateLimits
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.accountKey = try container.decodeIfPresent(String.self, forKey: .accountKey)
+            self.email = try container.decode(String.self, forKey: .email)
+            self.kind = try container.decodeIfPresent(Kind.self, forKey: .kind)
+                ?? Kind.legacyDefault(accountKey: accountKey, email: email)
+            self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
+            self.lastActivatedAt = try container.decodeIfPresent(Date.self, forKey: .lastActivatedAt)
+            self.lastRateLimitFetchAt = try container.decodeIfPresent(Date.self, forKey: .lastRateLimitFetchAt)
+            self.lastRateLimitError = try container.decodeIfPresent(String.self, forKey: .lastRateLimitError)
+            self.cachedRateLimits = try container.decodeIfPresent(
+                [SavedRateLimitWindow].self,
+                forKey: .cachedRateLimits
+            )
+        }
+    }
+
+    private enum Kind: String, Codable {
+        case chatGPT = "chatgpt"
+        case apiKey
+        case amazonBedrock
+
+        init(_ accountKind: BackendAccountKind) {
+            switch accountKind {
+            case .chatGPT:
+                self = .chatGPT
+            case .apiKey:
+                self = .apiKey
+            case .amazonBedrock:
+                self = .amazonBedrock
+            }
+        }
+
+        var accountKind: BackendAccountKind {
+            switch self {
+            case .chatGPT:
+                .chatGPT
+            case .apiKey:
+                .apiKey
+            case .amazonBedrock:
+                .amazonBedrock
+            }
+        }
+
+        static func legacyDefault(accountKey: String?, email: String) -> Self {
+            let normalizedAccountKey = accountKey
+                .map(normalizedReviewAccountEmail(email:))
+                .flatMap { $0.isEmpty ? nil : $0 }
+            switch normalizedAccountKey ?? normalizedReviewAccountEmail(email: email) {
+            case "api-key":
+                return .apiKey
+            case "amazon-bedrock":
+                return .amazonBedrock
+            default:
+                return .chatGPT
+            }
+        }
     }
 
     private struct SavedRateLimitWindow: Codable {
@@ -1295,6 +1398,7 @@ private enum CodexReviewAccountRegistry {
         let records = accounts.map { account in
             var entry = existingByAccountKey[account.accountKey] ?? Entry(
                 accountKey: account.accountKey,
+                kind: .init(account.kind),
                 email: account.email,
                 planType: account.planType,
                 lastActivatedAt: nil,
@@ -1303,6 +1407,7 @@ private enum CodexReviewAccountRegistry {
                 cachedRateLimits: nil
             )
             entry.accountKey = account.accountKey
+            entry.kind = .init(account.kind)
             entry.email = account.email
             entry.planType = account.planType
             entry.cachedRateLimits = account.rateLimits.map { window in
@@ -1447,7 +1552,8 @@ private enum CodexReviewAccountRegistry {
         let account = CodexAccount(
             accountKey: accountKey,
             email: email,
-            planType: entry.planType
+            planType: entry.planType,
+            kind: entry.kind.accountKind
         )
         account.updateRateLimits(entry.cachedRateLimits?.map(\.tuple) ?? [])
         account.updateRateLimitFetchMetadata(

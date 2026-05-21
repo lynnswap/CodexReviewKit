@@ -498,20 +498,15 @@ private extension AppServerCodexReviewBackend {
 }
 
 private extension AppServerAccount {
-    var backendAccount: BackendAccountSnapshot? {
-        switch self {
-        case .chatgpt(let email, let planType):
-            .init(
-                id: .init(normalizedReviewAccountEmail(email: email)),
-                label: email,
-                isActive: true,
-                planType: planType
-            )
-        case .apiKey:
-            .init(id: .init("api-key"), label: "API Key", isActive: true)
-        case .amazonBedrock:
-            .init(id: .init("amazon-bedrock"), label: "Amazon Bedrock", isActive: true)
-        }
+    var backendAccount: BackendAccountSnapshot {
+        .init(
+            id: id,
+            kind: kind,
+            label: label,
+            isActive: true,
+            planType: planType,
+            capabilities: capabilities
+        )
     }
 }
 

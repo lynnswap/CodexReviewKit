@@ -618,50 +618,133 @@ package extension AppServerAccountRateLimitsResponse {
     }
 }
 
-package enum AppServerAccount: Codable, Equatable, Sendable {
-    case apiKey
-    case chatgpt(email: String, planType: String)
-    case amazonBedrock
+package struct AppServerAccount: Codable, Equatable, Sendable {
+    package var id: BackendAccountID
+    package var kind: BackendAccountKind
+    package var label: String
+    package var planType: String?
+    package var capabilities: BackendAccountCapabilities
 
-    private enum CodingKeys: String, CodingKey {
-        case type
-        case email
-        case planType
+    package init(email: String, planType: String) {
+        self.init(
+            kind: .chatGPT,
+            id: .init(normalizedReviewAccountEmail(email: email)),
+            label: email,
+            planType: planType,
+            capabilities: .supportsCodexRateLimits
+        )
+    }
+
+    fileprivate init(
+        kind: BackendAccountKind,
+        id: BackendAccountID,
+        label: String,
+        planType: String?,
+        capabilities: BackendAccountCapabilities
+    ) {
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.planType = planType
+        self.capabilities = capabilities
     }
 
     package init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(String.self, forKey: .type) {
-        case "apiKey":
-            self = .apiKey
-        case "chatgpt":
-            self = .chatgpt(
-                email: try container.decode(String.self, forKey: .email),
-                planType: try container.decode(String.self, forKey: .planType)
+        let container = try decoder.container(keyedBy: AppServerAccountCodingKeys.self)
+        let kind = try container.decode(BackendAccountKind.self, forKey: .type)
+        let descriptor = AppServerAccountKindDescriptor.descriptor(for: kind)
+        self = try descriptor.decode(container)
+    }
+
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: AppServerAccountCodingKeys.self)
+        try container.encode(kind, forKey: .type)
+        let descriptor = AppServerAccountKindDescriptor.descriptor(for: kind)
+        try descriptor.encodeFields(self, &container)
+    }
+}
+
+private enum AppServerAccountCodingKeys: String, CodingKey {
+    case type
+    case email
+    case planType
+}
+
+private struct AppServerAccountKindDescriptor {
+    var decode: (KeyedDecodingContainer<AppServerAccountCodingKeys>) throws -> AppServerAccount
+    var encodeFields: (AppServerAccount, inout KeyedEncodingContainer<AppServerAccountCodingKeys>) throws -> Void
+
+    static func descriptor(for kind: BackendAccountKind) -> Self {
+        switch kind {
+        case .apiKey:
+            fixed(
+                kind: .apiKey,
+                id: "api-key",
+                label: "API Key",
+                capabilities: .noCodexRateLimits
             )
-        case "amazonBedrock":
-            self = .amazonBedrock
-        case let type:
-            throw DecodingError.dataCorruptedError(
-                forKey: .type,
-                in: container,
-                debugDescription: "Unsupported account type: \(type)"
+        case .chatGPT:
+            .init(
+                decode: { container in
+                    let email = try container.decode(String.self, forKey: .email)
+                    let normalizedEmail = normalizedReviewAccountEmail(email: email)
+                    guard normalizedEmail.isEmpty == false else {
+                        throw DecodingError.dataCorruptedError(
+                            forKey: .email,
+                            in: container,
+                            debugDescription: "ChatGPT account email must not be empty."
+                        )
+                    }
+                    return AppServerAccount(
+                        kind: .chatGPT,
+                        id: .init(normalizedEmail),
+                        label: email,
+                        planType: try container.decode(String.self, forKey: .planType),
+                        capabilities: .supportsCodexRateLimits
+                    )
+                },
+                encodeFields: { account, container in
+                    guard let planType = account.planType else {
+                        throw EncodingError.invalidValue(
+                            account,
+                            .init(
+                                codingPath: container.codingPath + [AppServerAccountCodingKeys.planType],
+                                debugDescription: "ChatGPT account planType must not be nil."
+                            )
+                        )
+                    }
+                    try container.encode(account.label, forKey: .email)
+                    try container.encode(planType, forKey: .planType)
+                }
+            )
+        case .amazonBedrock:
+            fixed(
+                kind: .amazonBedrock,
+                id: "amazon-bedrock",
+                label: "Amazon Bedrock",
+                capabilities: .noCodexRateLimits
             )
         }
     }
 
-    package func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .apiKey:
-            try container.encode("apiKey", forKey: .type)
-        case .chatgpt(let email, let planType):
-            try container.encode("chatgpt", forKey: .type)
-            try container.encode(email, forKey: .email)
-            try container.encode(planType, forKey: .planType)
-        case .amazonBedrock:
-            try container.encode("amazonBedrock", forKey: .type)
-        }
+    private static func fixed(
+        kind: BackendAccountKind,
+        id: String,
+        label: String,
+        capabilities: BackendAccountCapabilities
+    ) -> Self {
+        .init(
+            decode: { _ in
+                AppServerAccount(
+                    kind: kind,
+                    id: .init(id),
+                    label: label,
+                    planType: nil,
+                    capabilities: capabilities
+                )
+            },
+            encodeFields: { _, _ in }
+        )
     }
 }
 
