@@ -12,6 +12,10 @@ extension CodexReviewStore {
         orderedWorkspaces.flatMap { orderedJobs(in: $0) }
     }
 
+    package var hasReviewJobs: Bool {
+        jobs.isEmpty == false
+    }
+
     package func workspace(cwd: String) -> CodexReviewWorkspace? {
         workspaces.first(where: { $0.cwd == cwd })
     }

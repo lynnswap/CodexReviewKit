@@ -374,7 +374,7 @@ extension ReviewMonitorSplitViewController {
     }
 
     var sidebarPresentationForTesting: SidebarPresentationForTesting {
-        switch sidebarViewControllerForTesting.presentationForTesting {
+        switch sidebarViewControllerForTesting.sidebarKindForTesting {
         case .jobList, .empty:
             return .jobList
         case .accountList:
