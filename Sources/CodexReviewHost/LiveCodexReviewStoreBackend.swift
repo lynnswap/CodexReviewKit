@@ -112,14 +112,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             CodexReviewMCPHTTPServer(adapter: CodexReviewMCPServer(store: store))
         },
         appServerRuntimeFactory: @escaping AppServerRuntimeFactory = { codexHomeURL in
-            let configuration = AppServerProcessTransport.Configuration(codexHomeURL: codexHomeURL)
-            let transport = try AppServerProcessTransport(configuration: configuration)
-            let client = AppServerClient(transport: transport)
+            let processRuntime = try await Task.detached(priority: .userInitiated) {
+                // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
+                let configuration = AppServerProcessTransport.Configuration(codexHomeURL: codexHomeURL)
+                let transport = try AppServerProcessTransport(configuration: configuration)
+                return AppServerProcessRuntime(
+                    transport: transport,
+                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
+                )
+            }.value
+            let client = AppServerClient(transport: processRuntime.transport)
             return .init(
                 client: client,
                 backend: AppServerCodexReviewBackend(
                     client: client,
-                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
+                    threadStartPermissionStrategy: processRuntime.threadStartPermissionStrategy
                 )
             )
         }
@@ -1207,6 +1214,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 private struct AppServerRuntime: Sendable {
     var client: AppServerClient
     var backend: AppServerCodexReviewBackend
+}
+
+private struct AppServerProcessRuntime: Sendable {
+    var transport: AppServerProcessTransport
+    var threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
 }
 
 @MainActor
