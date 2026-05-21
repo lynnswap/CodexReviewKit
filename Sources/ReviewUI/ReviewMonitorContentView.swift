@@ -56,11 +56,9 @@ final class ReviewMonitorRootViewController: NSViewController {
     }
 
     private func bindWindowState() {
-        observationScope.update {
-            uiState.observe(\.contentKind) { [weak self] kind in
-                self?.setContentViewController(kind, animated: true)
-            }
-            .store(in: observationScope)
+        observationScope.observe(uiState) { [weak self] _, uiState in
+            let kind = uiState.contentKind
+            self?.setContentViewController(kind, animated: true)
         }
     }
 

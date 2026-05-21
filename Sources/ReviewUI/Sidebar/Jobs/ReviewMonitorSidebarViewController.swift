@@ -1,5 +1,4 @@
 import AppKit
-import Observation
 import ObservationBridge
 import CodexReview
 import SwiftUI
@@ -9,7 +8,6 @@ package enum SidebarLayout {
 }
 
 @MainActor
-@Observable
 final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     enum PresentationForTesting: Equatable {
         case unavailable
@@ -99,7 +97,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let unavailableView: NSHostingView<MCPServerUnavailableView>
     private let rowHeights: SidebarRowHeights
 
-    @ObservationIgnored private let storeObservationScope = ObservationScope()
+    private let storeObservationScope = ObservationScope()
     private var isReconcilingSelection = false
 #if DEBUG
     private var fullReloadCountForTesting = 0
@@ -132,7 +130,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         configureOutlineView()
         reloadOutline(workspaces: store.orderedWorkspaces)
         bindObservation()
-        applySidebarPresentation(sidebarPresentation)
+        applySidebarPresentation(currentSidebarPresentation())
     }
 
     override func viewDidLayout() {
@@ -221,27 +219,49 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func bindObservation() {
-        storeObservationScope.update {
-            observe(\.sidebarPresentation) { [weak self] presentation in
-                self?.applySidebarPresentation(presentation)
+        storeObservationScope.observe(uiState) { [weak self] _, uiState in
+            let sidebarSelection = uiState.sidebarSelection
+            guard let self else {
+                return
             }
-            .store(in: storeObservationScope)
+            self.applySidebarPresentation(
+                Self.sidebarPresentation(
+                    sidebarSelection: sidebarSelection,
+                    serverState: self.store.serverState,
+                    totalJobCount: self.totalJobCount()
+                )
+            )
+        }
 
-            store.observe([\.workspaces]) { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.applyWorkspaceMembershipChange(store.orderedWorkspaces)
+        storeObservationScope.observe(store) { [weak self] _, store in
+            let serverState = store.serverState
+            let totalJobCount = store.totalJobCount()
+            guard let self else {
+                return
             }
-            .store(in: storeObservationScope)
+            self.applySidebarPresentation(
+                Self.sidebarPresentation(
+                    sidebarSelection: self.uiState.sidebarSelection,
+                    serverState: serverState,
+                    totalJobCount: totalJobCount
+                )
+            )
+        }
 
-            store.observe([\.jobs]) { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.applyJobMembershipChange(store.orderedWorkspaces)
+        storeObservationScope.observe(store) { [weak self] _, store in
+            let workspaces = store.orderedWorkspaces
+            guard let self else {
+                return
             }
-            .store(in: storeObservationScope)
+            self.applyWorkspaceMembershipChange(workspaces)
+        }
+
+        storeObservationScope.observe(store) { [weak self] _, store in
+            let workspaces = store.orderedWorkspaces
+            guard let self else {
+                return
+            }
+            self.applyJobMembershipChange(workspaces)
         }
     }
 
@@ -339,14 +359,26 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         isReconcilingSelection = wasReconcilingSelection
     }
 
-    private var sidebarPresentation: PresentationForTesting {
-        if uiState.sidebarSelection == .account {
+    private static func sidebarPresentation(
+        sidebarSelection: SidebarPickerSelection,
+        serverState: CodexReviewServerState,
+        totalJobCount: Int
+    ) -> PresentationForTesting {
+        if sidebarSelection == .account {
             return .accountList
         }
-        if case .failed = store.serverState {
+        if case .failed = serverState {
             return .unavailable
         }
-        return totalJobCount() > 0 ? .jobList : .empty
+        return totalJobCount > 0 ? .jobList : .empty
+    }
+
+    private func currentSidebarPresentation() -> PresentationForTesting {
+        Self.sidebarPresentation(
+            sidebarSelection: uiState.sidebarSelection,
+            serverState: store.serverState,
+            totalJobCount: totalJobCount()
+        )
     }
 
     private func applySidebarPresentation(_ presentation: PresentationForTesting) {
@@ -1243,7 +1275,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 @MainActor
 extension ReviewMonitorSidebarViewController {
     var presentationForTesting: PresentationForTesting {
-        sidebarPresentation
+        currentSidebarPresentation()
     }
 
     var accountsViewControllerForTesting: ReviewMonitorAccountsViewController {

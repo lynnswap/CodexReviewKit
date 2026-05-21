@@ -1,5 +1,5 @@
 {
-  "originHash" : "8eda4cc2ef6dcd4ab03286240774e1897553b7a82cb1ec60f05d44c8c80b066e",
+  "originHash" : "8ae0abf2c6b14c767db0a521339a9a098abb9e8b40086169a040a1266aa26c5a",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lynnswap/ObservationBridge.git",
       "state" : {
-        "revision" : "ba3b94adc34467dfa53836292c88f6d43095802e",
-        "version" : "0.8.0"
+        "revision" : "f267138d0492927463dba284b001c1fabca41f1c",
+        "version" : "0.9.0"
       }
     },
     {

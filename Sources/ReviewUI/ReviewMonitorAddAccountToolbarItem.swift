@@ -36,19 +36,25 @@ final class ReviewMonitorAddAccountToolbarItem: NSToolbarItem {
     }
 
     private func bindObservation() {
-        observationScope.update {
-            auth.observe(\.phase) { [weak self] _ in
-                self?.updateForAuthState(animated: true)
-            }
-            .store(in: observationScope)
+        observationScope.observe(auth) { [weak self] _, auth in
+            let progress = auth.progress
+            self?.updateForAuthState(progress: progress, animated: true)
         }
     }
 
     private func updateForAuthState(animated: Bool) {
-        overflowMenuItem.title = auth.isAuthenticating ? "Cancel Sign-In" : "Add Account"
+        updateForAuthState(progress: auth.progress, animated: animated)
+    }
+
+    private func updateForAuthState(
+        progress: CodexReviewAuthModel.Progress?,
+        animated: Bool
+    ) {
+        let isAuthenticating = progress != nil
+        overflowMenuItem.title = isAuthenticating ? "Cancel Sign-In" : "Add Account"
         toolbarView.applyPresentation(
-            mode: auth.isAuthenticating ? .progress : .add,
-            progressDetail: auth.progress?.detail,
+            mode: isAuthenticating ? .progress : .add,
+            progressDetail: progress?.detail,
             animated: animated
         )
     }

@@ -27,19 +27,23 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
     }
 
     private func bindObservation() {
-        observationScope.update {
-            uiState.observe(\.sidebarSelection) { [weak self] _ in
-                guard let self else {
-                    return
-                }
-                self.updateVisibility(animated: true)
+        observationScope.observe(uiState) { [weak self] _, uiState in
+            let shouldHide = uiState.sidebarSelection == .account
+            guard let self else {
+                return
             }
-            .store(in: observationScope)
+            self.updateVisibility(shouldHide: shouldHide, animated: true)
         }
     }
 
     private func updateVisibility(animated: Bool) {
-        let shouldHide = uiState.sidebarSelection == .account
+        updateVisibility(
+            shouldHide: uiState.sidebarSelection == .account,
+            animated: animated
+        )
+    }
+
+    private func updateVisibility(shouldHide: Bool, animated: Bool) {
         shouldHideStatusAccessory = shouldHide
         guard animated else {
             isHidden = shouldHide

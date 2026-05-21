@@ -18,7 +18,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let uiStateObservationScope = ObservationScope()
     private let selectedJobObservationScope = ObservationScope()
     private let selectedWorkspaceObservationScope = ObservationScope()
-    private let selectedWorkspaceJobsObservationScope = ObservationScope()
     private var boundJob: CodexReviewJob?
     private var boundWorkspace: CodexReviewWorkspace?
     private var displayedSelection: DisplayedSelection?
@@ -92,13 +91,27 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func bindObservation() {
         uiStateObservationScope.cancelAll()
-        uiState.observe(\.selection) { [weak self] selection in
+        uiStateObservationScope.observe(uiState) { [weak self] _, uiState in
+            let selection = uiState.selection
             guard let self else {
+                return
+            }
+            guard self.selectionRequiresPresentationUpdate(selection) else {
                 return
             }
             self.updatePresentation(selection: selection)
         }
-        .store(in: uiStateObservationScope)
+    }
+
+    private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
+        switch selection {
+        case .job(let selectedJob):
+            return boundJob !== selectedJob || displayedSelection != .job(selectedJob.id)
+        case .workspace(let selectedWorkspace):
+            return boundWorkspace !== selectedWorkspace || displayedSelection != .workspace(selectedWorkspace.cwd)
+        case nil:
+            return displayedSelection != nil
+        }
     }
 
     private func updatePresentation(selection: ReviewMonitorSelection?) {
@@ -137,22 +150,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservationScope.cancelAll()
         boundJob = selectedJob
 
-        renderSelectedJob(
-            selectedJob,
-            restorationTarget: restorationTarget(selectedJob),
-            allowIncrementalUpdate: false
-        )
-
-        selectedJob.observe(\.reviewMonitorLogText) { [weak self] text in
-            guard let self else {
+        selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
+            let text = selectedJob.reviewMonitorLogText
+            guard let self,
+                  self.boundJob === selectedJob
+            else {
                 return
             }
-            let logChanged = self.renderBoundJobLog(text)
+            let logChanged = self.renderBoundJobLog(
+                text,
+                restorationTarget: event.kind == .initial
+                    ? self.restorationTarget(selectedJob)
+                    : self.logScrollView.currentScrollRestorationTarget,
+                allowIncrementalUpdate: event.kind != .initial
+            )
             if logChanged {
                 self.noteRenderForTesting()
             }
         }
-        .store(in: selectedJobObservationScope)
     }
 
     private func clearDisplayedJob() {
@@ -167,19 +182,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func displayWorkspace(_ workspace: CodexReviewWorkspace) {
         if boundWorkspace !== workspace {
             selectedWorkspaceObservationScope.cancelAll()
-            selectedWorkspaceJobsObservationScope.cancelAll()
             boundWorkspace = workspace
             bindWorkspaceObservation(workspace)
-            bindWorkspaceJobObservations(workspace)
-        }
-        if renderWorkspaceFindings(workspace) {
-            noteRenderForTesting()
         }
     }
 
     private func clearDisplayedWorkspace() {
         selectedWorkspaceObservationScope.cancelAll()
-        selectedWorkspaceJobsObservationScope.cancelAll()
         boundWorkspace = nil
         if workspaceFindingsView.clear() {
             noteRenderForTesting()
@@ -188,43 +197,22 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func bindWorkspaceObservation(_ workspace: CodexReviewWorkspace) {
-        store.observe([\.jobs]) { [weak self, weak workspace] in
+        selectedWorkspaceObservationScope.observe(store) { [weak self, weak workspace] _, _ in
             guard let self,
                   let workspace,
                   self.boundWorkspace === workspace
             else {
                 return
             }
-            self.bindWorkspaceJobObservations(workspace)
-            if self.renderWorkspaceFindings(workspace) {
+            let entries = self.workspaceFindingEntries(for: workspace)
+            if self.renderWorkspaceFindings(entries: entries) {
                 self.noteRenderForTesting()
-            }
-        }
-        .store(in: selectedWorkspaceObservationScope)
-    }
-
-    private func bindWorkspaceJobObservations(_ workspace: CodexReviewWorkspace) {
-        selectedWorkspaceJobsObservationScope.update {
-            for job in store.orderedJobs(in: workspace) {
-                job.observe([\.core, \.targetSummary, \.sortOrder]) { [weak self, weak workspace] in
-                    guard let self,
-                          let workspace,
-                          self.boundWorkspace === workspace
-                    else {
-                        return
-                    }
-                    if self.renderWorkspaceFindings(workspace) {
-                        self.noteRenderForTesting()
-                    }
-                }
-                .store(in: selectedWorkspaceJobsObservationScope)
             }
         }
     }
 
     @discardableResult
-    private func renderWorkspaceFindings(_ workspace: CodexReviewWorkspace) -> Bool {
-        let entries = workspaceFindingEntries(for: workspace)
+    private func renderWorkspaceFindings(entries: [ReviewMonitorWorkspaceFindingsView.Entry]) -> Bool {
         let rendered = workspaceFindingsView.render(entries: entries)
         let presentationChanged = updateWorkspaceFindingsPresentation(hasFindings: entries.isEmpty == false)
         return rendered || presentationChanged
@@ -344,21 +332,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private func renderSelectedJob(
-        _ job: CodexReviewJob,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) {
-        let logChanged = renderSelectedJobLog(
-            job.reviewMonitorLogText,
-            restorationTarget: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate
-        )
-        if logChanged {
-            noteRenderForTesting()
-        }
-    }
-
     @discardableResult
     private func renderSelectedJobLog(
         _ text: String,
@@ -373,14 +346,18 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     @discardableResult
-    private func renderBoundJobLog(_ text: String) -> Bool {
+    private func renderBoundJobLog(
+        _ text: String,
+        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
+        allowIncrementalUpdate: Bool
+    ) -> Bool {
         guard boundJob != nil else {
             return false
         }
         return renderSelectedJobLog(
             text,
-            restorationTarget: logScrollView.currentScrollRestorationTarget,
-            allowIncrementalUpdate: true
+            restorationTarget: restorationTarget,
+            allowIncrementalUpdate: allowIncrementalUpdate
         )
     }
 
