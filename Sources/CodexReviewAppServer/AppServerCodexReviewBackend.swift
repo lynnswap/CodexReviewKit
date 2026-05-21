@@ -5,7 +5,10 @@ import CodexReview
 private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-backend")
 
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
+    private static let reviewPermissionProfileID = ":danger-full-access"
+
     private let client: AppServerClient
+    private let threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var notificationStreamsByThreadID: [String: AsyncThrowingStream<JSONRPCNotification, Error>] = [:]
     private var reviewEventContinuationsByThreadID: [
@@ -13,8 +16,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ] = [:]
     private var pendingReviewEventStreamFinishesByThreadID: [String: PendingReviewEventStreamFinish] = [:]
 
-    package init(client: AppServerClient) {
+    package init(
+        client: AppServerClient,
+        threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy = .modernPermissions
+    ) {
         self.client = client
+        self.threadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
     package func readSettings() async throws -> BackendSettingsSnapshot {
@@ -102,15 +109,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ = try await client.initialize()
         let control = AppServerReviewControl(client: client)
 
-        let thread = try await client.send(ThreadStartRequest(
-            params: .init(
-                cwd: request.request.cwd,
-                model: request.model,
-                ephemeral: true,
-                approvalPolicy: "never",
-                sandbox: "danger-full-access"
-            )
-        ))
+        let thread = try await startReviewThread(request)
         await control.recordThreadStarted(threadID: thread.threadID)
         controlsByThreadID[thread.threadID] = control
         notificationStreamsByThreadID[thread.threadID] = await client.notificationStream()
@@ -133,6 +132,102 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: reviewThreadID,
             model: thread.model ?? request.model
         )
+    }
+
+    private func startReviewThread(_ request: BackendReviewStart) async throws -> ThreadStartResponse {
+        if threadStartPermissionStrategy == .legacySandbox {
+            // Deprecated compatibility: installed Codex builds without the app-server v2
+            // session-source flag can ignore permissions without failing the request.
+            return try await client.send(ThreadStartRequest(
+                params: threadStartParamsWithLegacySandbox(request)
+            ))
+        }
+        do {
+            return try await startReviewThreadWithProfileIDPermissions(request)
+        } catch let error as JSONRPCError where Self.shouldRetryThreadStartWithLegacySandbox(error) {
+            // Deprecated compatibility: some builds accept the permissions field shape
+            // without registering the danger-full-access built-in profile.
+            return try await client.send(ThreadStartRequest(
+                params: threadStartParamsWithLegacySandbox(request)
+            ))
+        } catch let error as JSONRPCError where Self.shouldRetryThreadStartWithObjectPermissions(error) {
+            // Deprecated compatibility: installed Codex builds can require object-shaped
+            // permissions while the latest local app-server source accepts a profile ID string.
+            return try await startReviewThreadWithProfileSelectionPermissions(request)
+        }
+    }
+
+    private func startReviewThreadWithProfileIDPermissions(
+        _ request: BackendReviewStart
+    ) async throws -> ThreadStartResponse {
+        try await client.send(ThreadStartRequest(
+            params: threadStartParams(
+                request,
+                permissions: .profileID(Self.reviewPermissionProfileID)
+            )
+        ))
+    }
+
+    private func startReviewThreadWithProfileSelectionPermissions(
+        _ request: BackendReviewStart
+    ) async throws -> ThreadStartResponse {
+        do {
+            return try await client.send(ThreadStartRequest(
+                params: threadStartParams(
+                    request,
+                    permissions: .profileSelection(.init(id: Self.reviewPermissionProfileID))
+                )
+            ))
+        } catch let error as JSONRPCError
+            where Self.shouldRetryThreadStartWithLegacySandbox(error)
+        {
+            // Deprecated compatibility: installed Codex builds can know the permissions
+            // object shape without registering the danger-full-access built-in profile.
+            return try await client.send(ThreadStartRequest(
+                params: threadStartParamsWithLegacySandbox(request)
+            ))
+        }
+    }
+
+    private func threadStartParams(
+        _ request: BackendReviewStart,
+        permissions: ThreadStartPermissions
+    ) -> ThreadStartParams {
+        .init(
+            cwd: request.request.cwd,
+            model: request.model,
+            ephemeral: true,
+            approvalPolicy: "never",
+            permissions: permissions,
+            threadSource: "user"
+        )
+    }
+
+    private func threadStartParamsWithLegacySandbox(_ request: BackendReviewStart) -> ThreadStartParams {
+        .init(
+            cwd: request.request.cwd,
+            model: request.model,
+            ephemeral: true,
+            approvalPolicy: "never",
+            sandbox: "danger-full-access",
+            threadSource: "user"
+        )
+    }
+
+    private nonisolated static func shouldRetryThreadStartWithObjectPermissions(_ error: JSONRPCError) -> Bool {
+        guard case .responseError(_, let message) = error else {
+            return false
+        }
+        return message.contains("PermissionProfileSelectionParams")
+            || message.contains("invalid type: string")
+    }
+
+    private nonisolated static func shouldRetryThreadStartWithLegacySandbox(_ error: JSONRPCError) -> Bool {
+        guard case .responseError(_, let message) = error else {
+            return false
+        }
+        return message.contains("unknown built-in profile")
+            || message.contains("default_permissions refers to unknown")
     }
 
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
@@ -165,7 +260,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let _: EmptyResponse? = try? await client.send(BackgroundTerminalsCleanRequest(
             params: .init(threadID: run.threadID)
         ))
-        let _: EmptyResponse? = try? await client.send(ThreadUnsubscribeRequest(
+        let _: ThreadUnsubscribeResponse? = try? await client.send(ThreadUnsubscribeRequest(
             params: .init(threadID: run.threadID)
         ))
     }

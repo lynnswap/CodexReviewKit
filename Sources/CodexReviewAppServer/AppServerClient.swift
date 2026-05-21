@@ -4,6 +4,13 @@ import OSLog
 private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-client")
 
 package actor AppServerClient {
+    private static let appServerOverloadedErrorCode = -32001
+    private static let overloadRetryDelays: [Duration] = [
+        .milliseconds(100),
+        .milliseconds(250),
+        .milliseconds(500),
+    ]
+
     private let transport: any JSONRPCTransport
     private let serializer = RequestSerializer()
     private let encoder = JSONEncoder()
@@ -69,22 +76,32 @@ package actor AppServerClient {
         responseType: Response.Type,
         scope: AppServerRequestScope? = nil
     ) async throws -> Response {
-        let requestID = allocateRequestID()
-        logger.debug("JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)")
-        return try await serializer.run(scope: scope) { [transport, encoder, decoder] in
+        try await serializer.run(scope: scope) { [transport, encoder, decoder, self] in
             let encodedParams = try encoder.encode(params)
-            do {
-                let rawResponse = try await transport.send(.init(
-                    id: requestID,
-                    method: method,
-                    params: encodedParams
-                ))
-                let response = try decoder.decode(responseType, from: rawResponse)
-                logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
-                return response
-            } catch {
-                logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                throw error
+            var retryAttempt = 0
+            while true {
+                let requestID = await self.allocateRequestID()
+                logger.debug("JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)")
+                do {
+                    let rawResponse = try await transport.send(.init(
+                        id: requestID,
+                        method: method,
+                        params: encodedParams
+                    ))
+                    let response = try decoder.decode(responseType, from: rawResponse)
+                    logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
+                    return response
+                } catch let error as JSONRPCError
+                    where Self.shouldRetry(error, retryAttempt: retryAttempt)
+                {
+                    let delay = Self.overloadRetryDelay(for: retryAttempt)
+                    retryAttempt += 1
+                    logger.warning("JSON-RPC request \(requestID, privacy: .public) overloaded for \(method, privacy: .public); retrying in \(String(describing: delay), privacy: .public)")
+                    try await Task.sleep(for: delay)
+                } catch {
+                    logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    throw error
+                }
             }
         }
     }
@@ -112,6 +129,22 @@ package actor AppServerClient {
     private func allocateRequestID() -> Int {
         defer { nextRequestID += 1 }
         return nextRequestID
+    }
+
+    private nonisolated static func shouldRetry(_ error: JSONRPCError, retryAttempt: Int) -> Bool {
+        guard retryAttempt < overloadRetryDelays.count else {
+            return false
+        }
+        if case .responseError(let code, _) = error {
+            return code == appServerOverloadedErrorCode
+        }
+        return false
+    }
+
+    private nonisolated static func overloadRetryDelay(for retryAttempt: Int) -> Duration {
+        let base = overloadRetryDelays[retryAttempt]
+        let jitter = Duration.milliseconds(Int.random(in: 0...50))
+        return base + jitter
     }
 }
 

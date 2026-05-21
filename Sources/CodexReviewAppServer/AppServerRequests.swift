@@ -5,6 +5,11 @@ package enum AppServerRequestScope: Hashable, Sendable {
     case thread(String)
 }
 
+package enum AppServerThreadStartPermissionStrategy: Equatable, Sendable {
+    case modernPermissions
+    case legacySandbox
+}
+
 package protocol AppServerRequest: Sendable {
     associatedtype Params: Encodable & Sendable
     associatedtype Response: Decodable & Sendable
@@ -84,19 +89,69 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
     package var ephemeral: Bool?
     package var approvalPolicy: String?
     package var sandbox: String?
+    package var permissions: ThreadStartPermissions?
+    package var threadSource: String?
 
     package init(
         cwd: String,
         model: String? = nil,
         ephemeral: Bool? = nil,
         approvalPolicy: String? = nil,
-        sandbox: String? = nil
+        sandbox: String? = nil,
+        permissions: ThreadStartPermissions? = nil,
+        threadSource: String? = nil
     ) {
         self.cwd = cwd
         self.model = model
         self.ephemeral = ephemeral
         self.approvalPolicy = approvalPolicy
         self.sandbox = sandbox
+        self.permissions = permissions
+        self.threadSource = threadSource
+    }
+}
+
+package enum ThreadStartPermissions: Codable, Equatable, Sendable {
+    case profileID(String)
+    case profileSelection(ThreadStartPermissionProfileSelection)
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let profileID = try? container.decode(String.self) {
+            self = .profileID(profileID)
+            return
+        }
+        if let profileSelection = try? container.decode(ThreadStartPermissionProfileSelection.self) {
+            self = .profileSelection(profileSelection)
+            return
+        }
+        throw DecodingError.typeMismatch(
+            ThreadStartPermissions.self,
+            .init(
+                codingPath: decoder.codingPath,
+                debugDescription: "Expected a permissions profile ID or profile selection object."
+            )
+        )
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .profileID(let profileID):
+            try container.encode(profileID)
+        case .profileSelection(let profileSelection):
+            try container.encode(profileSelection)
+        }
+    }
+}
+
+package struct ThreadStartPermissionProfileSelection: Codable, Equatable, Sendable {
+    package var type: String
+    package var id: String
+
+    package init(id: String, type: String = "profile") {
+        self.type = type
+        self.id = id
     }
 }
 
@@ -268,8 +323,22 @@ package struct ThreadUnsubscribeParams: Codable, Equatable, Sendable {
     }
 }
 
+package enum ThreadUnsubscribeStatus: String, Codable, Equatable, Sendable {
+    case notLoaded
+    case notSubscribed
+    case unsubscribed
+}
+
+package struct ThreadUnsubscribeResponse: Codable, Equatable, Sendable {
+    package var status: ThreadUnsubscribeStatus
+
+    package init(status: ThreadUnsubscribeStatus) {
+        self.status = status
+    }
+}
+
 package struct ThreadUnsubscribeRequest: AppServerRequest {
-    package typealias Response = EmptyResponse
+    package typealias Response = ThreadUnsubscribeResponse
 
     package static let method = "thread/unsubscribe"
     package var params: ThreadUnsubscribeParams

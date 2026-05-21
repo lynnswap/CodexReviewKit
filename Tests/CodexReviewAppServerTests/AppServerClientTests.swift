@@ -15,7 +15,42 @@ struct AppServerClientTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let codex = directory.appending(path: "codex")
-        try Data("#!/bin/sh\n".utf8).write(to: codex)
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+          printf 'Usage: codex app-server --listen <URL> --session-source <SOURCE>\\n'
+        fi
+        """
+        try Data(script.utf8).write(to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+
+        let configuration = AppServerProcessTransport.Configuration(
+            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
+        )
+
+        #expect(configuration.executable == codex.path)
+        #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments(supportsSessionSource: true))
+        #expect(configuration.arguments.contains(#"cli_auth_credentials_store="file""#))
+        #expect(configuration.threadStartPermissionStrategy == .modernPermissions)
+        let sessionSourceIndex = try #require(configuration.arguments.firstIndex(of: "--session-source"))
+        #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
+    }
+
+    @Test func processTransportConfigurationOmitsUnsupportedSessionSourceFlag() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-transport-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let codex = directory.appending(path: "codex")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+          printf 'Usage: codex app-server --listen <URL>\\n'
+        fi
+        """
+        try Data(script.utf8).write(to: codex)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
@@ -24,7 +59,36 @@ struct AppServerClientTests {
 
         #expect(configuration.executable == codex.path)
         #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
-        #expect(configuration.arguments.contains(#"cli_auth_credentials_store="file""#))
+        #expect(configuration.arguments.contains("--session-source") == false)
+        #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
+    }
+
+    @Test func processTransportConfigurationDoesNotProbeWhenArgumentsAreExplicit() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-transport-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let codex = directory.appending(path: "codex")
+        let probed = directory.appending(path: "probed")
+        let script = """
+        #!/bin/sh
+        touch "\(probed.path)"
+        """
+        try Data(script.utf8).write(to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+
+        let configuration = AppServerProcessTransport.Configuration(
+            executable: codex.path,
+            arguments: ["custom", "argument"],
+            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
+        )
+
+        #expect(configuration.executable == codex.path)
+        #expect(configuration.arguments == ["custom", "argument"])
+        #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
+        #expect(FileManager.default.fileExists(atPath: probed.path) == false)
     }
 
     @Test func processTransportSearchesCodexAppBundleResourcesFallback() throws {
@@ -133,7 +197,7 @@ struct AppServerClientTests {
         let script = """
         #!/bin/sh
         IFS= read -r request
-        printf '{"jsonrpc":"2.0","id":1,"result":{"value":'
+        printf '{"id":1,"result":{"value":'
         sleep 0.05
         printf '"done"}}\\n'
         """
@@ -157,6 +221,66 @@ struct AppServerClientTests {
 
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(object["value"] as? String == "done")
+    }
+
+    @Test func processTransportWritesCodexJSONRPCLiteMessages() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-jsonrpc-lite-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let executable = directory.appending(path: "app-server-stub.sh")
+        let requestFile = directory.appending(path: "request.json")
+        let notificationFile = directory.appending(path: "notification.json")
+        let script = """
+        #!/bin/sh
+        request_file="$1"
+        notification_file="$2"
+        IFS= read -r request
+        printf '%s\\n' "$request" > "$request_file"
+        printf '{"id":7,"result":{}}\\n'
+        IFS= read -r notification
+        printf '%s\\n' "$notification" > "$notification_file"
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let transport = try AppServerProcessTransport(configuration: .init(
+            executable: executable.path,
+            arguments: [requestFile.path, notificationFile.path],
+            environment: [
+                "HOME": directory.path,
+                "PATH": "/bin:/usr/bin",
+            ]
+        ))
+
+        _ = try await transport.send(JSONRPCRequest(
+            id: 7,
+            method: "test/request",
+            params: Data(#"{"value":true}"#.utf8)
+        ))
+        try await transport.notify(JSONRPCNotification(
+            method: "initialized",
+            params: Data("{}".utf8)
+        ))
+        let notificationWritten = await waitUntil(timeout: .seconds(2)) {
+            FileManager.default.fileExists(atPath: notificationFile.path)
+        }
+        await transport.close()
+
+        #expect(notificationWritten)
+        let request = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: requestFile)
+        ) as? [String: Any])
+        let notification = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: notificationFile)
+        ) as? [String: Any])
+        #expect(request["jsonrpc"] == nil)
+        #expect(request["id"] as? Int == 7)
+        #expect(request["method"] as? String == "test/request")
+        #expect(notification["jsonrpc"] == nil)
+        #expect(notification["method"] as? String == "initialized")
     }
 
     @Test func processTransportMapsNullJSONRPCResultToEmptyPayload() throws {
@@ -185,7 +309,7 @@ struct AppServerClientTests {
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let error = try #require(object["error"] as? [String: Any])
 
-        #expect(object["jsonrpc"] as? String == "2.0")
+        #expect(object["jsonrpc"] == nil)
         #expect(object["id"] as? Int == 42)
         #expect(error["code"] as? Int == -32601)
         #expect(error["message"] as? String == "Unsupported app-server request: approval/request")
@@ -232,6 +356,44 @@ struct AppServerClientTests {
         _ = try await (first, second)
 
         #expect(await transport.maxActiveCount(for: "review/start") == 2)
+    }
+
+    @Test func sendRetriesAppServerOverloadWithFreshRequestID() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(code: -32001, message: "Server overloaded; retry later."),
+            for: "test/request"
+        )
+        let client = AppServerClient(transport: transport)
+
+        let response: EmptyResponse = try await client.send(
+            method: "test/request",
+            params: EmptyResponse(),
+            responseType: EmptyResponse.self
+        )
+
+        #expect(response == EmptyResponse())
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == ["test/request", "test/request"])
+        #expect(requests[0].id != requests[1].id)
+    }
+
+    @Test func sendDoesNotRetryNonOverloadAppServerErrors() async throws {
+        let transport = FakeJSONRPCTransport()
+        await transport.enqueueFailure(
+            .responseError(code: -32602, message: "invalid target"),
+            for: "test/request"
+        )
+        let client = AppServerClient(transport: transport)
+
+        await #expect(throws: JSONRPCError.responseError(code: -32602, message: "invalid target")) {
+            let _: EmptyResponse = try await client.send(
+                method: "test/request",
+                params: EmptyResponse(),
+                responseType: EmptyResponse.self
+            )
+        }
+        #expect(await transport.recordedRequests().map(\.method) == ["test/request"])
     }
 
     @Test func startupInterruptUsesEmptyTurnID() async throws {
@@ -606,9 +768,157 @@ struct AppServerClientTests {
 
         let threadStart = try #require(await transport.recordedRequests().first { $0.method == "thread/start" })
         let params = try JSONDecoder().decode(ThreadStartParams.self, from: threadStart.params)
+        let object = try #require(JSONSerialization.jsonObject(with: threadStart.params) as? [String: Any])
         #expect(params.ephemeral == true)
         #expect(params.approvalPolicy == "never")
-        #expect(params.sandbox == "danger-full-access")
+        #expect(params.permissions == .profileID(":danger-full-access"))
+        #expect(params.threadSource == "user")
+        #expect(params.sandbox == nil)
+        #expect(object["permissions"] as? String == ":danger-full-access")
+        #expect(object["sandbox"] == nil)
+    }
+
+    @Test func backendUsesLegacySandboxWhenProcessDoesNotSupportModernSessionSource() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(
+            client: .init(transport: transport),
+            threadStartPermissionStrategy: .legacySandbox
+        )
+
+        _ = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+
+        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
+        #expect(threadStarts.count == 1)
+        let request = try #require(threadStarts.first)
+        let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
+        #expect(params["sandbox"] as? String == "danger-full-access")
+        #expect(params["permissions"] == nil)
+        #expect(params["threadSource"] as? String == "user")
+    }
+
+    @Test func backendRetriesThreadStartWithObjectPermissionsForInstalledCodex() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: #"Invalid request: invalid type: string ":danger-full-access", expected internally tagged enum PermissionProfileSelectionParams"#
+            ),
+            for: "thread/start"
+        )
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        _ = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+
+        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
+        #expect(threadStarts.count == 2)
+
+        let firstRequest = try #require(threadStarts.first)
+        let secondRequest = try #require(threadStarts.last)
+        let first = try #require(JSONSerialization.jsonObject(
+            with: firstRequest.params
+        ) as? [String: Any])
+        let second = try #require(JSONSerialization.jsonObject(
+            with: secondRequest.params
+        ) as? [String: Any])
+        let permissions = try #require(second["permissions"] as? [String: Any])
+
+        #expect(first["permissions"] as? String == ":danger-full-access")
+        #expect(first["sandbox"] == nil)
+        #expect(permissions["type"] as? String == "profile")
+        #expect(permissions["id"] as? String == ":danger-full-access")
+        #expect(second["sandbox"] == nil)
+        #expect(second["threadSource"] as? String == "user")
+    }
+
+    @Test func backendFallsBackToLegacySandboxWhenInstalledCodexLacksDangerProfile() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: #"Invalid request: invalid type: string ":danger-full-access", expected internally tagged enum PermissionProfileSelectionParams"#
+            ),
+            for: "thread/start"
+        )
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "failed to load configuration: default_permissions refers to unknown built-in profile `:danger-full-access`"
+            ),
+            for: "thread/start"
+        )
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        _ = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+
+        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
+        #expect(threadStarts.count == 3)
+
+        let fallbackRequest = try #require(threadStarts.last)
+        let fallback = try #require(JSONSerialization.jsonObject(
+            with: fallbackRequest.params
+        ) as? [String: Any])
+        #expect(fallback["sandbox"] as? String == "danger-full-access")
+        #expect(fallback["permissions"] == nil)
+        #expect(fallback["threadSource"] as? String == "user")
+    }
+
+    @Test func backendFallsBackToLegacySandboxWhenProfileIDPermissionsAreUnknown() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "failed to load configuration: default_permissions refers to unknown built-in profile `:danger-full-access`"
+            ),
+            for: "thread/start"
+        )
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        _ = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+
+        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
+        #expect(threadStarts.count == 2)
+
+        let firstRequest = try #require(threadStarts.first)
+        let fallbackRequest = try #require(threadStarts.last)
+        let first = try #require(JSONSerialization.jsonObject(
+            with: firstRequest.params
+        ) as? [String: Any])
+        let fallback = try #require(JSONSerialization.jsonObject(
+            with: fallbackRequest.params
+        ) as? [String: Any])
+        #expect(first["permissions"] as? String == ":danger-full-access")
+        #expect(first["sandbox"] == nil)
+        #expect(fallback["sandbox"] as? String == "danger-full-access")
+        #expect(fallback["permissions"] == nil)
+        #expect(fallback["threadSource"] as? String == "user")
     }
 
     @Test func backendAppliesRequestedReviewModelToThreadStartAndRunMetadata() async throws {
@@ -654,6 +964,13 @@ struct AppServerClientTests {
         #expect(run.threadID == "thread-1")
         #expect(run.turnID == "turn-1")
         #expect(run.model == "gpt-5")
+    }
+
+    @Test func threadUnsubscribeResponseDecodesStatus() throws {
+        let data = Data(#"{"status":"unsubscribed"}"#.utf8)
+        let response = try JSONDecoder().decode(ThreadUnsubscribeResponse.self, from: data)
+
+        #expect(response.status == .unsubscribed)
     }
 
     @Test func backendKeepsParentThreadIDForDetachedReviewThread() async throws {

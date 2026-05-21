@@ -112,11 +112,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             CodexReviewMCPHTTPServer(adapter: CodexReviewMCPServer(store: store))
         },
         appServerRuntimeFactory: @escaping AppServerRuntimeFactory = { codexHomeURL in
-            let transport = try AppServerProcessTransport(configuration: .init(codexHomeURL: codexHomeURL))
+            let configuration = AppServerProcessTransport.Configuration(codexHomeURL: codexHomeURL)
+            let transport = try AppServerProcessTransport(configuration: configuration)
             let client = AppServerClient(transport: transport)
             return .init(
                 client: client,
-                backend: AppServerCodexReviewBackend(client: client)
+                backend: AppServerCodexReviewBackend(
+                    client: client,
+                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
+                )
             )
         }
     ) {
