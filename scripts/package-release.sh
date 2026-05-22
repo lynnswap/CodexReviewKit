@@ -228,7 +228,7 @@ hdiutil attach \
 
 SetFile -a V "$mount_point/.background" 2>/dev/null || true
 
-osascript - "$mount_point" "$applications_alias_name" <<'OSA'
+if osascript - "$mount_point" "$applications_alias_name" <<'OSA'
 on run argv
   set mountPoint to item 1 of argv
   set applicationsAliasName to item 2 of argv
@@ -265,6 +265,13 @@ on run argv
   end tell
 end run
 OSA
+then
+  :
+else
+  echo "Finder automation failed while writing the DMG window layout." >&2
+  echo "Run the release shell from a logged-in local macOS session and grant Automation permission to the invoking terminal." >&2
+  exit 1
+fi
 
 bless --folder "$mount_point" --openfolder "$mount_point" 2>/dev/null || true
 sync
