@@ -1,6 +1,6 @@
 //
-//  ReviewMonitorApp.swift
-//  ReviewMonitor
+//  CodexReviewMonitorApp.swift
+//  CodexReviewMonitor
 //
 //  Created by Kazuki Nakashima on 2026/03/28.
 //
@@ -211,7 +211,7 @@ private final class ReviewMonitorPresentationAnchorSource {
 }
 
 private enum ReviewMonitorNativeAuthentication {
-    static let callbackScheme = "lynnpd.ReviewMonitor.auth"
+    static let callbackScheme = "lynnpd.CodexReviewMonitor.auth"
 }
 
 @MainActor

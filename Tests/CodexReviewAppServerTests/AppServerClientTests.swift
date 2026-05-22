@@ -577,23 +577,23 @@ struct AppServerClientTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         let challenge = try await backend.startLogin(.init(
-            nativeWebAuthenticationCallbackScheme: "lynnpd.ReviewMonitor.auth"
+            nativeWebAuthenticationCallbackScheme: "lynnpd.CodexReviewMonitor.auth"
         ))
 
         #expect(challenge.id == "login-1")
         #expect(challenge.verificationURL == URL(string: "https://example.com/auth"))
-        #expect(challenge.nativeWebAuthenticationCallbackScheme == "lynnpd.ReviewMonitor.auth")
+        #expect(challenge.nativeWebAuthenticationCallbackScheme == "lynnpd.CodexReviewMonitor.auth")
         let request = try #require(await transport.recordedRequests().last)
         #expect(request.method == "account/login/start")
         let params = try JSONDecoder().decode(LoginAccountParams.self, from: request.params)
-        #expect(params.nativeWebAuthentication?.callbackURLScheme == "lynnpd.ReviewMonitor.auth")
+        #expect(params.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
     }
 
     @Test func loginStartPreservesDeviceCodeUserCode() async throws {

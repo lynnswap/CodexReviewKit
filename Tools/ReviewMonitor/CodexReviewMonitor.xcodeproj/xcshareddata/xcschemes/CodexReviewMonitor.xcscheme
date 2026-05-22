@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AB19F42E2F77D8AD009726F1"
-               BuildableName = "ReviewMonitor.app"
-               BlueprintName = "ReviewMonitor"
-               ReferencedContainer = "container:ReviewMonitor.xcodeproj">
+               BuildableName = "CodexReviewMonitor.app"
+               BlueprintName = "CodexReviewMonitor"
+               ReferencedContainer = "container:CodexReviewMonitor.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AB19F42E2F77D8AD009726F1"
-            BuildableName = "ReviewMonitor.app"
-            BlueprintName = "ReviewMonitor"
-            ReferencedContainer = "container:ReviewMonitor.xcodeproj">
+            BuildableName = "CodexReviewMonitor.app"
+            BlueprintName = "CodexReviewMonitor"
+            ReferencedContainer = "container:CodexReviewMonitor.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <EnvironmentVariables>
@@ -52,9 +52,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AB19F43B2F77D8AD009726F1"
-               BuildableName = "ReviewMonitorCITests.xctest"
-               BlueprintName = "ReviewMonitorCITests"
-               ReferencedContainer = "container:ReviewMonitor.xcodeproj">
+               BuildableName = "CodexReviewMonitorCITests.xctest"
+               BlueprintName = "CodexReviewMonitorCITests"
+               ReferencedContainer = "container:CodexReviewMonitor.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -75,9 +75,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AB19F42E2F77D8AD009726F1"
-            BuildableName = "ReviewMonitor.app"
-            BlueprintName = "ReviewMonitor"
-            ReferencedContainer = "container:ReviewMonitor.xcodeproj">
+            BuildableName = "CodexReviewMonitor.app"
+            BlueprintName = "CodexReviewMonitor"
+            ReferencedContainer = "container:CodexReviewMonitor.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <EnvironmentVariables>
@@ -104,9 +104,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AB19F42E2F77D8AD009726F1"
-            BuildableName = "ReviewMonitor.app"
-            BlueprintName = "ReviewMonitor"
-            ReferencedContainer = "container:ReviewMonitor.xcodeproj">
+            BuildableName = "CodexReviewMonitor.app"
+            BlueprintName = "CodexReviewMonitor"
+            ReferencedContainer = "container:CodexReviewMonitor.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

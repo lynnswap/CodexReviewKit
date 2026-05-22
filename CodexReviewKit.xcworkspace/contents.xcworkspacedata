@@ -2,7 +2,7 @@
 <Workspace
    version = "1.0">
    <FileRef
-      location = "group:Tools/ReviewMonitor/ReviewMonitor.xcodeproj">
+      location = "group:Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj">
    </FileRef>
    <FileRef
       location = "group:">

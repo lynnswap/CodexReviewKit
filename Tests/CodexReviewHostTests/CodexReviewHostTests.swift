@@ -204,7 +204,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -213,7 +213,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -257,7 +257,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -265,7 +265,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -352,7 +352,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -382,7 +382,7 @@ struct CodexReviewHostTests {
             $0.method == "account/login/start"
         })
         let loginParams = try JSONDecoder().decode(LoginAccountParams.self, from: loginRequest.params)
-        #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.ReviewMonitor.auth")
+        #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
         try await authTransport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-2", success: true)
@@ -441,7 +441,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-new",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -461,7 +461,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -479,7 +479,7 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        session.complete(with: URL(string: "lynnpd.ReviewMonitor.auth://callback?code=1")!)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=1")!)
         await waitUntil {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
@@ -535,7 +535,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-2",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -544,7 +544,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -938,7 +938,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -947,7 +947,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -1063,7 +1063,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -1111,7 +1111,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -1159,7 +1159,7 @@ struct CodexReviewHostTests {
             LoginAccountResponse.chatgpt(
                 loginID: "login-2",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.ReviewMonitor.auth")
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
         )
@@ -1172,7 +1172,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
-                callbackScheme: "lynnpd.ReviewMonitor.auth",
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
@@ -1191,7 +1191,7 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        session.complete(with: URL(string: "lynnpd.ReviewMonitor.auth://callback?code=1")!)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=1")!)
         await loginTransport.waitForRequestCount(3)
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)

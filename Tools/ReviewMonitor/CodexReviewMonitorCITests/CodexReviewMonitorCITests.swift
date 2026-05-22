@@ -2,11 +2,11 @@ import AppKit
 import Foundation
 import CodexReview
 import Testing
-@testable import ReviewMonitor
+@testable import CodexReviewMonitor
 
 @Suite(.serialized)
 @MainActor
-struct ReviewMonitorCITests {
+struct CodexReviewMonitorCITests {
     @Test func ciSchemeBuildsPreviewLaunchContextWithoutStartingServer() {
         let environment = ProcessInfo.processInfo.environment
         let context = ReviewMonitorLaunchContext(

@@ -6,7 +6,7 @@ struct SignInView: View {
 
     var body: some View {
         ContentUnavailableView {
-            Text("Welcome to ReviewMonitor")
+            Text("Welcome to CodexReviewMonitor")
                 .font(.largeTitle)
                 .fontDesign(.rounded)
                 .fontWidth(.compressed)
