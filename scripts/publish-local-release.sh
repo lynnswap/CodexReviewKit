@@ -20,6 +20,32 @@ notary_profile="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
 skip_tests=0
 allow_dirty=0
 app_name="CodexReviewMonitor"
+tag_needs_push=1
+
+remote_tag_commit() {
+  local remote_name="$1"
+  local tag_name="$2"
+  local tag_lines peeled direct
+
+  tag_lines="$(git ls-remote --tags "$remote_name" "refs/tags/$tag_name" "refs/tags/$tag_name^{}")"
+  if [[ -z "$tag_lines" ]]; then
+    return 1
+  fi
+
+  peeled="$(awk '$2 ~ /\^\{\}$/ { print $1 }' <<<"$tag_lines" | tail -n 1)"
+  if [[ -n "$peeled" ]]; then
+    echo "$peeled"
+    return 0
+  fi
+
+  direct="$(awk -v ref="refs/tags/$tag_name" '$2 == ref { print $1; exit }' <<<"$tag_lines")"
+  if [[ -n "$direct" ]]; then
+    echo "$direct"
+    return 0
+  fi
+
+  return 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -114,18 +140,27 @@ if [[ "$allow_dirty" -eq 0 ]]; then
   fi
 
   git fetch --quiet "$remote" "refs/heads/$release_branch:refs/remotes/$remote/$release_branch" --tags
-  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-    echo "Local or fetched tag already exists: $tag" >&2
-    exit 1
-  fi
-
-  remote_tag="$(git ls-remote --tags "$remote" "refs/tags/$tag")"
-  if [[ -n "$remote_tag" ]]; then
-    echo "Remote tag already exists on $remote: $tag" >&2
-    exit 1
-  fi
-
   local_head="$(git rev-parse HEAD)"
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    local_tag_commit="$(git rev-parse "$tag^{commit}")"
+    if [[ "$local_tag_commit" != "$local_head" ]]; then
+      echo "Local or fetched tag already exists but does not point to HEAD: $tag" >&2
+      echo "Tag target: $local_tag_commit" >&2
+      echo "HEAD:       $local_head" >&2
+      exit 1
+    fi
+  fi
+
+  if remote_tag_commit="$(remote_tag_commit "$remote" "$tag")"; then
+    if [[ "$remote_tag_commit" != "$local_head" ]]; then
+      echo "Remote tag already exists on $remote but does not point to HEAD: $tag" >&2
+      echo "Remote tag target: $remote_tag_commit" >&2
+      echo "HEAD:              $local_head" >&2
+      exit 1
+    fi
+    tag_needs_push=0
+  fi
+
   remote_head="$(git rev-parse "$remote/$release_branch")"
   if [[ "$local_head" != "$remote_head" ]]; then
     echo "Release tag target must match $remote/$release_branch before the tag is pushed." >&2
@@ -198,8 +233,14 @@ if [[ "$allow_dirty" -eq 1 ]]; then
   exit 0
 fi
 
-git tag -a "$tag" -m "Release $tag"
-git push "$remote" "$tag"
+if [[ "$tag_needs_push" -eq 1 ]]; then
+  if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    git tag -a "$tag" -m "Release $tag"
+  fi
+  git push "$remote" "$tag"
+else
+  echo "Remote tag already exists on $remote and points to HEAD; continuing release upload."
+fi
 
 if gh release view "$tag" >/dev/null 2>&1; then
   gh release upload "$tag" "$archive_path" --clobber
