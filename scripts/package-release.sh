@@ -14,13 +14,18 @@ signing_identity="${CODE_SIGN_IDENTITY:-}"
 notary_profile="${NOTARYTOOL_KEYCHAIN_PROFILE:-}"
 app_name="CodexReviewMonitor"
 
+detach_volume() {
+  local mount_path="$1"
+  hdiutil detach "$mount_path" >/dev/null 2>&1 || hdiutil detach -force "$mount_path" >/dev/null 2>&1
+}
+
 detach_mounted_release_volumes() {
   local mounted_volume
   while IFS= read -r mounted_volume; do
     [[ -d "$mounted_volume" ]] || continue
     if [[ -e "$mounted_volume/${app_name}.app" || -e "$mounted_volume/.background/background.png" ]]; then
       echo "Detaching existing ${app_name} mount: $mounted_volume" >&2
-      hdiutil detach "$mounted_volume" >/dev/null || hdiutil detach -force "$mounted_volume" >/dev/null
+      detach_volume "$mounted_volume"
     fi
   done < <(find /Volumes -maxdepth 1 \( -name "$app_name" -o -name "$app_name [0-9]*" \) -print 2>/dev/null)
 }
@@ -127,7 +132,7 @@ dmg_root="$(mktemp -d "${TMPDIR:-/tmp}/reviewmonitor-dmg.XXXXXX")"
 mount_point=""
 cleanup() {
   if [[ -n "$mount_point" && -d "$mount_point" ]]; then
-    hdiutil detach "$mount_point" >/dev/null 2>&1 || hdiutil detach -force "$mount_point" >/dev/null 2>&1 || true
+    detach_volume "$mount_point" || true
     rmdir "$mount_point" >/dev/null 2>&1 || true
   fi
   rm -rf "$dmg_root" "$rw_archive_path"
@@ -268,7 +273,7 @@ if [[ ! -f "$mount_point/.DS_Store" ]]; then
   exit 1
 fi
 
-hdiutil detach "$mount_point"
+detach_volume "$mount_point"
 rmdir "$mount_point" 2>/dev/null || true
 mount_point=""
 
