@@ -2,13 +2,13 @@
 
 CodexReviewKit is the native macOS companion app for Codex review.
 
-Launch `ReviewMonitor.app`, register its MCP endpoint with Codex, then run
+Launch `CodexReviewMonitor.app`, register its MCP endpoint with Codex, then run
 reviews through the `codex_review` tools while the app keeps the review state
 visible.
 
 ## Quick Start
 
-1. Launch `ReviewMonitor.app`.
+1. Launch `CodexReviewMonitor.app`.
 
 2. Register the local MCP endpoint in the client you use.
 
@@ -33,10 +33,10 @@ visible.
 
 ## What Runs Locally
 
-- `ReviewMonitor.app` shows review jobs, output, and findings.
+- `CodexReviewMonitor.app` shows review jobs, output, and findings.
 - `http://localhost:9417/mcp` is the app-managed MCP endpoint.
-- `codex app-server` runs behind ReviewMonitor as the live review backend.
-- `~/.codex_review` is the dedicated Codex home used by ReviewMonitor.
+- `codex app-server` runs behind CodexReviewMonitor as the live review backend.
+- `~/.codex_review` is the dedicated Codex home used by CodexReviewMonitor.
 
 ## Timeout Setup
 
@@ -51,7 +51,7 @@ tool_timeout_sec = 1200.0
 ```
 
 This config belongs to the Codex client that calls the MCP server. It is
-separate from ReviewMonitor's dedicated runtime home at `~/.codex_review`.
+separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
 ## More Detail
 
@@ -59,3 +59,23 @@ separate from ReviewMonitor's dedicated runtime home at `~/.codex_review`.
   test responsibilities.
 - [MCP reference](Docs/mcp.md): tool schemas, discovery resources, session
   behavior, and runtime files.
+
+## Local Release
+
+Public macOS archives are built locally so Developer ID certificates and notary
+credentials stay out of CI. The local script signs, notarizes, staples, pushes
+the tag from `main`, creates the draft release asset, and then explicitly
+dispatches the read-only release verification workflow for that tag.
+
+```bash
+scripts/publish-local-release.sh \
+  v0.0.2 \
+  --signing-identity "Developer ID Application: Your Team (TEAMID)" \
+  --notary-profile "codex-reviewkit"
+```
+
+Create the `notarytool` profile in the local Keychain before publishing:
+
+```bash
+xcrun notarytool store-credentials codex-reviewkit
+```

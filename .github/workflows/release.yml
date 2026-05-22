@@ -1,9 +1,23 @@
-name: Release
+name: Release Verification
 
+# Release assets are built, Developer ID signed, notarized, and uploaded by
+# scripts/publish-local-release.sh before the release tag is pushed. The local
+# script explicitly dispatches this read-only verification workflow after the
+# tag exists, so tag pushes do not implicitly build unsigned release assets.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-verification-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   package-tests:
@@ -13,6 +27,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify release ref
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release verification must be dispatched against the release tag ref." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
 
       - name: Resolve latest stable Xcode
         run: |
@@ -55,66 +80,8 @@ jobs:
       - name: Run monitor app tests
         run: |
           xcodebuild test \
-            -project Tools/ReviewMonitor/ReviewMonitor.xcodeproj \
-            -scheme ReviewMonitor \
+            -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
+            -scheme CodexReviewMonitor \
             -destination 'platform=macOS,arch=arm64' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
-
-  release:
-    name: Package and Publish
-    needs:
-      - package-tests
-    runs-on: macos-26
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Resolve latest stable Xcode
-        run: |
-          xcode_app="$(ruby <<'RUBY'
-          xcode_major = "26"
-          candidates = Dir["/Applications/Xcode_#{xcode_major}*.app"].select { |path| File.directory?(path) }
-
-          def pre_release_xcode_path?(path)
-            labels = [path, File.realpath(path)].map { |candidate| File.basename(candidate).downcase }
-            labels.any? do |label|
-              label.match?(/beta|release[ _-]?candidate|(?:^|[_. -])rc(?:$|[_. -])/)
-            end
-          end
-
-          candidates = candidates.reject do |path|
-            pre_release_xcode_path?(path)
-          end
-
-          def version_components(path)
-            version = File.basename(path)[/Xcode_(\d+(?:\.\d+)*)/, 1]
-            version.to_s.split(".").map(&:to_i)
-          end
-
-          selected = candidates.max_by { |path| version_components(path) }
-          abort("No stable Xcode #{xcode_major} installation found") unless selected
-          puts selected
-          RUBY
-          )"
-          echo "DEVELOPER_DIR=${xcode_app}/Contents/Developer" >> "$GITHUB_ENV"
-          echo "Resolved Xcode: ${xcode_app}"
-
-      - name: Xcode version
-        run: xcodebuild -version
-
-      - name: Build release artifacts
-        run: bash scripts/build-release.sh --version "${GITHUB_REF_NAME}" --dist-root dist
-
-      - name: Package release archive
-        run: bash scripts/package-release.sh --version "${GITHUB_REF_NAME}" --dist-root dist --output-dir release
-
-      - name: Publish Draft GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
-        with:
-          files: release/ReviewMonitor_*.dmg
-          draft: true
-          generate_release_notes: true

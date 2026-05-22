@@ -3,12 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-release.sh --version <tag> [--dist-root <dir>]
+Usage: scripts/build-release.sh --version <tag> [--dist-root <dir>] [--signing-identity <identity>]
 EOF
 }
 
 version=""
 dist_root="dist"
+signing_identity="${CODE_SIGN_IDENTITY:-}"
+app_name="CodexReviewMonitor"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,6 +20,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dist-root)
       dist_root="${2:-}"
+      shift 2
+      ;;
+    --signing-identity)
+      signing_identity="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -48,7 +54,7 @@ fi
 arch="arm64"
 derived_data_path="$repo_root/.build/release-$arch"
 out_dir="$dist_base/$arch"
-app_out="$out_dir/ReviewMonitor.app"
+app_out="$out_dir/${app_name}.app"
 
 pushd "$repo_root" >/dev/null
 
@@ -56,8 +62,8 @@ rm -rf "$out_dir" "$derived_data_path"
 mkdir -p "$out_dir"
 
 xcodebuild build \
-  -project Tools/ReviewMonitor/ReviewMonitor.xcodeproj \
-  -scheme ReviewMonitor \
+  -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj \
+  -scheme CodexReviewMonitor \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$derived_data_path" \
@@ -67,8 +73,27 @@ xcodebuild build \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY=""
 
-ditto "$derived_data_path/Build/Products/Release/ReviewMonitor.app" "$app_out"
+ditto "$derived_data_path/Build/Products/Release/${app_name}.app" "$app_out"
+
+if [[ -n "$signing_identity" ]]; then
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --timestamp \
+    --sign "$signing_identity" \
+    "$app_out"
+  codesign --verify --deep --strict --verbose=2 "$app_out"
+else
+  codesign \
+    --force \
+    --deep \
+    --sign - \
+    "$app_out"
+  codesign --verify --deep --strict --verbose=2 "$app_out"
+  echo "Warning: ${app_name}.app was ad-hoc signed for local inspection only. Downloaded release archives will be blocked by Gatekeeper." >&2
+fi
 
 popd >/dev/null
 
-echo "Staged ReviewMonitor $version release artifact at: $app_out"
+echo "Staged ${app_name} $version release artifact at: $app_out"
