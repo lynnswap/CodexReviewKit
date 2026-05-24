@@ -256,6 +256,7 @@ on run argv
 
     set position of item "CodexReviewMonitor.app" of volumeFolder to {240, 122}
     set position of item applicationsAliasName of volumeFolder to {240, 387}
+    set selection to {}
 
     update volumeFolder without registering applications
     delay 1
