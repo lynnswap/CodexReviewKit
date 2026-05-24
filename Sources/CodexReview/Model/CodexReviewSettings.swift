@@ -88,6 +88,57 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
         let id: String
     }
 
+    package var normalizedDisplayName: String {
+        guard displayName.drop(while: \.isWhitespace).lowercased().hasPrefix("gpt") else {
+            return displayName
+        }
+        var normalized = ""
+        var currentRun = ""
+        var currentRunIsWhitespace: Bool?
+
+        func appendRun() {
+            guard let currentRunIsWhitespace else {
+                return
+            }
+            if currentRunIsWhitespace {
+                normalized += currentRun
+            } else {
+                normalized += Self.normalizedDisplayNameComponent(currentRun)
+            }
+        }
+
+        for character in displayName {
+            let isWhitespace = character.isWhitespace
+            if let currentRunIsWhitespace, currentRunIsWhitespace != isWhitespace {
+                appendRun()
+                currentRun = ""
+            }
+            currentRun += String(character)
+            currentRunIsWhitespace = isWhitespace
+        }
+        appendRun()
+        return normalized
+    }
+
+    package var compactDisplayName: String {
+        let normalizedName = normalizedDisplayName
+        let compactTokens = normalizedName
+            .split { character in
+                character == "-" || character.isWhitespace
+            }
+        guard compactTokens.first?.lowercased() == "gpt" else {
+            return normalizedName
+        }
+        let visibleTokens = compactTokens
+            .filter { token in
+                !Self.compactDisplayNameOmittedTokens.contains(token.lowercased())
+            }
+        guard !visibleTokens.isEmpty else {
+            return normalizedName
+        }
+        return visibleTokens.joined(separator: " ")
+    }
+
     package init(
         id: String,
         model: String,
@@ -158,6 +209,34 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
             forKey: .supportedServiceTiers
         )
         try container.encode(isDefault, forKey: .isDefault)
+    }
+
+    private static let compactDisplayNameOmittedTokens: Set<String> = [
+        "codex",
+        "gpt",
+    ]
+
+    private static func normalizedDisplayNameComponent(_ component: String) -> String {
+        component
+            .split(separator: "-", omittingEmptySubsequences: false)
+            .enumerated()
+            .map { index, token in
+                guard !token.isEmpty else {
+                    return ""
+                }
+                switch token.lowercased() {
+                case "gpt":
+                    return "GPT"
+                case "oai":
+                    return "OAI"
+                default:
+                    guard index > 0 else {
+                        return String(token)
+                    }
+                    return token.prefix(1).uppercased() + token.dropFirst()
+                }
+            }
+            .joined(separator: "-")
     }
 }
 

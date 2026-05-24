@@ -22,31 +22,48 @@ public final class ReviewMonitorWindowController: NSWindowController {
     public convenience init(store: CodexReviewStore) {
         self.init(
             store: store,
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            showSettings: nil
+        )
+    }
+
+    @_spi(PreviewSupport)
+    public convenience init(
+        store: CodexReviewStore,
+        showSettings: @escaping @MainActor () -> Void
+    ) {
+        self.init(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            showSettings: showSettings
         )
     }
 
     convenience init(
         store: CodexReviewStore,
-        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator
+        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
+        showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             contentTransitionAnimator: contentTransitionAnimator,
-            frameAutosaveName: Self.frameAutosaveName
+            frameAutosaveName: Self.frameAutosaveName,
+            showSettings: showSettings
         )
     }
 
     init(
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
-        frameAutosaveName: NSWindow.FrameAutosaveName
+        frameAutosaveName: NSWindow.FrameAutosaveName,
+        showSettings: (@MainActor () -> Void)? = nil
     ) {
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
             uiState: uiState,
-            contentTransitionAnimator: contentTransitionAnimator
+            contentTransitionAnimator: contentTransitionAnimator,
+            showSettings: showSettings
         )
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),

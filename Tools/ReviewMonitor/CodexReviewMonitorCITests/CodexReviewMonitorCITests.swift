@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CodexReview
+import CodexReviewHost
 import Testing
 @testable import CodexReviewMonitor
 
@@ -81,15 +82,21 @@ struct CodexReviewMonitorCITests {
 
         let expectedStore = CodexReviewStore.makePreviewStore()
         var capturedContext: ReviewMonitorLaunchContext?
+        var capturedShowSettings: (@MainActor () -> Void)?
         let recorder = WindowControllerFactoryRecorder()
+        let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
             makeStore: { context, _ in
                 capturedContext = context
                 return expectedStore
             },
-            makeWindowController: { store in
+            makeWindowController: { store, showSettings in
                 #expect(store === expectedStore)
+                capturedShowSettings = showSettings
                 return recorder.makeWindowController()
+            },
+            makeSettingsWindowController: {
+                settingsWindowController
             }
         )
         let delegate = ReviewMonitorAppDelegate(
@@ -119,10 +126,108 @@ struct CodexReviewMonitorCITests {
         #expect(delegate.windowController === windowController)
         #expect(windowController?.showWindowCallCount == 1)
         #expect(windowController?.windowForTesting.makeKeyAndOrderFrontCallCount == 1)
+
+        capturedShowSettings?()
+        #expect(delegate.settingsWindowController === settingsWindowController)
+        #expect(settingsWindowController.showWindowCallCount == 1)
+    }
+
+    @Test func appDelegateInstallsSettingsMenuItem() {
+        let previousMainMenu = NSApp.mainMenu
+        let previousServicesMenu = NSApp.servicesMenu
+        let previousWindowsMenu = NSApp.windowsMenu
+        defer {
+            NSApp.mainMenu = previousMainMenu
+            NSApp.servicesMenu = previousServicesMenu
+            NSApp.windowsMenu = previousWindowsMenu
+        }
+
+        let composition = ReviewMonitorAppComposition(
+            makeStore: { _, _ in
+                CodexReviewStore.makePreviewStore()
+            },
+            makeWindowController: { _, _ in
+                CountingWindowController()
+            }
+        )
+        let delegate = ReviewMonitorAppDelegate(
+            launchContextProvider: {
+                ReviewMonitorLaunchContext(
+                    environment: [:],
+                    arguments: [],
+                    launchMode: .xctest
+                )
+            },
+            composition: composition
+        )
+
+        delegate.applicationDidFinishLaunching(Notification(name: .init("ci-test-launch")))
+
+        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else {
+            Issue.record("Expected the application menu to be installed.")
+            return
+        }
+        let settingsItem = appMenu.item(withTitle: "Settings…")
+        let quitItem = appMenu.items.first {
+            $0.action == #selector(NSApplication.terminate(_:))
+        }
+
+        #expect(settingsItem?.action == #selector(ReviewMonitorAppDelegate.showSettingsWindow(_:)))
+        #expect(settingsItem?.target === delegate)
+        #expect(settingsItem?.keyEquivalent == ",")
+        #expect(settingsItem?.keyEquivalentModifierMask == [.command])
+        if let settingsItem,
+           let quitItem
+        {
+            let settingsIndex = appMenu.index(of: settingsItem)
+            let quitIndex = appMenu.index(of: quitItem)
+            #expect(settingsIndex < quitIndex)
+        } else {
+            Issue.record("Expected Settings and Quit menu items.")
+        }
+    }
+
+    @Test func appDelegateShowsInjectedSettingsWindowController() {
+        let settingsWindowController = CountingWindowController()
+        let composition = ReviewMonitorAppComposition(
+            makeStore: { _, _ in
+                CodexReviewStore.makePreviewStore()
+            },
+            makeWindowController: { _, _ in
+                CountingWindowController()
+            },
+            makeSettingsWindowController: {
+                settingsWindowController
+            }
+        )
+        let delegate = ReviewMonitorAppDelegate(
+            launchContextProvider: {
+                ReviewMonitorLaunchContext(
+                    environment: [:],
+                    arguments: [],
+                    launchMode: .xctest
+                )
+            },
+            composition: composition
+        )
+
+        delegate.showSettingsWindow(nil)
+
+        #expect(delegate.settingsWindowController === settingsWindowController)
+        #expect(settingsWindowController.showWindowCallCount == 1)
     }
 
     @Test func liveCompositionUsesPreviewStoreWhenPreviewContentIsRequested() {
-        let composition = ReviewMonitorAppComposition.live()
+        let runtimePreferencesStore = FailingRuntimePreferencesStore()
+        var didCallLiveStoreFactory = false
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _ in
+                didCallLiveStoreFactory = true
+                Issue.record("Preview store creation should not build a live store.")
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
         let context = ReviewMonitorLaunchContext(
             environment: [
                 ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
@@ -139,7 +244,56 @@ struct CodexReviewMonitorCITests {
         }
 
         #expect(didRequestPresentationAnchor == false)
+        #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
+        let expectedRuntimePreferences = CodexReviewRuntimePreferences(
+            codexHomePath: FileManager.default.temporaryDirectory
+                .appending(path: "codex-review-monitor-ci-\(UUID().uuidString)", directoryHint: .isDirectory)
+                .path,
+            mcpHost: "localhost",
+            mcpPort: 54321,
+            mcpPath: "/custom-mcp",
+            codexExecutablePath: "/tmp/codex"
+        )
+        let runtimePreferencesStore = RuntimePreferencesStoreStub(
+            preferences: expectedRuntimePreferences
+        )
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var capturedRuntimePreferences: CodexReviewRuntimePreferences?
+        var capturedAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { runtimePreferences, authenticationConfiguration in
+                capturedRuntimePreferences = runtimePreferences
+                capturedAuthenticationConfiguration = authenticationConfiguration
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [:],
+            arguments: [],
+            launchMode: .application
+        )
+        var didRequestPresentationAnchor = false
+
+        let store = composition.makeStore(context) {
+            didRequestPresentationAnchor = true
+            return nil
+        }
+
+        #expect(store === expectedStore)
+        #expect(capturedRuntimePreferences == expectedRuntimePreferences)
+        #expect(didRequestPresentationAnchor == false)
+        #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
+        if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
+        } else {
+            Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
+        }
+        #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
+        #expect(didRequestPresentationAnchor)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {
@@ -159,6 +313,209 @@ struct CodexReviewMonitorCITests {
         #expect(store.startArguments == [true])
     }
 
+    @Test func settingsWindowUsesAppKitPreferenceShell() {
+        let controller = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: RuntimePreferencesStoreStub()
+        )
+
+        guard let window = controller.window,
+              let tabViewController = controller.contentViewController as? NSTabViewController
+        else {
+            Issue.record("Expected a settings window with a tab view controller.")
+            return
+        }
+
+        #expect(window.styleMask == [.closable, .titled])
+        #expect(window.toolbarStyle == .preference)
+        #expect(window.collectionBehavior.contains(.auxiliary))
+        #expect(tabViewController.tabStyle == .toolbar)
+        #expect(tabViewController.tabViewItems.map(\.label) == ["Runtime"])
+    }
+
+    @Test func runtimeSettingsPaneSavesNormalizedRuntimePreferences() {
+        let initialPreferences = CodexReviewRuntimePreferences(
+            codexHomePath: "/tmp/codex-home",
+            mcpHost: "localhost",
+            mcpPort: 1234,
+            mcpPath: "/initial-mcp",
+            codexExecutablePath: "/tmp/codex"
+        )
+        let store = RuntimePreferencesStoreStub(preferences: initialPreferences)
+        let settingsWindowController = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: store
+        )
+        guard let tabViewController = settingsWindowController.contentViewController as? NSTabViewController,
+              let runtimeViewController = tabViewController.tabViewItems.first?.viewController as? ReviewMonitorRuntimeSettingsViewController
+        else {
+            Issue.record("Expected the Runtime settings pane.")
+            return
+        }
+
+        let formState = runtimeViewController.formState
+        #expect(formState.mcpHost == initialPreferences.mcpHost)
+        #expect(formState.mcpPath == initialPreferences.mcpPath)
+        #expect(formState.statusMessage == "")
+        #expect(!formState.hasUnsavedChanges)
+        #expect(!formState.canSavePreferences)
+        #expect(formState.canRestoreDefaults)
+        #expect(formState.validationMessage == nil)
+
+        formState.codexHomePath = "   "
+        formState.mcpHost = "   "
+        formState.mcpPort = "   "
+        formState.mcpPath = "custom-mcp"
+        formState.codexExecutablePath = "  /tmp/custom-codex  "
+        #expect(formState.hasUnsavedChanges)
+        #expect(formState.canSavePreferences)
+        runtimeViewController.savePreferences(nil)
+
+        #expect(store.savedPreferences == [
+            CodexReviewRuntimePreferences(
+                codexHomePath: nil,
+                mcpHost: "localhost",
+                mcpPort: 9417,
+                mcpPath: "/custom-mcp",
+                codexExecutablePath: "/tmp/custom-codex"
+            ),
+        ])
+        #expect(formState.statusMessage == "Saved. Restart ReviewMonitor to apply changes.")
+        #expect(!formState.saveFailed)
+        #expect(!formState.hasUnsavedChanges)
+        #expect(formState.canRestoreDefaults)
+        #expect(!formState.canSavePreferences)
+    }
+
+    @Test func runtimeSettingsPanePreservesFallbackCodexHomeWhenEditingOtherFields() {
+        let store = RuntimePreferencesStoreStub(preferences: .defaults)
+        let settingsWindowController = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: store
+        )
+        guard let tabViewController = settingsWindowController.contentViewController as? NSTabViewController,
+              let runtimeViewController = tabViewController.tabViewItems.first?.viewController as? ReviewMonitorRuntimeSettingsViewController
+        else {
+            Issue.record("Expected the Runtime settings pane.")
+            return
+        }
+
+        let formState = runtimeViewController.formState
+        #expect(!formState.hasUnsavedChanges)
+
+        formState.mcpPath = "custom-mcp"
+        runtimeViewController.savePreferences(nil)
+
+        #expect(store.savedPreferences == [
+            CodexReviewRuntimePreferences(
+                codexHomePath: nil,
+                mcpPath: "/custom-mcp"
+            ),
+        ])
+    }
+
+    @Test func runtimeSettingsPaneRejectsInvalidInputBeforeSaving() {
+        let store = RuntimePreferencesStoreStub()
+        let settingsWindowController = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: store
+        )
+        guard let tabViewController = settingsWindowController.contentViewController as? NSTabViewController,
+              let runtimeViewController = tabViewController.tabViewItems.first?.viewController as? ReviewMonitorRuntimeSettingsViewController
+        else {
+            Issue.record("Expected the Runtime settings pane.")
+            return
+        }
+
+        let formState = runtimeViewController.formState
+        formState.mcpPort = "70000"
+
+        #expect(formState.validationMessage == "MCP port must be a number from 1 to 65535.")
+        #expect(formState.hasUnsavedChanges)
+        #expect(!formState.canSavePreferences)
+        runtimeViewController.savePreferences(nil)
+        #expect(store.savedPreferences.isEmpty)
+        #expect(formState.statusMessage == "MCP port must be a number from 1 to 65535.")
+        #expect(formState.saveFailed)
+
+        formState.mcpPort = "9417"
+        formState.codexExecutablePath = "bin/codex"
+
+        #expect(formState.validationMessage == "Codex executable must start with / or ~/.")
+        #expect(formState.hasUnsavedChanges)
+        #expect(!formState.canSavePreferences)
+        runtimeViewController.savePreferences(nil)
+        #expect(store.savedPreferences.isEmpty)
+        #expect(formState.statusMessage == "Codex executable must start with / or ~/.")
+        #expect(formState.saveFailed)
+
+        formState.codexExecutablePath = ""
+        for invalidHost in [
+            "localhost:9417",
+            "http://localhost",
+            "::1",
+            "[::1]",
+            "256.256.256.256",
+            "-foo",
+            "..",
+        ] {
+            formState.mcpHost = invalidHost
+
+            #expect(formState.validationMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")
+            #expect(formState.hasUnsavedChanges)
+            #expect(!formState.canSavePreferences)
+            runtimeViewController.savePreferences(nil)
+            #expect(store.savedPreferences.isEmpty)
+            #expect(formState.statusMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")
+            #expect(formState.saveFailed)
+        }
+
+        formState.mcpHost = "localhost"
+        for invalidPath in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
+            formState.mcpPath = invalidPath
+
+            #expect(formState.validationMessage == "MCP path must be a URL path that does not require escaping.")
+            #expect(formState.hasUnsavedChanges)
+            #expect(!formState.canSavePreferences)
+            runtimeViewController.savePreferences(nil)
+            #expect(store.savedPreferences.isEmpty)
+            #expect(formState.statusMessage == "MCP path must be a URL path that does not require escaping.")
+            #expect(formState.saveFailed)
+        }
+    }
+
+    @Test func runtimeSettingsPaneRestoresDefaultsBeforeSaving() {
+        let store = RuntimePreferencesStoreStub(
+            preferences: CodexReviewRuntimePreferences(
+                codexHomePath: "/tmp/codex-home",
+                mcpHost: "localhost",
+                mcpPort: 1234,
+                mcpPath: "/custom-mcp",
+                codexExecutablePath: "/tmp/codex"
+            )
+        )
+        let settingsWindowController = ReviewMonitorSettingsWindowController(
+            runtimePreferencesStore: store
+        )
+        guard let tabViewController = settingsWindowController.contentViewController as? NSTabViewController,
+              let runtimeViewController = tabViewController.tabViewItems.first?.viewController as? ReviewMonitorRuntimeSettingsViewController
+        else {
+            Issue.record("Expected the Runtime settings pane.")
+            return
+        }
+
+        let formState = runtimeViewController.formState
+        formState.restoreDefaults()
+
+        #expect(formState.hasUnsavedChanges)
+        #expect(formState.canSavePreferences)
+        #expect(!formState.canRestoreDefaults)
+        #expect(store.savedPreferences.isEmpty)
+
+        runtimeViewController.savePreferences(nil)
+
+        #expect(store.savedPreferences == [.defaults])
+        #expect(!formState.hasUnsavedChanges)
+        #expect(!formState.canSavePreferences)
+        #expect(!formState.canRestoreDefaults)
+    }
+
     @Test func appDelegateInstallsFindMenuWithoutLiveServices() {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
@@ -173,7 +530,7 @@ struct CodexReviewMonitorCITests {
             makeStore: { _, _ in
                 CodexReviewStore.makePreviewStore()
             },
-            makeWindowController: { _ in
+            makeWindowController: { _, _ in
                 CountingWindowController()
             }
         )
@@ -251,6 +608,37 @@ private final class FakeLifecycleStore: ReviewMonitorLifecycleStore {
         stopCallCount += 1
         await stopStartedSignal.signal()
         await stopGate.wait()
+    }
+}
+
+@MainActor
+private final class RuntimePreferencesStoreStub: CodexReviewRuntimePreferencesStore {
+    private var preferences: CodexReviewRuntimePreferences
+    private(set) var savedPreferences: [CodexReviewRuntimePreferences] = []
+
+    init(preferences: CodexReviewRuntimePreferences = .defaults) {
+        self.preferences = preferences
+    }
+
+    func load() -> CodexReviewRuntimePreferences {
+        return preferences
+    }
+
+    func save(_ preferences: CodexReviewRuntimePreferences) throws {
+        self.preferences = preferences
+        savedPreferences.append(preferences)
+    }
+}
+
+@MainActor
+private final class FailingRuntimePreferencesStore: CodexReviewRuntimePreferencesStore {
+    func load() -> CodexReviewRuntimePreferences {
+        Issue.record("Preview store creation should not load runtime preferences.")
+        return .defaults
+    }
+
+    func save(_: CodexReviewRuntimePreferences) throws {
+        Issue.record("Preview store creation should not save runtime preferences.")
     }
 }
 

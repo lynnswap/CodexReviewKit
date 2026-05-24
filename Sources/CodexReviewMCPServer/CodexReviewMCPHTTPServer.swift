@@ -21,7 +21,7 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
     package var streamHeartbeatInterval: Duration?
 
     package init(
-        host: String = "127.0.0.1",
+        host: String = "localhost",
         port: Int = 9417,
         endpoint: String = "/mcp",
         sessionTimeout: TimeInterval = 3600,
@@ -38,7 +38,7 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
     }
 
     package init(
-        host: String = "127.0.0.1",
+        host: String = "localhost",
         port: Int = 9417,
         endpoint: String = "/mcp",
         sessionTimeout: TimeInterval = 3600,

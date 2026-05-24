@@ -10,13 +10,20 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
     private let observationScope = ObservationScope()
     private var shouldHideStatusAccessory = false
 
-    init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
         self.store = store
         self.uiState = uiState
         super.init(nibName: nil, bundle: nil)
 
         automaticallyAppliesContentInsets = true
-        view = NSHostingView(rootView: StatusView(store: store))
+        view = NSHostingView(rootView: StatusView(
+            store: store,
+            showSettings: showSettings
+        ))
         bindObservation()
     }
 
@@ -111,6 +118,7 @@ struct AccountRateLimitsSectionView: View {
 
 struct StatusView: View {
     var store: CodexReviewStore
+    var showSettings: (@MainActor () -> Void)? = nil
 
     private var settings: SettingsStore {
         store.settings
@@ -164,6 +172,15 @@ struct StatusView: View {
                 Section(currentAccount?.email ?? "") {
                     AccountRateLimitsSectionView(account: currentAccount)
                 }
+                if let showSettings {
+                    Section{
+                        Button{
+                            showSettings()
+                        }label:{
+                            Label("Settings",systemImage: "gear")
+                        }
+                    }
+                }
                 
                 if showsServerRestartAction {
                     Divider()
@@ -184,11 +201,28 @@ struct StatusView: View {
             .buttonStyle(.plain)
             HStack{
                 Menu{
+                    // Deliberately mirror the concrete reasoning choices from the model catalog
+                    // instead of adding an extra "default" menu row that upstream clients lack.
+                    Picker("Reasoning", selection: reasoningSelection) {
+                        ForEach(settings.availableReasoningOptions) { item in
+                            Text(item.reasoningEffort.displayText)
+                                .tag(Optional(item.reasoningEffort))
+                        }
+                    }
+                    .pickerStyle(.inline)
+
                     // Keep this picker aligned with Codex CLI/App behavior and avoid
                     // inventing a synthetic inherited/default row that those clients do not expose.
                     Picker("Model", selection: modelSelection) {
                         ForEach(settings.displayedModels) { item in
-                            Text(item.displayName).tag(Optional(item.model))
+                            LabeledContent{
+                                if item.supportedServiceTiers.contains(.fast) {
+                                    Image(systemName: "bolt.fill")
+                                }
+                            }label:{
+                                Text(item.normalizedDisplayName)
+                            }
+                            .tag(Optional(item.model))
                         }
                     }
                     .pickerStyle(.inline)
@@ -201,20 +235,13 @@ struct StatusView: View {
                     }
                     .pickerStyle(.inline)
                 }label:{
-                    Text(settings.effectiveModelItem?.displayName ?? settings.effectiveModel ?? "Model")
-                }
-                Menu{
-                    // Deliberately mirror the concrete reasoning choices from the model catalog
-                    // instead of adding an extra "default" menu row that upstream clients lack.
-                    Picker("Reasoning", selection: reasoningSelection) {
-                        ForEach(settings.availableReasoningOptions) { item in
-                            Text(item.reasoningEffort.displayText)
-                                .tag(Optional(item.reasoningEffort))
+                    LabeledContent{
+                        if settings.selectedServiceTier == .fast{
+                            Image(systemName:"bolt.fill")
                         }
+                    }label:{
+                        Text("\(settings.effectiveModelItem?.compactDisplayName ?? settings.effectiveModel ?? "Model")  \(settings.effectiveReasoningEffort?.displayText ?? "Reasoning")")
                     }
-                    .pickerStyle(.inline)
-                }label:{
-                    Text(settings.effectiveReasoningEffort?.displayText ?? "Reasoning")
                 }
                 Spacer(minLength: 0)
             }
@@ -223,7 +250,6 @@ struct StatusView: View {
                     || settings.isLoading
                     || settings.displayedModels.isEmpty
             )
-            .labelsVisibility(.hidden)
         }
         .padding(8)
     }

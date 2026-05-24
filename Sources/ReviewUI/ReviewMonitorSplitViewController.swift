@@ -16,6 +16,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
+    private let showSettings: (@MainActor () -> Void)?
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
     private var sidebarItem: NSSplitViewItem?
@@ -29,9 +30,14 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private weak var attachedWindow: NSWindow?
     private var isSidebarCollapsed = false
 
-    init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
         self.store = store
         self.uiState = uiState
+        self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -53,7 +59,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         )
         let statusAccessoryViewController = ReviewMonitorServerStatusAccessoryViewController(
             store: store,
-            uiState: uiState
+            uiState: uiState,
+            showSettings: showSettings
         )
         if #available(macOS 26.1, *) {
             statusAccessoryViewController.preferredScrollEdgeEffectStyle = .soft

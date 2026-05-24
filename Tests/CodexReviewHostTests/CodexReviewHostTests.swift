@@ -73,6 +73,168 @@ struct CodexReviewHostTests {
         #expect(host.store.auth.persistedActiveAccountKey == "review@example.com")
     }
 
+    @Test func runtimePreferencesNormalizeInvalidValues() {
+        let preferences = CodexReviewRuntimePreferences(
+            codexHomePath: "  ",
+            mcpHost: "\n",
+            mcpPort: 0,
+            mcpPath: "custom-mcp",
+            codexExecutablePath: "\t"
+        )
+
+        #expect(preferences.codexHomePath == nil)
+        #expect(preferences.mcpHost == "localhost")
+        #expect(preferences.mcpPort == 9417)
+        #expect(preferences.mcpPath == "/custom-mcp")
+        #expect(preferences.codexExecutablePath == nil)
+    }
+
+    @Test func runtimePreferencesDefaultInvalidMCPHosts() {
+        for host in [
+            "::1",
+            "[::1]",
+            "localhost:9417",
+            "http://localhost",
+            "256.256.256.256",
+            "-foo",
+            "..",
+        ] {
+            let preferences = CodexReviewRuntimePreferences(mcpHost: host)
+            #expect(preferences.mcpHost == "localhost")
+        }
+    }
+
+    @Test func runtimePreferencesKeepValidMCPHosts() {
+        for host in ["localhost", "127.0.0.1", "0.0.0.0", "example.com", "xn--bcher-kva.de"] {
+            let preferences = CodexReviewRuntimePreferences(mcpHost: host)
+            #expect(preferences.mcpHost == host)
+        }
+    }
+
+    @Test func runtimePreferencesDefaultEscapedMCPPaths() {
+        for path in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
+            let preferences = CodexReviewRuntimePreferences(mcpPath: path)
+            #expect(preferences.mcpPath == "/mcp")
+        }
+    }
+
+    @Test func runtimePreferencesDefaultRelativePaths() {
+        let preferences = CodexReviewRuntimePreferences(
+            codexHomePath: "tmp/home",
+            codexExecutablePath: "codex"
+        )
+
+        #expect(preferences.codexHomePath == nil)
+        #expect(preferences.codexExecutablePath == nil)
+    }
+
+    @Test func runtimePreferencesExpandHomeRelativePaths() {
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let preferences = CodexReviewRuntimePreferences(
+            codexHomePath: " ~/.codex_review ",
+            codexExecutablePath: " ~/bin/codex "
+        )
+
+        #expect(preferences.codexHomePath == "\(homePath)/.codex_review")
+        #expect(preferences.codexExecutablePath == "\(homePath)/bin/codex")
+
+        let homeOnlyPreferences = CodexReviewRuntimePreferences(codexHomePath: "~")
+        #expect(homeOnlyPreferences.codexHomePath == homePath)
+    }
+
+    @Test func userDefaultsRuntimePreferencesStoreRoundTripsNormalizedPreferences() throws {
+        let suiteName = "CodexReviewRuntimePreferencesStoreTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = UserDefaultsCodexReviewRuntimePreferencesStore(defaults: defaults)
+
+        try store.save(.init(
+            codexHomePath: " /tmp/codex-review-home ",
+            mcpHost: " ",
+            mcpPort: -1,
+            mcpPath: "custom-mcp",
+            codexExecutablePath: " /tmp/codex "
+        ))
+
+        #expect(store.load() == .init(
+            codexHomePath: "/tmp/codex-review-home",
+            mcpHost: "localhost",
+            mcpPort: 9417,
+            mcpPath: "/custom-mcp",
+            codexExecutablePath: "/tmp/codex"
+        ))
+    }
+
+    @Test func liveStoreUsesRuntimePreferenceCodexHome() async throws {
+        let homeURL = try temporaryHome()
+        let configuredCodexHomeURL = homeURL.appendingPathComponent("custom-codex-home", isDirectory: true)
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(InitializeResponse(), for: "initialize")
+        try await transport.enqueue(AccountReadResponse(), for: "account/read")
+        try await transport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(codexHomePath: configuredCodexHomeURL.path),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                #expect(codexHomeURL == configuredCodexHomeURL)
+                return transport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == .running)
+        await store.stop()
+    }
+
+    @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(InitializeResponse(), for: "initialize")
+        try await transport.enqueue(AccountReadResponse(), for: "account/read")
+        try await transport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
+        var capturedConfiguration: CodexReviewMCPHTTPServerConfiguration?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(
+                mcpPort: 54321,
+                mcpPath: "custom-mcp"
+            ),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { store, configuration in
+                capturedConfiguration = configuration
+                return CodexReviewMCPHTTPServer(
+                    adapter: CodexReviewMCPServer(store: store),
+                    configuration: .init(
+                        host: configuration.host,
+                        port: 0,
+                        endpoint: configuration.endpoint
+                    )
+                )
+            },
+            transportFactory: { _ in transport }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let serverURL = try #require(store.serverURL)
+
+        #expect(capturedConfiguration?.port == 54321)
+        #expect(capturedConfiguration?.endpoint == "/custom-mcp")
+        #expect(serverURL.path == "/custom-mcp")
+        await store.stop()
+    }
+
     @Test func liveStoreLoadsPersistedRegistryAccountKind() throws {
         let homeURL = try temporaryHome()
         try writeRegistryRecords(
@@ -851,7 +1013,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { store in
+            mcpHTTPServerFactory: { store, _ in
                 CodexReviewMCPHTTPServer(
                     adapter: CodexReviewMCPServer(store: store),
                     configuration: .init(port: 0)

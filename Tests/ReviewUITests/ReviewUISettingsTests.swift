@@ -170,6 +170,35 @@ struct ReviewUISettingsTests {
         #expect(store.settings.effectiveReasoningEffort == .high)
     }
 
+    @Test func modelCatalogItemDisplayNamesNormalizeAndCompactGPTNames() {
+        let cases: [(displayName: String, normalized: String, compact: String)] = [
+            ("gpt-5.4", "GPT-5.4", "5.4"),
+            ("gpt-5.3-codex", "GPT-5.3-Codex", "5.3"),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", "5.3 Spark"),
+            ("GPT-5.3 Codex", "GPT-5.3 Codex", "5.3"),
+            ("GPT-5.4-Mini", "GPT-5.4-Mini", "5.4 Mini"),
+            ("gpt-5.2", "GPT-5.2", "5.2"),
+            ("codex-auto-review", "codex-auto-review", "codex-auto-review"),
+        ]
+
+        for testCase in cases {
+            let item = CodexReviewModelCatalogItem(
+                id: testCase.displayName,
+                model: testCase.displayName,
+                displayName: testCase.displayName,
+                hidden: false,
+                supportedReasoningEfforts: [
+                    .init(reasoningEffort: .medium, description: "Default.")
+                ],
+                defaultReasoningEffort: .medium,
+                supportedServiceTiers: []
+            )
+
+            #expect(item.normalizedDisplayName == testCase.normalized)
+            #expect(item.compactDisplayName == testCase.compact)
+        }
+    }
+
     @Test func settingsStoreAppliesPendingSelectionAfterInFlightSave() async throws {
         let backend = BlockingSettingsBackend(snapshot: makeSettingsSnapshot())
         backend.blockNextModelUpdate()

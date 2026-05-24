@@ -713,6 +713,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(
             store: store,
             configuration: .init(
+                host: "127.0.0.1",
                 port: 0,
                 sessionTimeout: 1,
                 streamHeartbeatInterval: .milliseconds(50)
