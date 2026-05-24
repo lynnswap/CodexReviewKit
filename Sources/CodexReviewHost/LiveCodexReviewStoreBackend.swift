@@ -25,10 +25,12 @@ private struct PendingLoginRuntimeCleanup {
 @MainActor
 public extension CodexReviewStore {
     static func makeLiveStore(
+        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory = CodexReviewWebAuthenticationSessions.system
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
+            runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory
         ))
@@ -36,6 +38,7 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
+        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
@@ -43,6 +46,7 @@ public extension CodexReviewStore {
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
+            runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             externalURLOpener: externalURLOpener,
@@ -52,14 +56,19 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
+        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
-        mcpHTTPServerFactory: (@MainActor @Sendable (CodexReviewStore) -> CodexReviewMCPHTTPServer)? = nil,
+        mcpHTTPServerFactory: (@MainActor @Sendable (
+            CodexReviewStore,
+            CodexReviewMCPHTTPServerConfiguration
+        ) -> CodexReviewMCPHTTPServer)? = nil,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPCTransport
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
             environment: environment,
+            runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             externalURLOpener: externalURLOpener,
@@ -77,7 +86,10 @@ public extension CodexReviewStore {
 
 @MainActor
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
-    typealias MCPHTTPServerFactory = @MainActor @Sendable (CodexReviewStore) -> CodexReviewMCPHTTPServer
+    typealias MCPHTTPServerFactory = @MainActor @Sendable (
+        CodexReviewStore,
+        CodexReviewMCPHTTPServerConfiguration
+    ) -> CodexReviewMCPHTTPServer
 
     let seed: CodexReviewStoreSeed
 
@@ -96,6 +108,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var loginNotificationTask: Task<Void, Never>?
     private var settingsSnapshot = CodexReviewSettingsSnapshot()
     private let codexHomeURL: URL
+    private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServerConfiguration
     private let nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration?
     private let webAuthenticationSessionFactory: CodexReviewWebAuthenticationSessionFactory
     private let externalURLOpener: ExternalURLOpener
@@ -105,38 +118,35 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory = CodexReviewWebAuthenticationSessions.system,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
-        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store in
-            CodexReviewMCPHTTPServer(adapter: CodexReviewMCPServer(store: store))
-        },
-        appServerRuntimeFactory: @escaping AppServerRuntimeFactory = { codexHomeURL in
-            let processRuntime = try await Task.detached(priority: .userInitiated) {
-                // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
-                let configuration = AppServerProcessTransport.Configuration(codexHomeURL: codexHomeURL)
-                let transport = try AppServerProcessTransport(configuration: configuration)
-                return AppServerProcessRuntime(
-                    transport: transport,
-                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
-                )
-            }.value
-            let client = AppServerClient(transport: processRuntime.transport)
-            return .init(
-                client: client,
-                backend: AppServerCodexReviewBackend(
-                    client: client,
-                    threadStartPermissionStrategy: processRuntime.threadStartPermissionStrategy
-                )
+        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration in
+            CodexReviewMCPHTTPServer(
+                adapter: CodexReviewMCPServer(store: store),
+                configuration: configuration
             )
-        }
+        },
+        appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
-        codexHomeURL = AppServerCodexHome.url(environment: environment)
+        let runtimePreferences = runtimePreferences.normalized
+        codexHomeURL = Self.codexHomeURL(
+            runtimePreferences: runtimePreferences,
+            environment: environment
+        )
+        self.mcpHTTPServerConfiguration = .init(
+            host: runtimePreferences.mcpHost,
+            port: runtimePreferences.mcpPort,
+            endpoint: runtimePreferences.mcpPath
+        )
         self.nativeAuthenticationConfiguration = nativeAuthenticationConfiguration
         self.webAuthenticationSessionFactory = webAuthenticationSessionFactory
         self.externalURLOpener = externalURLOpener
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
-        self.appServerRuntimeFactory = appServerRuntimeFactory
+        self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
+            codexExecutablePath: runtimePreferences.codexExecutablePath
+        )
         let registry = CodexReviewAccountRegistry.load(
             codexHomeURL: codexHomeURL
         )
@@ -153,6 +163,43 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
         settingsSnapshot
+    }
+
+    private static func codexHomeURL(
+        runtimePreferences: CodexReviewRuntimePreferences,
+        environment: [String: String]
+    ) -> URL {
+        if let codexHomePath = runtimePreferences.codexHomePath {
+            return URL(fileURLWithPath: codexHomePath, isDirectory: true)
+        }
+        return AppServerCodexHome.url(environment: environment)
+    }
+
+    private static func makeAppServerRuntimeFactory(
+        codexExecutablePath: String?
+    ) -> AppServerRuntimeFactory {
+        { codexHomeURL in
+            let processRuntime = try await Task.detached(priority: .userInitiated) {
+                // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
+                let configuration = AppServerProcessTransport.Configuration(
+                    executable: codexExecutablePath,
+                    codexHomeURL: codexHomeURL
+                )
+                let transport = try AppServerProcessTransport(configuration: configuration)
+                return AppServerProcessRuntime(
+                    transport: transport,
+                    threadStartPermissionStrategy: configuration.threadStartPermissionStrategy
+                )
+            }.value
+            let client = AppServerClient(transport: processRuntime.transport)
+            return .init(
+                client: client,
+                backend: AppServerCodexReviewBackend(
+                    client: client,
+                    threadStartPermissionStrategy: processRuntime.threadStartPermissionStrategy
+                )
+            )
+        }
     }
 
     func attachStore(_ store: CodexReviewStore) {
@@ -181,7 +228,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.appServerBackend = backend
             observeAuthNotifications(client: client, backend: backend, store: store)
             if let mcpHTTPServerFactory {
-                let mcpHTTPServer = mcpHTTPServerFactory(store)
+                let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
                 try await mcpHTTPServer.start()
                 startedHTTPServer = mcpHTTPServer
                 self.mcpHTTPServer = mcpHTTPServer

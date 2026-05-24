@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import CodexReview
+import CodexReviewHost
 import Testing
 @testable import CodexReviewMonitor
 
@@ -122,7 +123,16 @@ struct CodexReviewMonitorCITests {
     }
 
     @Test func liveCompositionUsesPreviewStoreWhenPreviewContentIsRequested() {
-        let composition = ReviewMonitorAppComposition.live()
+        let runtimePreferencesStore = FailingRuntimePreferencesStore()
+        var didCallLiveStoreFactory = false
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _ in
+                didCallLiveStoreFactory = true
+                Issue.record("Preview store creation should not build a live store.")
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
         let context = ReviewMonitorLaunchContext(
             environment: [
                 ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
@@ -139,7 +149,56 @@ struct CodexReviewMonitorCITests {
         }
 
         #expect(didRequestPresentationAnchor == false)
+        #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
+        let expectedRuntimePreferences = CodexReviewRuntimePreferences(
+            codexHomePath: FileManager.default.temporaryDirectory
+                .appending(path: "codex-review-monitor-ci-\(UUID().uuidString)", directoryHint: .isDirectory)
+                .path,
+            mcpHost: "127.0.0.1",
+            mcpPort: 54321,
+            mcpPath: "/custom-mcp",
+            codexExecutablePath: "/tmp/codex"
+        )
+        let runtimePreferencesStore = RuntimePreferencesStoreStub(
+            preferences: expectedRuntimePreferences
+        )
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var capturedRuntimePreferences: CodexReviewRuntimePreferences?
+        var capturedAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { runtimePreferences, authenticationConfiguration in
+                capturedRuntimePreferences = runtimePreferences
+                capturedAuthenticationConfiguration = authenticationConfiguration
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [:],
+            arguments: [],
+            launchMode: .application
+        )
+        var didRequestPresentationAnchor = false
+
+        let store = composition.makeStore(context) {
+            didRequestPresentationAnchor = true
+            return nil
+        }
+
+        #expect(store === expectedStore)
+        #expect(capturedRuntimePreferences == expectedRuntimePreferences)
+        #expect(didRequestPresentationAnchor == false)
+        #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
+        if case .ephemeral? = capturedAuthenticationConfiguration?.browserSessionPolicy {
+        } else {
+            Issue.record("Expected ReviewMonitor to use an ephemeral browser session.")
+        }
+        #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
+        #expect(didRequestPresentationAnchor)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {
@@ -251,6 +310,33 @@ private final class FakeLifecycleStore: ReviewMonitorLifecycleStore {
         stopCallCount += 1
         await stopStartedSignal.signal()
         await stopGate.wait()
+    }
+}
+
+private final class RuntimePreferencesStoreStub: CodexReviewRuntimePreferencesStore {
+    private let preferences: CodexReviewRuntimePreferences
+
+    init(preferences: CodexReviewRuntimePreferences = .defaults) {
+        self.preferences = preferences
+    }
+
+    func load() -> CodexReviewRuntimePreferences {
+        return preferences
+    }
+
+    func save(_: CodexReviewRuntimePreferences) throws {
+    }
+}
+
+@MainActor
+private final class FailingRuntimePreferencesStore: CodexReviewRuntimePreferencesStore {
+    func load() -> CodexReviewRuntimePreferences {
+        Issue.record("Preview store creation should not load runtime preferences.")
+        return .defaults
+    }
+
+    func save(_: CodexReviewRuntimePreferences) throws {
+        Issue.record("Preview store creation should not save runtime preferences.")
     }
 }
 

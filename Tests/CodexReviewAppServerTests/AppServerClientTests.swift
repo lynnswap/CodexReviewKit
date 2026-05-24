@@ -36,6 +36,35 @@ struct AppServerClientTests {
         #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
     }
 
+    @Test func processTransportConfigurationUsesExplicitExecutableWithoutPathSearch() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "codex-review-explicit-executable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let codex = directory.appending(path: "custom-codex")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+          printf 'Usage: custom codex app-server --listen <URL>\\n'
+        fi
+        """
+        try Data(script.utf8).write(to: codex)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+
+        let configuration = AppServerProcessTransport.Configuration(
+            executable: codex.path,
+            environment: [
+                "PATH": "/tmp/not-used",
+                "HOME": "/tmp/review-home",
+            ]
+        )
+
+        #expect(configuration.executable == codex.path)
+        #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
+    }
+
     @Test func processTransportConfigurationOmitsUnsupportedSessionSourceFlag() throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-transport-\(UUID().uuidString)")
