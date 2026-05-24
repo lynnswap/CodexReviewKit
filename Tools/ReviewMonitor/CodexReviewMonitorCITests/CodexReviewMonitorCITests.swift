@@ -385,7 +385,7 @@ struct CodexReviewMonitorCITests {
         #expect(!formState.canSavePreferences)
     }
 
-    @Test func runtimeSettingsPaneSavesDisplayedCodexHomeWhenEditingOtherFields() {
+    @Test func runtimeSettingsPanePreservesFallbackCodexHomeWhenEditingOtherFields() {
         let store = RuntimePreferencesStoreStub(preferences: .defaults)
         let settingsWindowController = ReviewMonitorSettingsWindowController(
             runtimePreferencesStore: store
@@ -405,7 +405,7 @@ struct CodexReviewMonitorCITests {
 
         #expect(store.savedPreferences == [
             CodexReviewRuntimePreferences(
-                codexHomePath: "~/.codex_review",
+                codexHomePath: nil,
                 mcpPath: "/custom-mcp"
             ),
         ])
@@ -444,6 +444,19 @@ struct CodexReviewMonitorCITests {
         #expect(store.savedPreferences.isEmpty)
         #expect(formState.statusMessage == "Codex executable must start with / or ~/.")
         #expect(formState.saveFailed)
+
+        formState.codexExecutablePath = ""
+        for invalidHost in ["localhost:9417", "http://localhost", "::1"] {
+            formState.mcpHost = invalidHost
+
+            #expect(formState.validationMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")
+            #expect(formState.hasUnsavedChanges)
+            #expect(!formState.canSavePreferences)
+            runtimeViewController.savePreferences(nil)
+            #expect(store.savedPreferences.isEmpty)
+            #expect(formState.statusMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")
+            #expect(formState.saveFailed)
+        }
     }
 
     @Test func runtimeSettingsPaneRestoresDefaultsBeforeSaving() {
@@ -476,9 +489,7 @@ struct CodexReviewMonitorCITests {
 
         runtimeViewController.savePreferences(nil)
 
-        #expect(store.savedPreferences == [
-            CodexReviewRuntimePreferences(codexHomePath: "~/.codex_review"),
-        ])
+        #expect(store.savedPreferences == [.defaults])
         #expect(!formState.hasUnsavedChanges)
         #expect(!formState.canSavePreferences)
         #expect(!formState.canRestoreDefaults)

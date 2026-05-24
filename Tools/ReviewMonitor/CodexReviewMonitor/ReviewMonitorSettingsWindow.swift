@@ -129,12 +129,14 @@ final class ReviewMonitorRuntimeSettingsViewController: NSHostingController<Revi
 @Observable
 final class ReviewMonitorRuntimeSettingsFormState {
     private static let defaultCodexHomeDisplayPath = "~/.codex_review"
-    private static let defaultFormPreferences = CodexReviewRuntimePreferences(
-        codexHomePath: defaultCodexHomeDisplayPath
-    )
 
     var codexHomePath = "" {
-        didSet { clearStatusAfterEditing() }
+        didSet {
+            if isPopulatingFields == false {
+                preservesCodexHomeFallback = false
+            }
+            clearStatusAfterEditing()
+        }
     }
     var mcpHost = "" {
         didSet { clearStatusAfterEditing() }
@@ -151,14 +153,17 @@ final class ReviewMonitorRuntimeSettingsFormState {
     var statusMessage = ""
     var saveFailed = false
     private var savedPreferences: CodexReviewRuntimePreferences
+    private var preservesCodexHomeFallback = false
+    private var isPopulatingFields = false
 
     @ObservationIgnored
     private let runtimePreferencesStore: any CodexReviewRuntimePreferencesStore
 
     init(runtimePreferencesStore: any CodexReviewRuntimePreferencesStore) {
         self.runtimePreferencesStore = runtimePreferencesStore
-        let preferences = Self.formPreferences(from: runtimePreferencesStore.load())
+        let preferences = runtimePreferencesStore.load()
         self.savedPreferences = preferences
+        self.preservesCodexHomeFallback = preferences.codexHomePath == nil
         populateFields(with: preferences)
     }
 
@@ -171,7 +176,7 @@ final class ReviewMonitorRuntimeSettingsFormState {
     }
 
     var canRestoreDefaults: Bool {
-        currentPreferences != Self.defaultFormPreferences || validationMessage != nil
+        currentPreferences != .defaults || validationMessage != nil
     }
 
     var validationMessage: String? {
@@ -180,6 +185,10 @@ final class ReviewMonitorRuntimeSettingsFormState {
             fieldName: "Codex home"
         ) {
             return pathValidationMessage
+        }
+
+        if let hostValidationMessage = hostValidationMessage(mcpHost) {
+            return hostValidationMessage
         }
 
         let port = mcpPort.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -211,10 +220,8 @@ final class ReviewMonitorRuntimeSettingsFormState {
         do {
             try runtimePreferencesStore.save(preferences)
             savedPreferences = preferences
-            populateFields(
-                with: preferences,
-                displaysDefaultCodexHomeWhenNil: preferences.codexHomePath != nil
-            )
+            preservesCodexHomeFallback = preferences.codexHomePath == nil
+            populateFields(with: preferences)
             statusMessage = "Saved. Restart ReviewMonitor to apply changes."
             saveFailed = false
         } catch {
@@ -227,7 +234,8 @@ final class ReviewMonitorRuntimeSettingsFormState {
         guard canRestoreDefaults else {
             return
         }
-        populateFields(with: Self.defaultFormPreferences)
+        preservesCodexHomeFallback = true
+        populateFields(with: .defaults)
     }
 
     private var parsedMCPPort: Int {
@@ -237,7 +245,7 @@ final class ReviewMonitorRuntimeSettingsFormState {
 
     private var currentPreferences: CodexReviewRuntimePreferences {
         let preferences = CodexReviewRuntimePreferences(
-            codexHomePath: codexHomePath,
+            codexHomePath: preservesCodexHomeFallback ? nil : codexHomePath,
             mcpHost: mcpHost,
             mcpPort: parsedMCPPort,
             mcpPath: mcpPath,
@@ -247,12 +255,13 @@ final class ReviewMonitorRuntimeSettingsFormState {
     }
 
     private func populateFields(
-        with preferences: CodexReviewRuntimePreferences,
-        displaysDefaultCodexHomeWhenNil: Bool = true
+        with preferences: CodexReviewRuntimePreferences
     ) {
+        isPopulatingFields = true
+        defer { isPopulatingFields = false }
+
         codexHomePath = displayCodexHomePath(
-            preferences.codexHomePath,
-            displaysDefaultWhenNil: displaysDefaultCodexHomeWhenNil
+            preferences.codexHomePath
         )
         mcpHost = preferences.mcpHost
         mcpPort = String(preferences.mcpPort)
@@ -260,25 +269,9 @@ final class ReviewMonitorRuntimeSettingsFormState {
         codexExecutablePath = displayPath(preferences.codexExecutablePath)
     }
 
-    private static func formPreferences(
-        from preferences: CodexReviewRuntimePreferences
-    ) -> CodexReviewRuntimePreferences {
-        let codexHomePath = preferences.codexHomePath ?? defaultFormPreferences.codexHomePath
-        return CodexReviewRuntimePreferences(
-            codexHomePath: codexHomePath,
-            mcpHost: preferences.mcpHost,
-            mcpPort: preferences.mcpPort,
-            mcpPath: preferences.mcpPath,
-            codexExecutablePath: preferences.codexExecutablePath
-        )
-    }
-
-    private func displayCodexHomePath(
-        _ path: String?,
-        displaysDefaultWhenNil: Bool
-    ) -> String {
+    private func displayCodexHomePath(_ path: String?) -> String {
         guard let path else {
-            return displaysDefaultWhenNil ? Self.defaultCodexHomeDisplayPath : ""
+            return Self.defaultCodexHomeDisplayPath
         }
         return displayPath(path)
     }
@@ -316,6 +309,27 @@ final class ReviewMonitorRuntimeSettingsFormState {
         }
         guard trimmed == "~" || trimmed.hasPrefix("~/") || trimmed.hasPrefix("/") else {
             return "\(fieldName) must start with / or ~/."
+        }
+        return nil
+    }
+
+    private func hostValidationMessage(_ host: String) -> String? {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+
+        guard let components = URLComponents(string: "http://\(trimmed)"),
+              components.url != nil,
+              components.host == trimmed,
+              components.port == nil,
+              components.user == nil,
+              components.password == nil,
+              components.path.isEmpty,
+              components.query == nil,
+              components.fragment == nil
+        else {
+            return "MCP host must be a host name or IPv4 address without a scheme or port."
         }
         return nil
     }
