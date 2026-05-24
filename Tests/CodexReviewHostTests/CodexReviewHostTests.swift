@@ -83,10 +83,24 @@ struct CodexReviewHostTests {
         )
 
         #expect(preferences.codexHomePath == nil)
-        #expect(preferences.mcpHost == "127.0.0.1")
+        #expect(preferences.mcpHost == "localhost")
         #expect(preferences.mcpPort == 9417)
         #expect(preferences.mcpPath == "/custom-mcp")
         #expect(preferences.codexExecutablePath == nil)
+    }
+
+    @Test func runtimePreferencesExpandHomeRelativePaths() {
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let preferences = CodexReviewRuntimePreferences(
+            codexHomePath: " ~/.codex_review ",
+            codexExecutablePath: " ~/bin/codex "
+        )
+
+        #expect(preferences.codexHomePath == "\(homePath)/.codex_review")
+        #expect(preferences.codexExecutablePath == "\(homePath)/bin/codex")
+
+        let homeOnlyPreferences = CodexReviewRuntimePreferences(codexHomePath: "~")
+        #expect(homeOnlyPreferences.codexHomePath == homePath)
     }
 
     @Test func userDefaultsRuntimePreferencesStoreRoundTripsNormalizedPreferences() throws {
@@ -107,7 +121,7 @@ struct CodexReviewHostTests {
 
         #expect(store.load() == .init(
             codexHomePath: "/tmp/codex-review-home",
-            mcpHost: "127.0.0.1",
+            mcpHost: "localhost",
             mcpPort: 9417,
             mcpPath: "/custom-mcp",
             codexExecutablePath: "/tmp/codex"
@@ -141,7 +155,7 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func liveStorePassesRuntimePreferenceMCPConfigurationToHTTPServerFactory() async throws {
+    @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(InitializeResponse(), for: "initialize")
@@ -155,7 +169,6 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(
-                mcpHost: "127.0.0.1",
                 mcpPort: 54321,
                 mcpPath: "custom-mcp"
             ),
@@ -177,7 +190,6 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         let serverURL = try #require(store.serverURL)
 
-        #expect(capturedConfiguration?.host == "127.0.0.1")
         #expect(capturedConfiguration?.port == 54321)
         #expect(capturedConfiguration?.endpoint == "/custom-mcp")
         #expect(serverURL.path == "/custom-mcp")

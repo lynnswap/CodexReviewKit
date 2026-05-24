@@ -11,7 +11,7 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
 
     public init(
         codexHomePath: String? = nil,
-        mcpHost: String = "127.0.0.1",
+        mcpHost: String = "localhost",
         mcpPort: Int = 9417,
         mcpPath: String = "/mcp",
         codexExecutablePath: String? = nil
@@ -57,7 +57,18 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
         guard let trimmed, trimmed.isEmpty == false else {
             return nil
         }
-        return trimmed
+        return expandedHomePath(trimmed)
+    }
+
+    private static func expandedHomePath(_ path: String) -> String {
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        if path == "~" {
+            return homePath
+        }
+        if path.hasPrefix("~/") {
+            return homePath + String(path.dropFirst())
+        }
+        return path
     }
 
     private static func normalizedHost(_ host: String) -> String {

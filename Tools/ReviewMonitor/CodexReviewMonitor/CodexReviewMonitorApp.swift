@@ -227,7 +227,8 @@ struct ReviewMonitorAppComposition {
         any ReviewMonitorLifecycleStore,
         ReviewMonitorLaunchContext
     ) -> ReviewMonitorLifecycleController
-    var makeWindowController: (CodexReviewStore) -> NSWindowController
+    var makeWindowController: (CodexReviewStore, @escaping @MainActor () -> Void) -> NSWindowController
+    var makeSettingsWindowController: () -> NSWindowController
 
     init(
         makeStore: @escaping (
@@ -243,11 +244,20 @@ struct ReviewMonitorAppComposition {
                 shouldManageEmbeddedServer: context.shouldStartEmbeddedServer
             )
         },
-        makeWindowController: @escaping (CodexReviewStore) -> NSWindowController
+        makeWindowController: @escaping (
+            CodexReviewStore,
+            @escaping @MainActor () -> Void
+        ) -> NSWindowController,
+        makeSettingsWindowController: @escaping () -> NSWindowController = {
+            ReviewMonitorSettingsWindowController(
+                runtimePreferencesStore: UserDefaultsCodexReviewRuntimePreferencesStore()
+            )
+        }
     ) {
         self.makeStore = makeStore
         self.makeLifecycleController = makeLifecycleController
         self.makeWindowController = makeWindowController
+        self.makeSettingsWindowController = makeSettingsWindowController
     }
 
     static func live(
@@ -273,8 +283,16 @@ struct ReviewMonitorAppComposition {
                     )
                 )
             },
-            makeWindowController: { store in
-                ReviewMonitorWindowController(store: store)
+            makeWindowController: { store, showSettings in
+                ReviewMonitorWindowController(
+                    store: store,
+                    showSettings: showSettings
+                )
+            },
+            makeSettingsWindowController: {
+                ReviewMonitorSettingsWindowController(
+                    runtimePreferencesStore: runtimePreferencesStore
+                )
             }
         )
     }
@@ -298,10 +316,13 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     }()
     lazy var lifecycle = composition.makeLifecycleController(store, launchContext)
     lazy var windowController: NSWindowController = {
-        let windowController = composition.makeWindowController(store)
+        let windowController = composition.makeWindowController(store) { [weak self] in
+            self?.showSettingsWindow(nil)
+        }
         presentationAnchorSource.window = windowController.window
         return windowController
     }()
+    lazy var settingsWindowController = composition.makeSettingsWindowController()
 
     override init() {
         launchContextProvider = {
@@ -358,6 +379,10 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    @IBAction func showSettingsWindow(_ sender: Any?) {
+        settingsWindowController.showWindow(sender)
+    }
+
     private func showMainWindow(_ sender: Any?) {
         windowController.showWindow(sender)
         windowController.window?.orderFrontRegardless()
@@ -373,6 +398,14 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu(title: appName)
         appMenu.addItem(withTitle: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettingsWindow(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
         let servicesMenu = NSMenu(title: "Services")

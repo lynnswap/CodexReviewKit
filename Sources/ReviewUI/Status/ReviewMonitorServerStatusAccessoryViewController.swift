@@ -10,13 +10,20 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
     private let observationScope = ObservationScope()
     private var shouldHideStatusAccessory = false
 
-    init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
         self.store = store
         self.uiState = uiState
         super.init(nibName: nil, bundle: nil)
 
         automaticallyAppliesContentInsets = true
-        view = NSHostingView(rootView: StatusView(store: store))
+        view = NSHostingView(rootView: StatusView(
+            store: store,
+            showSettings: showSettings
+        ))
         bindObservation()
     }
 
@@ -111,6 +118,7 @@ struct AccountRateLimitsSectionView: View {
 
 struct StatusView: View {
     var store: CodexReviewStore
+    var showSettings: (@MainActor () -> Void)? = nil
 
     private var settings: SettingsStore {
         store.settings
@@ -163,6 +171,15 @@ struct StatusView: View {
             Menu {
                 Section(currentAccount?.email ?? "") {
                     AccountRateLimitsSectionView(account: currentAccount)
+                }
+                if let showSettings {
+                    Section{
+                        Button{
+                            showSettings()
+                        }label:{
+                            Label("Settings",systemImage: "gear")
+                        }
+                    }
                 }
                 
                 if showsServerRestartAction {

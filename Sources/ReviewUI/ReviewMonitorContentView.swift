@@ -14,12 +14,14 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
+    private let showSettings: (@MainActor () -> Void)?
     private let observationScope = ObservationScope()
     private var windowCancellable: AnyCancellable?
 
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
-        uiState: uiState
+        uiState: uiState,
+        showSettings: showSettings
     )
 
     private lazy var signInViewController = ReviewMonitorSignInViewController(store: store)
@@ -27,11 +29,13 @@ final class ReviewMonitorRootViewController: NSViewController {
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator
+        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+        showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
         self.contentTransitionAnimator = contentTransitionAnimator
+        self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
 
