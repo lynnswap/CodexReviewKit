@@ -85,7 +85,19 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
         guard trimmed.isEmpty == false else {
             return defaults.mcpPath
         }
-        return trimmed.hasPrefix("/") ? trimmed : "/\(trimmed)"
+        let normalized = trimmed.hasPrefix("/") ? trimmed : "/\(trimmed)"
+        guard isUnescapedURLPath(normalized) else {
+            return defaults.mcpPath
+        }
+        return normalized
+    }
+
+    private static func isUnescapedURLPath(_ path: String) -> Bool {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "localhost"
+        components.path = path
+        return components.url != nil && components.percentEncodedPath == path
     }
 }
 

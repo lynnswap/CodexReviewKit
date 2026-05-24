@@ -457,6 +457,19 @@ struct CodexReviewMonitorCITests {
             #expect(formState.statusMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")
             #expect(formState.saveFailed)
         }
+
+        formState.mcpHost = "localhost"
+        for invalidPath in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
+            formState.mcpPath = invalidPath
+
+            #expect(formState.validationMessage == "MCP path must be a URL path that does not require escaping.")
+            #expect(formState.hasUnsavedChanges)
+            #expect(!formState.canSavePreferences)
+            runtimeViewController.savePreferences(nil)
+            #expect(store.savedPreferences.isEmpty)
+            #expect(formState.statusMessage == "MCP path must be a URL path that does not require escaping.")
+            #expect(formState.saveFailed)
+        }
     }
 
     @Test func runtimeSettingsPaneRestoresDefaultsBeforeSaving() {

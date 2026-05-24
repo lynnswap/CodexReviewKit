@@ -200,6 +200,10 @@ final class ReviewMonitorRuntimeSettingsFormState {
             }
         }
 
+        if let mcpPathValidationMessage = mcpPathValidationMessage(mcpPath) {
+            return mcpPathValidationMessage
+        }
+
         return pathValidationMessage(
             codexExecutablePath,
             fieldName: "Codex executable"
@@ -330,6 +334,25 @@ final class ReviewMonitorRuntimeSettingsFormState {
               components.fragment == nil
         else {
             return "MCP host must be a host name or IPv4 address without a scheme or port."
+        }
+        return nil
+    }
+
+    private func mcpPathValidationMessage(_ path: String) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return nil
+        }
+
+        let normalized = trimmed.hasPrefix("/") ? trimmed : "/\(trimmed)"
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "localhost"
+        components.path = normalized
+        guard components.url != nil,
+              components.percentEncodedPath == normalized
+        else {
+            return "MCP path must be a URL path that does not require escaping."
         }
         return nil
     }

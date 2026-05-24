@@ -89,6 +89,13 @@ struct CodexReviewHostTests {
         #expect(preferences.codexExecutablePath == nil)
     }
 
+    @Test func runtimePreferencesDefaultEscapedMCPPaths() {
+        for path in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
+            let preferences = CodexReviewRuntimePreferences(mcpPath: path)
+            #expect(preferences.mcpPath == "/mcp")
+        }
+    }
+
     @Test func runtimePreferencesExpandHomeRelativePaths() {
         let homePath = FileManager.default.homeDirectoryForCurrentUser.path
         let preferences = CodexReviewRuntimePreferences(
