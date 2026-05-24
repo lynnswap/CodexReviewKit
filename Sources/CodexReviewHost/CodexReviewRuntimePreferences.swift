@@ -73,7 +73,12 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
 
     private static func normalizedHost(_ host: String) -> String {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? defaults.mcpHost : trimmed
+        guard trimmed.isEmpty == false,
+              isValidHost(trimmed)
+        else {
+            return defaults.mcpHost
+        }
+        return trimmed
     }
 
     private static func normalizedPort(_ port: Int) -> Int {
@@ -98,6 +103,24 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
         components.host = "localhost"
         components.path = path
         return components.url != nil && components.percentEncodedPath == path
+    }
+
+    private static func isValidHost(_ host: String) -> Bool {
+        guard host.contains("[") == false,
+              host.contains("]") == false,
+              let components = URLComponents(string: "http://\(host)"),
+              components.url != nil,
+              components.host == host,
+              components.port == nil,
+              components.user == nil,
+              components.password == nil,
+              components.path.isEmpty,
+              components.query == nil,
+              components.fragment == nil
+        else {
+            return false
+        }
+        return true
     }
 }
 

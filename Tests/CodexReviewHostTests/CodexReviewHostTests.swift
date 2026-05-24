@@ -89,6 +89,13 @@ struct CodexReviewHostTests {
         #expect(preferences.codexExecutablePath == nil)
     }
 
+    @Test func runtimePreferencesDefaultInvalidMCPHosts() {
+        for host in ["::1", "[::1]", "localhost:9417", "http://localhost"] {
+            let preferences = CodexReviewRuntimePreferences(mcpHost: host)
+            #expect(preferences.mcpHost == "localhost")
+        }
+    }
+
     @Test func runtimePreferencesDefaultEscapedMCPPaths() {
         for path in ["custom mcp", "/custom?mcp", "/custom#mcp", "/custom%20mcp"] {
             let preferences = CodexReviewRuntimePreferences(mcpPath: path)

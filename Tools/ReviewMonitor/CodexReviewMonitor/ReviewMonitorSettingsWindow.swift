@@ -323,7 +323,9 @@ final class ReviewMonitorRuntimeSettingsFormState {
             return nil
         }
 
-        guard let components = URLComponents(string: "http://\(trimmed)"),
+        guard trimmed.contains("[") == false,
+              trimmed.contains("]") == false,
+              let components = URLComponents(string: "http://\(trimmed)"),
               components.url != nil,
               components.host == trimmed,
               components.port == nil,
