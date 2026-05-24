@@ -188,7 +188,7 @@ struct StatusView: View {
                     // inventing a synthetic inherited/default row that those clients do not expose.
                     Picker("Model", selection: modelSelection) {
                         ForEach(settings.displayedModels) { item in
-                            Text(item.displayName).tag(Optional(item.model))
+                            Text(item.normalizedDisplayName).tag(Optional(item.model))
                         }
                     }
                     .pickerStyle(.inline)
@@ -201,7 +201,7 @@ struct StatusView: View {
                     }
                     .pickerStyle(.inline)
                 }label:{
-                    Text(settings.effectiveModelItem?.displayName ?? settings.effectiveModel ?? "Model")
+                    Text(settings.effectiveModelItem?.compactDisplayName ?? settings.effectiveModel ?? "Model")
                 }
                 Menu{
                     // Deliberately mirror the concrete reasoning choices from the model catalog
