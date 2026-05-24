@@ -323,18 +323,7 @@ final class ReviewMonitorRuntimeSettingsFormState {
             return nil
         }
 
-        guard trimmed.contains("[") == false,
-              trimmed.contains("]") == false,
-              let components = URLComponents(string: "http://\(trimmed)"),
-              components.url != nil,
-              components.host == trimmed,
-              components.port == nil,
-              components.user == nil,
-              components.password == nil,
-              components.path.isEmpty,
-              components.query == nil,
-              components.fragment == nil
-        else {
+        guard CodexReviewRuntimePreferences(mcpHost: trimmed).mcpHost == trimmed else {
             return "MCP host must be a host name or IPv4 address without a scheme or port."
         }
         return nil

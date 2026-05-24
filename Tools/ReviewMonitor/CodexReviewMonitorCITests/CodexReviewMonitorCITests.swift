@@ -446,7 +446,15 @@ struct CodexReviewMonitorCITests {
         #expect(formState.saveFailed)
 
         formState.codexExecutablePath = ""
-        for invalidHost in ["localhost:9417", "http://localhost", "::1", "[::1]"] {
+        for invalidHost in [
+            "localhost:9417",
+            "http://localhost",
+            "::1",
+            "[::1]",
+            "256.256.256.256",
+            "-foo",
+            "..",
+        ] {
             formState.mcpHost = invalidHost
 
             #expect(formState.validationMessage == "MCP host must be a host name or IPv4 address without a scheme or port.")

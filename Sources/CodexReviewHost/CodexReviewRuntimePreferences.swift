@@ -57,7 +57,14 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
         guard let trimmed, trimmed.isEmpty == false else {
             return nil
         }
+        guard isAbsoluteOrHomeRelativePath(trimmed) else {
+            return nil
+        }
         return expandedHomePath(trimmed)
+    }
+
+    private static func isAbsoluteOrHomeRelativePath(_ path: String) -> Bool {
+        path == "~" || path.hasPrefix("~/") || path.hasPrefix("/")
     }
 
     private static func expandedHomePath(_ path: String) -> String {
@@ -107,20 +114,74 @@ public struct CodexReviewRuntimePreferences: Codable, Equatable, Sendable {
 
     private static func isValidHost(_ host: String) -> Bool {
         guard host.contains("[") == false,
-              host.contains("]") == false,
-              let components = URLComponents(string: "http://\(host)"),
-              components.url != nil,
-              components.host == host,
-              components.port == nil,
-              components.user == nil,
-              components.password == nil,
-              components.path.isEmpty,
-              components.query == nil,
-              components.fragment == nil
+              host.contains("]") == false
         else {
             return false
         }
+
+        let dnsHost = host.hasSuffix(".") ? String(host.dropLast()) : host
+        guard dnsHost.isEmpty == false,
+              dnsHost.utf8.count <= 253
+        else {
+            return false
+        }
+
+        if dnsHost.contains("."),
+           dnsHost.unicodeScalars.allSatisfy({ isASCIIDigit($0) || $0 == "." }) {
+            return isValidIPv4Address(dnsHost)
+        }
+
+        return isValidDNSHost(dnsHost)
+    }
+
+    private static func isValidIPv4Address(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else {
+            return false
+        }
+
+        for part in parts {
+            guard part.isEmpty == false,
+                  part.count <= 3,
+                  part.unicodeScalars.allSatisfy(isASCIIDigit),
+                  let value = Int(part),
+                  (0...255).contains(value),
+                  part.count == 1 || part.first != "0"
+            else {
+                return false
+            }
+        }
         return true
+    }
+
+    private static func isValidDNSHost(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.isEmpty == false else {
+            return false
+        }
+
+        for label in labels {
+            guard (1...63).contains(label.utf8.count),
+                  let first = label.unicodeScalars.first,
+                  let last = label.unicodeScalars.last,
+                  isASCIIAlphanumeric(first),
+                  isASCIIAlphanumeric(last),
+                  label.unicodeScalars.allSatisfy({ isASCIIAlphanumeric($0) || $0 == "-" })
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func isASCIIAlphanumeric(_ scalar: UnicodeScalar) -> Bool {
+        isASCIIDigit(scalar)
+            || (65...90).contains(scalar.value)
+            || (97...122).contains(scalar.value)
+    }
+
+    private static func isASCIIDigit(_ scalar: UnicodeScalar) -> Bool {
+        (48...57).contains(scalar.value)
     }
 }
 

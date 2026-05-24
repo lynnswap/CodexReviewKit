@@ -90,9 +90,24 @@ struct CodexReviewHostTests {
     }
 
     @Test func runtimePreferencesDefaultInvalidMCPHosts() {
-        for host in ["::1", "[::1]", "localhost:9417", "http://localhost"] {
+        for host in [
+            "::1",
+            "[::1]",
+            "localhost:9417",
+            "http://localhost",
+            "256.256.256.256",
+            "-foo",
+            "..",
+        ] {
             let preferences = CodexReviewRuntimePreferences(mcpHost: host)
             #expect(preferences.mcpHost == "localhost")
+        }
+    }
+
+    @Test func runtimePreferencesKeepValidMCPHosts() {
+        for host in ["localhost", "127.0.0.1", "0.0.0.0", "example.com", "xn--bcher-kva.de"] {
+            let preferences = CodexReviewRuntimePreferences(mcpHost: host)
+            #expect(preferences.mcpHost == host)
         }
     }
 
@@ -101,6 +116,16 @@ struct CodexReviewHostTests {
             let preferences = CodexReviewRuntimePreferences(mcpPath: path)
             #expect(preferences.mcpPath == "/mcp")
         }
+    }
+
+    @Test func runtimePreferencesDefaultRelativePaths() {
+        let preferences = CodexReviewRuntimePreferences(
+            codexHomePath: "tmp/home",
+            codexExecutablePath: "codex"
+        )
+
+        #expect(preferences.codexHomePath == nil)
+        #expect(preferences.codexExecutablePath == nil)
     }
 
     @Test func runtimePreferencesExpandHomeRelativePaths() {
