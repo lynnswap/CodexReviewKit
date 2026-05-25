@@ -3217,6 +3217,12 @@ struct ReviewUITests {
         transport.clearLogFinderSelectedRangesForTesting()
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "Fi")
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
     }
 
     @Test func logFindUsesSystemHighlightingAndKeepsSearchStringCurrentAfterAppend() async throws {

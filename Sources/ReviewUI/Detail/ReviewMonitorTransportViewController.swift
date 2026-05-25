@@ -796,6 +796,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.clearFinderSelectedRangesForTesting()
     }
 
+    func performLogKeyboardCommandForTesting(_ selector: Selector) {
+        logScrollView.performKeyboardCommandForTesting(selector)
+    }
+
     @discardableResult
     func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
         logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)

@@ -553,6 +553,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var isLayingOutViewport = false
     private var selectedRange = NSRange(location: 0, length: 0)
     private var dragAnchorUTF16Offset: Int?
+    private var keyboardSelectionAnchorUTF16Offset: Int?
+    private var keyboardSelectionFocusUTF16Offset: Int?
     private var preferredTextContainerWidth: CGFloat = 0
     private(set) var estimatedDocumentHeight: CGFloat = 0
     var contentInsets: NSEdgeInsets = .init()
@@ -744,8 +746,16 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     }
 
     func setSelectedRange(_ range: NSRange) {
+        setSelectedRange(range, preserveKeyboardSelection: false)
+    }
+
+    private func setSelectedRange(_ range: NSRange, preserveKeyboardSelection: Bool) {
         let clampedRange = clamp(range)
         selectedRange = clampedRange
+        if preserveKeyboardSelection == false {
+            keyboardSelectionAnchorUTF16Offset = nil
+            keyboardSelectionFocusUTF16Offset = nil
+        }
         if let textRange = textRange(for: clampedRange) {
             textLayoutManager.textSelections = [
                 NSTextSelection([textRange], affinity: .downstream, granularity: .character),
@@ -803,6 +813,20 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             return
         }
 
+        let clipRects = rects(forCharacterRange: range).map(\.rectValue)
+        guard clipRects.isEmpty == false else {
+            return
+        }
+
+        context.saveGState()
+        for clipRect in clipRects {
+            context.addRect(clipRect)
+        }
+        context.clip()
+        defer {
+            context.restoreGState()
+        }
+
         textLayoutManager.ensureLayout(for: textRange)
         textLayoutManager.enumerateTextLayoutFragments(
             from: textRange.location,
@@ -850,6 +874,57 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     override func mouseUp(with event: NSEvent) {
         dragAnchorUTF16Offset = nil
         super.mouseUp(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        interpretKeyEvents([event])
+    }
+
+    override func doCommand(by selector: Selector) {
+        switch selector {
+        case #selector(NSStandardKeyBindingResponding.moveLeft(_:)):
+            moveInsertionPoint(by: .character, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveRight(_:)):
+            moveInsertionPoint(by: .character, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveWordLeft(_:)):
+            moveInsertionPoint(by: .word, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveWordRight(_:)):
+            moveInsertionPoint(by: .word, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveUp(_:)):
+            moveInsertionPoint(by: .line, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveDown(_:)):
+            moveInsertionPoint(by: .line, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveToBeginningOfLine(_:)):
+            moveInsertionPoint(by: .lineBoundary, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveToEndOfLine(_:)):
+            moveInsertionPoint(by: .lineBoundary, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveToBeginningOfDocument(_:)):
+            moveInsertionPoint(by: .document, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveToEndOfDocument(_:)):
+            moveInsertionPoint(by: .document, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveLeftAndModifySelection(_:)):
+            extendSelection(by: .character, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)):
+            extendSelection(by: .character, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveWordLeftAndModifySelection(_:)):
+            extendSelection(by: .word, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveWordRightAndModifySelection(_:)):
+            extendSelection(by: .word, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveUpAndModifySelection(_:)):
+            extendSelection(by: .line, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)):
+            extendSelection(by: .line, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveToBeginningOfLineAndModifySelection(_:)):
+            extendSelection(by: .lineBoundary, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)):
+            extendSelection(by: .lineBoundary, direction: .forward)
+        case #selector(NSStandardKeyBindingResponding.moveToBeginningOfDocumentAndModifySelection(_:)):
+            extendSelection(by: .document, direction: .backward)
+        case #selector(NSStandardKeyBindingResponding.moveToEndOfDocumentAndModifySelection(_:)):
+            extendSelection(by: .document, direction: .forward)
+        default:
+            super.doCommand(by: selector)
+        }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -1071,6 +1146,165 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             return NSRange(location: location, length: 0)
         }
         return NSRange(location: start, length: end - start)
+    }
+
+    private enum KeyboardMoveUnit {
+        case character
+        case word
+        case line
+        case lineBoundary
+        case document
+    }
+
+    private enum KeyboardMoveDirection {
+        case backward
+        case forward
+    }
+
+    private func moveInsertionPoint(by unit: KeyboardMoveUnit, direction: KeyboardMoveDirection) {
+        let currentOffset: Int
+        if selectedRange.length > 0 {
+            currentOffset = direction == .backward ? selectedRange.location : NSMaxRange(selectedRange)
+        } else {
+            currentOffset = selectedRange.location
+        }
+        let movedOffset = keyboardMovedOffset(from: currentOffset, unit: unit, direction: direction)
+        setSelectedRange(NSRange(location: movedOffset, length: 0))
+        scrollRangeToVisible(selectedRange)
+    }
+
+    private func extendSelection(by unit: KeyboardMoveUnit, direction: KeyboardMoveDirection) {
+        let initialFocus = keyboardSelectionFocusUTF16Offset ?? keyboardSelectionFocus(for: direction)
+        let anchor = keyboardSelectionAnchorUTF16Offset ?? initialFocus
+        let movedFocus = keyboardMovedOffset(from: initialFocus, unit: unit, direction: direction)
+        keyboardSelectionAnchorUTF16Offset = anchor
+        keyboardSelectionFocusUTF16Offset = movedFocus
+        setSelectedRange(rangeBetween(anchor, movedFocus), preserveKeyboardSelection: true)
+        scrollRangeToVisible(NSRange(location: movedFocus, length: 0))
+    }
+
+    private func keyboardSelectionFocus(for direction: KeyboardMoveDirection) -> Int {
+        if selectedRange.length == 0 {
+            return selectedRange.location
+        }
+        return direction == .backward ? selectedRange.location : NSMaxRange(selectedRange)
+    }
+
+    private func keyboardMovedOffset(
+        from offset: Int,
+        unit: KeyboardMoveUnit,
+        direction: KeyboardMoveDirection
+    ) -> Int {
+        switch unit {
+        case .character:
+            return clampUTF16Offset(offset + (direction == .backward ? -1 : 1))
+        case .word:
+            return wordMovedOffset(from: offset, direction: direction)
+        case .line:
+            return lineMovedOffset(from: offset, direction: direction)
+        case .lineBoundary:
+            return lineBoundaryOffset(from: offset, direction: direction)
+        case .document:
+            return direction == .backward ? 0 : textStorage.length
+        }
+    }
+
+    private func rangeBetween(_ firstOffset: Int, _ secondOffset: Int) -> NSRange {
+        let location = min(firstOffset, secondOffset)
+        return NSRange(location: location, length: abs(firstOffset - secondOffset))
+    }
+
+    private func wordMovedOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
+        let string = textStorage.string as NSString
+        let length = string.length
+        guard length > 0 else {
+            return 0
+        }
+
+        let wordCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-./:"))
+
+        func isWordCharacter(at index: Int) -> Bool {
+            guard index >= 0, index < length,
+                  let scalar = UnicodeScalar(string.character(at: index))
+            else {
+                return false
+            }
+            return wordCharacters.contains(scalar)
+        }
+
+        switch direction {
+        case .backward:
+            var index = clampUTF16Offset(offset)
+            while index > 0, isWordCharacter(at: index - 1) == false {
+                index -= 1
+            }
+            while index > 0, isWordCharacter(at: index - 1) {
+                index -= 1
+            }
+            return index
+        case .forward:
+            var index = clampUTF16Offset(offset)
+            while index < length, isWordCharacter(at: index) {
+                index += 1
+            }
+            while index < length, isWordCharacter(at: index) == false {
+                index += 1
+            }
+            return index
+        }
+    }
+
+    private func lineMovedOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
+        let currentLineRange = lineRange(containing: offset)
+        let column = max(0, offset - currentLineRange.location)
+        switch direction {
+        case .backward:
+            guard currentLineRange.location > 0 else {
+                return lineBoundaryOffset(from: offset, direction: .backward)
+            }
+            let previousLineRange = lineRange(containing: currentLineRange.location - 1)
+            return min(lineContentEndOffset(previousLineRange), previousLineRange.location + column)
+        case .forward:
+            let nextLineStart = NSMaxRange(currentLineRange)
+            guard nextLineStart < textStorage.length else {
+                return lineBoundaryOffset(from: offset, direction: .forward)
+            }
+            let nextLineRange = lineRange(containing: nextLineStart)
+            return min(lineContentEndOffset(nextLineRange), nextLineRange.location + column)
+        }
+    }
+
+    private func lineBoundaryOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
+        let lineRange = lineRange(containing: offset)
+        switch direction {
+        case .backward:
+            return lineRange.location
+        case .forward:
+            return lineContentEndOffset(lineRange)
+        }
+    }
+
+    private func lineRange(containing offset: Int) -> NSRange {
+        let string = textStorage.string as NSString
+        guard string.length > 0 else {
+            return NSRange(location: 0, length: 0)
+        }
+        let location = min(max(0, offset), string.length - 1)
+        return string.lineRange(for: NSRange(location: location, length: 0))
+    }
+
+    private func lineContentEndOffset(_ lineRange: NSRange) -> Int {
+        let string = textStorage.string as NSString
+        var end = min(NSMaxRange(lineRange), string.length)
+        while end > lineRange.location {
+            let character = string.character(at: end - 1)
+            if character == 10 || character == 13 {
+                end -= 1
+            } else {
+                break
+            }
+        }
+        return end
     }
 
     private func clampSelectedRange() {
@@ -1647,6 +1881,10 @@ extension ReviewMonitorLogScrollView {
 
     func clearFinderSelectedRangesForTesting() {
         textFinderClient.selectedRanges = []
+    }
+
+    func performKeyboardCommandForTesting(_ selector: Selector) {
+        logDocumentView.doCommand(by: selector)
     }
 
     @discardableResult
