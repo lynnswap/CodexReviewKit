@@ -508,6 +508,38 @@ extension ReviewMonitorTransportViewController {
         logScrollView.isFindBarVisibleForTesting
     }
 
+    var logFindVisibleCharacterRangesForTesting: [NSRange] {
+        logScrollView.findVisibleCharacterRangesForTesting
+    }
+
+    var logFindStringLengthForTesting: Int {
+        logScrollView.findStringLengthForTesting
+    }
+
+    var logFindClientStringWillChangeCountForTesting: Int {
+        logScrollView.findClientStringWillChangeCountForTesting
+    }
+
+    var logFindIndicatorInvalidationCountForTesting: Int {
+        logScrollView.findIndicatorInvalidationCountForTesting
+    }
+
+    var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
+        logScrollView.findBarContainerContentViewIsTextContentViewForTesting
+    }
+
+    var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
+        logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
+    }
+
+    var logFindFeedbackDimmingEnabledForTesting: Bool {
+        logScrollView.findFeedbackDimmingEnabledForTesting
+    }
+
+    var logHitTestTargetsDocumentViewForTesting: Bool {
+        logScrollView.hitTestTargetsDocumentViewForTesting
+    }
+
     var logWritingToolsDisabledForTesting: Bool {
         logScrollView.writingToolsDisabledForTesting
     }
@@ -746,6 +778,10 @@ extension ReviewMonitorTransportViewController {
 
     func selectAllLogForTesting() {
         logScrollView.selectAllForTesting()
+    }
+
+    func setSelectedLogRangeForTesting(_ range: NSRange) {
+        logScrollView.setSelectedLogRangeForTesting(range)
     }
 
     func copyLogSelectionForTesting() {

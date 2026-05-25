@@ -30,6 +30,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private let logDocumentView = ReviewMonitorLogDocumentView()
     private let textFinder = NSTextFinder()
     private let textFinderClient = ReviewMonitorLogTextFinderClient()
+    private let textFinderBarContainer = ReviewMonitorLogTextFinderBarContainer()
     private var displayedText = ""
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
 
@@ -38,6 +39,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private(set) var reloadCount = 0
     private(set) var autoFollowCount = 0
     private(set) var programmaticScrollCount = 0
+    private(set) var findClientStringWillChangeCount = 0
+    private(set) var findIndicatorInvalidationCount = 0
     private(set) var overlayScrollerHideRequestCount = 0
     private var overlayScrollersShownOverrideForTesting: Bool?
     private var overlayScrollerBridgeModeForTesting: OverlayScrollerBridgeModeForTesting = .live
@@ -59,9 +62,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         logDocumentView.setAccessibilityIdentifier("review-monitor.activity-log")
 
         textFinderClient.documentView = logDocumentView
+        textFinderBarContainer.scrollView = self
+        textFinderBarContainer.finderContentView = logDocumentView.finderContentView
         textFinder.client = textFinderClient
-        textFinder.findBarContainer = self
+        textFinder.findBarContainer = textFinderBarContainer
         textFinder.isIncrementalSearchingEnabled = true
+        textFinder.incrementalSearchingShouldDimContentView = true
 
         invalidateDocumentLayout()
     }
@@ -71,11 +77,23 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         nil
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            textFinder.cancelFindIndicator()
+            textFinder.client = nil
+            textFinder.findBarContainer = nil
+        } else if textFinder.client == nil {
+            textFinder.client = textFinderClient
+            textFinder.findBarContainer = textFinderBarContainer
+        }
+    }
+
     override func tile() {
         let shouldPreserveBottom = shouldPreserveBottomForLayout()
         super.tile()
         invalidateDocumentLayout()
-        if shouldPreserveBottom {
+        if shouldPreserveBottom, hasScrollableVerticalRange() {
             scrollToBottom(countAsAutoFollow: false, hideOverlayScroller: false)
         }
     }
@@ -102,7 +120,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     override func reflectScrolledClipView(_ clipView: NSClipView) {
         super.reflectScrolledClipView(clipView)
         logDocumentView.layoutTextViewport()
-        textFinder.findIndicatorNeedsUpdate = true
+        invalidateFindIndicator()
     }
 
     @discardableResult
@@ -129,11 +147,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = isPinnedToBottom()
-        noteClientStringWillChange()
         logDocumentView.appendText(suffix)
         displayedText += suffix
         invalidateDocumentLayout()
-        layoutSubtreeIfNeeded()
 #if DEBUG
         appendCount += 1
 #endif
@@ -142,6 +158,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         } else {
             logDocumentView.layoutTextViewport()
         }
+        invalidateFindIndicator()
         return true
     }
 
@@ -167,13 +184,27 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         reloadCount += 1
 #endif
         restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
+        invalidateFindIndicator()
         return true
     }
 
     private func noteClientStringWillChange() {
         if textFinder.isIncrementalSearchingEnabled {
+#if DEBUG
+            findClientStringWillChangeCount += 1
+#endif
             textFinder.noteClientStringWillChange()
         }
+    }
+
+    private func invalidateFindIndicator() {
+        guard isFindBarVisible else {
+            return
+        }
+#if DEBUG
+        findIndicatorInvalidationCount += 1
+#endif
+        textFinder.findIndicatorNeedsUpdate = true
     }
 
     private func appendedSuffix(for text: String) -> String? {
@@ -220,17 +251,26 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     private func syncDocumentFrame(contentSize: NSSize) -> Bool {
+        let minimumHeight = minimumDocumentHeight(for: contentSize)
+        let targetHeight = max(
+            logDocumentView.estimatedDocumentHeight,
+            minimumHeight
+        )
         let targetFrame = NSRect(
             x: 0,
             y: 0,
             width: contentSize.width,
-            height: logDocumentView.estimatedDocumentHeight
+            height: targetHeight
         )
         guard rectsAreNearlyEqual(logDocumentView.frame, targetFrame) == false else {
             return false
         }
         logDocumentView.frame = targetFrame
         return true
+    }
+
+    private func minimumDocumentHeight(for contentSize: NSSize) -> CGFloat {
+        max(0, contentSize.height - max(0, contentView.contentInsets.top))
     }
 
     private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
@@ -242,10 +282,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     private func scrollToBottom(countAsAutoFollow: Bool, hideOverlayScroller: Bool = true) {
         syncDocumentFrameToTextLayout()
-        restoreScrollOrigin(
-            NSPoint(x: 0, y: maximumVerticalScrollOffset()),
-            hideOverlayScroller: hideOverlayScroller
-        )
+        let targetOrigin = NSPoint(x: 0, y: maximumVerticalScrollOffset())
+        if pointsAreNearlyEqual(contentView.bounds.origin, targetOrigin) {
+#if DEBUG
+            if countAsAutoFollow {
+                autoFollowCount += 1
+            }
+#endif
+            return
+        }
+
+        restoreScrollOrigin(targetOrigin, hideOverlayScroller: hideOverlayScroller)
         let settledMaximumOffset = maximumVerticalScrollOffset()
         if abs(contentView.bounds.origin.y - settledMaximumOffset) > 0.5 {
             restoreScrollOrigin(
@@ -270,6 +317,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return isPinnedToBottom()
     }
 
+    private func hasScrollableVerticalRange() -> Bool {
+        maximumVerticalScrollOffset() > minimumVerticalScrollOffset() + 0.5
+    }
+
     private func restoreScrollOrigin(_ origin: NSPoint, hideOverlayScroller: Bool = true) {
         guard documentView != nil else {
             return
@@ -280,6 +331,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             x: 0,
             y: min(max(minY, origin.y), maxY)
         )
+        guard pointsAreNearlyEqual(contentView.bounds.origin, clampedOrigin) == false else {
+            return
+        }
+
         contentView.scroll(to: clampedOrigin)
 #if DEBUG
         programmaticScrollCount += 1
@@ -433,11 +488,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return maxOffset - contentView.bounds.origin.y <= tolerance
     }
 
+    private func pointsAreNearlyEqual(_ lhs: NSPoint, _ rhs: NSPoint) -> Bool {
+        abs(lhs.x - rhs.x) <= 0.5 && abs(lhs.y - rhs.y) <= 0.5
+    }
+
     @discardableResult
     func performDisplayedTextFinderAction(_ sender: Any?) -> Bool {
         guard isHidden == false,
               let action = textFinderAction(from: sender)
         else {
+            return false
+        }
+        guard textFinder.validateAction(action) else {
             return false
         }
         textFinder.performAction(action)
@@ -477,11 +539,14 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
     )
     private let textStorage = NSTextStorage()
+    private let textContentView = ReviewMonitorLogContentView()
+    private let fragmentViewportView = ReviewMonitorLogContentViewportView()
     private let selectionView = ReviewMonitorLogSelectionView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var lastUsedFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var needsViewportLayout = true
+    private var needsViewportRelayout = false
     private var lastViewportLayoutBounds: CGRect?
     private var isLayingOutViewport = false
     private var selectedRange = NSRange(location: 0, length: 0)
@@ -531,6 +596,10 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         selectedRange
     }
 
+    var finderContentView: NSView {
+        textContentView
+    }
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
@@ -541,7 +610,9 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         textContentStorage.addTextLayoutManager(textLayoutManager)
         textContentStorage.primaryTextLayoutManager = textLayoutManager
         textLayoutManager.textViewportLayoutController.delegate = self
-        addSubview(selectionView)
+        addSubview(textContentView)
+        textContentView.addSubview(selectionView)
+        textContentView.addSubview(fragmentViewportView)
         estimatedDocumentHeight = measuredDocumentHeight()
         setAccessibilityElement(true)
     }
@@ -553,8 +624,40 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
 
     override func layout() {
         super.layout()
-        selectionView.frame = bounds
+        syncContentSubviewFrames()
         layoutTextViewport()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
+        super.setFrameSize(newSize)
+        syncContentSubviewFrames()
+        if sizesAreNearlyEqual(oldSize, frame.size) == false, isLayingOutViewport {
+            needsViewportRelayout = true
+        }
+    }
+
+    override class var isCompatibleWithResponsiveScrolling: Bool {
+        false
+    }
+
+    override func prepareContent(in rect: NSRect) {
+        let previousPreparedContentRect = preparedContentRect
+        var preparedRect = rect
+
+        let verticalPrepExpansion = preparedRect.height * 0.5
+        if verticalPrepExpansion > 0 {
+            let upwardShift = min(verticalPrepExpansion, max(0, preparedRect.minY))
+            preparedRect.origin.y -= upwardShift
+            preparedRect.size.height += upwardShift
+        }
+        preparedRect.size.width = max(preparedRect.width, frame.width)
+
+        super.prepareContent(in: preparedRect)
+
+        if rectsAreNearlyEqual(previousPreparedContentRect, preparedContentRect) == false {
+            layoutTextViewport()
+        }
     }
 
     @discardableResult
@@ -585,11 +688,15 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         guard suffix.isEmpty == false else {
             return
         }
+        let invalidationStart = appendInvalidationStartUTF16Offset()
         textContentStorage.performEditingTransaction {
             textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
         }
         clampSelectedRange()
-        invalidateTextLayout()
+        invalidateTextLayout(
+            in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
+            measureEstimatedHeightImmediately: false
+        )
     }
 
     func replaceText(_ text: String) {
@@ -597,7 +704,7 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             textStorage.setAttributedString(NSAttributedString(string: text, attributes: baseAttributes))
         }
         clampSelectedRange()
-        invalidateTextLayout()
+        invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
 
     func layoutTextViewport(force: Bool = false) {
@@ -612,15 +719,26 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             return
         }
         guard isLayingOutViewport == false else {
+            needsViewportRelayout = true
             return
         }
 
         isLayingOutViewport = true
-        textLayoutManager.textViewportLayoutController.layoutViewport()
-        isLayingOutViewport = false
-        lastViewportLayoutBounds = viewportBounds
-        needsViewportLayout = false
-        updateSelectionRects()
+        defer {
+            isLayingOutViewport = false
+            updateSelectionRects()
+        }
+
+        var iterations = 5
+        repeat {
+            needsViewportRelayout = false
+            let currentBounds = currentViewportBounds()
+            lastViewportLayoutBounds = currentBounds
+            textLayoutManager.textViewportLayoutController.layoutViewport()
+            iterations -= 1
+        } while needsViewportRelayout && iterations > 0
+
+        needsViewportLayout = needsViewportRelayout
     }
 
     func setSelectedRange(_ range: NSRange) {
@@ -676,7 +794,7 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
     }
 
     func drawCharacters(in range: NSRange, forContentView view: NSView) {
-        guard view === self,
+        guard view === finderContentView,
               let textRange = textRange(for: range),
               let context = NSGraphicsContext.current?.cgContext
         else {
@@ -719,6 +837,7 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         guard let dragAnchorUTF16Offset else {
             return
         }
+        autoscroll(with: event)
         let point = convert(event.locationInWindow, from: nil)
         let offset = utf16Offset(at: point)
         let location = min(dragAnchorUTF16Offset, offset)
@@ -774,15 +893,43 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         return (textStorage.string as NSString).substring(with: selectedRange)
     }
 
-    private func invalidateTextLayout() {
-        textLayoutManager.invalidateLayout(for: textContentStorage.documentRange)
+    private func invalidateTextLayout(measureEstimatedHeightImmediately: Bool) {
+        invalidateTextLayout(in: NSRange(location: 0, length: textStorage.length), measureEstimatedHeightImmediately: measureEstimatedHeightImmediately)
+    }
+
+    private func invalidateTextLayout(
+        in characterRange: NSRange,
+        measureEstimatedHeightImmediately: Bool
+    ) {
+        let clampedRange = clamp(characterRange)
+        if let textRange = textRange(for: clampedRange) {
+            textLayoutManager.invalidateLayout(for: textRange)
+        } else {
+            textLayoutManager.invalidateLayout(for: textContentStorage.documentRange)
+        }
         needsViewportLayout = true
         lastViewportLayoutBounds = nil
-        updateEstimatedDocumentHeight()
-        onLayoutInvalidated?()
+        if measureEstimatedHeightImmediately {
+            updateEstimatedDocumentHeight()
+            onLayoutInvalidated?()
+        }
         needsLayout = true
         needsDisplay = true
         layoutTextViewport()
+    }
+
+    private func appendInvalidationStartUTF16Offset() -> Int {
+        let string = textStorage.string as NSString
+        guard string.length > 0 else {
+            return 0
+        }
+
+        let lastCharacter = string.character(at: string.length - 1)
+        if lastCharacter == 10 || lastCharacter == 13 {
+            return string.length
+        }
+
+        return string.paragraphRange(for: NSRange(location: string.length - 1, length: 0)).location
     }
 
     @discardableResult
@@ -862,6 +1009,12 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             return true
         }
         selectionView.selectionRects = rects
+    }
+
+    private func syncContentSubviewFrames() {
+        textContentView.frame = bounds
+        selectionView.frame = textContentView.bounds
+        fragmentViewportView.frame = textContentView.bounds
     }
 
     private func utf16Offset(at point: NSPoint) -> Int {
@@ -966,19 +1119,80 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
     }
 
     private func currentViewportBounds() -> CGRect {
-        var visible = visibleRect
-        visible.origin.x -= textContainerInset.width
-        visible.origin.y -= textContainerInset.height
+        var visible = usableViewportRect(visibleBoundsForViewportLayout())
+        var prepared = usableViewportRect(preparedContentRect)
 
-        let overdraw = max(visible.height, 200)
-        let minY = max(0, visible.minY - overdraw)
-        let maxY = max(minY, visible.maxY + overdraw)
+        if prepared.isEmpty {
+            prepared = visible
+        }
+
+        visible = textLayoutRect(fromContentRect: visible)
+        prepared = textLayoutRect(fromContentRect: prepared)
+
+        let yRange: (minY: CGFloat, maxY: CGFloat)
+        if prepared.intersects(visible) {
+            yRange = (
+                minY: max(0, min(prepared.minY, visible.minY)),
+                maxY: max(prepared.maxY, visible.maxY)
+            )
+        } else {
+            yRange = (minY: visible.minY, maxY: visible.maxY)
+        }
+
         return CGRect(
             x: 0,
-            y: minY,
+            y: yRange.minY,
             width: max(textContainer.size.width, visible.width),
-            height: maxY - minY
+            height: max(0, yRange.maxY - yRange.minY)
         )
+    }
+
+    private func visibleBoundsForViewportLayout() -> NSRect {
+        if let clipView = superview as? NSClipView {
+            let bounds = clipView.bounds
+            if isUsableViewportRect(bounds) {
+                return bounds
+            }
+        }
+        if isUsableViewportRect(visibleRect) {
+            return visibleRect
+        }
+        return bounds
+    }
+
+    private func textLayoutRect(fromContentRect rect: NSRect) -> NSRect {
+        var textRect = rect
+        if textRect.minX < 0 {
+            textRect.size.width += textRect.minX
+            textRect.origin.x = 0
+        }
+        if textRect.minY < 0 {
+            textRect.size.height += textRect.minY
+            textRect.origin.y = 0
+        }
+        textRect.origin.x = max(0, textRect.origin.x - textContainerInset.width)
+        textRect.origin.y = max(0, textRect.origin.y - textContainerInset.height)
+        textRect.size.width = max(0, textRect.width - textContainerInset.width * 2)
+        textRect.size.height = max(0, textRect.height - textContainerInset.height * 2)
+        return textRect
+    }
+
+    private func usableViewportRect(_ rect: NSRect) -> NSRect {
+        guard isUsableViewportRect(rect) else {
+            return .zero
+        }
+        return rect
+    }
+
+    private func isUsableViewportRect(_ rect: NSRect) -> Bool {
+        rect.minX.isFinite &&
+            rect.minY.isFinite &&
+            rect.width.isFinite &&
+            rect.height.isFinite &&
+            abs(rect.minX) < 1_000_000_000 &&
+            abs(rect.minY) < 1_000_000_000 &&
+            rect.width >= 0 &&
+            rect.height >= 0
     }
 
     func textViewportLayoutControllerWillLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
@@ -1011,8 +1225,8 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             fragmentView.needsDisplay = true
         }
 
-        if fragmentView.superview !== self {
-            addSubview(fragmentView, positioned: .above, relativeTo: selectionView)
+        if fragmentView.superview !== fragmentViewportView {
+            fragmentViewportView.addSubview(fragmentView)
         }
         visibleFragmentViews.insert(fragmentView)
     }
@@ -1023,7 +1237,10 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             visibleFragmentViews.remove(staleView)
         }
         lastUsedFragmentViews.removeAll()
-        selectionView.frame = bounds
+        syncContentSubviewFrames()
+        if let viewportRange = textViewportLayoutController.viewportRange {
+            textLayoutManager.ensureLayout(for: viewportRange)
+        }
         let heightChanged = updateEstimatedDocumentHeight()
         if heightChanged {
             onLayoutInvalidated?()
@@ -1038,6 +1255,11 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             abs(lhs.height - rhs.height) <= 0.5
     }
 
+    private func sizesAreNearlyEqual(_ lhs: NSSize, _ rhs: NSSize) -> Bool {
+        abs(lhs.width - rhs.width) <= 0.5 &&
+            abs(lhs.height - rhs.height) <= 0.5
+    }
+
     private func edgeInsetsAreNearlyEqual(_ lhs: NSEdgeInsets, _ rhs: NSEdgeInsets) -> Bool {
         abs(lhs.top - rhs.top) <= 0.5 &&
             abs(lhs.left - rhs.left) <= 0.5 &&
@@ -1045,6 +1267,38 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
             abs(lhs.right - rhs.right) <= 0.5
     }
 }
+
+@MainActor
+private class ReviewMonitorLogTiledContentView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        CATiledLayer()
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+}
+
+@MainActor
+private final class ReviewMonitorLogContentView: ReviewMonitorLogTiledContentView {}
+
+@MainActor
+private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentView {}
 
 @MainActor
 private final class ReviewMonitorLogFragmentView: NSView {
@@ -1056,6 +1310,10 @@ private final class ReviewMonitorLogFragmentView: NSView {
 
     override var isFlipped: Bool {
         true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 
     init(layoutFragment: NSTextLayoutFragment, frame: NSRect) {
@@ -1093,6 +1351,10 @@ private final class ReviewMonitorLogSelectionView: NSView {
         true
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard selectionRects.isEmpty == false else {
             return
@@ -1105,6 +1367,39 @@ private final class ReviewMonitorLogSelectionView: NSView {
 }
 
 @MainActor
+private final class ReviewMonitorLogTextFinderBarContainer: NSObject, @preconcurrency NSTextFinderBarContainer {
+    weak var scrollView: NSScrollView?
+    weak var finderContentView: NSView?
+
+    var findBarView: NSView? {
+        get {
+            scrollView?.findBarView
+        }
+        set {
+            scrollView?.findBarView = newValue
+        }
+    }
+
+    var isFindBarVisible: Bool {
+        get {
+            scrollView?.isFindBarVisible ?? false
+        }
+        set {
+            scrollView?.isFindBarVisible = newValue
+        }
+    }
+
+    func contentView() -> NSView? {
+        finderContentView
+    }
+
+    func findBarViewDidChangeHeight() {
+        scrollView?.findBarViewDidChangeHeight()
+    }
+}
+
+@MainActor
+@objcMembers
 private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFinderClient {
     weak var documentView: ReviewMonitorLogDocumentView?
 
@@ -1169,7 +1464,7 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
             return NSView()
         }
         outRange.pointee = NSRange(location: 0, length: documentView.stringLength)
-        return documentView
+        return documentView.finderContentView
     }
 
     func drawCharacters(in range: NSRange, forContentView view: NSView) {
@@ -1205,7 +1500,7 @@ extension ReviewMonitorLogScrollView {
     }
 
     var usesFindBarForTesting: Bool {
-        textFinder.findBarContainer === self
+        textFinder.findBarContainer === textFinderBarContainer
     }
 
     var isIncrementalSearchingEnabledForTesting: Bool {
@@ -1214,6 +1509,38 @@ extension ReviewMonitorLogScrollView {
 
     var isFindBarVisibleForTesting: Bool {
         isFindBarVisible
+    }
+
+    var findVisibleCharacterRangesForTesting: [NSRange] {
+        textFinderClient.visibleCharacterRanges.map(\.rangeValue)
+    }
+
+    var findStringLengthForTesting: Int {
+        textFinderClient.stringLength()
+    }
+
+    var findClientStringWillChangeCountForTesting: Int {
+        findClientStringWillChangeCount
+    }
+
+    var findIndicatorInvalidationCountForTesting: Int {
+        findIndicatorInvalidationCount
+    }
+
+    var findBarContainerContentViewIsTextContentViewForTesting: Bool {
+        textFinderBarContainer.contentView() === logDocumentView.finderContentView
+    }
+
+    var findIncrementalSearchUsesSystemHighlightingForTesting: Bool {
+        textFinder.incrementalSearchingShouldDimContentView
+    }
+
+    var findFeedbackDimmingEnabledForTesting: Bool {
+        textFinder.incrementalSearchingShouldDimContentView
+    }
+
+    var hitTestTargetsDocumentViewForTesting: Bool {
+        logDocumentView.hitTestTargetsDocumentViewForTesting
     }
 
     var writingToolsDisabledForTesting: Bool {
@@ -1303,6 +1630,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.selectAll(nil)
     }
 
+    func setSelectedLogRangeForTesting(_ range: NSRange) {
+        logDocumentView.setSelectedRange(range)
+    }
+
     func copySelectionForTesting() {
         logDocumentView.copy(nil)
     }
@@ -1345,6 +1676,15 @@ private extension ReviewMonitorLogDocumentView {
     var usesTextKit2ForTesting: Bool {
         textLayoutManager.textContainer === textContainer &&
             textContentStorage.textLayoutManagers.contains(textLayoutManager)
+    }
+
+    var hitTestTargetsDocumentViewForTesting: Bool {
+        guard bounds.isEmpty == false else {
+            return false
+        }
+        syncContentSubviewFrames()
+        let point = NSPoint(x: bounds.midX, y: bounds.midY)
+        return hitTest(point) === self
     }
 
     var visibleFragmentViewCountForTesting: Int {
