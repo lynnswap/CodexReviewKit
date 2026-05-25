@@ -784,6 +784,11 @@ extension ReviewMonitorTransportViewController {
         logScrollView.setSelectedLogRangeForTesting(range)
     }
 
+    @discardableResult
+    func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
+        logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
+    }
+
     func copyLogSelectionForTesting() {
         logScrollView.copySelectionForTesting()
     }

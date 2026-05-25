@@ -147,6 +147,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = isPinnedToBottom()
+        noteClientStringWillChange()
         logDocumentView.appendText(suffix)
         displayedText += suffix
         invalidateDocumentLayout()
@@ -208,12 +209,13 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func appendedSuffix(for text: String) -> String? {
-        guard text.utf16.count > displayedText.utf16.count,
+        guard text.count > displayedText.count,
               text.hasPrefix(displayedText)
         else {
             return nil
         }
-        return String(text[displayedText.endIndex...])
+        let suffixStart = text.index(text.startIndex, offsetBy: displayedText.count)
+        return String(text[suffixStart...])
     }
 
     private func invalidateDocumentLayout() {
@@ -1632,6 +1634,11 @@ extension ReviewMonitorLogScrollView {
 
     func setSelectedLogRangeForTesting(_ range: NSRange) {
         logDocumentView.setSelectedRange(range)
+    }
+
+    @discardableResult
+    func renderForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
+        render(text: text, restoring: currentScrollRestorationTarget, allowIncrementalUpdate: allowIncrementalUpdate)
     }
 
     func copySelectionForTesting() {

@@ -2590,6 +2590,41 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
+    @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
+        let decomposedPrefix = "Caf\u{0065}\u{0301}"
+        let precomposedUpdate = "Caf\u{00E9} appended"
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-canonical-append",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg_1", text: decomposedPrefix)
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+        #expect(transport.renderLogForTesting(text: precomposedUpdate, allowIncrementalUpdate: true))
+
+        #expect(transport.displayedLogForTesting.hasSuffix(" appended"))
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
     @Test func coalescedLogTextUpdateUsesAppendPathWhenSuffixCanBeDerived() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-coalesced",
@@ -3223,7 +3258,7 @@ struct ReviewUITests {
 
         let appendedLength = (job.reviewMonitorLogText as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend + 1)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeAppend)
         #expect(transport.logFindStringLengthForTesting == appendedLength)
         #expect(appendedVisibleRanges.isEmpty == false)
@@ -3241,7 +3276,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: middleAppendRenderCount)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend + 1)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeMiddleAppend)
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
