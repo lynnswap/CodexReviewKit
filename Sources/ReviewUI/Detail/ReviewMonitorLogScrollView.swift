@@ -534,7 +534,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 }
 
 @MainActor
-private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSTextViewportLayoutControllerDelegate {
+private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @preconcurrency NSTextViewportLayoutControllerDelegate {
     private let textContentStorage = NSTextContentStorage()
     private let textLayoutManager = NSTextLayoutManager()
     private let textContainer = NSTextContainer(
@@ -856,7 +856,7 @@ private final class ReviewMonitorLogDocumentView: NSView, @preconcurrency NSText
         true
     }
 
-    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+    @objc func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch item.action {
         case #selector(copy(_:)):
             return selectedRange.length > 0
@@ -1442,6 +1442,7 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
         }
         set {
             guard let range = newValue.first?.rangeValue else {
+                documentView?.setSelectedRange(NSRange(location: 0, length: 0))
                 return
             }
             documentView?.setSelectedRange(range)
@@ -1634,6 +1635,18 @@ extension ReviewMonitorLogScrollView {
 
     func setSelectedLogRangeForTesting(_ range: NSRange) {
         logDocumentView.setSelectedRange(range)
+    }
+
+    var documentViewExportsUserInterfaceValidationForTesting: Bool {
+        logDocumentView.responds(to: #selector(ReviewMonitorLogDocumentView.validateUserInterfaceItem(_:)))
+    }
+
+    func validateDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        logDocumentView.validateUserInterfaceItem(item)
+    }
+
+    func clearFinderSelectedRangesForTesting() {
+        textFinderClient.selectedRanges = []
     }
 
     @discardableResult

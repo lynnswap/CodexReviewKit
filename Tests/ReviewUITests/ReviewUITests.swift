@@ -3199,13 +3199,24 @@ struct ReviewUITests {
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.nextMatch)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.replace)) == false)
         #expect(transport.logAccessibilityValueForTesting == job.logText)
+        #expect(transport.logDocumentViewExportsUserInterfaceValidationForTesting)
+
+        let copyItem = commandMenuItemForTesting("copy:")
+        let selectAllItem = commandMenuItemForTesting("selectAll:")
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(selectAllItem))
 
         transport.selectAllLogForTesting()
         #expect(transport.logSelectedTextForTesting == job.logText)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
 
         NSPasteboard.general.clearContents()
         transport.copyLogSelectionForTesting()
         #expect(NSPasteboard.general.string(forType: .string) == job.logText)
+
+        transport.clearLogFinderSelectedRangesForTesting()
+        #expect(transport.logSelectedTextForTesting == nil)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
     }
 
     @Test func logFindUsesSystemHighlightingAndKeepsSearchStringCurrentAfterAppend() async throws {
@@ -3346,6 +3357,10 @@ func textFinderMenuItemForTesting(_ action: NSTextFinder.Action) -> NSMenuItem {
     )
     item.tag = action.rawValue
     return item
+}
+
+func commandMenuItemForTesting(_ selectorName: String) -> NSMenuItem {
+    NSMenuItem(title: "", action: Selector((selectorName)), keyEquivalent: "")
 }
 
 @MainActor

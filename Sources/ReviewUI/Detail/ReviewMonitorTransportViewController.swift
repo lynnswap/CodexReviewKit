@@ -784,6 +784,18 @@ extension ReviewMonitorTransportViewController {
         logScrollView.setSelectedLogRangeForTesting(range)
     }
 
+    var logDocumentViewExportsUserInterfaceValidationForTesting: Bool {
+        logScrollView.documentViewExportsUserInterfaceValidationForTesting
+    }
+
+    func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        logScrollView.validateDocumentUserInterfaceItemForTesting(item)
+    }
+
+    func clearLogFinderSelectedRangesForTesting() {
+        logScrollView.clearFinderSelectedRangesForTesting()
+    }
+
     @discardableResult
     func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
         logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
