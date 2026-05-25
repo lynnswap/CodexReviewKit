@@ -69,6 +69,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         sidebarItem.allowsFullHeightLayout = true
         sidebarItem.minimumThickness = 220
         sidebarItem.preferredThicknessFraction = 0.22
+        sidebarItem.canCollapseFromWindowResize = false
         sidebarItem.titlebarSeparatorStyle = .none
         sidebarItem.addBottomAlignedAccessoryViewController(statusAccessoryViewController)
 
@@ -445,6 +446,10 @@ extension ReviewMonitorSplitViewController {
 
     var sidebarItemIsCollapsedForTesting: Bool {
         sidebarItem?.isCollapsed ?? false
+    }
+
+    var sidebarCanCollapseFromWindowResizeForTesting: Bool {
+        sidebarItem?.canCollapseFromWindowResize ?? false
     }
 
     func selectSidebarPickerToolbarSegmentForTesting(_ selection: SidebarPickerSelection) {

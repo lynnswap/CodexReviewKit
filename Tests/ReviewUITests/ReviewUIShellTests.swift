@@ -241,6 +241,7 @@ struct ReviewUIShellTests {
         #expect(window.titlebarAppearsTransparent == false)
         #expect(window.isMovableByWindowBackground == false)
         #expect(viewController.sidebarAllowsFullHeightLayoutForTesting)
+        #expect(viewController.sidebarCanCollapseFromWindowResizeForTesting == false)
         #expect(viewController.contentAutomaticallyAdjustsSafeAreaInsetsForTesting)
     }
 
@@ -795,7 +796,7 @@ struct ReviewUIShellTests {
         ) < 0.5)
     }
 
-    @Test func shortDetailLogKeepsTextViewWithinDocumentBounds() async throws {
+    @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
         let job = makeJob(
             id: "job-short-log-layout",
             status: .running,
@@ -818,13 +819,13 @@ struct ReviewUIShellTests {
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
         transport.view.layoutSubtreeIfNeeded()
 
-        let textViewFrame = transport.logTextViewFrameForTesting
+        let textContentFrame = transport.logTextContentFrameForTesting
         let documentViewFrame = transport.logDocumentViewFrameForTesting
 
-        #expect(abs(textViewFrame.minY) < 0.5)
-        #expect(textViewFrame.maxY <= documentViewFrame.maxY + 0.5)
-        #expect(textViewFrame.height <= documentViewFrame.height + 0.5)
-        expectLogTextContainerWidthTracksTextView(transport)
+        #expect(abs(textContentFrame.minY) < 0.5)
+        #expect(textContentFrame.maxY <= documentViewFrame.maxY + 0.5)
+        #expect(textContentFrame.height <= documentViewFrame.height + 0.5)
+        expectLogTextContainerWidthTracksContentView(transport)
     }
 
     @Test func detailLogExpandsAfterSidebarReopensFromCompactWidth() async throws {
@@ -857,7 +858,7 @@ struct ReviewUIShellTests {
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let compactDocumentWidth = transport.logDocumentViewFrameForTesting.width
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
 
         sidebarItem.isCollapsed = false
         window.setContentSize(NSSize(width: 960, height: 600))
@@ -868,12 +869,12 @@ struct ReviewUIShellTests {
 
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let expandedLogWidth = transport.logFrameForTesting.width
-        let expandedTextWidth = transport.logTextViewFrameForTesting.width
+        let expandedTextWidth = transport.logTextContentFrameForTesting.width
 
         #expect(expandedDocumentWidth > compactDocumentWidth + 200)
         #expect(abs(expandedDocumentWidth - expandedLogWidth) < 32)
         #expect(abs(expandedTextWidth - expandedLogWidth) < 32)
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
     }
 
     @Test func detailLogShrinksAfterSidebarReopensIntoNarrowWidth() async throws {
@@ -902,7 +903,7 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
 
         sidebarItem.isCollapsed = true
         window.setContentSize(NSSize(width: 360, height: 420))
@@ -913,12 +914,12 @@ struct ReviewUIShellTests {
 
         let compactDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let compactLogWidth = transport.logFrameForTesting.width
-        let compactTextWidth = transport.logTextViewFrameForTesting.width
+        let compactTextWidth = transport.logTextContentFrameForTesting.width
 
         #expect(compactDocumentWidth < expandedDocumentWidth - 200)
         #expect(abs(compactDocumentWidth - compactLogWidth) < 32)
         #expect(abs(compactTextWidth - compactLogWidth) < 32)
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
     }
 
     @Test func detailLogTracksSimpleWindowResizeInBothDirections() async throws {
@@ -945,7 +946,7 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let wideWidth = transport.logDocumentViewFrameForTesting.width
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
 
         window.setContentSize(NSSize(width: 520, height: 420))
         window.layoutIfNeeded()
@@ -953,9 +954,9 @@ struct ReviewUIShellTests {
         transport.view.layoutSubtreeIfNeeded()
         await transport.flushMainQueueForTesting()
         let narrowWidth = transport.logDocumentViewFrameForTesting.width
-        let narrowTextWidth = transport.logTextViewFrameForTesting.width
+        let narrowTextWidth = transport.logTextContentFrameForTesting.width
         let narrowLogWidth = transport.logFrameForTesting.width
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
 
         window.setContentSize(NSSize(width: 900, height: 600))
         window.layoutIfNeeded()
@@ -963,7 +964,7 @@ struct ReviewUIShellTests {
         transport.view.layoutSubtreeIfNeeded()
         await transport.flushMainQueueForTesting()
         let widenedAgainWidth = transport.logDocumentViewFrameForTesting.width
-        let widenedAgainTextWidth = transport.logTextViewFrameForTesting.width
+        let widenedAgainTextWidth = transport.logTextContentFrameForTesting.width
         let widenedAgainLogWidth = transport.logFrameForTesting.width
 
         #expect(narrowWidth < wideWidth - 150)
@@ -972,7 +973,119 @@ struct ReviewUIShellTests {
         #expect(abs(narrowTextWidth - narrowLogWidth) < 32)
         #expect(abs(widenedAgainWidth - widenedAgainLogWidth) < 32)
         #expect(abs(widenedAgainTextWidth - widenedAgainLogWidth) < 32)
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
+    }
+
+    @Test func detailLogRewrapsVisibleTextDuringLiveWindowResize() async throws {
+        let job = makeJob(
+            id: "job-window-live-resize-log",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: String(repeating: "wrap-sensitive text ", count: 600)
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 960, height: 600)
+        )
+        let viewController = harness.viewController
+        let window = harness.window
+        let transport = viewController.transportViewControllerForTesting
+        var liveResizeActive = false
+        defer {
+            if liveResizeActive {
+                transport.endLogLiveResizeForTesting()
+            }
+            window.close()
+        }
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        window.layoutIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        let wideWidth = transport.logDocumentViewFrameForTesting.width
+        let wideDocumentHeight = transport.logDocumentViewFrameForTesting.height
+        let wideFragmentHeight = transport.logVisibleFragmentBoundsForTesting.height
+        #expect(transport.isLogPinnedToBottomForTesting)
+
+        transport.beginLogLiveResizeForTesting()
+        liveResizeActive = true
+        window.setContentSize(NSSize(width: 520, height: 420))
+        window.layoutIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        await transport.flushMainQueueForTesting()
+
+        let narrowWidth = transport.logDocumentViewFrameForTesting.width
+        let narrowDocumentHeight = transport.logDocumentViewFrameForTesting.height
+        let narrowFragmentHeight = transport.logVisibleFragmentBoundsForTesting.height
+        transport.endLogLiveResizeForTesting()
+        liveResizeActive = false
+
+        #expect(narrowWidth < wideWidth - 150)
+        #expect(narrowDocumentHeight > wideDocumentHeight + 20)
+        #expect(narrowDocumentHeight >= narrowFragmentHeight - 0.5)
+        #expect(narrowFragmentHeight > wideFragmentHeight + 20)
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+        #expect(transport.isLogPinnedToBottomForTesting)
+    }
+
+    @Test func detailLogKeepsBottomFilledForMultilineStreamDuringLiveWindowResize() async throws {
+        let streamLog = (0..<80)
+            .map { index in
+                "stream.tick \(String(format: "%03d", index)) delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh"
+            }
+            .joined(separator: "\n\n")
+        let job = makeJob(
+            id: "job-window-live-resize-stream-log",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: streamLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 1_060, height: 600)
+        )
+        let viewController = harness.viewController
+        let window = harness.window
+        let transport = viewController.transportViewControllerForTesting
+        var liveResizeActive = false
+        defer {
+            if liveResizeActive {
+                transport.endLogLiveResizeForTesting()
+            }
+            window.close()
+        }
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        window.layoutIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        #expect(transport.isLogPinnedToBottomForTesting)
+
+        transport.beginLogLiveResizeForTesting()
+        liveResizeActive = true
+        window.setContentSize(NSSize(width: 620, height: 600))
+        window.layoutIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        transport.view.layoutSubtreeIfNeeded()
+        await transport.flushMainQueueForTesting()
+
+        let visibleFragmentBounds = transport.logVisibleFragmentBoundsForTesting
+        let visibleBottomInViewport = visibleFragmentBounds.maxY - transport.logVerticalScrollOffsetForTesting
+        let bottomGap = transport.logViewportHeightForTesting - visibleBottomInViewport
+
+        #expect(abs(bottomGap) < 120)
+        #expect(transport.isLogPinnedToBottomForTesting)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
     }
 
     @Test func detailLogTextContainerExpandsAfterToolbarSidebarToggleAtCompactWidth() async throws {
@@ -1018,7 +1131,7 @@ struct ReviewUIShellTests {
         transport.view.layoutSubtreeIfNeeded()
         await transport.flushMainQueueForTesting()
         let compactDocumentWidth = transport.logDocumentViewFrameForTesting.width
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
 
         window.setContentSize(NSSize(width: 960, height: 600))
         window.layoutIfNeeded()
@@ -1028,13 +1141,13 @@ struct ReviewUIShellTests {
 
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let expandedLogWidth = transport.logFrameForTesting.width
-        let expandedTextWidth = transport.logTextViewFrameForTesting.width
+        let expandedTextWidth = transport.logTextContentFrameForTesting.width
 
         #expect(sidebarItem.isCollapsed == false)
         #expect(expandedDocumentWidth > compactDocumentWidth + 200)
         #expect(abs(expandedDocumentWidth - expandedLogWidth) < 32)
         #expect(abs(expandedTextWidth - expandedLogWidth) < 32)
-        expectLogTextContainerWidthTracksTextView(transport)
+        expectLogTextContainerWidthTracksContentView(transport)
     }
 
     @Test func windowControllerDoesNotStartStoreWhenConstructed() {
@@ -1076,9 +1189,11 @@ struct ReviewUIShellTests {
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
 
+        let appendedText = String(runningJob.reviewMonitorLogText.dropFirst(initialLog.count))
         #expect(runningJob.reviewMonitorRevision > initialRevision)
         #expect(runningJob.reviewMonitorLogText != initialLog)
-        #expect(runningJob.reviewMonitorLogText.contains("stream.tick"))
+        #expect(appendedText.contains("stream.tick"))
+        #expect(appendedText.split(separator: "\n").contains { $0.count >= 120 })
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
