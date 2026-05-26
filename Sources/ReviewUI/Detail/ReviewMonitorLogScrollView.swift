@@ -39,6 +39,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var findClientStringState = FindClientStringState.live
     private var findClientStringChangeTimer: Timer?
     private var shouldNotifyNextVisibleFindChange = false
+    private var hasActiveFindQuery = false
 
     private static let findClientStringChangeCoalescingInterval: TimeInterval = 0.25
 
@@ -89,9 +90,20 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         logDocumentView.onLayoutInvalidated = { [weak self] in
             self?.syncDocumentFrameToTextLayout()
         }
+        logDocumentView.onUserSelectionChanged = { [weak self] in
+            self?.clearActiveFindQueryAfterUserSelectionChange()
+        }
         logDocumentView.setAccessibilityIdentifier("review-monitor.activity-log")
 
         textFinderClient.documentView = logDocumentView
+        textFinderClient.onSelectedRangeChangedByFinder = { [weak self] range in
+            guard let self else {
+                return
+            }
+            if isFindBarVisible || range.length > 0 {
+                hasActiveFindQuery = true
+            }
+        }
         textFinderBarContainer.scrollView = self
         textFinderBarContainer.finderContentView = logDocumentView.finderContentView
         textFinderBarContainer.onFindBarVisibilityChanged = { [weak self] isVisible in
@@ -120,6 +132,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             cancelPendingFindClientStringChange()
             findClientStringState = .live
             shouldNotifyNextVisibleFindChange = false
+            hasActiveFindQuery = false
             textFinderClient.clearSnapshot()
             textFinder.cancelFindIndicator()
             textFinder.client = nil
@@ -134,6 +147,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         cancelPendingFindClientStringChange()
         findClientStringState = .live
         shouldNotifyNextVisibleFindChange = isFindBarVisible
+        hasActiveFindQuery = false
         if shouldNotifySnapshotReset {
             beginLiveFindClientStringUpdate()
         } else {
@@ -287,10 +301,14 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
-        let findUpdate = beginFindClientStringUpdate(for: .structural)
+        let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        let findUpdate = beginFindClientStringUpdate(
+            for: .structural,
+            resultingTextIsEmpty: resultingTextUTF16Length == 0
+        )
         logDocumentView.replaceText(in: replacement.range, with: replacement.text)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
-        displayedUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        displayedUTF16Length = resultingTextUTF16Length
         finishFindClientStringUpdate(findUpdate)
         invalidateDocumentLayout()
 #if DEBUG
@@ -319,7 +337,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let mutation = reloadMutation(for: text)
-        let findUpdate = beginFindClientStringUpdate(for: mutation)
+        let findUpdate = beginFindClientStringUpdate(for: mutation, resultingTextIsEmpty: text.isEmpty)
         logDocumentView.replaceText(text)
         displayedText = text
         displayedUTF16Length = (text as NSString).length
@@ -343,19 +361,22 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return .appendPreservingPrefix
     }
 
-    private func beginFindClientStringUpdate(for mutation: LogTextMutation) -> FindClientStringUpdate {
+    private func beginFindClientStringUpdate(
+        for mutation: LogTextMutation,
+        resultingTextIsEmpty: Bool = false
+    ) -> FindClientStringUpdate {
         guard textFinder.isIncrementalSearchingEnabled else {
             return .noPostMutationWork
         }
 
         if isFindBarVisible {
-            if logDocumentView.string.isEmpty || shouldNotifyNextVisibleFindChange {
+            if logDocumentView.string.isEmpty || resultingTextIsEmpty || shouldNotifyNextVisibleFindChange {
                 shouldNotifyNextVisibleFindChange = false
                 beginLiveFindClientStringUpdate()
                 return .noPostMutationWork
             }
             shouldNotifyNextVisibleFindChange = false
-            guard textFinderClient.firstSelectedRange.length > 0 else {
+            guard hasActiveFindQuery else {
                 beginLiveFindClientStringUpdate()
                 return .noPostMutationWork
             }
@@ -390,7 +411,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     private func finishFindClientStringUpdate(_ update: FindClientStringUpdate) {
         if update == .clearVisibleSelectionAfterMutation {
-            logDocumentView.setSelectedRange(NSRange(location: 0, length: 0))
+            logDocumentView.setSelectedRangeFromTextFinder(NSRange(location: 0, length: 0))
         }
     }
 
@@ -424,10 +445,19 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func resetDeferredFindStateAfterFindBarHidden() {
+        hasActiveFindQuery = false
         guard findClientStringState == .visibleSnapshot else {
             return
         }
         shouldNotifyNextVisibleFindChange = false
+        beginLiveFindClientStringUpdate()
+    }
+
+    private func clearActiveFindQueryAfterUserSelectionChange() {
+        hasActiveFindQuery = false
+        guard findClientStringState == .visibleSnapshot else {
+            return
+        }
         beginLiveFindClientStringUpdate()
     }
 
@@ -755,7 +785,20 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return false
         }
         textFinder.performAction(action)
+        if action == .setSearchString ||
+            (actionActivatesFindQuery(action) &&
+                (hasActiveFindQuery || textFinderClient.firstSelectedRange.length > 0)) {
+            hasActiveFindQuery = true
+        }
         return true
+    }
+
+    private func actionActivatesFindQuery(_ action: NSTextFinder.Action) -> Bool {
+        action == .setSearchString ||
+            action == .nextMatch ||
+            action == .previousMatch ||
+            action == .selectAll ||
+            action == .selectAllInSelection
     }
 
     func validateDisplayedTextFinderAction(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -803,6 +846,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var lastViewportLayoutBounds: CGRect?
     private var isLayingOutViewport = false
     private var selectedRange = NSRange(location: 0, length: 0)
+    private var isApplyingTextFinderSelection = false
     private var dragAnchorUTF16Offset: Int?
     private var keyboardSelectionAnchorUTF16Offset: Int?
     private var keyboardSelectionFocusUTF16Offset: Int?
@@ -812,6 +856,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     var contentInsets: NSEdgeInsets = .init()
     var textContainerInset = NSSize(width: 4, height: 6)
     var onLayoutInvalidated: (() -> Void)?
+    var onUserSelectionChanged: (() -> Void)?
 #if DEBUG
     var reduceMotionOverrideForTesting: Bool?
     private var wordFadeDisplayInvalidationCount = 0
@@ -1332,6 +1377,12 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         setSelectedRange(range, preserveKeyboardSelection: false)
     }
 
+    func setSelectedRangeFromTextFinder(_ range: NSRange) {
+        isApplyingTextFinderSelection = true
+        setSelectedRange(range)
+        isApplyingTextFinderSelection = false
+    }
+
     private func setSelectedRange(_ range: NSRange, preserveKeyboardSelection: Bool) {
         let clampedRange = clamp(range)
         selectedRange = clampedRange
@@ -1348,6 +1399,9 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         updateSelectionRects()
         setNeedsDisplay(bounds)
+        if isApplyingTextFinderSelection == false {
+            onUserSelectionChanged?()
+        }
     }
 
     func scrollRangeToVisible(_ range: NSRange) {
@@ -2345,6 +2399,7 @@ private final class ReviewMonitorLogTextFinderBarContainer: NSObject, @preconcur
 @objcMembers
 private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFinderClient {
     weak var documentView: ReviewMonitorLogDocumentView?
+    var onSelectedRangeChangedByFinder: ((NSRange) -> Void)?
 
     var string: String {
         snapshot?.string ?? documentView?.string ?? ""
@@ -2424,15 +2479,20 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
         }
         set {
             guard snapshot?.mapsToDocument != false else {
-                documentView?.setSelectedRange(NSRange(location: 0, length: 0))
+                let range = NSRange(location: 0, length: 0)
+                documentView?.setSelectedRangeFromTextFinder(range)
+                onSelectedRangeChangedByFinder?(range)
                 return
             }
             guard let rawRange = newValue.first?.rangeValue else {
-                documentView?.setSelectedRange(NSRange(location: 0, length: 0))
+                let range = NSRange(location: 0, length: 0)
+                documentView?.setSelectedRangeFromTextFinder(range)
+                onSelectedRangeChangedByFinder?(range)
                 return
             }
             let range = rangeClampedToActiveString(rawRange)
-            documentView?.setSelectedRange(range)
+            documentView?.setSelectedRangeFromTextFinder(range)
+            onSelectedRangeChangedByFinder?(range)
         }
     }
 
@@ -2598,6 +2658,10 @@ extension ReviewMonitorLogScrollView {
         textFinderClient.firstSelectedRange
     }
 
+    var hasActiveFindQueryForTesting: Bool {
+        hasActiveFindQuery
+    }
+
     func flushPendingFindClientStringChangeForTesting() {
         finishPendingFindClientStringChange()
     }
@@ -2730,6 +2794,10 @@ extension ReviewMonitorLogScrollView {
     }
 
     func clearFinderSelectedRangesForTesting() {
+        logDocumentView.setSelectedRange(NSRange(location: 0, length: 0))
+    }
+
+    func simulateFinderNoResultSelectionForTesting() {
         textFinderClient.selectedRanges = []
     }
 

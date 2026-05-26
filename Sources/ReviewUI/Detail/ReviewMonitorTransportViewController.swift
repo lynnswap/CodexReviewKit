@@ -569,6 +569,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.findClientFirstSelectedRangeForTesting
     }
 
+    var logHasActiveFindQueryForTesting: Bool {
+        logScrollView.hasActiveFindQueryForTesting
+    }
+
     func flushLogPendingFindClientStringChangeForTesting() {
         logScrollView.flushPendingFindClientStringChangeForTesting()
     }
@@ -855,6 +859,10 @@ extension ReviewMonitorTransportViewController {
 
     func clearLogFinderSelectedRangesForTesting() {
         logScrollView.clearFinderSelectedRangesForTesting()
+    }
+
+    func simulateLogFinderNoResultSelectionForTesting() {
+        logScrollView.simulateFinderNoResultSelectionForTesting()
     }
 
     func performLogKeyboardCommandForTesting(_ selector: Selector) {
