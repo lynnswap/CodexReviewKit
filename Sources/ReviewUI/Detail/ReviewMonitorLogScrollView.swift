@@ -217,6 +217,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = isPinnedToBottom()
+        noteClientStringWillChange()
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
@@ -236,6 +237,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
+        noteClientStringWillChange()
         logDocumentView.replaceText(in: replacement.range, with: replacement.text)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length

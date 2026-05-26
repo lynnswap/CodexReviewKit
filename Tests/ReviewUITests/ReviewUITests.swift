@@ -2837,6 +2837,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
+        let findStringWillChangeCount = transport.logFindClientStringWillChangeCountForTesting
         job.appendLogEntry(.init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
         let snapshot = try await awaitTransportRender(transport, after: reloadRenderCount)
@@ -2844,6 +2845,7 @@ struct ReviewUITests {
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCount + 1)
     }
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
@@ -3531,7 +3533,7 @@ struct ReviewUITests {
 
         let appendedLength = (job.reviewMonitorLogDocument.text as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend + 1)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeAppend)
         #expect(transport.logFindStringLengthForTesting == appendedLength)
         #expect(transport.logSelectedTextForTesting == "needle")
@@ -3550,7 +3552,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: middleAppendRenderCount)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend + 1)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeMiddleAppend)
         #expect(transport.logSelectedTextForTesting == "needle")
 
