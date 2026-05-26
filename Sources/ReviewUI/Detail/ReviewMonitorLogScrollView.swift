@@ -130,10 +130,15 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     func resetFindStateForContentReuse() {
+        let shouldNotifySnapshotReset = isFindBarVisible && textFinderClient.usesSnapshot
         cancelPendingFindClientStringChange()
         findClientStringState = .live
         shouldNotifyNextVisibleFindChange = isFindBarVisible
-        textFinderClient.clearSnapshot()
+        if shouldNotifySnapshotReset {
+            beginLiveFindClientStringUpdate()
+        } else {
+            textFinderClient.clearSnapshot()
+        }
         textFinder.cancelFindIndicator()
     }
 
@@ -350,15 +355,15 @@ final class ReviewMonitorLogScrollView: NSScrollView {
                 return .noPostMutationWork
             }
             shouldNotifyNextVisibleFindChange = false
-            guard findClientStringState == .visibleSnapshot || textFinderClient.firstSelectedRange.length > 0 else {
+            guard textFinderClient.firstSelectedRange.length > 0 else {
                 beginLiveFindClientStringUpdate()
                 return .noPostMutationWork
             }
             cancelPendingFindClientStringChange()
             if mutation == .appendPreservingPrefix {
-                textFinderClient.captureSnapshotIfNeeded(logDocumentView.string, mapsToDocument: true)
+                textFinderClient.captureSnapshotIfNeeded(mapsToDocument: true) { logDocumentView.string }
             } else {
-                textFinderClient.captureSnapshotIfNeeded(logDocumentView.string, mapsToDocument: false)
+                textFinderClient.captureSnapshotIfNeeded(mapsToDocument: false) { logDocumentView.string }
                 textFinderClient.invalidateSnapshotDocumentMapping()
             }
             findClientStringState = .visibleSnapshot
@@ -2357,8 +2362,12 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
 
     private var snapshot: Snapshot?
 
-    var usesSnapshotForTesting: Bool {
+    var usesSnapshot: Bool {
         snapshot != nil
+    }
+
+    var usesSnapshotForTesting: Bool {
+        usesSnapshot
     }
 
     var snapshotMapsToDocument: Bool {
@@ -2369,9 +2378,9 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
         snapshotMapsToDocument
     }
 
-    func captureSnapshotIfNeeded(_ string: String, mapsToDocument: Bool) {
+    func captureSnapshotIfNeeded(mapsToDocument: Bool, string: () -> String) {
         if snapshot == nil {
-            snapshot = Snapshot(string: string, mapsToDocument: mapsToDocument)
+            snapshot = Snapshot(string: string(), mapsToDocument: mapsToDocument)
         }
     }
 

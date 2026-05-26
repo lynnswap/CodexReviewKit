@@ -3656,11 +3656,14 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         ))
         await transport.flushMainQueueForTesting()
-        #expect(transport.logFindClientUsesSnapshotForTesting)
-        #expect(transport.logFindClientSnapshotMapsToDocumentForTesting == false)
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeEmptyReload)
+        #expect(transport.logFindClientUsesSnapshotForTesting == false)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeEmptyReload + 1)
+        #expect(transport.logFindStringLengthForTesting == 0)
+        transport.flushLogPendingFindClientStringChangeForTesting()
 
         let liveReloadText = "needle after empty structural reload\n"
+        let findStringWillChangeCountBeforeLiveReload = transport.logFindClientStringWillChangeCountForTesting
         #expect(transport.renderLogForTesting(
             text: liveReloadText,
             allowIncrementalUpdate: false
@@ -3668,7 +3671,7 @@ struct ReviewUITests {
         await transport.flushMainQueueForTesting()
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         #expect(transport.logHasPendingFindClientStringChangeForTesting)
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeEmptyReload + 1)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeLiveReload + 1)
         #expect(transport.logFindStringLengthForTesting == (liveReloadText as NSString).length)
         transport.flushLogPendingFindClientStringChangeForTesting()
 
@@ -3745,6 +3748,63 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        #expect(transport.logFindStringLengthForTesting == (secondJob.reviewMonitorLogDocument.text as NSString).length)
+        transport.flushLogPendingFindClientStringChangeForTesting()
+    }
+
+    @Test func logFindContentReuseNotifiesFinderWhenSameTextSkipsRender() async throws {
+        let initialLog = "needle initial"
+        let appendedLine = "needle appended"
+        let reusedLog = initialLog + "\n\n" + appendedLine
+        let firstJob = makeJob(
+            id: "job-log-find-same-text-reuse-first",
+            status: .running,
+            targetSummary: "First job",
+            summary: "Running review.",
+            logText: initialLog
+        )
+        let secondJob = makeJob(
+            id: "job-log-find-same-text-reuse-second",
+            status: .running,
+            targetSummary: "Second job",
+            summary: "Running review.",
+            logText: reusedLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 720, height: 320))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let firstNeedleRange = (firstJob.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        #expect(firstNeedleRange.location != NSNotFound)
+        transport.setSelectedLogRangeForTesting(firstNeedleRange)
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+
+        let appendRenderCount = transport.renderCountForTesting
+        firstJob.appendLogEntry(.init(kind: .progress, text: appendedLine))
+        _ = try await awaitTransportRender(transport, after: appendRenderCount)
+        #expect(transport.displayedLogForTesting == secondJob.reviewMonitorLogDocument.text)
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logFindClientUsesSnapshotForTesting)
+
+        let findStringWillChangeCountBeforeSwitch = transport.logFindClientStringWillChangeCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        await transport.flushMainQueueForTesting()
+
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logFindClientUsesSnapshotForTesting == false)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeSwitch + 1)
         #expect(transport.logFindStringLengthForTesting == (secondJob.reviewMonitorLogDocument.text as NSString).length)
         transport.flushLogPendingFindClientStringChangeForTesting()
     }
@@ -3842,6 +3902,57 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         #expect(transport.logHasPendingFindClientStringChangeForTesting)
         #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeHide + 1)
+        #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+        transport.flushLogPendingFindClientStringChangeForTesting()
+    }
+
+    @Test func logFindClearedSelectionReturnsVisibleUpdatesToLiveString() async throws {
+        let job = makeJob(
+            id: "job-log-find-cleared-selection",
+            status: .running,
+            targetSummary: "Cleared selection",
+            summary: "Running review.",
+            logText: "needle initial\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 720, height: 320))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let firstNeedleRange = (job.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        #expect(firstNeedleRange.location != NSNotFound)
+        transport.setSelectedLogRangeForTesting(firstNeedleRange)
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+
+        let snapshotRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .progress, text: "needle appended into snapshot"))
+        _ = try await awaitTransportRender(transport, after: snapshotRenderCount)
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logFindClientUsesSnapshotForTesting)
+
+        transport.clearLogFinderSelectedRangesForTesting()
+        #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
+        #expect(transport.logSelectedTextForTesting == nil)
+
+        let findStringWillChangeCountBeforeClearedSelectionAppend = transport.logFindClientStringWillChangeCountForTesting
+        let liveRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .progress, text: "needle appended after cleared selection"))
+        _ = try await awaitTransportRender(transport, after: liveRenderCount)
+
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logFindClientUsesSnapshotForTesting == false)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeClearedSelectionAppend + 1)
         #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
         transport.flushLogPendingFindClientStringChangeForTesting()
     }
