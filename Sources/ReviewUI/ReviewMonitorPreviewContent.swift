@@ -15,6 +15,42 @@ public enum ReviewMonitorPreviewContent {
         let hasFinalReview: Bool
     }
 
+    private struct PreviewStreamTemplate {
+        let kind: ReviewLogEntry.Kind
+        let groupName: String?
+        let text: String
+        let chunkByWord: Bool
+        let delayAfterPreviousTicks: Int
+        let chunkIntervalTicks: Int
+
+        init(
+            kind: ReviewLogEntry.Kind,
+            groupName: String? = nil,
+            text: String,
+            chunkByWord: Bool = false,
+            delayAfterPreviousTicks: Int,
+            chunkIntervalTicks: Int = 1
+        ) {
+            self.kind = kind
+            self.groupName = groupName
+            self.text = text
+            self.chunkByWord = chunkByWord
+            self.delayAfterPreviousTicks = delayAfterPreviousTicks
+            self.chunkIntervalTicks = chunkIntervalTicks
+        }
+    }
+
+    private struct PreviewStreamStep {
+        let kind: ReviewLogEntry.Kind
+        let groupName: String?
+        let text: String
+    }
+
+    private struct PreviewStreamFrame {
+        let step: PreviewStreamStep
+        let cycle: Int
+    }
+
     @MainActor
     private final class PreviewLogStreamer {
         private weak var store: CodexReviewStore?
@@ -82,7 +118,8 @@ public enum ReviewMonitorPreviewContent {
         _ = appendPreviewStreamTick(to: store, after: 0)
     }
 
-    private static func appendPreviewStreamTick(
+    @discardableResult
+    package static func appendPreviewStreamTick(
         to store: CodexReviewStore,
         after currentTick: Int
     ) -> Int {
@@ -95,80 +132,162 @@ public enum ReviewMonitorPreviewContent {
 
         let nextTick = currentTick + 1
         for (index, job) in runningJobs.enumerated() {
-            job.appendLogEntry(
-                .init(
-                    kind: .agentMessage,
-                    groupID: "preview-stream-\(job.id)",
-                    text: streamWordChunk(forJobAt: index, tick: nextTick)
-                )
-            )
+            if let frame = streamFrame(forJobAt: index, tick: nextTick) {
+                job.appendLogEntry(streamEntry(from: frame.step, for: job, cycle: frame.cycle))
+            }
         }
         return nextTick
     }
 
-    private static func streamWordChunk(forJobAt index: Int, tick: Int) -> String {
-        guard streamFragments.isEmpty == false,
-              streamCycleChunkCount > 0
-        else {
-            return "\n"
+    private static func streamFrame(
+        forJobAt jobIndex: Int,
+        tick: Int
+    ) -> PreviewStreamFrame? {
+        guard previewStreamTimeline.isEmpty == false else {
+            return nil
+        }
+        let jobTick = tick - jobIndex * previewJobTickOffset
+        guard jobTick > 0 else {
+            return nil
         }
 
-        let zeroBasedTick = max(0, tick - 1)
-        let fullCycles = zeroBasedTick / streamCycleChunkCount
-        var remainingChunkOffset = zeroBasedTick % streamCycleChunkCount
-        let normalizedJobIndex = index % streamFragments.count
-
-        for lineOffset in 0..<streamFragments.count {
-            let fragmentIndex = (normalizedJobIndex + lineOffset + 1) % streamFragments.count
-            let lineChunkCount = 2 + streamFragmentChunks[fragmentIndex].count
-            if remainingChunkOffset < lineChunkCount {
-                let lineTick = fullCycles * streamFragments.count + lineOffset + 1
-                if remainingChunkOffset == 0 {
-                    return "stream.tick "
-                }
-                if remainingChunkOffset == 1 {
-                    return streamTickNumberChunk(lineTick)
-                }
-                return streamFragmentChunks[fragmentIndex][remainingChunkOffset - 2]
-            }
-            remainingChunkOffset -= lineChunkCount
+        let offset = (jobTick - 1) % previewStreamTimeline.count
+        guard let step = previewStreamTimeline[offset] else {
+            return nil
         }
-
-        return "\n"
+        return PreviewStreamFrame(
+            step: step,
+            cycle: (jobTick - 1) / previewStreamTimeline.count
+        )
     }
 
-    private static func streamTickNumberChunk(_ tick: Int) -> String {
+    private static func streamEntry(
+        from step: PreviewStreamStep,
+        for job: CodexReviewJob,
+        cycle: Int
+    ) -> ReviewLogEntry {
+        return .init(
+            kind: step.kind,
+            groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
+            text: step.text
+        )
+    }
+
+    private static func previewTurnID(_ tick: Int) -> String {
         if tick < 10 {
-            return "00\(tick) "
+            return "preview-turn-00\(tick)"
         }
         if tick < 100 {
-            return "0\(tick) "
+            return "preview-turn-0\(tick)"
         }
-        return "\(tick) "
+        return "preview-turn-\(tick)"
     }
 
-    private static let streamFragments = [
-        "delta/sidebar +4 -1 while preserving workspace expansion, selected job identity, and row geometry across a narrow preview window resize",
-        "delta/layout +2 -0 after recomputing visible log fragments, scroll restoration, and live text wrapping for the current viewport",
-        "delta/selection +1 -1 with read-only range preservation, copy validation, and finder highlight rects following the reflowed log text",
-        "delta/transport +3 -2 while streaming monitor revisions through append-only updates without forcing a full log surface reload",
-        "delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh",
-        "delta/preview +2 -1 to exercise long mock stream lines that should wrap clearly in compact and expanded ReviewMonitor layouts",
-    ]
+    private static func streamTimeline(from templates: [PreviewStreamTemplate]) -> [PreviewStreamStep?] {
+        var timeline: [PreviewStreamStep?] = []
+        for template in templates {
+            let delay = timeline.isEmpty ? 1 : max(1, template.delayAfterPreviousTicks)
+            if delay > 1 {
+                timeline.append(contentsOf: Array(repeating: nil, count: delay - 1))
+            }
+            let chunks = template.chunkByWord ? wordChunks(in: template.text) : [template.text]
+            for (index, chunk) in chunks.enumerated() {
+                if index > 0 && template.chunkIntervalTicks > 1 {
+                    timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalTicks - 1))
+                }
+                timeline.append(PreviewStreamStep(
+                    kind: template.kind,
+                    groupName: template.groupName,
+                    text: chunk
+                ))
+            }
+        }
+        return timeline
+    }
 
-    private static let streamFragmentChunks: [[String]] = streamFragments.map { fragment in
-        let words = fragment.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    private static func wordChunks(in text: String) -> [String] {
+        let words = text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        guard words.isEmpty == false else {
+            return [text]
+        }
         return words.enumerated().map { offset, word in
             if offset == words.count - 1 {
-                return word + "\n"
+                return word
             }
             return word + " "
         }
     }
 
-    private static let streamCycleChunkCount = streamFragmentChunks.reduce(0) { total, chunks in
-        total + 2 + chunks.count
-    }
+    private static let interItemDelayFrameCount = 13
+    private static let previewJobTickOffset = 7
+
+    private static let previewStreamTemplates: [PreviewStreamTemplate] = [
+        .init(
+            kind: .event,
+            text: "Turn started: \(previewTurnID(1))",
+            delayAfterPreviousTicks: 1
+        ),
+        .init(
+            kind: .plan,
+            groupName: "plan",
+            text: """
+            [completed] Inspect ReviewMonitor log rendering
+            [in_progress] Preserve active find UI while streaming
+            [pending] Run focused UI tests
+            """,
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .command,
+            text: "$ /bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .toolCall,
+            text: "MCP codex_review.review_read started.",
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .reasoningSummary,
+            groupName: "reasoning-summary",
+            text: "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
+            chunkByWord: true,
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .command,
+            text: "$ /bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .toolCall,
+            text: "File changes updated.",
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .rawReasoning,
+            groupName: "raw-reasoning",
+            text: "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
+            chunkByWord: true,
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .agentMessage,
+            groupName: "agent-message-main",
+            text: "I found the log update path and am keeping the current find session stable while new output streams in.\n",
+            chunkByWord: true,
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .agentMessage,
+            groupName: "agent-message-summary",
+            text: "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
+            chunkByWord: true,
+            delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+    ]
+
+    private static let previewStreamTimeline = streamTimeline(from: previewStreamTemplates)
 
     @_spi(PreviewSupport)
     public static func makePreviewAccounts() -> [CodexAccount] {
@@ -293,7 +412,7 @@ public enum ReviewMonitorPreviewContent {
                         cwd: cwd
                     ),
                     lastAgentMessage: definition.lastAgentMessage,
-                    logText: makePreviewLogText(for: definition)
+                    logEntries: makePreviewLogEntries(for: definition, workspaceName: workspaceName)
                 )
             }
         }
@@ -312,7 +431,7 @@ public enum ReviewMonitorPreviewContent {
         hasFinalReview: Bool,
         reviewResult: ParsedReviewResult?,
         lastAgentMessage: String,
-        logText: String
+        logEntries: [ReviewLogEntry]
     ) -> CodexReviewJob {
         CodexReviewJob.makeForTesting(
             id: id,
@@ -328,12 +447,7 @@ public enum ReviewMonitorPreviewContent {
             hasFinalReview: hasFinalReview,
             reviewResult: reviewResult,
             lastAgentMessage: lastAgentMessage,
-            logEntries: [
-                ReviewLogEntry(
-                    kind: .agentMessage,
-                    text: logText
-                )
-            ]
+            logEntries: logEntries
         )
     }
 
@@ -379,27 +493,71 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func makePreviewLogText(for definition: PreviewJobDefinition) -> String {
-        if definition.status == .running {
-            return """
-            $ review.start
-            queue.pop -> session/open
-            turn.create -> 01HZX9M4K2
-            plan.delta + sidebar.scan
-            plan.delta + row.identity
-            plan.delta + log.scroll
-            item.start -> diff/sidebar
-            diff/sidebar +18 -6
-            item.start -> render/layout
-            render/layout frame=900x600
-            """
+    private static func makePreviewLogEntries(
+        for definition: PreviewJobDefinition,
+        workspaceName: String
+    ) -> [ReviewLogEntry] {
+        switch definition.status {
+        case .running:
+            [
+                .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
+                .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
+                .init(
+                    kind: .plan,
+                    groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
+                    replacesGroup: true,
+                    text: """
+                    [completed] Inspect changed files
+                    [in_progress] Check ReviewMonitor log behavior
+                    [pending] Run focused tests
+                    """
+                ),
+                .init(
+                    kind: .command,
+                    text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+                ),
+                .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
+                    text: "I am comparing the current UI state with the streaming log updates before changing the finder integration."
+                ),
+                .init(
+                    kind: .agentMessage,
+                    groupID: "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)",
+                    text: definition.lastAgentMessage
+                ),
+            ]
+        case .queued:
+            [
+                .init(kind: .event, text: "Queued review for \(definition.targetSummary)."),
+                .init(kind: .progress, text: definition.summary),
+            ]
+        case .failed:
+            [
+                .init(kind: .event, text: "Turn started: preview-failed-\(workspaceName.lowercased())"),
+                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""),
+                .init(kind: .error, text: definition.summary),
+                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+            ]
+        case .cancelled:
+            [
+                .init(kind: .event, text: "Turn started: preview-cancelled-\(workspaceName.lowercased())"),
+                .init(kind: .progress, text: definition.summary),
+                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+            ]
+        case .succeeded:
+            [
+                .init(kind: .event, text: "Turn started: preview-complete-\(workspaceName.lowercased())"),
+                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""),
+                .init(
+                    kind: .reasoningSummary,
+                    groupID: "preview-complete-summary-\(workspaceName)-\(definition.targetSummary)",
+                    text: definition.summary
+                ),
+                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+            ]
         }
-
-        return """
-        \(definition.summary)
-
-        \(definition.lastAgentMessage)
-        """
     }
 
     private static func makeJobDefinitions(for workspaceName: String) -> [PreviewJobDefinition] {

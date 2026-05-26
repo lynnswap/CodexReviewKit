@@ -549,14 +549,6 @@ extension ReviewMonitorTransportViewController {
         logScrollView.findStringLengthForTesting
     }
 
-    var logFindClientStringWillChangeCountForTesting: Int {
-        logScrollView.findClientStringWillChangeCountForTesting
-    }
-
-    var logHasPendingFindClientStringChangeForTesting: Bool {
-        logScrollView.hasPendingFindClientStringChangeForTesting
-    }
-
     var logFindClientUsesSnapshotForTesting: Bool {
         logScrollView.findClientUsesSnapshotForTesting
     }
@@ -573,12 +565,21 @@ extension ReviewMonitorTransportViewController {
         logScrollView.hasActiveFindQueryForTesting
     }
 
-    func flushLogPendingFindClientStringChangeForTesting() {
-        logScrollView.flushPendingFindClientStringChangeForTesting()
+    var logVisibleFindBarSearchStringForTesting: String? {
+        logScrollView.visibleFindBarSearchStringForTesting
+    }
+
+    @discardableResult
+    func setLogVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
+        logScrollView.setVisibleFindBarSearchStringForTesting(string)
     }
 
     var logFindIndicatorInvalidationCountForTesting: Int {
         logScrollView.findIndicatorInvalidationCountForTesting
+    }
+
+    var logFindIncrementalMatchRangeCountForTesting: Int {
+        logScrollView.findIncrementalMatchRangeCountForTesting
     }
 
     var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
@@ -587,10 +588,6 @@ extension ReviewMonitorTransportViewController {
 
     var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
         logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
-    }
-
-    var logFindFeedbackDimmingEnabledForTesting: Bool {
-        logScrollView.findFeedbackDimmingEnabledForTesting
     }
 
     var logHitTestTargetsDocumentViewForTesting: Bool {

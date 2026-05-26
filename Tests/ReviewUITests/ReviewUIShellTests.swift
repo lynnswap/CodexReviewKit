@@ -1186,25 +1186,103 @@ struct ReviewUIShellTests {
         )
         let initialRevision = runningJob.reviewMonitorRevision
         let initialLog = runningJob.reviewMonitorLogDocument.text
+        let initialEntryCount = runningJob.logEntries.count
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
 
         let appendedText = String(runningJob.reviewMonitorLogDocument.text.dropFirst(initialLog.count))
+        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
         #expect(runningJob.reviewMonitorRevision > initialRevision)
         #expect(runningJob.reviewMonitorLogDocument.text != initialLog)
-        #expect(appendedText.contains("stream.tick"))
+        #expect(appendedText.contains("Turn started"))
         #expect(appendedText.contains("delta/") == false)
-        #expect(appendedText.count < 32)
-        let expectedAppendText = "\n\nstream.tick "
-        #expect(runningJob.reviewMonitorLogDocument.lastChange == .append(.init(
-            kind: .agentMessage,
-            blockID: ReviewMonitorLogBlockID("agentMessage:preview-stream-\(runningJob.id)"),
-            range: NSRange(
-                location: (runningJob.reviewMonitorLogDocument.text as NSString).length - ("stream.tick " as NSString).length,
-                length: ("stream.tick " as NSString).length
-            ),
-            text: expectedAppendText
-        )))
+        #expect(appendedText.count < 160)
+        #expect(appendedEntries.count == 1)
+        #expect(appendedEntries.first?.kind == .event)
+        #expect(appendedEntries.first?.text.contains("preview-turn") == true)
+    }
+
+    @Test func previewStreamUsesMixedReviewLogKinds() throws {
+        let store = ReviewMonitorPreviewContent.makeStore(
+            streamInterval: .seconds(60)
+        )
+        let runningJob = try #require(
+            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
+        )
+        let initialEntryCount = runningJob.logEntries.count
+        var tick = 0
+
+        for _ in 0..<240 {
+            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        }
+
+        let appendedKinds = runningJob.logEntries.dropFirst(initialEntryCount).map(\.kind)
+        #expect(appendedKinds.contains(.event))
+        #expect(appendedKinds.contains(.command))
+        #expect(appendedKinds.contains(.toolCall))
+        #expect(appendedKinds.contains(.plan))
+        #expect(appendedKinds.contains(.reasoningSummary))
+        #expect(appendedKinds.contains(.agentMessage))
+        #expect(Set(appendedKinds).count >= 5)
+    }
+
+    @Test func previewStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
+        let store = ReviewMonitorPreviewContent.makeStore(
+            streamInterval: .seconds(60)
+        )
+        let runningJob = try #require(
+            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
+        )
+        let initialEntryCount = runningJob.logEntries.count
+        var tick = 0
+
+        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        #expect(runningJob.logEntries.count == initialEntryCount + 1)
+        #expect(runningJob.logEntries.last?.kind == .event)
+
+        for _ in 0..<12 {
+            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        }
+        #expect(runningJob.logEntries.count == initialEntryCount + 1)
+
+        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        #expect(runningJob.logEntries.count == initialEntryCount + 2)
+        #expect(runningJob.logEntries.last?.kind == .plan)
+
+        var observedEntryCount = runningJob.logEntries.count
+        for _ in 0..<80 where runningJob.logEntries.last?.kind != .reasoningSummary {
+            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            observedEntryCount = runningJob.logEntries.count
+        }
+        let firstReasoning = try #require(runningJob.logEntries.last)
+        #expect(firstReasoning.kind == .reasoningSummary)
+        let reasoningGroupID = firstReasoning.groupID
+        var reasoningChunkCount = 1
+
+        for _ in 0..<80 {
+            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            let entries = Array(runningJob.logEntries.dropFirst(observedEntryCount))
+            if entries.isEmpty {
+                break
+            }
+            #expect(entries.count == 1)
+            let entry = try #require(entries.first)
+            #expect(entry.kind == .reasoningSummary)
+            #expect(entry.groupID == reasoningGroupID)
+            reasoningChunkCount += 1
+            observedEntryCount = runningJob.logEntries.count
+        }
+
+        #expect(reasoningChunkCount > 1)
+        let countAfterReasoning = runningJob.logEntries.count
+        for _ in 0..<11 {
+            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        }
+        #expect(runningJob.logEntries.count == countAfterReasoning)
+
+        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        #expect(runningJob.logEntries.count == countAfterReasoning + 1)
+        #expect(runningJob.logEntries.last?.kind == .command)
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
