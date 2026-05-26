@@ -1966,7 +1966,7 @@ struct ReviewUITests {
         #expect(window.subtitle == job.cwd)
 
         let displayedLog = transport.displayedLogForTesting
-        #expect(displayedLog == job.reviewMonitorLogText)
+        #expect(displayedLog == job.reviewMonitorLogDocument.text)
     }
 
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
@@ -2588,6 +2588,8 @@ struct ReviewUITests {
         #expect(snapshot.log == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+        #expect(transport.logWordGlowCountForTesting == 1)
+        #expect(transport.logReasoningLineGlowCountForTesting == 0)
     }
 
     @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
@@ -2763,6 +2765,46 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func reasoningAppendCreatesLineGlowAndReduceMotionDisablesGlow() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-reasoning-glow",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let reasoningRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
+        _ = try await awaitTransportRender(transport, after: reasoningRenderCount)
+
+        #expect(transport.logWordGlowCountForTesting == 2)
+        #expect(transport.logReasoningLineGlowCountForTesting == 1)
+
+        transport.setLogReduceMotionForTesting(true)
+        let reduceMotionRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
+        _ = try await awaitTransportRender(transport, after: reduceMotionRenderCount)
+
+        #expect(transport.logWordGlowCountForTesting == 0)
+        #expect(transport.logReasoningLineGlowCountForTesting == 0)
     }
 
     @Test func logAutoFollowRunsOnlyWhenPinnedToBottom() async throws {
@@ -3307,7 +3349,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
 
-        let renderedInitialLog = job.reviewMonitorLogText
+        let renderedInitialLog = job.reviewMonitorLogDocument.text
         let renderedInitialLength = (renderedInitialLog as NSString).length
         let visibleRanges = transport.logFindVisibleCharacterRangesForTesting
         #expect(transport.logFindFeedbackDimmingEnabledForTesting)
@@ -3330,11 +3372,12 @@ struct ReviewUITests {
         job.appendLogEntry(.init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport, after: appendRenderCount)
 
-        let appendedLength = (job.reviewMonitorLogText as NSString).length
+        let appendedLength = (job.reviewMonitorLogDocument.text as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend + 1)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeAppend)
         #expect(transport.logFindStringLengthForTesting == appendedLength)
+        #expect(transport.logSelectedTextForTesting == "needle")
         #expect(appendedVisibleRanges.isEmpty == false)
         #expect(appendedVisibleRanges.allSatisfy { $0.location >= 0 && NSMaxRange($0) <= appendedLength })
 
@@ -3350,8 +3393,9 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: middleAppendRenderCount)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
-        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend + 1)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeMiddleAppend)
+        #expect(transport.logSelectedTextForTesting == "needle")
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
         #expect(transport.logFindBarVisibleForTesting == false)

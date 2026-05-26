@@ -150,14 +150,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundJob = selectedJob
 
         selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
-            let text = selectedJob.reviewMonitorLogText
+            let document = selectedJob.reviewMonitorLogDocument
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
             let logChanged = self.renderBoundJobLog(
-                text,
+                document,
                 restorationTarget: event.kind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
@@ -333,12 +333,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderSelectedJobLog(
-        _ text: String,
+        _ document: ReviewMonitorLogDocument,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
         logScrollView.render(
-            text: text,
+            document: document,
             restoring: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -346,7 +346,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderBoundJobLog(
-        _ text: String,
+        _ document: ReviewMonitorLogDocument,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -354,7 +354,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return false
         }
         return renderSelectedJobLog(
-            text,
+            document,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -474,6 +474,18 @@ extension ReviewMonitorTransportViewController {
 
     var logAutoFollowCountForTesting: Int {
         logScrollView.autoFollowCount
+    }
+
+    var logWordGlowCountForTesting: Int {
+        logScrollView.wordGlowCountForTesting
+    }
+
+    var logReasoningLineGlowCountForTesting: Int {
+        logScrollView.reasoningLineGlowCountForTesting
+    }
+
+    func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
+        logScrollView.setReduceMotionForTesting(reduceMotion)
     }
 
     var logUsesCustomTextKit2SurfaceForTesting: Bool {

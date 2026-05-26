@@ -55,7 +55,7 @@ public enum ReviewMonitorPreviewContent {
 
     @_spi(PreviewSupport)
     public static func makeStore(
-        streamInterval: Duration = .seconds(1)
+        streamInterval: Duration = .milliseconds(40)
     ) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
@@ -97,17 +97,54 @@ public enum ReviewMonitorPreviewContent {
         for (index, job) in runningJobs.enumerated() {
             job.appendLogEntry(
                 .init(
-                    kind: .progress,
-                    text: streamLine(forJobAt: index, tick: nextTick)
+                    kind: .agentMessage,
+                    groupID: "preview-stream-\(job.id)",
+                    text: streamWordChunk(forJobAt: index, tick: nextTick)
                 )
             )
         }
         return nextTick
     }
 
-    private static func streamLine(forJobAt index: Int, tick: Int) -> String {
-        let fragment = streamFragments[(tick + index) % streamFragments.count]
-        return String(format: "stream.tick %03d %@", tick, fragment)
+    private static func streamWordChunk(forJobAt index: Int, tick: Int) -> String {
+        guard streamFragments.isEmpty == false,
+              streamCycleChunkCount > 0
+        else {
+            return "\n"
+        }
+
+        let zeroBasedTick = max(0, tick - 1)
+        let fullCycles = zeroBasedTick / streamCycleChunkCount
+        var remainingChunkOffset = zeroBasedTick % streamCycleChunkCount
+        let normalizedJobIndex = index % streamFragments.count
+
+        for lineOffset in 0..<streamFragments.count {
+            let fragmentIndex = (normalizedJobIndex + lineOffset + 1) % streamFragments.count
+            let lineChunkCount = 2 + streamFragmentChunks[fragmentIndex].count
+            if remainingChunkOffset < lineChunkCount {
+                let lineTick = fullCycles * streamFragments.count + lineOffset + 1
+                if remainingChunkOffset == 0 {
+                    return "stream.tick "
+                }
+                if remainingChunkOffset == 1 {
+                    return streamTickNumberChunk(lineTick)
+                }
+                return streamFragmentChunks[fragmentIndex][remainingChunkOffset - 2]
+            }
+            remainingChunkOffset -= lineChunkCount
+        }
+
+        return "\n"
+    }
+
+    private static func streamTickNumberChunk(_ tick: Int) -> String {
+        if tick < 10 {
+            return "00\(tick) "
+        }
+        if tick < 100 {
+            return "0\(tick) "
+        }
+        return "\(tick) "
     }
 
     private static let streamFragments = [
@@ -118,6 +155,20 @@ public enum ReviewMonitorPreviewContent {
         "delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh",
         "delta/preview +2 -1 to exercise long mock stream lines that should wrap clearly in compact and expanded ReviewMonitor layouts",
     ]
+
+    private static let streamFragmentChunks: [[String]] = streamFragments.map { fragment in
+        let words = fragment.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        return words.enumerated().map { offset, word in
+            if offset == words.count - 1 {
+                return word + "\n"
+            }
+            return word + " "
+        }
+    }
+
+    private static let streamCycleChunkCount = streamFragmentChunks.reduce(0) { total, chunks in
+        total + 2 + chunks.count
+    }
 
     @_spi(PreviewSupport)
     public static func makePreviewAccounts() -> [CodexAccount] {

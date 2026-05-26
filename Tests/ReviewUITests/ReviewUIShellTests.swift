@@ -1185,15 +1185,26 @@ struct ReviewUIShellTests {
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
         )
         let initialRevision = runningJob.reviewMonitorRevision
-        let initialLog = runningJob.reviewMonitorLogText
+        let initialLog = runningJob.reviewMonitorLogDocument.text
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
 
-        let appendedText = String(runningJob.reviewMonitorLogText.dropFirst(initialLog.count))
+        let appendedText = String(runningJob.reviewMonitorLogDocument.text.dropFirst(initialLog.count))
         #expect(runningJob.reviewMonitorRevision > initialRevision)
-        #expect(runningJob.reviewMonitorLogText != initialLog)
+        #expect(runningJob.reviewMonitorLogDocument.text != initialLog)
         #expect(appendedText.contains("stream.tick"))
-        #expect(appendedText.split(separator: "\n").contains { $0.count >= 120 })
+        #expect(appendedText.contains("delta/") == false)
+        #expect(appendedText.count < 32)
+        let expectedAppendText = "\n\nstream.tick "
+        #expect(runningJob.reviewMonitorLogDocument.lastChange == .append(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:preview-stream-\(runningJob.id)"),
+            range: NSRange(
+                location: (runningJob.reviewMonitorLogDocument.text as NSString).length - ("stream.tick " as NSString).length,
+                length: ("stream.tick " as NSString).length
+            ),
+            text: expectedAppendText
+        )))
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
