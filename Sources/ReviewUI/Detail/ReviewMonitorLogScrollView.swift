@@ -1162,13 +1162,17 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     }
 
     private func moveInsertionPoint(by unit: KeyboardMoveUnit, direction: KeyboardMoveDirection) {
-        let currentOffset: Int
         if selectedRange.length > 0 {
-            currentOffset = direction == .backward ? selectedRange.location : NSMaxRange(selectedRange)
-        } else {
-            currentOffset = selectedRange.location
+            let collapsedOffset = characterBoundaryOffset(
+                at: direction == .backward ? selectedRange.location : NSMaxRange(selectedRange),
+                rounding: direction
+            )
+            setSelectedRange(NSRange(location: collapsedOffset, length: 0))
+            scrollRangeToVisible(selectedRange)
+            return
         }
-        let movedOffset = keyboardMovedOffset(from: currentOffset, unit: unit, direction: direction)
+
+        let movedOffset = keyboardMovedOffset(from: selectedRange.location, unit: unit, direction: direction)
         setSelectedRange(NSRange(location: movedOffset, length: 0))
         scrollRangeToVisible(selectedRange)
     }
@@ -1195,23 +1199,87 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         unit: KeyboardMoveUnit,
         direction: KeyboardMoveDirection
     ) -> Int {
+        let movedOffset: Int
         switch unit {
         case .character:
-            return clampUTF16Offset(offset + (direction == .backward ? -1 : 1))
+            movedOffset = characterMovedOffset(from: offset, direction: direction)
         case .word:
-            return wordMovedOffset(from: offset, direction: direction)
+            movedOffset = wordMovedOffset(from: offset, direction: direction)
         case .line:
-            return lineMovedOffset(from: offset, direction: direction)
+            movedOffset = lineMovedOffset(from: offset, direction: direction)
         case .lineBoundary:
-            return lineBoundaryOffset(from: offset, direction: direction)
+            movedOffset = lineBoundaryOffset(from: offset, direction: direction)
         case .document:
-            return direction == .backward ? 0 : textStorage.length
+            movedOffset = direction == .backward ? 0 : textStorage.length
         }
+        return characterBoundaryOffset(at: movedOffset, rounding: direction)
     }
 
     private func rangeBetween(_ firstOffset: Int, _ secondOffset: Int) -> NSRange {
         let location = min(firstOffset, secondOffset)
         return NSRange(location: location, length: abs(firstOffset - secondOffset))
+    }
+
+    private func characterMovedOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
+        let string = textStorage.string
+        guard string.isEmpty == false else {
+            return 0
+        }
+
+        let clampedOffset = clampUTF16Offset(offset)
+        let boundaryOffset = characterBoundaryOffset(at: clampedOffset, rounding: direction)
+        guard boundaryOffset == clampedOffset,
+              let currentIndex = stringIndex(atUTF16Offset: boundaryOffset, in: string)
+        else {
+            return boundaryOffset
+        }
+
+        switch direction {
+        case .backward:
+            guard currentIndex > string.startIndex else {
+                return 0
+            }
+            return string.index(before: currentIndex).utf16Offset(in: string)
+        case .forward:
+            guard currentIndex < string.endIndex else {
+                return textStorage.length
+            }
+            return string.index(after: currentIndex).utf16Offset(in: string)
+        }
+    }
+
+    private func characterBoundaryOffset(at offset: Int, rounding direction: KeyboardMoveDirection) -> Int {
+        let string = textStorage.string
+        let clampedOffset = clampUTF16Offset(offset)
+        guard string.isEmpty == false else {
+            return 0
+        }
+
+        var previousOffset = 0
+        for index in string.indices {
+            let currentOffset = index.utf16Offset(in: string)
+            if currentOffset == clampedOffset {
+                return currentOffset
+            }
+            if currentOffset > clampedOffset {
+                return direction == .backward ? previousOffset : currentOffset
+            }
+            previousOffset = currentOffset
+        }
+
+        let endOffset = string.endIndex.utf16Offset(in: string)
+        if clampedOffset == endOffset {
+            return endOffset
+        }
+        return direction == .backward ? previousOffset : endOffset
+    }
+
+    private func stringIndex(atUTF16Offset offset: Int, in string: String) -> String.Index? {
+        guard offset >= 0, offset <= string.utf16.count else {
+            return nil
+        }
+        let utf16Index = string.utf16.index(string.utf16.startIndex, offsetBy: offset)
+        return String.Index(utf16Index, within: string)
     }
 
     private func wordMovedOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
@@ -1255,56 +1323,73 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     }
 
     private func lineMovedOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
-        let currentLineRange = lineRange(containing: offset)
-        let column = max(0, offset - currentLineRange.location)
         switch direction {
         case .backward:
-            guard currentLineRange.location > 0 else {
-                return lineBoundaryOffset(from: offset, direction: .backward)
-            }
-            let previousLineRange = lineRange(containing: currentLineRange.location - 1)
-            return min(lineContentEndOffset(previousLineRange), previousLineRange.location + column)
+            return textSelectionNavigationMovedOffset(
+                from: offset,
+                direction: .up,
+                destination: .character,
+                rounding: direction
+            ) ?? lineBoundaryOffset(from: offset, direction: .backward)
         case .forward:
-            let nextLineStart = NSMaxRange(currentLineRange)
-            guard nextLineStart < textStorage.length else {
-                return lineBoundaryOffset(from: offset, direction: .forward)
-            }
-            let nextLineRange = lineRange(containing: nextLineStart)
-            return min(lineContentEndOffset(nextLineRange), nextLineRange.location + column)
+            return textSelectionNavigationMovedOffset(
+                from: offset,
+                direction: .down,
+                destination: .character,
+                rounding: direction
+            ) ?? lineBoundaryOffset(from: offset, direction: .forward)
         }
     }
 
     private func lineBoundaryOffset(from offset: Int, direction: KeyboardMoveDirection) -> Int {
-        let lineRange = lineRange(containing: offset)
         switch direction {
         case .backward:
-            return lineRange.location
+            return textSelectionNavigationMovedOffset(
+                from: offset,
+                direction: .left,
+                destination: .line,
+                rounding: direction
+            ) ?? 0
         case .forward:
-            return lineContentEndOffset(lineRange)
+            return textSelectionNavigationMovedOffset(
+                from: offset,
+                direction: .right,
+                destination: .line,
+                rounding: direction
+            ) ?? textStorage.length
         }
     }
 
-    private func lineRange(containing offset: Int) -> NSRange {
-        let string = textStorage.string as NSString
-        guard string.length > 0 else {
-            return NSRange(location: 0, length: 0)
+    private func textSelectionNavigationMovedOffset(
+        from offset: Int,
+        direction: NSTextSelectionNavigation.Direction,
+        destination: NSTextSelectionNavigation.Destination,
+        rounding: KeyboardMoveDirection
+    ) -> Int? {
+        let boundaryOffset = characterBoundaryOffset(at: offset, rounding: rounding)
+        guard let textRange = textRange(for: NSRange(location: boundaryOffset, length: 0)) else {
+            return nil
         }
-        let location = min(max(0, offset), string.length - 1)
-        return string.lineRange(for: NSRange(location: location, length: 0))
-    }
 
-    private func lineContentEndOffset(_ lineRange: NSRange) -> Int {
-        let string = textStorage.string as NSString
-        var end = min(NSMaxRange(lineRange), string.length)
-        while end > lineRange.location {
-            let character = string.character(at: end - 1)
-            if character == 10 || character == 13 {
-                end -= 1
-            } else {
-                break
-            }
+        layoutTextViewport()
+        textLayoutManager.ensureLayout(for: textRange)
+        guard let destinationSelection = textLayoutManager.textSelectionNavigation.destinationSelection(
+            for: NSTextSelection([textRange], affinity: .downstream, granularity: .character),
+            direction: direction,
+            destination: destination,
+            extending: false,
+            confined: false
+        ),
+            let destinationRange = destinationSelection.textRanges.first
+        else {
+            return nil
         }
-        return end
+
+        let range = nsRange(for: destinationRange)
+        if range.length == 0 {
+            return range.location
+        }
+        return rounding == .backward ? range.location : NSMaxRange(range)
     }
 
     private func clampSelectedRange() {

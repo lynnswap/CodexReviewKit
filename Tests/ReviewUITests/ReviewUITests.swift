@@ -3223,6 +3223,63 @@ struct ReviewUITests {
         transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "Fi")
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRight(_:)))
+        #expect(transport.logSelectedTextForTesting == nil)
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "r")
+
+        let graphemeLog = "A🙂e\u{301}B\n"
+        transport.renderLogForTesting(text: graphemeLog, allowIncrementalUpdate: false)
+        transport.setSelectedLogRangeForTesting(NSRange(location: ("A" as NSString).length, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "🙂")
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: ("A🙂" as NSString).length, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "e\u{301}")
+    }
+
+    @Test func logKeyboardLineNavigationUsesSoftWrappedVisualLines() async throws {
+        let wrappedLine = (1...80)
+            .map { "wrapped-segment-\($0)" }
+            .joined(separator: " ")
+        let job = makeJob(
+            id: "job-log-soft-wrap-keyboard",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: wrappedLine + "\nnext logical line\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 560, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        transport.scrollLogToTopForTesting()
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)))
+        let selectedVisualLineEnd = try #require(transport.logSelectedTextForTesting)
+        #expect(selectedVisualLineEnd.isEmpty == false)
+        #expect(selectedVisualLineEnd.contains("\n") == false)
+        #expect((selectedVisualLineEnd as NSString).length < (wrappedLine as NSString).length)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)))
+        let selectedVisualLineMove = try #require(transport.logSelectedTextForTesting)
+        #expect(selectedVisualLineMove.isEmpty == false)
+        #expect(selectedVisualLineMove.contains("\n") == false)
+        #expect((selectedVisualLineMove as NSString).length < (wrappedLine as NSString).length)
     }
 
     @Test func logFindUsesSystemHighlightingAndKeepsSearchStringCurrentAfterAppend() async throws {
