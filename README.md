@@ -65,7 +65,9 @@ separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 Public macOS archives are built locally so Developer ID certificates and notary
 credentials stay out of CI. The local script signs, notarizes, staples, pushes
 the tag from `main`, creates the draft release asset, and then explicitly
-dispatches the read-only release verification workflow for that tag.
+dispatches the release verification workflow for that tag. The workflow runs
+tests with read-only repository access and publishes the draft release only
+after verification succeeds.
 
 ```bash
 scripts/publish-local-release.sh \

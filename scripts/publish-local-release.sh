@@ -6,6 +6,7 @@ usage() {
 Usage: scripts/publish-local-release.sh <tag> --signing-identity <developer-id-identity> --notary-profile <profile> [--dist-root <dir>] [--output-dir <dir>] [--remote <name>] [--release-branch <branch>] [--skip-tests] [--allow-dirty]
 
 Builds, Developer ID signs, notarizes, and uploads the CodexReviewMonitor DMG, then pushes the release tag.
+The dispatched release verification workflow publishes the draft release only after remote tests pass.
 Passing --allow-dirty creates a local-only signed/notarized archive and never pushes a tag or GitHub release.
 EOF
 }
@@ -177,7 +178,7 @@ fi
 
 if [[ "$allow_dirty" -eq 0 ]]; then
   if ! command -v gh >/dev/null 2>&1; then
-    echo "gh CLI is required to create the draft GitHub Release." >&2
+    echo "gh CLI is required to create the draft GitHub Release and dispatch release verification." >&2
     exit 1
   fi
 
@@ -250,5 +251,6 @@ fi
 
 gh workflow run release.yml --ref "$tag" -f version="$tag"
 
-echo "Published local release draft for $tag with asset: $archive_path"
+echo "Created local release draft for $tag with asset: $archive_path"
 echo "Dispatched Release Verification workflow for $tag"
+echo "The workflow will publish the draft release after verification succeeds."
