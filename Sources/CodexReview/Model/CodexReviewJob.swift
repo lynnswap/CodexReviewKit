@@ -92,7 +92,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 appended = "\n\n" + block.text
             }
 
-            let previousLength = CodexReviewJob.utf16Length(document.text)
+            let previousLength = document.textUTF16Length
             let suffixLength = CodexReviewJob.utf16Length(appended)
             let blockLength = CodexReviewJob.utf16Length(block.text)
             let blockRange = NSRange(
@@ -101,6 +101,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
 
             document.text += appended
+            document.textUTF16Length += suffixLength
             document.blocks.append(.init(
                 id: block.id,
                 kind: block.kind,
@@ -112,7 +113,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 kind: block.kind,
                 blockID: block.id,
                 range: blockRange,
-                text: appended
+                text: appended,
+                textUTF16Length: suffixLength
             )
         }
 
@@ -127,16 +129,18 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 return nil
             }
 
-            let previousLength = CodexReviewJob.utf16Length(document.text)
+            let previousLength = document.textUTF16Length
             let deltaLength = CodexReviewJob.utf16Length(delta)
             document.text += delta
+            document.textUTF16Length += deltaLength
             document.blocks[blockIndexInDocument].range.length += deltaLength
             lastBlockIndex = blockIndex
             return .init(
                 kind: block.kind,
                 blockID: block.id,
                 range: NSRange(location: previousLength, length: deltaLength),
-                text: delta
+                text: delta,
+                textUTF16Length: deltaLength
             )
         }
     }
@@ -255,15 +259,25 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return state
         }
 
-        mutating func append(_ entry: ReviewLogEntry) -> ReviewMonitorLogAppend? {
+        mutating func append(_ entry: ReviewLogEntry) -> ReviewMonitorLogChange? {
             entries.append(entry)
 
             if let key = CodexReviewJob.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
                     let oldText = blocks[blockIndex].text
                     if entry.replacesGroup || blockIndex != blocks.indices.last {
+                        let previousMonitorDocument = reviewMonitorProjection.document
+                        let blockID = blocks[blockIndex].id
                         self = Self.rebuild(entries: entries)
-                        return nil
+                        if entry.replacesGroup,
+                           let replacement = Self.monitorReplacement(
+                               previous: previousMonitorDocument,
+                               current: reviewMonitorProjection.document,
+                               blockID: blockID
+                           ) {
+                            return .replace(replacement)
+                        }
+                        return .reload
                     }
 
                     blocks[blockIndex].text.append(entry.text)
@@ -274,7 +288,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                         newText: newText,
                         blockIndex: blockIndex,
                         delta: entry.text
-                    )
+                    ).map(ReviewMonitorLogChange.append)
                 }
 
                 indexByGroup[key] = blocks.count
@@ -288,7 +302,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 text: entry.text
             )
             blocks.append(block)
-            return appendTailBlock(block, at: blockIndex)
+            return appendTailBlock(block, at: blockIndex).map(ReviewMonitorLogChange.append)
         }
 
         private mutating func ingestBlock(_ block: RenderedBlock, at index: Int) {
@@ -567,6 +581,29 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 return nil
             }
         }
+
+        private static func monitorReplacement(
+            previous: ReviewMonitorLogDocument,
+            current: ReviewMonitorLogDocument,
+            blockID: ReviewMonitorLogBlockID
+        ) -> ReviewMonitorLogReplacement? {
+            guard let previousBlock = previous.blocks.first(where: { $0.id == blockID }),
+                  let currentBlock = current.blocks.first(where: { $0.id == blockID }),
+                  previousBlock.range.location == currentBlock.range.location,
+                  NSMaxRange(currentBlock.range) <= current.textUTF16Length
+            else {
+                return nil
+            }
+
+            let replacementText = (current.text as NSString).substring(with: currentBlock.range)
+            return .init(
+                kind: currentBlock.kind,
+                blockID: currentBlock.id,
+                range: previousBlock.range,
+                text: replacementText,
+                textUTF16Length: currentBlock.range.length
+            )
+        }
     }
 
     @ObservationIgnored
@@ -652,22 +689,26 @@ public final class CodexReviewJob: Identifiable, Hashable {
         logState = Self.trimmedLogState(entries: entries)
         syncLogState(
             previousMonitorDocument: previousMonitorDocument,
-            preferredMonitorAppend: nil
+            preferredMonitorChange: .reload
         )
     }
 
     package func appendLogEntry(_ entry: ReviewLogEntry) {
         let previousMonitorDocument = reviewMonitorLogDocument
-        let preferredMonitorAppend = logState.append(entry)
+        let preferredMonitorChange = logState.append(entry)
         let didTrim = applyReviewLogLimit()
         syncLogState(
             previousMonitorDocument: previousMonitorDocument,
-            preferredMonitorAppend: didTrim ? nil : preferredMonitorAppend
+            preferredMonitorChange: didTrim ? .reload : preferredMonitorChange
         )
     }
 
     @discardableResult
     package func applyReviewLogLimit() -> Bool {
+        guard logState.cappedBytes > Self.logLimitBytes else {
+            return false
+        }
+
         let trimmedState = Self.trimmedLogState(from: logState)
         guard trimmedState.entries != logState.entries else {
             return false
@@ -712,7 +753,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     private func syncLogState(
         previousMonitorDocument: ReviewMonitorLogDocument,
-        preferredMonitorAppend: ReviewMonitorLogAppend?
+        preferredMonitorChange: ReviewMonitorLogChange?
     ) {
         logEntries = logState.entries
         logText = logState.logText
@@ -723,32 +764,88 @@ public final class CodexReviewJob: Identifiable, Hashable {
         cappedLogBytes = logState.cappedBytes
 
         let currentMonitorDocument = logState.reviewMonitorDocument
-        guard previousMonitorDocument.text != currentMonitorDocument.text else {
-            return
-        }
-
-        reviewMonitorLogDocument = Self.resolveMonitorDocument(
+        guard let resolvedMonitorDocument = Self.resolveMonitorDocument(
             previous: previousMonitorDocument,
             current: currentMonitorDocument,
-            preferredAppend: preferredMonitorAppend
-        )
+            preferredChange: preferredMonitorChange
+        ) else {
+            return
+        }
+        reviewMonitorLogDocument = resolvedMonitorDocument
     }
 
     private nonisolated static func resolveMonitorDocument(
         previous: ReviewMonitorLogDocument,
         current: ReviewMonitorLogDocument,
-        preferredAppend: ReviewMonitorLogAppend?
-    ) -> ReviewMonitorLogDocument {
+        preferredChange: ReviewMonitorLogChange?
+    ) -> ReviewMonitorLogDocument? {
+        guard let preferredChange else {
+            return nil
+        }
+
+        guard monitorDocumentContentChanged(previous: previous, current: current) else {
+            return nil
+        }
+
         var resolved = current
         resolved.revision = previous.revision &+ 1
-        if let preferredAppend,
-           current.text == previous.text + preferredAppend.text,
-           NSMaxRange(preferredAppend.range) <= utf16Length(current.text) {
+
+        switch preferredChange {
+        case .append(let preferredAppend)
+            where isContiguousMonitorAppend(
+                preferredAppend,
+                previousUTF16Length: previous.textUTF16Length,
+                currentUTF16Length: current.textUTF16Length
+            ):
             resolved.lastChange = .append(preferredAppend)
-        } else {
+        case .replace(let replacement)
+            where isValidMonitorReplacement(
+                replacement,
+                previousUTF16Length: previous.textUTF16Length,
+                currentUTF16Length: current.textUTF16Length
+            ):
+            resolved.lastChange = .replace(replacement)
+        default:
             resolved.lastChange = .reload
         }
         return resolved
+    }
+
+    private nonisolated static func monitorDocumentContentChanged(
+        previous: ReviewMonitorLogDocument,
+        current: ReviewMonitorLogDocument
+    ) -> Bool {
+        if previous.textUTF16Length != current.textUTF16Length {
+            return true
+        }
+        if previous.blocks != current.blocks {
+            return true
+        }
+        return previous.text != current.text
+    }
+
+    private nonisolated static func isContiguousMonitorAppend(
+        _ append: ReviewMonitorLogAppend,
+        previousUTF16Length: Int,
+        currentUTF16Length: Int
+    ) -> Bool {
+        let appendEnd = previousUTF16Length + append.textUTF16Length
+        return append.textUTF16Length > 0 &&
+            currentUTF16Length == appendEnd &&
+            append.range.location >= previousUTF16Length &&
+            NSMaxRange(append.range) <= appendEnd
+    }
+
+    private nonisolated static func isValidMonitorReplacement(
+        _ replacement: ReviewMonitorLogReplacement,
+        previousUTF16Length: Int,
+        currentUTF16Length: Int
+    ) -> Bool {
+        let replacementEnd = replacement.range.location + replacement.textUTF16Length
+        return replacement.textUTF16Length >= 0 &&
+            NSMaxRange(replacement.range) <= previousUTF16Length &&
+            currentUTF16Length == previousUTF16Length - replacement.range.length + replacement.textUTF16Length &&
+            replacementEnd <= currentUTF16Length
     }
 
     private nonisolated static func trimmedLogState(entries: [ReviewLogEntry]) -> LogState {

@@ -103,7 +103,7 @@ struct CodexReviewJobRenderingTests {
         )))
     }
 
-    @Test func replacingGroupedPlanUsesReloadMonitorChange() {
+    @Test func replacingGroupedPlanUsesReplacementMonitorChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-plan-reload",
             cwd: "/tmp/workspace",
@@ -118,7 +118,12 @@ struct CodexReviewJobRenderingTests {
         job.appendLogEntry(.init(kind: .plan, groupID: "plan-1", replacesGroup: true, text: "- updated"))
 
         #expect(job.reviewMonitorLogDocument.text == "- updated")
-        #expect(job.reviewMonitorLogDocument.lastChange == .reload)
+        #expect(job.reviewMonitorLogDocument.lastChange == .replace(.init(
+            kind: .plan,
+            blockID: ReviewMonitorLogBlockID("plan:plan-1"),
+            range: NSRange(location: 0, length: ("- original" as NSString).length),
+            text: "- updated"
+        )))
     }
 
     @Test func cappedAgentMessageKeepsNewestText() {

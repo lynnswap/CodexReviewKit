@@ -468,6 +468,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.appendCount
     }
 
+    var logReplaceCountForTesting: Int {
+        logScrollView.replaceCount
+    }
+
     var logReloadCountForTesting: Int {
         logScrollView.reloadCount
     }

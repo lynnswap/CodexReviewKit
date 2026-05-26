@@ -2701,7 +2701,7 @@ struct ReviewUITests {
         #expect(abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting) < 0.5)
     }
 
-    @Test func selectedJobGroupedReplacementUsesReloadPath() async throws {
+    @Test func selectedJobGroupedReplacementUsesReplacementPath() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-reload",
             cwd: "/tmp/workspace-alpha",
@@ -2727,13 +2727,15 @@ struct ReviewUITests {
 
         let reloadRenderCount = transport.renderCountForTesting
         let appendCount = transport.logAppendCountForTesting
+        let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         job.appendLogEntry(.init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
         let snapshot = try await awaitTransportRender(transport, after: reloadRenderCount)
         #expect(snapshot.log == "- updated")
         #expect(transport.logAppendCountForTesting == appendCount)
-        #expect(transport.logReloadCountForTesting == reloadCount + 1)
+        #expect(transport.logReplaceCountForTesting == replaceCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
     @Test func metadataOnlyUpdatesDoNotTouchLogView() async throws {
