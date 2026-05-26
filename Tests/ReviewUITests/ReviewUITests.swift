@@ -2568,7 +2568,11 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 360))
         viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
 
         let initialRenderCount = transport.renderCountForTesting
@@ -2582,6 +2586,41 @@ struct ReviewUITests {
 
         let snapshot = try await awaitTransportRender(transport, after: appendRenderCount)
         #expect(snapshot.log == "Initial log")
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
+        let decomposedPrefix = "Caf\u{0065}\u{0301}"
+        let precomposedUpdate = "Caf\u{00E9} appended"
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-canonical-append",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg_1", text: decomposedPrefix)
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+        #expect(transport.renderLogForTesting(text: precomposedUpdate, allowIncrementalUpdate: true))
+
+        #expect(transport.displayedLogForTesting.hasSuffix(" appended"))
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
@@ -2620,6 +2659,44 @@ struct ReviewUITests {
         #expect(snapshot.log == "Initial one two")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func shortLogAppendDoesNotGrowDocumentFrameBeforeContentIsScrollable() async throws {
+        let job = makeJob(
+            id: "job-short-append-frame-stability",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: "review.start\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 600))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.view.layoutSubtreeIfNeeded()
+
+        let initialDocumentFrame = transport.logDocumentViewFrameForTesting
+        #expect(transport.isLogPinnedToBottomForTesting)
+        #expect(abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting) < 0.5)
+
+        let appendRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(
+            kind: .progress,
+            text: "stream.tick 001 delta/layout +2 -0 while the short log remains below the scrollable viewport height"
+        ))
+        _ = try await awaitTransportRender(transport, after: appendRenderCount)
+        transport.view.layoutSubtreeIfNeeded()
+
+        let appendedDocumentFrame = transport.logDocumentViewFrameForTesting
+        #expect(abs(appendedDocumentFrame.height - initialDocumentFrame.height) < 0.5)
+        #expect(abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting) < 0.5)
     }
 
     @Test func selectedJobGroupedReplacementUsesReloadPath() async throws {
@@ -2734,6 +2811,51 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: pinnedRenderCount)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
+    }
+
+    @Test func logAppendDoesNotScrollWhenNearBottomButUnpinned() async throws {
+        let longLog = (0..<500)
+            .map { "scroll stability line \($0) with enough text to keep TextKit 2 viewport layout active" }
+            .joined(separator: "\n")
+        let job = makeJob(
+            id: "job-append-near-bottom-scroll-stability",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let nearBottomOffset = transport.logMaximumVerticalScrollOffsetForTesting - 12
+        transport.scrollLogToOffsetForTesting(nearBottomOffset)
+        #expect(transport.isLogPinnedToBottomForTesting == false)
+        let offsetBeforeAppend = transport.logVerticalScrollOffsetForTesting
+        let autoFollowBeforeAppend = transport.logAutoFollowCountForTesting
+        let programmaticScrollsBeforeAppend = transport.logProgrammaticScrollCountForTesting
+
+        let appendRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(
+            kind: .progress,
+            text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
+        ))
+        _ = try await awaitTransportRender(transport, after: appendRenderCount)
+
+        #expect(transport.logAutoFollowCountForTesting == autoFollowBeforeAppend)
+        #expect(transport.logProgrammaticScrollCountForTesting == programmaticScrollsBeforeAppend)
+        #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeAppend) < 0.5)
+        #expect(transport.isLogPinnedToBottomForTesting == false)
     }
 
     @Test func programmaticLogAutoFollowRequestsOverlayScrollerHideWhenShown() async throws {
@@ -2956,7 +3078,7 @@ struct ReviewUITests {
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
 
-    @Test func logViewUsesTextKit1AndDisablesEditingFeatures() async throws {
+    @Test func logViewUsesCustomTextKit2SurfaceAndDisablesEditingFeatures() async throws {
         let job = makeJob(
             id: "job-log-config",
             status: .running,
@@ -2974,10 +3096,266 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
 
-        #expect(transport.logUsesTextKit1ForTesting)
+        #expect(transport.logUsesCustomTextKit2SurfaceForTesting)
+        #expect(transport.logUsesTextViewForTesting == false)
+        #expect(transport.logUsesLegacyLayoutManagerForTesting == false)
         #expect(transport.logIsEditableForTesting == false)
         #expect(transport.logIsSelectableForTesting)
+        #expect(transport.logHitTestTargetsDocumentViewForTesting)
         #expect(transport.logWritingToolsDisabledForTesting)
+    }
+
+    @Test func logViewMaintainsVisibleTextKit2FragmentCoverageWhenScrolled() async throws {
+        let longLog = (0..<1_000).map { "fragment coverage line \($0)" }.joined(separator: "\n")
+        let job = makeJob(
+            id: "job-log-fragments",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.view.layoutSubtreeIfNeeded()
+
+        let bottomFragmentCount = transport.logVisibleFragmentViewCountForTesting
+        #expect(bottomFragmentCount > 0)
+        #expect(bottomFragmentCount < 1_000)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+
+        transport.scrollLogToTopForTesting()
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+
+        let middleOffset = transport.logMaximumVerticalScrollOffsetForTesting / 2
+        transport.scrollLogToOffsetForTesting(middleOffset)
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+
+        transport.scrollLogToBottomForTesting()
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+    }
+
+    @Test func logAppendDoesNotLeaveStaleTextKit2FragmentViews() async throws {
+        let longLog = (0..<400).map { "append fragment line \($0)" }.joined(separator: "\n")
+        let job = makeJob(
+            id: "job-log-fragment-append",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        let appendCount = transport.logAppendCountForTesting
+
+        let updateRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .progress, text: "Newest fragment line"))
+        _ = try await awaitTransportRender(transport, after: updateRenderCount)
+
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.logStaleFragmentViewCountForTesting == 0)
+    }
+
+    @Test func logViewSupportsReadOnlySelectAllCopyFindValidationAndAccessibility() async throws {
+        let job = makeJob(
+            id: "job-log-readonly",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: "First readonly line\nSecond readonly line\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.showFindInterface)))
+        #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.nextMatch)))
+        #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.replace)) == false)
+        #expect(transport.logAccessibilityValueForTesting == job.logText)
+        #expect(transport.logDocumentViewExportsUserInterfaceValidationForTesting)
+
+        let copyItem = commandMenuItemForTesting("copy:")
+        let selectAllItem = commandMenuItemForTesting("selectAll:")
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(selectAllItem))
+
+        transport.selectAllLogForTesting()
+        #expect(transport.logSelectedTextForTesting == job.logText)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
+
+        NSPasteboard.general.clearContents()
+        transport.copyLogSelectionForTesting()
+        #expect(NSPasteboard.general.string(forType: .string) == job.logText)
+
+        transport.clearLogFinderSelectedRangesForTesting()
+        #expect(transport.logSelectedTextForTesting == nil)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "Fi")
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRight(_:)))
+        #expect(transport.logSelectedTextForTesting == nil)
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "r")
+
+        let graphemeLog = "A🙂e\u{301}B\n"
+        transport.renderLogForTesting(text: graphemeLog, allowIncrementalUpdate: false)
+        transport.setSelectedLogRangeForTesting(NSRange(location: ("A" as NSString).length, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "🙂")
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: ("A🙂" as NSString).length, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        #expect(transport.logSelectedTextForTesting == "e\u{301}")
+    }
+
+    @Test func logKeyboardLineNavigationUsesSoftWrappedVisualLines() async throws {
+        let wrappedLine = (1...80)
+            .map { "wrapped-segment-\($0)" }
+            .joined(separator: " ")
+        let job = makeJob(
+            id: "job-log-soft-wrap-keyboard",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: wrappedLine + "\nnext logical line\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 560, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        transport.scrollLogToTopForTesting()
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)))
+        let selectedVisualLineEnd = try #require(transport.logSelectedTextForTesting)
+        #expect(selectedVisualLineEnd.isEmpty == false)
+        #expect(selectedVisualLineEnd.contains("\n") == false)
+        #expect((selectedVisualLineEnd as NSString).length < (wrappedLine as NSString).length)
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
+        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)))
+        let selectedVisualLineMove = try #require(transport.logSelectedTextForTesting)
+        #expect(selectedVisualLineMove.isEmpty == false)
+        #expect(selectedVisualLineMove.contains("\n") == false)
+        #expect((selectedVisualLineMove as NSString).length < (wrappedLine as NSString).length)
+    }
+
+    @Test func logFindUsesSystemHighlightingAndKeepsSearchStringCurrentAfterAppend() async throws {
+        let initialLog = (1...140)
+            .map { "needle \($0) with enough trailing text to wrap in the visible log surface" }
+            .joined(separator: "\n") + "\n"
+        let job = makeJob(
+            id: "job-log-find-system-highlights",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: initialLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 360))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let renderedInitialLog = job.reviewMonitorLogText
+        let renderedInitialLength = (renderedInitialLog as NSString).length
+        let visibleRanges = transport.logFindVisibleCharacterRangesForTesting
+        #expect(transport.logFindFeedbackDimmingEnabledForTesting)
+        #expect(transport.logFindBarContainerContentViewIsTextContentViewForTesting)
+        #expect(transport.logFindStringLengthForTesting == renderedInitialLength)
+        #expect(visibleRanges.isEmpty == false)
+        #expect(visibleRanges.allSatisfy { $0.location >= 0 && NSMaxRange($0) <= renderedInitialLength })
+
+        let firstNeedleRange = (renderedInitialLog as NSString).range(of: "needle")
+        #expect(firstNeedleRange.location != NSNotFound)
+        transport.setSelectedLogRangeForTesting(firstNeedleRange)
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logFindFeedbackDimmingEnabledForTesting)
+
+        let findStringWillChangeCountBeforeAppend = transport.logFindClientStringWillChangeCountForTesting
+        let findIndicatorInvalidationCountBeforeAppend = transport.logFindIndicatorInvalidationCountForTesting
+        let appendRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .progress, text: "needle appended"))
+        _ = try await awaitTransportRender(transport, after: appendRenderCount)
+
+        let appendedLength = (job.reviewMonitorLogText as NSString).length
+        let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeAppend + 1)
+        #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeAppend)
+        #expect(transport.logFindStringLengthForTesting == appendedLength)
+        #expect(appendedVisibleRanges.isEmpty == false)
+        #expect(appendedVisibleRanges.allSatisfy { $0.location >= 0 && NSMaxRange($0) <= appendedLength })
+
+        let middleOffset = transport.logMaximumVerticalScrollOffsetForTesting / 2
+        transport.scrollLogToOffsetForTesting(middleOffset)
+        #expect(transport.isLogPinnedToBottomForTesting == false)
+
+        let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
+        let findStringWillChangeCountBeforeMiddleAppend = transport.logFindClientStringWillChangeCountForTesting
+        let findIndicatorInvalidationCountBeforeMiddleAppend = transport.logFindIndicatorInvalidationCountForTesting
+        let middleAppendRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .progress, text: "needle appended while the log is not following bottom"))
+        _ = try await awaitTransportRender(transport, after: middleAppendRenderCount)
+
+        #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend + 1)
+        #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeMiddleAppend)
+
+        viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
+        #expect(transport.logFindBarVisibleForTesting == false)
+        #expect(transport.logFindFeedbackDimmingEnabledForTesting)
     }
 
     @Test func authFailedJobShowsNormalFailureDetails() async throws {
@@ -3042,6 +3420,10 @@ func textFinderMenuItemForTesting(_ action: NSTextFinder.Action) -> NSMenuItem {
     )
     item.tag = action.rawValue
     return item
+}
+
+func commandMenuItemForTesting(_ selectorName: String) -> NSMenuItem {
+    NSMenuItem(title: "", action: Selector((selectorName)), keyEquivalent: "")
 }
 
 @MainActor
@@ -3313,13 +3695,13 @@ func awaitTransportRender(
 }
 
 @MainActor
-func expectLogTextContainerWidthTracksTextView(
+func expectLogTextContainerWidthTracksContentView(
     _ transport: ReviewMonitorTransportViewController
 ) {
-    let textViewFrame = transport.logTextViewFrameForTesting
+    let textContentFrame = transport.logTextContentFrameForTesting
     let textContainerInset = transport.logTextContainerInsetForTesting
     let textContainerSize = transport.logTextContainerSizeForTesting
-    let expectedWidth = max(0, textViewFrame.width - textContainerInset.width * 2)
+    let expectedWidth = max(0, textContentFrame.width - textContainerInset.width * 2)
 
     #expect(abs(textContainerSize.width - expectedWidth) < 1)
 }

@@ -111,12 +111,12 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static let streamFragments = [
-        "delta/sidebar +4 -1",
-        "delta/layout +2 -0",
-        "delta/selection +1 -1",
-        "delta/transport +3 -2",
-        "delta/render +5 -3",
-        "delta/preview +2 -1",
+        "delta/sidebar +4 -1 while preserving workspace expansion, selected job identity, and row geometry across a narrow preview window resize",
+        "delta/layout +2 -0 after recomputing visible log fragments, scroll restoration, and live text wrapping for the current viewport",
+        "delta/selection +1 -1 with read-only range preservation, copy validation, and finder highlight rects following the reflowed log text",
+        "delta/transport +3 -2 while streaming monitor revisions through append-only updates without forcing a full log surface reload",
+        "delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh",
+        "delta/preview +2 -1 to exercise long mock stream lines that should wrap clearly in compact and expanded ReviewMonitor layouts",
     ]
 
     @_spi(PreviewSupport)

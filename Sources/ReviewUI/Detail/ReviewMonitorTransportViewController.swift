@@ -337,8 +337,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        logScrollView.replaceText(
-            text,
+        logScrollView.render(
+            text: text,
             restoring: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -476,8 +476,16 @@ extension ReviewMonitorTransportViewController {
         logScrollView.autoFollowCount
     }
 
-    var logUsesTextKit1ForTesting: Bool {
-        logScrollView.usesTextKit1ForTesting
+    var logUsesCustomTextKit2SurfaceForTesting: Bool {
+        logScrollView.usesCustomTextKit2SurfaceForTesting
+    }
+
+    var logUsesTextViewForTesting: Bool {
+        logScrollView.usesTextViewForTesting
+    }
+
+    var logUsesLegacyLayoutManagerForTesting: Bool {
+        logScrollView.usesLegacyLayoutManagerForTesting
     }
 
     var logIsEditableForTesting: Bool {
@@ -498,6 +506,38 @@ extension ReviewMonitorTransportViewController {
 
     var logFindBarVisibleForTesting: Bool {
         logScrollView.isFindBarVisibleForTesting
+    }
+
+    var logFindVisibleCharacterRangesForTesting: [NSRange] {
+        logScrollView.findVisibleCharacterRangesForTesting
+    }
+
+    var logFindStringLengthForTesting: Int {
+        logScrollView.findStringLengthForTesting
+    }
+
+    var logFindClientStringWillChangeCountForTesting: Int {
+        logScrollView.findClientStringWillChangeCountForTesting
+    }
+
+    var logFindIndicatorInvalidationCountForTesting: Int {
+        logScrollView.findIndicatorInvalidationCountForTesting
+    }
+
+    var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
+        logScrollView.findBarContainerContentViewIsTextContentViewForTesting
+    }
+
+    var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
+        logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
+    }
+
+    var logFindFeedbackDimmingEnabledForTesting: Bool {
+        logScrollView.findFeedbackDimmingEnabledForTesting
+    }
+
+    var logHitTestTargetsDocumentViewForTesting: Bool {
+        logScrollView.hitTestTargetsDocumentViewForTesting
     }
 
     var logWritingToolsDisabledForTesting: Bool {
@@ -676,6 +716,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.verticalScrollOffsetForTesting
     }
 
+    var logViewportHeightForTesting: CGFloat {
+        logScrollView.viewportHeightForTesting
+    }
+
     var logMinimumVerticalScrollOffsetForTesting: CGFloat {
         logScrollView.minimumVerticalScrollOffsetForTesting
     }
@@ -684,8 +728,8 @@ extension ReviewMonitorTransportViewController {
         logScrollView.maximumVerticalScrollOffsetForTesting
     }
 
-    var logTextViewFrameForTesting: NSRect {
-        logScrollView.textViewFrameForTesting
+    var logTextContentFrameForTesting: NSRect {
+        logScrollView.textContentFrameForTesting
     }
 
     var logDocumentViewFrameForTesting: NSRect {
@@ -706,6 +750,71 @@ extension ReviewMonitorTransportViewController {
 
     var logTextContainerInsetForTesting: NSSize {
         logScrollView.textContainerInsetForTesting
+    }
+
+    var logVisibleFragmentViewCountForTesting: Int {
+        logScrollView.visibleFragmentViewCountForTesting
+    }
+
+    var logVisibleFragmentBoundsForTesting: NSRect {
+        logScrollView.visibleFragmentBoundsForTesting
+    }
+
+    var logStaleFragmentViewCountForTesting: Int {
+        logScrollView.staleFragmentViewCountForTesting
+    }
+
+    var logProgrammaticScrollCountForTesting: Int {
+        logScrollView.programmaticScrollCountForTesting
+    }
+
+    var logAccessibilityValueForTesting: String? {
+        logScrollView.accessibilityValueForTesting
+    }
+
+    var logSelectedTextForTesting: String? {
+        logScrollView.selectedTextForTesting
+    }
+
+    func selectAllLogForTesting() {
+        logScrollView.selectAllForTesting()
+    }
+
+    func setSelectedLogRangeForTesting(_ range: NSRange) {
+        logScrollView.setSelectedLogRangeForTesting(range)
+    }
+
+    var logDocumentViewExportsUserInterfaceValidationForTesting: Bool {
+        logScrollView.documentViewExportsUserInterfaceValidationForTesting
+    }
+
+    func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        logScrollView.validateDocumentUserInterfaceItemForTesting(item)
+    }
+
+    func clearLogFinderSelectedRangesForTesting() {
+        logScrollView.clearFinderSelectedRangesForTesting()
+    }
+
+    func performLogKeyboardCommandForTesting(_ selector: Selector) {
+        logScrollView.performKeyboardCommandForTesting(selector)
+    }
+
+    @discardableResult
+    func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
+        logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
+    }
+
+    func copyLogSelectionForTesting() {
+        logScrollView.copySelectionForTesting()
+    }
+
+    func beginLogLiveResizeForTesting() {
+        logScrollView.beginLiveResizeForTesting()
+    }
+
+    func endLogLiveResizeForTesting() {
+        logScrollView.endLiveResizeForTesting()
     }
 
     func scrollLogToBottomForTesting() {
