@@ -145,7 +145,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func displayJob(_ selectedJob: CodexReviewJob) {
+        let isSwitchingRenderedJob = boundJob != nil && boundJob !== selectedJob
         cacheBoundJobScrollTarget()
+        if isSwitchingRenderedJob {
+            logScrollView.resetFindStateForContentReuse()
+        }
         selectedJobObservationScope.cancelAll()
         boundJob = selectedJob
 
@@ -173,6 +177,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         cacheBoundJobScrollTarget()
         selectedJobObservationScope.cancelAll()
         boundJob = nil
+        logScrollView.resetFindStateForContentReuse()
         if logScrollView.clear() {
             noteRenderForTesting()
         }
@@ -532,6 +537,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.isFindBarVisibleForTesting
     }
 
+    var logTextFinderIdentifierForTesting: ObjectIdentifier {
+        logScrollView.textFinderIdentifierForTesting
+    }
+
     var logFindVisibleCharacterRangesForTesting: [NSRange] {
         logScrollView.findVisibleCharacterRangesForTesting
     }
@@ -546,6 +555,18 @@ extension ReviewMonitorTransportViewController {
 
     var logHasPendingFindClientStringChangeForTesting: Bool {
         logScrollView.hasPendingFindClientStringChangeForTesting
+    }
+
+    var logFindClientUsesSnapshotForTesting: Bool {
+        logScrollView.findClientUsesSnapshotForTesting
+    }
+
+    var logFindClientSnapshotMapsToDocumentForTesting: Bool {
+        logScrollView.findClientSnapshotMapsToDocumentForTesting
+    }
+
+    var logFindClientFirstSelectedRangeForTesting: NSRange {
+        logScrollView.findClientFirstSelectedRangeForTesting
     }
 
     func flushLogPendingFindClientStringChangeForTesting() {
@@ -806,6 +827,10 @@ extension ReviewMonitorTransportViewController {
 
     var logSelectedTextForTesting: String? {
         logScrollView.selectedTextForTesting
+    }
+
+    var logSelectedRangeForTesting: NSRange {
+        logScrollView.selectedRangeForTesting
     }
 
     func selectAllLogForTesting() {
