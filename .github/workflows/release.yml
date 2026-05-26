@@ -2,8 +2,8 @@ name: Release Verification
 
 # Release assets are built, Developer ID signed, notarized, and uploaded by
 # scripts/publish-local-release.sh before the release tag is pushed. The local
-# script explicitly dispatches this read-only verification workflow after the
-# tag exists, so tag pushes do not implicitly build unsigned release assets.
+# script explicitly dispatches this workflow after the draft release asset
+# exists, so tag pushes do not implicitly build unsigned release assets.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +24,8 @@ jobs:
     name: Package Tests
     runs-on: macos-26
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -32,6 +34,11 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3." >&2
+            exit 1
+          fi
           if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
             echo "Release verification must be dispatched against the release tag ref." >&2
             echo "Expected tag: ${RELEASE_VERSION}" >&2
@@ -85,3 +92,72 @@ jobs:
             -destination 'platform=macOS,arch=arm64' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO
+
+  publish-release:
+    name: Publish Verified Release
+    needs: package-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Verify release ref
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must look like v1.2.3." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release publishing must be dispatched against the release tag ref." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual ref: ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Publish verified draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          tag_name="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')"
+          if [[ "${tag_name}" != "${RELEASE_VERSION}" ]]; then
+            echo "Release tag mismatch." >&2
+            echo "Expected tag: ${RELEASE_VERSION}" >&2
+            echo "Actual tag:   ${tag_name}" >&2
+            exit 1
+          fi
+
+          expected_asset="CodexReviewMonitor_${RELEASE_VERSION#v}.dmg"
+          asset_state="$(
+            EXPECTED_ASSET="${expected_asset}" \
+              gh release view "${RELEASE_VERSION}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --json assets \
+                --jq '.assets[] | select(.name == env.EXPECTED_ASSET) | .state' \
+              | head -n 1
+          )"
+          if [[ "${asset_state}" != "uploaded" ]]; then
+            echo "Expected uploaded release asset was not found: ${expected_asset}" >&2
+            exit 1
+          fi
+
+          is_draft="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')"
+          is_prerelease="$(gh release view "${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" --json isPrerelease --jq '.isPrerelease')"
+          if [[ "${is_draft}" != "true" ]]; then
+            if [[ "${is_prerelease}" == "false" ]]; then
+              echo "Release ${RELEASE_VERSION} is already published."
+              exit 0
+            fi
+            echo "Release ${RELEASE_VERSION} is already public but marked as a prerelease." >&2
+            exit 1
+          fi
+
+          gh release edit "${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --prerelease=false
