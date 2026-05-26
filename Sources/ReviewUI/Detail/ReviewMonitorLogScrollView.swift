@@ -641,7 +641,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private let textStorage = NSTextStorage()
     private let textContentView = ReviewMonitorLogContentView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
-    private let lineGlowView = ReviewMonitorLogLineGlowView()
     private let selectionView = ReviewMonitorLogSelectionView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
@@ -675,11 +674,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             .foregroundColor: NSColor.textColor,
         ]
     }
-
-    private static let reasoningLineGlowKinds: Set<ReviewLogEntry.Kind> = [
-        .reasoningSummary,
-        .rawReasoning,
-    ]
 
     private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
         .agentMessage,
@@ -738,7 +732,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         textContentStorage.primaryTextLayoutManager = textLayoutManager
         textLayoutManager.textViewportLayoutController.delegate = self
         addSubview(textContentView)
-        textContentView.addSubview(lineGlowView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
         estimatedDocumentHeight = measuredDocumentHeight()
@@ -812,7 +805,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         if widthChanged || insetsChanged {
             clearWordFadeAnimations()
-            lineGlowView.clear()
         }
         if containerChanged || estimatedDocumentHeight <= 0 {
             updateEstimatedDocumentHeight()
@@ -850,8 +842,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
             measureEstimatedHeightImmediately: false
         )
-        if let animation {
-            enqueueReasoningLineGlowIfNeeded(for: animation, startedAt: glowAnimationStart)
+        if animation != nil {
             startGlowTimerIfNeeded()
         }
     }
@@ -885,22 +876,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
             measureEstimatedHeightImmediately: false
         )
-    }
-
-    private func enqueueReasoningLineGlowIfNeeded(for append: ReviewMonitorLogAppend, startedAt: TimeInterval) {
-        guard shouldAnimateGlow,
-              append.range.length > 0
-        else {
-            return
-        }
-
-        if Self.reasoningLineGlowKinds.contains(append.kind) {
-            let paragraphRange = (textStorage.string as NSString).paragraphRange(for: append.range)
-            lineGlowView.enqueueReasoningLineGlow(
-                rects: rects(forCharacterRange: paragraphRange).map(\.rectValue),
-                lastActivityAt: startedAt
-            )
-        }
     }
 
     private var shouldAnimateGlow: Bool {
@@ -1123,7 +1098,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         guard glowTimer == nil,
               hasActiveGlowAnimations
         else {
-            setGlowViewsNeedDisplay()
             return
         }
 
@@ -1134,7 +1108,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         glowTimer = timer
         RunLoop.main.add(timer, forMode: .common)
-        setGlowViewsNeedDisplay()
     }
 
     private func advanceGlowAnimations() {
@@ -1145,13 +1118,9 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
         let now = CACurrentMediaTime()
         updateWordFadeAttributes(at: now)
-        lineGlowView.pruneExpiredAnimations(at: now)
-        if hasActiveGlowAnimations {
-            setGlowViewsNeedDisplay()
-        } else {
+        if hasActiveGlowAnimations == false {
             glowTimer?.invalidate()
             glowTimer = nil
-            setGlowViewsNeedDisplay()
         }
     }
 
@@ -1159,15 +1128,10 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         glowTimer?.invalidate()
         glowTimer = nil
         clearWordFadeAnimations()
-        lineGlowView.clear()
     }
 
     private var hasActiveGlowAnimations: Bool {
-        wordFadeAnimations.isEmpty == false || lineGlowView.hasActiveAnimations
-    }
-
-    private func setGlowViewsNeedDisplay() {
-        lineGlowView.needsDisplay = true
+        wordFadeAnimations.isEmpty == false
     }
 
     func layoutTextViewport(force: Bool = false) {
@@ -1559,7 +1523,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private func syncContentSubviewFrames() {
         textContentView.frame = bounds
-        lineGlowView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
     }
@@ -2145,91 +2108,6 @@ private struct ReviewMonitorLogWordFadeAnimation {
 }
 
 @MainActor
-private final class ReviewMonitorLogLineGlowView: NSView {
-    private struct ReasoningLineGlow {
-        var rects: [NSRect]
-        var lastActivityAt: TimeInterval
-    }
-
-    private var reasoningLineGlow: ReasoningLineGlow?
-
-    private static let reasoningLineGlowDuration: TimeInterval = 1.2
-
-    override var isFlipped: Bool {
-        true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-
-    var hasActiveAnimations: Bool {
-        reasoningLineGlow != nil
-    }
-
-    var reasoningLineGlowCount: Int {
-        reasoningLineGlow == nil ? 0 : 1
-    }
-
-    func enqueueReasoningLineGlow(rects: [NSRect], lastActivityAt: TimeInterval) {
-        guard rects.isEmpty == false else {
-            return
-        }
-        reasoningLineGlow = .init(rects: rects, lastActivityAt: lastActivityAt)
-        needsDisplay = true
-    }
-
-    func pruneExpiredAnimations(at now: TimeInterval) {
-        if let reasoningLineGlow,
-           now - reasoningLineGlow.lastActivityAt >= Self.reasoningLineGlowDuration {
-            self.reasoningLineGlow = nil
-        }
-    }
-
-    func clear() {
-        guard reasoningLineGlow != nil else {
-            return
-        }
-        reasoningLineGlow = nil
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        drawReasoningLineGlow(
-            dirtyRect,
-            now: CACurrentMediaTime()
-        )
-    }
-
-    private func drawReasoningLineGlow(
-        _ dirtyRect: NSRect,
-        now: TimeInterval
-    ) {
-        guard let reasoningLineGlow else {
-            return
-        }
-        let elapsed = now - reasoningLineGlow.lastActivityAt
-        let fade = max(0, 1 - elapsed / Self.reasoningLineGlowDuration)
-        let pulse = 0.72 + 0.28 * sin(now * 8)
-        let alpha = fade * pulse * 0.16
-        guard alpha > 0 else {
-            return
-        }
-
-        NSColor.controlAccentColor.withAlphaComponent(alpha).setFill()
-        for rect in reasoningLineGlow.rects where rect.intersects(dirtyRect) {
-            let lineRect = NSRect(
-                x: 0,
-                y: rect.minY - 1,
-                width: bounds.width,
-                height: rect.height + 2
-            )
-            NSBezierPath(roundedRect: lineRect, xRadius: 4, yRadius: 4).fill()
-        }
-    }
-}
-
-@MainActor
 private final class ReviewMonitorLogSelectionView: NSView {
     var selectionRects: [NSRect] = [] {
         didSet {
@@ -2558,10 +2436,6 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.wordGlowCountForTesting
     }
 
-    var reasoningLineGlowCountForTesting: Int {
-        logDocumentView.reasoningLineGlowCountForTesting
-    }
-
     func setReduceMotionForTesting(_ reduceMotion: Bool?) {
         logDocumentView.reduceMotionOverrideForTesting = reduceMotion
         if reduceMotion == true {
@@ -2624,10 +2498,6 @@ private extension ReviewMonitorLogDocumentView {
 
     var wordGlowCountForTesting: Int {
         wordFadeAnimations.count
-    }
-
-    var reasoningLineGlowCountForTesting: Int {
-        lineGlowView.reasoningLineGlowCount
     }
 
     var visibleFragmentBoundsForTesting: NSRect {

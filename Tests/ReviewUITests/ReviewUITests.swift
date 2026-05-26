@@ -2590,41 +2590,6 @@ struct ReviewUITests {
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
         #expect(transport.logWordGlowCountForTesting == 1)
-        #expect(transport.logReasoningLineGlowCountForTesting == 0)
-    }
-
-    @Test func separatorPrefixedReasoningAppendKeepsStructuredLineGlow() async throws {
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-reasoning-separator-append",
-            cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
-            status: .running,
-            startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
-            logEntries: [
-                .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
-            ]
-        )
-        let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
-        viewController.loadViewIfNeeded()
-        let transport = viewController.transportViewControllerForTesting
-
-        let initialRenderCount = transport.renderCountForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
-        transport.setLogReduceMotionForTesting(false)
-
-        let appendRenderCount = transport.renderCountForTesting
-        let reasoningLineGlowCount = transport.logReasoningLineGlowCountForTesting
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking through"))
-
-        let snapshot = try await awaitTransportRender(transport, after: appendRenderCount)
-        #expect(snapshot.log.hasSuffix("Thinking through"))
-        #expect(transport.logReasoningLineGlowCountForTesting == reasoningLineGlowCount + 1)
     }
 
     @Test func separatorPrefixedProgressAppendDoesNotUseGenericWordGlow() async throws {
@@ -2653,13 +2618,11 @@ struct ReviewUITests {
 
         let appendRenderCount = transport.renderCountForTesting
         let wordGlowCount = transport.logWordGlowCountForTesting
-        let reasoningLineGlowCount = transport.logReasoningLineGlowCountForTesting
         job.appendLogEntry(.init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
         let snapshot = try await awaitTransportRender(transport, after: appendRenderCount)
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
-        #expect(transport.logReasoningLineGlowCountForTesting == reasoningLineGlowCount)
     }
 
     @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
@@ -2925,7 +2888,7 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
-    @Test func reasoningAppendCreatesLineGlowAndReduceMotionDisablesGlow() async throws {
+    @Test func reasoningAppendUsesWordGlowAndReduceMotionDisablesGlow() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-reasoning-glow",
             cwd: "/tmp/workspace-alpha",
@@ -2955,7 +2918,6 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: reasoningRenderCount)
 
         #expect(transport.logWordGlowCountForTesting == 2)
-        #expect(transport.logReasoningLineGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
         let reduceMotionRenderCount = transport.renderCountForTesting
@@ -2963,7 +2925,6 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: reduceMotionRenderCount)
 
         #expect(transport.logWordGlowCountForTesting == 0)
-        #expect(transport.logReasoningLineGlowCountForTesting == 0)
     }
 
     @Test func logAutoFollowRunsOnlyWhenPinnedToBottom() async throws {
