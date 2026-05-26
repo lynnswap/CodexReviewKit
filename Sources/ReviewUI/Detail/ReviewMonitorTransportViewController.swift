@@ -484,10 +484,6 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordGlowCountForTesting
     }
 
-    var logReasoningLineGlowCountForTesting: Int {
-        logScrollView.reasoningLineGlowCountForTesting
-    }
-
     func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
         logScrollView.setReduceMotionForTesting(reduceMotion)
     }
