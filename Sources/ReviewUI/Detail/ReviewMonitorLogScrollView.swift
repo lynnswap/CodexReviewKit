@@ -97,12 +97,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
         textFinderClient.documentView = logDocumentView
         textFinderClient.onSelectedRangeChangedByFinder = { [weak self] range in
-            guard let self else {
-                return
-            }
-            if isFindBarVisible || range.length > 0 {
-                hasActiveFindQuery = true
-            }
+            self?.updateActiveFindQueryAfterFinderSelectedRangeChange(range)
         }
         textFinderBarContainer.scrollView = self
         textFinderBarContainer.finderContentView = logDocumentView.finderContentView
@@ -454,6 +449,25 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func clearActiveFindQueryAfterUserSelectionChange() {
+        clearActiveFindQuery()
+    }
+
+    private func updateActiveFindQueryAfterFinderSelectedRangeChange(_ range: NSRange) {
+        if range.length > 0 || hasNonEmptyFindPasteboardString {
+            hasActiveFindQuery = true
+        } else {
+            clearActiveFindQuery()
+        }
+    }
+
+    private var hasNonEmptyFindPasteboardString: Bool {
+        guard let findString = NSPasteboard(name: .find).string(forType: .string) else {
+            return false
+        }
+        return findString.isEmpty == false
+    }
+
+    private func clearActiveFindQuery() {
         hasActiveFindQuery = false
         guard findClientStringState == .visibleSnapshot else {
             return
@@ -784,10 +798,16 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard textFinder.validateAction(action) else {
             return false
         }
+        let selectedRangeBeforeAction = textFinderClient.firstSelectedRange
         textFinder.performAction(action)
-        if action == .setSearchString ||
-            (actionActivatesFindQuery(action) &&
-                (hasActiveFindQuery || textFinderClient.firstSelectedRange.length > 0)) {
+        if action == .setSearchString {
+            if selectedRangeBeforeAction.length > 0 || hasNonEmptyFindPasteboardString {
+                hasActiveFindQuery = true
+            } else {
+                clearActiveFindQuery()
+            }
+        } else if actionActivatesFindQuery(action) &&
+            (hasActiveFindQuery || textFinderClient.firstSelectedRange.length > 0) {
             hasActiveFindQuery = true
         }
         return true
@@ -2797,7 +2817,7 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.setSelectedRange(NSRange(location: 0, length: 0))
     }
 
-    func simulateFinderNoResultSelectionForTesting() {
+    func simulateFinderEmptySelectedRangesForTesting() {
         textFinderClient.selectedRanges = []
     }
 

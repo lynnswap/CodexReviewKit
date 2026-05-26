@@ -861,8 +861,8 @@ extension ReviewMonitorTransportViewController {
         logScrollView.clearFinderSelectedRangesForTesting()
     }
 
-    func simulateLogFinderNoResultSelectionForTesting() {
-        logScrollView.simulateFinderNoResultSelectionForTesting()
+    func simulateLogFinderEmptySelectedRangesForTesting() {
+        logScrollView.simulateFinderEmptySelectedRangesForTesting()
     }
 
     func performLogKeyboardCommandForTesting(_ selector: Selector) {
