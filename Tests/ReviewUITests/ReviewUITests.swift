@@ -2795,6 +2795,7 @@ struct ReviewUITests {
         let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.flushLogPendingFindClientStringChangeForTesting()
 
         let reloadRenderCount = transport.renderCountForTesting
         let appendCount = transport.logAppendCountForTesting
@@ -2925,6 +2926,52 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport, after: reduceMotionRenderCount)
 
         #expect(transport.logWordGlowCountForTesting == 0)
+    }
+
+    @Test func reasoningWordGlowCompletesAndClearsRenderingAttributes() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-reasoning-glow-completion",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.setLogReduceMotionForTesting(false)
+
+        let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
+        let reasoningRenderCount = transport.renderCountForTesting
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
+        _ = try await awaitTransportRender(transport, after: reasoningRenderCount)
+
+        #expect(transport.logWordGlowCountForTesting > 0)
+        #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting > 0)
+        #expect(transport.logWordFadeStorageUsesOpaqueTextColorForTesting)
+
+        try await waitForCondition(timeout: .seconds(3)) {
+            transport.logWordGlowCountForTesting == 0
+        }
+
+        #expect(transport.logWordGlowCountForTesting == 0)
+        #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting == 0)
+        #expect(transport.logWordFadeStorageUsesOpaqueTextColorForTesting)
+        #expect(transport.logWordFadeDisplayInvalidationCountForTesting > invalidationCount)
     }
 
     @Test func logAutoFollowRunsOnlyWhenPinnedToBottom() async throws {
@@ -3401,6 +3448,36 @@ struct ReviewUITests {
         #expect(transport.logSelectedTextForTesting == "e\u{301}")
     }
 
+    @Test func logViewUsesStandardTextContextMenu() async throws {
+        let job = makeJob(
+            id: "job-log-context-menu",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: "First readonly line\nSecond readonly line\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+
+        let initialRenderCount = transport.renderCountForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+
+        let emptySelectionMenu = try #require(transport.logContextMenuForTesting)
+        #expect(emptySelectionMenu.items.contains { $0.title == "Copy" })
+        #expect(emptySelectionMenu.items.contains { $0.title == "Paste" })
+        #expect(emptySelectionMenu.items.contains { $0.title == "Font" })
+
+        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: ("First" as NSString).length))
+        let selectedTextMenu = try #require(transport.logContextMenuForTesting)
+        #expect(selectedTextMenu.items.contains { $0.action == #selector(NSText.copy(_:)) })
+    }
+
     @Test func logKeyboardLineNavigationUsesSoftWrappedVisualLines() async throws {
         let wrappedLine = (1...80)
             .map { "wrapped-segment-\($0)" }
@@ -3485,6 +3562,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindFeedbackDimmingEnabledForTesting)
+        transport.flushLogPendingFindClientStringChangeForTesting()
 
         let findStringWillChangeCountBeforeAppend = transport.logFindClientStringWillChangeCountForTesting
         let findIndicatorInvalidationCountBeforeAppend = transport.logFindIndicatorInvalidationCountForTesting
@@ -3498,8 +3576,11 @@ struct ReviewUITests {
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeAppend)
         #expect(transport.logFindStringLengthForTesting == appendedLength)
         #expect(transport.logSelectedTextForTesting == "needle")
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
         #expect(appendedVisibleRanges.isEmpty == false)
         #expect(appendedVisibleRanges.allSatisfy { $0.location >= 0 && NSMaxRange($0) <= appendedLength })
+        transport.flushLogPendingFindClientStringChangeForTesting()
 
         let middleOffset = transport.logMaximumVerticalScrollOffsetForTesting / 2
         transport.scrollLogToOffsetForTesting(middleOffset)
@@ -3516,6 +3597,40 @@ struct ReviewUITests {
         #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeMiddleAppend + 1)
         #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeMiddleAppend)
         #expect(transport.logSelectedTextForTesting == "needle")
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        transport.flushLogPendingFindClientStringChangeForTesting()
+
+        let findStringWillChangeCountBeforeBurst = transport.logFindClientStringWillChangeCountForTesting
+        let findIndicatorInvalidationCountBeforeBurst = transport.logFindIndicatorInvalidationCountForTesting
+        var burstText = job.reviewMonitorLogDocument.text
+        for index in 0..<8 {
+            burstText += "\nneedle burst \(index)"
+            #expect(transport.renderLogForTesting(text: burstText, allowIncrementalUpdate: true))
+        }
+        await transport.flushMainQueueForTesting()
+
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeBurst + 1)
+        #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeBurst)
+        #expect(transport.logSelectedTextForTesting == "needle")
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        transport.flushLogPendingFindClientStringChangeForTesting()
+
+        let findStringWillChangeCountBeforeReload = transport.logFindClientStringWillChangeCountForTesting
+        let findIndicatorInvalidationCountBeforeReload = transport.logFindIndicatorInvalidationCountForTesting
+        #expect(transport.renderLogForTesting(
+            text: burstText + "\nneedle forced reload\n",
+            allowIncrementalUpdate: false
+        ))
+        await transport.flushMainQueueForTesting()
+
+        #expect(transport.logFindClientStringWillChangeCountForTesting == findStringWillChangeCountBeforeReload + 1)
+        #expect(transport.logFindIndicatorInvalidationCountForTesting > findIndicatorInvalidationCountBeforeReload)
+        #expect(transport.logSelectedTextForTesting == "needle")
+        #expect(transport.logFindBarVisibleForTesting)
+        #expect(transport.logHasPendingFindClientStringChangeForTesting)
+        transport.flushLogPendingFindClientStringChangeForTesting()
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
         #expect(transport.logFindBarVisibleForTesting == false)

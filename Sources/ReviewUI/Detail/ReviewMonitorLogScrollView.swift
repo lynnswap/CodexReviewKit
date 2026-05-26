@@ -36,6 +36,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
+    private var isFindClientStringChangePending = false
+    private var findClientStringChangeTimer: Timer?
+
+    private static let findClientStringChangeCoalescingInterval: TimeInterval = 0.25
 
 #if DEBUG
     private(set) var appendCount = 0
@@ -76,6 +80,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         invalidateDocumentLayout()
     }
 
+    isolated deinit {
+        findClientStringChangeTimer?.invalidate()
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
@@ -84,6 +92,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
+            cancelPendingFindClientStringChange()
             textFinder.cancelFindIndicator()
             textFinder.client = nil
             textFinder.findBarContainer = nil
@@ -217,7 +226,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = isPinnedToBottom()
-        noteClientStringWillChange()
+        noteClientStringWillChangeIfNeeded()
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
@@ -237,7 +246,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
-        noteClientStringWillChange()
+        noteClientStringWillChangeIfNeeded()
         logDocumentView.replaceText(in: replacement.range, with: replacement.text)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
@@ -267,7 +276,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return contentView.bounds.origin != previousOrigin
         }
 
-        noteClientStringWillChange()
+        noteClientStringWillChangeIfNeeded()
         logDocumentView.replaceText(text)
         displayedText = text
         displayedUTF16Length = (text as NSString).length
@@ -281,13 +290,47 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return true
     }
 
-    private func noteClientStringWillChange() {
-        if textFinder.isIncrementalSearchingEnabled {
+    private func noteClientStringWillChangeIfNeeded() {
+        guard textFinder.isIncrementalSearchingEnabled else {
+            return
+        }
+
+        if isFindClientStringChangePending == false {
+            isFindClientStringChangePending = true
 #if DEBUG
             findClientStringWillChangeCount += 1
 #endif
             textFinder.noteClientStringWillChange()
         }
+
+        scheduleFindClientStringChangeCompletion()
+    }
+
+    private func scheduleFindClientStringChangeCompletion() {
+        findClientStringChangeTimer?.invalidate()
+        let timer = Timer(timeInterval: Self.findClientStringChangeCoalescingInterval, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.finishPendingFindClientStringChange()
+            }
+        }
+        findClientStringChangeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func finishPendingFindClientStringChange() {
+        findClientStringChangeTimer?.invalidate()
+        findClientStringChangeTimer = nil
+        guard isFindClientStringChangePending else {
+            return
+        }
+        isFindClientStringChangePending = false
+        invalidateFindIndicator()
+    }
+
+    private func cancelPendingFindClientStringChange() {
+        findClientStringChangeTimer?.invalidate()
+        findClientStringChangeTimer = nil
+        isFindClientStringChangePending = false
     }
 
     private func invalidateFindIndicator() {
@@ -662,6 +705,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     var onLayoutInvalidated: (() -> Void)?
 #if DEBUG
     var reduceMotionOverrideForTesting: Bool?
+    private var wordFadeDisplayInvalidationCount = 0
 #endif
 
     private let baseFont = NSFont.monospacedSystemFont(
@@ -819,16 +863,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         let appendBaseLocation = textStorage.length
         let invalidationStart = appendInvalidationStartUTF16Offset()
         let fadeRanges = wordFadeRanges(in: suffix, baseLocation: appendBaseLocation, animation: animation)
-        let attributedSuffix = NSMutableAttributedString(string: suffix, attributes: baseAttributes)
-        for range in fadeRanges {
-            attributedSuffix.addAttribute(
-                .foregroundColor,
-                value: wordFadeColor(progress: 0),
-                range: NSRange(location: range.location - appendBaseLocation, length: range.length)
-            )
-        }
         textContentStorage.performEditingTransaction {
-            textStorage.append(attributedSuffix)
+            textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
         }
         clampSelectedRange()
         let glowAnimationStart = CACurrentMediaTime()
@@ -905,6 +941,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 )
             )
         }
+        updateWordFadeRenderingColors(ranges.map { ($0, wordFadeColor(progress: 0)) })
         invalidateWordFadeDisplay(for: ranges)
     }
 
@@ -1000,7 +1037,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         return NSColor.textColor.withAlphaComponent(alpha)
     }
 
-    private func updateWordFadeAttributes(at now: TimeInterval) {
+    private func updateWordFadeAnimations(at now: TimeInterval) {
         guard wordFadeAnimations.isEmpty == false else {
             return
         }
@@ -1008,10 +1045,11 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         var activeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
         var updatedRanges: [NSRange] = []
         var colorUpdates: [(range: NSRange, color: NSColor)] = []
+        var finishedRanges: [NSRange] = []
         for var animation in wordFadeAnimations {
             let progress = min(1, max(0, (now - animation.startedAt) / Self.wordFadeDuration))
             if progress >= 1 {
-                colorUpdates.append((animation.range, NSColor.textColor))
+                finishedRanges.append(animation.range)
                 updatedRanges.append(animation.range)
                 continue
             }
@@ -1028,7 +1066,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             activeAnimations.append(animation)
         }
         wordFadeAnimations = activeAnimations
-        updateWordFadeStorageColors(colorUpdates)
+        removeWordFadeRenderingAttributes(in: finishedRanges)
+        updateWordFadeRenderingColors(colorUpdates)
         invalidateWordFadeDisplay(for: updatedRanges)
     }
 
@@ -1050,30 +1089,39 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
         let storageRanges = wordFadeAnimations.map(\.range)
         wordFadeAnimations.removeAll()
-        restoreWordFadeStorageColor(in: storageRanges)
+        removeWordFadeRenderingAttributes(in: storageRanges)
         invalidateWordFadeDisplay(for: storageRanges)
     }
 
-    private func restoreWordFadeStorageColor(in ranges: [NSRange]) {
-        guard ranges.isEmpty == false else {
-            return
-        }
-
-        updateWordFadeStorageColors(ranges.map { ($0, NSColor.textColor) })
-    }
-
-    private func updateWordFadeStorageColors(_ updates: [(range: NSRange, color: NSColor)]) {
+    private func updateWordFadeRenderingColors(_ updates: [(range: NSRange, color: NSColor)]) {
         guard updates.isEmpty == false else {
             return
         }
 
-        textContentStorage.performEditingTransaction {
-            for (range, color) in updates {
-                let range = clamp(range)
-                if range.length > 0 {
-                    textStorage.addAttribute(.foregroundColor, value: color, range: range)
-                }
+        for (range, color) in updates {
+            let range = clamp(range)
+            guard range.length > 0,
+                  let textRange = textRange(for: range)
+            else {
+                continue
             }
+            textLayoutManager.addRenderingAttribute(.foregroundColor, value: color, for: textRange)
+        }
+    }
+
+    private func removeWordFadeRenderingAttributes(in ranges: [NSRange]) {
+        guard ranges.isEmpty == false else {
+            return
+        }
+
+        for range in ranges {
+            let range = clamp(range)
+            guard range.length > 0,
+                  let textRange = textRange(for: range)
+            else {
+                continue
+            }
+            textLayoutManager.removeRenderingAttribute(.foregroundColor, for: textRange)
         }
     }
 
@@ -1085,6 +1133,9 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             invalidationRange = NSUnionRange(invalidationRange, range)
         }
 
+#if DEBUG
+        wordFadeDisplayInvalidationCount += 1
+#endif
         for fragmentView in visibleFragmentViews {
             let fragmentRange = nsRange(for: fragmentView.layoutFragment.rangeInElement)
             if NSIntersectionRange(fragmentRange, invalidationRange).length > 0 {
@@ -1117,7 +1168,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
 
         let now = CACurrentMediaTime()
-        updateWordFadeAttributes(at: now)
+        updateWordFadeAnimations(at: now)
         if hasActiveGlowAnimations == false {
             glowTimer?.invalidate()
             glowTimer = nil
@@ -1352,6 +1403,19 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     override func becomeFirstResponder() -> Bool {
         true
+    }
+
+    override func menu(for _: NSEvent) -> NSMenu? {
+        window?.makeFirstResponder(self)
+        return makeContextMenu()
+    }
+
+    private func makeContextMenu() -> NSMenu? {
+        guard let menu = NSTextView.defaultMenu?.copy() as? NSMenu else {
+            return nil
+        }
+        menu.autoenablesItems = true
+        return menu
     }
 
     @objc func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -2292,6 +2356,14 @@ extension ReviewMonitorLogScrollView {
         findClientStringWillChangeCount
     }
 
+    var hasPendingFindClientStringChangeForTesting: Bool {
+        isFindClientStringChangePending
+    }
+
+    func flushPendingFindClientStringChangeForTesting() {
+        finishPendingFindClientStringChange()
+    }
+
     var findIndicatorInvalidationCountForTesting: Int {
         findIndicatorInvalidationCount
     }
@@ -2411,6 +2483,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.validateUserInterfaceItem(item)
     }
 
+    func contextMenuForTesting() -> NSMenu? {
+        logDocumentView.contextMenuForTesting()
+    }
+
     func clearFinderSelectedRangesForTesting() {
         textFinderClient.selectedRanges = []
     }
@@ -2434,6 +2510,18 @@ extension ReviewMonitorLogScrollView {
 
     var wordGlowCountForTesting: Int {
         logDocumentView.wordGlowCountForTesting
+    }
+
+    var wordFadeRenderingAttributeRangeCountForTesting: Int {
+        logDocumentView.wordFadeRenderingAttributeRangeCountForTesting
+    }
+
+    var wordFadeStorageUsesOpaqueTextColorForTesting: Bool {
+        logDocumentView.wordFadeStorageUsesOpaqueTextColorForTesting
+    }
+
+    var wordFadeDisplayInvalidationCountForTesting: Int {
+        logDocumentView.wordFadeDisplayInvalidationCountForTesting
     }
 
     func setReduceMotionForTesting(_ reduceMotion: Bool?) {
@@ -2498,6 +2586,50 @@ private extension ReviewMonitorLogDocumentView {
 
     var wordGlowCountForTesting: Int {
         wordFadeAnimations.count
+    }
+
+    var wordFadeRenderingAttributeRangeCountForTesting: Int {
+        var count = 0
+        textLayoutManager.enumerateRenderingAttributes(
+            from: textContentStorage.documentRange.location,
+            reverse: false
+        ) { _, attributes, _ in
+            if attributes[.foregroundColor] != nil {
+                count += 1
+            }
+            return true
+        }
+        return count
+    }
+
+    var wordFadeStorageUsesOpaqueTextColorForTesting: Bool {
+        guard textStorage.length > 0 else {
+            return true
+        }
+
+        var usesOpaqueTextColor = true
+        textStorage.enumerateAttribute(
+            .foregroundColor,
+            in: NSRange(location: 0, length: textStorage.length)
+        ) { value, _, stop in
+            guard let color = value as? NSColor else {
+                return
+            }
+            if color.alphaComponent < 0.999 {
+                usesOpaqueTextColor = false
+                stop.pointee = true
+            }
+        }
+        return usesOpaqueTextColor
+    }
+
+    var wordFadeDisplayInvalidationCountForTesting: Int {
+        wordFadeDisplayInvalidationCount
+    }
+
+    func contextMenuForTesting() -> NSMenu? {
+        window?.makeFirstResponder(self)
+        return makeContextMenu()
     }
 
     var visibleFragmentBoundsForTesting: NSRect {

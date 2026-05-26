@@ -484,6 +484,18 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordGlowCountForTesting
     }
 
+    var logWordFadeRenderingAttributeRangeCountForTesting: Int {
+        logScrollView.wordFadeRenderingAttributeRangeCountForTesting
+    }
+
+    var logWordFadeStorageUsesOpaqueTextColorForTesting: Bool {
+        logScrollView.wordFadeStorageUsesOpaqueTextColorForTesting
+    }
+
+    var logWordFadeDisplayInvalidationCountForTesting: Int {
+        logScrollView.wordFadeDisplayInvalidationCountForTesting
+    }
+
     func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
         logScrollView.setReduceMotionForTesting(reduceMotion)
     }
@@ -530,6 +542,14 @@ extension ReviewMonitorTransportViewController {
 
     var logFindClientStringWillChangeCountForTesting: Int {
         logScrollView.findClientStringWillChangeCountForTesting
+    }
+
+    var logHasPendingFindClientStringChangeForTesting: Bool {
+        logScrollView.hasPendingFindClientStringChangeForTesting
+    }
+
+    func flushLogPendingFindClientStringChangeForTesting() {
+        logScrollView.flushPendingFindClientStringChangeForTesting()
     }
 
     var logFindIndicatorInvalidationCountForTesting: Int {
@@ -802,6 +822,10 @@ extension ReviewMonitorTransportViewController {
 
     func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
         logScrollView.validateDocumentUserInterfaceItemForTesting(item)
+    }
+
+    var logContextMenuForTesting: NSMenu? {
+        logScrollView.contextMenuForTesting()
     }
 
     func clearLogFinderSelectedRangesForTesting() {
