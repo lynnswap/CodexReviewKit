@@ -2578,6 +2578,7 @@ struct ReviewUITests {
         let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.setLogReduceMotionForTesting(false)
 
         let appendRenderCount = transport.renderCountForTesting
         let appendCount = transport.logAppendCountForTesting
@@ -2615,6 +2616,7 @@ struct ReviewUITests {
         let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.setLogReduceMotionForTesting(false)
 
         let appendRenderCount = transport.renderCountForTesting
         let reasoningLineGlowCount = transport.logReasoningLineGlowCountForTesting
@@ -2944,6 +2946,7 @@ struct ReviewUITests {
         let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        transport.setLogReduceMotionForTesting(false)
 
         let reasoningRenderCount = transport.renderCountForTesting
         job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
