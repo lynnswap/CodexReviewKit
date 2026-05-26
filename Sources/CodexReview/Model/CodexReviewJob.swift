@@ -1,11 +1,6 @@
 import Foundation
 import Observation
 
-package enum ReviewMonitorLogUpdate: Equatable {
-    case append(String)
-    case reload(String)
-}
-
 @MainActor
 @Observable
 public final class CodexReviewJob: Identifiable, Hashable {
@@ -20,7 +15,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private struct RenderedBlock {
+        var id: ReviewMonitorLogBlockID
         var kind: ReviewLogEntry.Kind
+        var groupID: String?
         var text: String
     }
 
@@ -72,12 +69,88 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
     }
 
+    private struct MonitorProjectionAccumulator {
+        private(set) var document = ReviewMonitorLogDocument()
+        private(set) var hasVisibleSections = false
+        private(set) var lastBlockIndex: Int?
+
+        mutating func appendBlock(
+            _ block: RenderedBlock,
+            at blockIndex: Int
+        ) -> ReviewMonitorLogAppend {
+            let appended: String
+            if hasVisibleSections == false {
+                appended = block.text
+                hasVisibleSections = true
+            } else if block.text.isEmpty {
+                appended = "\n\n"
+            } else if document.text.hasSuffix("\n\n") {
+                appended = block.text
+            } else if document.text.hasSuffix("\n") || block.text.hasPrefix("\n") {
+                appended = "\n" + block.text
+            } else {
+                appended = "\n\n" + block.text
+            }
+
+            let previousLength = document.textUTF16Length
+            let suffixLength = CodexReviewJob.utf16Length(appended)
+            let blockLength = CodexReviewJob.utf16Length(block.text)
+            let blockRange = NSRange(
+                location: previousLength + max(0, suffixLength - blockLength),
+                length: blockLength
+            )
+
+            document.text += appended
+            document.textUTF16Length += suffixLength
+            document.blocks.append(.init(
+                id: block.id,
+                kind: block.kind,
+                groupID: block.groupID,
+                range: blockRange
+            ))
+            lastBlockIndex = blockIndex
+            return .init(
+                kind: block.kind,
+                blockID: block.id,
+                range: blockRange,
+                text: appended,
+                textUTF16Length: suffixLength
+            )
+        }
+
+        mutating func appendToCurrentBlock(
+            _ block: RenderedBlock,
+            at blockIndex: Int,
+            delta: String
+        ) -> ReviewMonitorLogAppend? {
+            guard delta.isEmpty == false,
+                  let blockIndexInDocument = document.blocks.lastIndex(where: { $0.id == block.id })
+            else {
+                return nil
+            }
+
+            let previousLength = document.textUTF16Length
+            let deltaLength = CodexReviewJob.utf16Length(delta)
+            document.text += delta
+            document.textUTF16Length += deltaLength
+            document.blocks[blockIndexInDocument].range.length += deltaLength
+            lastBlockIndex = blockIndex
+            return .init(
+                kind: block.kind,
+                blockID: block.id,
+                range: NSRange(location: previousLength, length: deltaLength),
+                text: delta,
+                textUTF16Length: deltaLength
+            )
+        }
+    }
+
     private struct LogState {
         var entries: [ReviewLogEntry]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
         var logProjection: ProjectionAccumulator
-        var reviewMonitorProjection: ProjectionAccumulator
+        var reviewMonitorProjection: MonitorProjectionAccumulator
         var reviewOutputProjection: ProjectionAccumulator
         var activityProjection: ProjectionAccumulator
         var errorProjection: ProjectionAccumulator
@@ -89,7 +162,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             logProjection: ProjectionAccumulator,
-            reviewMonitorProjection: ProjectionAccumulator,
+            reviewMonitorProjection: MonitorProjectionAccumulator,
             reviewOutputProjection: ProjectionAccumulator,
             activityProjection: ProjectionAccumulator,
             errorProjection: ProjectionAccumulator,
@@ -116,8 +189,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
             logProjection.text
         }
 
-        var reviewMonitorLogText: String {
-            reviewMonitorProjection.text
+        var reviewMonitorDocument: ReviewMonitorLogDocument {
+            reviewMonitorProjection.document
         }
 
         var rawLogText: String {
@@ -151,7 +224,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 blocks: [],
                 indexByGroup: [:],
                 logProjection: .init(joinMode: .rendered),
-                reviewMonitorProjection: .init(joinMode: .rendered),
+                reviewMonitorProjection: .init(),
                 reviewOutputProjection: .init(joinMode: .rendered),
                 activityProjection: .init(joinMode: .rendered),
                 errorProjection: .init(joinMode: .rendered),
@@ -172,7 +245,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
                     state.indexByGroup[key] = state.blocks.count
                 }
 
-                state.blocks.append(.init(kind: entry.kind, text: entry.text))
+                state.blocks.append(.init(
+                    id: CodexReviewJob.blockID(for: entry),
+                    kind: entry.kind,
+                    groupID: entry.groupID,
+                    text: entry.text
+                ))
             }
 
             for (index, block) in state.blocks.enumerated() {
@@ -181,35 +259,50 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return state
         }
 
-        mutating func append(_ entry: ReviewLogEntry) -> ReviewMonitorLogUpdate? {
+        mutating func append(_ entry: ReviewLogEntry) -> ReviewMonitorLogChange? {
             entries.append(entry)
 
             if let key = CodexReviewJob.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
                     let oldText = blocks[blockIndex].text
                     if entry.replacesGroup || blockIndex != blocks.indices.last {
+                        let previousMonitorDocument = reviewMonitorProjection.document
+                        let blockID = blocks[blockIndex].id
                         self = Self.rebuild(entries: entries)
-                        return nil
+                        if entry.replacesGroup,
+                           let replacement = Self.monitorReplacement(
+                               previous: previousMonitorDocument,
+                               current: reviewMonitorProjection.document,
+                               blockID: blockID
+                           ) {
+                            return .replace(replacement)
+                        }
+                        return .reload
                     }
 
                     blocks[blockIndex].text.append(entry.text)
                     let newText = blocks[blockIndex].text
                     return appendTailGroupDelta(
-                        kind: entry.kind,
+                        block: blocks[blockIndex],
                         oldText: oldText,
                         newText: newText,
                         blockIndex: blockIndex,
                         delta: entry.text
-                    )
+                    ).map(ReviewMonitorLogChange.append)
                 }
 
                 indexByGroup[key] = blocks.count
             }
 
             let blockIndex = blocks.count
-            let block = RenderedBlock(kind: entry.kind, text: entry.text)
+            let block = RenderedBlock(
+                id: CodexReviewJob.blockID(for: entry),
+                kind: entry.kind,
+                groupID: entry.groupID,
+                text: entry.text
+            )
             blocks.append(block)
-            return appendTailBlock(block, at: blockIndex)
+            return appendTailBlock(block, at: blockIndex).map(ReviewMonitorLogChange.append)
         }
 
         private mutating func ingestBlock(_ block: RenderedBlock, at index: Int) {
@@ -220,7 +313,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 visibleKinds: CodexReviewJob.displayedLogKinds,
                 includeEmptyDiagnostic: true
             )
-            _ = Self.updateRenderedProjection(
+            _ = Self.updateMonitorProjection(
                 &reviewMonitorProjection,
                 block: block,
                 blockIndex: index,
@@ -263,7 +356,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         private mutating func appendTailBlock(
             _ block: RenderedBlock,
             at blockIndex: Int
-        ) -> ReviewMonitorLogUpdate? {
+        ) -> ReviewMonitorLogAppend? {
             _ = Self.updateRenderedProjection(
                 &logProjection,
                 block: block,
@@ -271,7 +364,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 visibleKinds: CodexReviewJob.displayedLogKinds,
                 includeEmptyDiagnostic: true
             )
-            let monitorSuffix = Self.updateRenderedProjection(
+            let monitorAppend = Self.updateMonitorProjection(
                 &reviewMonitorProjection,
                 block: block,
                 blockIndex: blockIndex,
@@ -309,19 +402,19 @@ public final class CodexReviewJob: Identifiable, Hashable {
             if block.kind == .diagnostic {
                 _ = rawProjection.appendSection(block.text, at: blockIndex)
             }
-            return monitorSuffix.map(ReviewMonitorLogUpdate.append)
+            return monitorAppend
         }
 
         private mutating func appendTailGroupDelta(
-            kind: ReviewLogEntry.Kind,
+            block: RenderedBlock,
             oldText: String,
             newText: String,
             blockIndex: Int,
             delta: String
-        ) -> ReviewMonitorLogUpdate? {
+        ) -> ReviewMonitorLogAppend? {
             _ = Self.updateTailProjection(
                 &logProjection,
-                kind: kind,
+                kind: block.kind,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -329,9 +422,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 visibleKinds: CodexReviewJob.displayedLogKinds,
                 includeEmptyDiagnostic: true
             )
-            let monitorSuffix = Self.updateTailProjection(
+            let monitorAppend = Self.updateTailMonitorProjection(
                 &reviewMonitorProjection,
-                kind: kind,
+                block: block,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -341,7 +434,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
             _ = Self.updateTailProjection(
                 &reviewOutputProjection,
-                kind: kind,
+                kind: block.kind,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -351,7 +444,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
             _ = Self.updateTailProjection(
                 &activityProjection,
-                kind: kind,
+                kind: block.kind,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -361,7 +454,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
             _ = Self.updateTailProjection(
                 &errorProjection,
-                kind: kind,
+                kind: block.kind,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -371,7 +464,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
             _ = Self.updateTailProjection(
                 &cappedProjection,
-                kind: kind,
+                kind: block.kind,
                 oldText: oldText,
                 newText: newText,
                 blockIndex: blockIndex,
@@ -379,7 +472,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 visibleKinds: CodexReviewJob.cappedLogKinds,
                 includeEmptyDiagnostic: false
             )
-            return monitorSuffix.map(ReviewMonitorLogUpdate.append)
+            return monitorAppend
         }
 
         private static func updateTailProjection(
@@ -435,6 +528,82 @@ public final class CodexReviewJob: Identifiable, Hashable {
             }
             return projection.appendSection(block.text, at: blockIndex)
         }
+
+        private static func updateMonitorProjection(
+            _ projection: inout MonitorProjectionAccumulator,
+            block: RenderedBlock,
+            blockIndex: Int,
+            visibleKinds: Set<ReviewLogEntry.Kind>,
+            includeEmptyDiagnostic: Bool
+        ) -> ReviewMonitorLogAppend? {
+            guard CodexReviewJob.isVisibleInRenderedProjection(
+                kind: block.kind,
+                text: block.text,
+                visibleKinds: visibleKinds,
+                includeEmptyDiagnostic: includeEmptyDiagnostic
+            ) else {
+                return nil
+            }
+            return projection.appendBlock(block, at: blockIndex)
+        }
+
+        private static func updateTailMonitorProjection(
+            _ projection: inout MonitorProjectionAccumulator,
+            block: RenderedBlock,
+            oldText: String,
+            newText: String,
+            blockIndex: Int,
+            delta: String,
+            visibleKinds: Set<ReviewLogEntry.Kind>,
+            includeEmptyDiagnostic: Bool
+        ) -> ReviewMonitorLogAppend? {
+            let wasVisible = CodexReviewJob.isVisibleInRenderedProjection(
+                kind: block.kind,
+                text: oldText,
+                visibleKinds: visibleKinds,
+                includeEmptyDiagnostic: includeEmptyDiagnostic
+            )
+            let isVisible = CodexReviewJob.isVisibleInRenderedProjection(
+                kind: block.kind,
+                text: newText,
+                visibleKinds: visibleKinds,
+                includeEmptyDiagnostic: includeEmptyDiagnostic
+            )
+
+            switch (wasVisible, isVisible) {
+            case (false, false):
+                return nil
+            case (false, true):
+                return projection.appendBlock(block, at: blockIndex)
+            case (true, true):
+                return projection.appendToCurrentBlock(block, at: blockIndex, delta: delta)
+            case (true, false):
+                return nil
+            }
+        }
+
+        private static func monitorReplacement(
+            previous: ReviewMonitorLogDocument,
+            current: ReviewMonitorLogDocument,
+            blockID: ReviewMonitorLogBlockID
+        ) -> ReviewMonitorLogReplacement? {
+            guard let previousBlock = previous.blocks.first(where: { $0.id == blockID }),
+                  let currentBlock = current.blocks.first(where: { $0.id == blockID }),
+                  previousBlock.range.location == currentBlock.range.location,
+                  NSMaxRange(currentBlock.range) <= current.textUTF16Length
+            else {
+                return nil
+            }
+
+            let replacementText = (current.text as NSString).substring(with: currentBlock.range)
+            return .init(
+                kind: currentBlock.kind,
+                blockID: currentBlock.id,
+                range: previousBlock.range,
+                text: replacementText,
+                textUTF16Length: currentBlock.range.length
+            )
+        }
     }
 
     @ObservationIgnored
@@ -453,14 +622,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
     package var completedAgentMessageItemIDs: Set<String>
     public private(set) var logEntries: [ReviewLogEntry]
     public private(set) var logText: String
-    public private(set) var reviewMonitorLogText: String
+    package private(set) var reviewMonitorLogDocument: ReviewMonitorLogDocument
     public private(set) var rawLogText: String
     public private(set) var reviewOutputText: String
     public private(set) var activityLogText: String
     public private(set) var diagnosticText: String
     package private(set) var cappedLogBytes: Int
-    package private(set) var reviewMonitorRevision: UInt64
-    package private(set) var lastMonitorUpdate: ReviewMonitorLogUpdate
+
+    package var reviewMonitorRevision: UInt64 {
+        reviewMonitorLogDocument.revision
+    }
 
     public var isTerminal: Bool {
         core.isTerminal
@@ -497,14 +668,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.logState = initialState
         self.logEntries = initialState.entries
         self.logText = initialState.logText
-        self.reviewMonitorLogText = initialState.reviewMonitorLogText
+        self.reviewMonitorLogDocument = initialState.reviewMonitorDocument
         self.rawLogText = initialState.rawLogText
         self.reviewOutputText = initialState.reviewOutputText
         self.activityLogText = initialState.activityLogText
         self.diagnosticText = initialState.diagnosticText
         self.cappedLogBytes = initialState.cappedBytes
-        self.reviewMonitorRevision = 0
-        self.lastMonitorUpdate = .reload(initialState.reviewMonitorLogText)
     }
 
     public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
@@ -516,26 +685,30 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func replaceLogEntries(_ entries: [ReviewLogEntry]) {
-        let previousMonitorText = reviewMonitorLogText
+        let previousMonitorDocument = reviewMonitorLogDocument
         logState = Self.trimmedLogState(entries: entries)
         syncLogState(
-            previousMonitorText: previousMonitorText,
-            preferredMonitorUpdate: .reload(logState.reviewMonitorLogText)
+            previousMonitorDocument: previousMonitorDocument,
+            preferredMonitorChange: .reload
         )
     }
 
     package func appendLogEntry(_ entry: ReviewLogEntry) {
-        let previousMonitorText = reviewMonitorLogText
-        let preferredMonitorUpdate = logState.append(entry)
+        let previousMonitorDocument = reviewMonitorLogDocument
+        let preferredMonitorChange = logState.append(entry)
         let didTrim = applyReviewLogLimit()
         syncLogState(
-            previousMonitorText: previousMonitorText,
-            preferredMonitorUpdate: didTrim ? .reload(logState.reviewMonitorLogText) : preferredMonitorUpdate
+            previousMonitorDocument: previousMonitorDocument,
+            preferredMonitorChange: didTrim ? .reload : preferredMonitorChange
         )
     }
 
     @discardableResult
     package func applyReviewLogLimit() -> Bool {
+        guard logState.cappedBytes > Self.logLimitBytes else {
+            return false
+        }
+
         let trimmedState = Self.trimmedLogState(from: logState)
         guard trimmedState.entries != logState.entries else {
             return false
@@ -579,47 +752,100 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private func syncLogState(
-        previousMonitorText: String,
-        preferredMonitorUpdate: ReviewMonitorLogUpdate?
+        previousMonitorDocument: ReviewMonitorLogDocument,
+        preferredMonitorChange: ReviewMonitorLogChange?
     ) {
         logEntries = logState.entries
         logText = logState.logText
-        reviewMonitorLogText = logState.reviewMonitorLogText
         rawLogText = logState.rawLogText
         reviewOutputText = logState.reviewOutputText
         activityLogText = logState.activityLogText
         diagnosticText = logState.diagnosticText
         cappedLogBytes = logState.cappedBytes
 
-        guard previousMonitorText != reviewMonitorLogText else {
+        let currentMonitorDocument = logState.reviewMonitorDocument
+        guard let resolvedMonitorDocument = Self.resolveMonitorDocument(
+            previous: previousMonitorDocument,
+            current: currentMonitorDocument,
+            preferredChange: preferredMonitorChange
+        ) else {
             return
         }
-
-        reviewMonitorRevision &+= 1
-        lastMonitorUpdate = Self.resolveMonitorUpdate(
-            previous: previousMonitorText,
-            current: reviewMonitorLogText,
-            preferred: preferredMonitorUpdate
-        )
+        reviewMonitorLogDocument = resolvedMonitorDocument
     }
 
-    private nonisolated static func resolveMonitorUpdate(
-        previous: String,
-        current: String,
-        preferred: ReviewMonitorLogUpdate?
-    ) -> ReviewMonitorLogUpdate {
-        guard let preferred else {
-            return .reload(current)
+    private nonisolated static func resolveMonitorDocument(
+        previous: ReviewMonitorLogDocument,
+        current: ReviewMonitorLogDocument,
+        preferredChange: ReviewMonitorLogChange?
+    ) -> ReviewMonitorLogDocument? {
+        guard let preferredChange else {
+            return nil
         }
 
-        switch preferred {
-        case .append(let suffix) where current == previous + suffix:
-            return preferred
-        case .reload(let text) where text == current:
-            return preferred
-        default:
-            return .reload(current)
+        guard monitorDocumentContentChanged(previous: previous, current: current) else {
+            return nil
         }
+
+        var resolved = current
+        resolved.revision = previous.revision &+ 1
+
+        switch preferredChange {
+        case .append(let preferredAppend)
+            where isContiguousMonitorAppend(
+                preferredAppend,
+                previousUTF16Length: previous.textUTF16Length,
+                currentUTF16Length: current.textUTF16Length
+            ):
+            resolved.lastChange = .append(preferredAppend)
+        case .replace(let replacement)
+            where isValidMonitorReplacement(
+                replacement,
+                previousUTF16Length: previous.textUTF16Length,
+                currentUTF16Length: current.textUTF16Length
+            ):
+            resolved.lastChange = .replace(replacement)
+        default:
+            resolved.lastChange = .reload
+        }
+        return resolved
+    }
+
+    private nonisolated static func monitorDocumentContentChanged(
+        previous: ReviewMonitorLogDocument,
+        current: ReviewMonitorLogDocument
+    ) -> Bool {
+        if previous.textUTF16Length != current.textUTF16Length {
+            return true
+        }
+        if previous.blocks != current.blocks {
+            return true
+        }
+        return previous.text != current.text
+    }
+
+    private nonisolated static func isContiguousMonitorAppend(
+        _ append: ReviewMonitorLogAppend,
+        previousUTF16Length: Int,
+        currentUTF16Length: Int
+    ) -> Bool {
+        let appendEnd = previousUTF16Length + append.textUTF16Length
+        return append.textUTF16Length > 0 &&
+            currentUTF16Length == appendEnd &&
+            append.range.location >= previousUTF16Length &&
+            NSMaxRange(append.range) <= appendEnd
+    }
+
+    private nonisolated static func isValidMonitorReplacement(
+        _ replacement: ReviewMonitorLogReplacement,
+        previousUTF16Length: Int,
+        currentUTF16Length: Int
+    ) -> Bool {
+        let replacementEnd = replacement.range.location + replacement.textUTF16Length
+        return replacement.textUTF16Length >= 0 &&
+            NSMaxRange(replacement.range) <= previousUTF16Length &&
+            currentUTF16Length == previousUTF16Length - replacement.range.length + replacement.textUTF16Length &&
+            replacementEnd <= currentUTF16Length
     }
 
     private nonisolated static func trimmedLogState(entries: [ReviewLogEntry]) -> LogState {
@@ -789,6 +1015,13 @@ public final class CodexReviewJob: Identifiable, Hashable {
         )
     }
 
+    private nonisolated static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLogBlockID {
+        if let key = mergeKey(for: entry) {
+            return ReviewMonitorLogBlockID("\(key.kind.rawValue):\(key.groupID)")
+        }
+        return ReviewMonitorLogBlockID(entry.id.uuidString)
+    }
+
     private nonisolated static func mergeKey(for entry: ReviewLogEntry) -> GroupKey? {
         guard let groupID = entry.groupID,
               groupID.isEmpty == false
@@ -802,6 +1035,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
         case .command, .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
+    }
+
+    private nonisolated static func utf16Length(_ text: String) -> Int {
+        (text as NSString).length
     }
 
     private nonisolated static func isVisibleInRenderedProjection(

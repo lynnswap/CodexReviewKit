@@ -5,7 +5,7 @@ import Testing
 @Suite("Codex review job rendering")
 @MainActor
 struct CodexReviewJobRenderingTests {
-    @Test func reviewMonitorLogTextOmitsCommandOutputButKeepsCommandEntry() {
+    @Test func reviewMonitorLogDocumentOmitsCommandOutputButKeepsCommandEntry() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",
             cwd: "/tmp/workspace",
@@ -26,11 +26,20 @@ struct CodexReviewJobRenderingTests {
 
         No correctness issues found.
         """)
-        #expect(job.reviewMonitorLogText == """
+        #expect(job.reviewMonitorLogDocument.text == """
         $ git diff --stat
 
         No correctness issues found.
         """)
+        #expect(job.reviewMonitorLogDocument.blocks.map(\.kind) == [.command, .agentMessage])
+        #expect(job.reviewMonitorLogDocument.blocks[0].range == NSRange(
+            location: 0,
+            length: ("$ git diff --stat" as NSString).length
+        ))
+        #expect(job.reviewMonitorLogDocument.blocks[1].range == NSRange(
+            location: ("$ git diff --stat\n\n" as NSString).length,
+            length: ("No correctness issues found." as NSString).length
+        ))
         #expect(job.activityLogText == """
         $ git diff --stat
 
@@ -51,16 +60,16 @@ struct CodexReviewJobRenderingTests {
             ]
         )
         let initialRevision = job.reviewMonitorRevision
-        let initialMonitorLog = job.reviewMonitorLogText
+        let initialMonitorDocument = job.reviewMonitorLogDocument
 
         job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd-1", text: "\nSources/App.swift | 2 +"))
 
         #expect(job.reviewMonitorRevision == initialRevision)
-        #expect(job.reviewMonitorLogText == initialMonitorLog)
+        #expect(job.reviewMonitorLogDocument == initialMonitorDocument)
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
-    @Test func tailAgentMessageDeltaUsesAppendMonitorUpdate() {
+    @Test func tailAgentMessageDeltaUsesAppendMonitorChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-agent-delta",
             cwd: "/tmp/workspace",
@@ -74,11 +83,27 @@ struct CodexReviewJobRenderingTests {
 
         job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg-1", text: " log"))
 
-        #expect(job.reviewMonitorLogText == "Initial log")
-        #expect(job.lastMonitorUpdate == .append(" log"))
+        #expect(job.reviewMonitorLogDocument.text == "Initial log")
+        #expect(job.reviewMonitorLogDocument.blocks == [
+            .init(
+                id: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+                kind: .agentMessage,
+                groupID: "msg-1",
+                range: NSRange(location: 0, length: ("Initial log" as NSString).length)
+            )
+        ])
+        #expect(job.reviewMonitorLogDocument.lastChange == .append(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(
+                location: ("Initial" as NSString).length,
+                length: (" log" as NSString).length
+            ),
+            text: " log"
+        )))
     }
 
-    @Test func replacingGroupedPlanUsesReloadMonitorUpdate() {
+    @Test func replacingGroupedPlanUsesReplacementMonitorChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-plan-reload",
             cwd: "/tmp/workspace",
@@ -92,8 +117,13 @@ struct CodexReviewJobRenderingTests {
 
         job.appendLogEntry(.init(kind: .plan, groupID: "plan-1", replacesGroup: true, text: "- updated"))
 
-        #expect(job.reviewMonitorLogText == "- updated")
-        #expect(job.lastMonitorUpdate == .reload("- updated"))
+        #expect(job.reviewMonitorLogDocument.text == "- updated")
+        #expect(job.reviewMonitorLogDocument.lastChange == .replace(.init(
+            kind: .plan,
+            blockID: ReviewMonitorLogBlockID("plan:plan-1"),
+            range: NSRange(location: 0, length: ("- original" as NSString).length),
+            text: "- updated"
+        )))
     }
 
     @Test func cappedAgentMessageKeepsNewestText() {
@@ -109,7 +139,7 @@ struct CodexReviewJobRenderingTests {
             ]
         )
 
-        #expect(job.reviewMonitorLogText.contains("FINAL REVIEW TEXT"))
-        #expect(job.reviewMonitorLogText.contains("STALE BEGINNING") == false)
+        #expect(job.reviewMonitorLogDocument.text.contains("FINAL REVIEW TEXT"))
+        #expect(job.reviewMonitorLogDocument.text.contains("STALE BEGINNING") == false)
     }
 }

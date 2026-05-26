@@ -1,5 +1,6 @@
 import AppKit
 import ObjectiveC.runtime
+import CodexReview
 
 @MainActor
 final class ReviewMonitorLogScrollView: NSScrollView {
@@ -32,10 +33,13 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private let textFinderClient = ReviewMonitorLogTextFinderClient()
     private let textFinderBarContainer = ReviewMonitorLogTextFinderBarContainer()
     private var displayedText = ""
+    private var displayedUTF16Length = 0
+    private var displayedRevision: UInt64?
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
 
 #if DEBUG
     private(set) var appendCount = 0
+    private(set) var replaceCount = 0
     private(set) var reloadCount = 0
     private(set) var autoFollowCount = 0
     private(set) var programmaticScrollCount = 0
@@ -125,34 +129,121 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func clear() -> Bool {
-        applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
+        displayedRevision = nil
+        return applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
     }
 
     @discardableResult
     func render(
-        text: String,
+        document: ReviewMonitorLogDocument,
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        if allowIncrementalUpdate, let suffix = appendedSuffix(for: text) {
-            return applyAppend(suffix)
+        if allowIncrementalUpdate, displayedRevision == document.revision {
+            return false
         }
-        return applyReload(text, restoring: restorationTarget, countBottomRestoreAsAutoFollow: false)
+
+        let canApplyLastChange = displayedRevision.map { $0 &+ 1 == document.revision } == true
+        if allowIncrementalUpdate,
+           canApplyLastChange,
+           case .append(let append) = document.lastChange,
+           canApplyAppend(append, to: document) {
+            let didRender = applyAppend(append)
+            displayedRevision = document.revision
+            return didRender
+        }
+        if allowIncrementalUpdate,
+           canApplyLastChange,
+           case .replace(let replacement) = document.lastChange,
+           canApplyReplacement(replacement, to: document) {
+            let didRender = applyReplacement(replacement)
+            displayedRevision = document.revision
+            return didRender
+        }
+        if allowIncrementalUpdate,
+           let suffix = appendedSuffix(for: document.text) {
+            let suffixUTF16Length = (suffix as NSString).length
+            let append = ReviewMonitorLogAppend(
+                kind: fallbackAppendKind(for: document.lastChange),
+                blockID: ReviewMonitorLogBlockID("fallback"),
+                range: NSRange(
+                    location: displayedUTF16Length,
+                    length: suffixUTF16Length
+                ),
+                text: suffix,
+                textUTF16Length: suffixUTF16Length
+            )
+            let didRender = applyAppend(append)
+            displayedRevision = document.revision
+            return didRender
+        }
+        let didRender = applyReload(document.text, restoring: restorationTarget, countBottomRestoreAsAutoFollow: false)
+        displayedRevision = document.revision
+        return didRender
+    }
+
+    private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
+        guard append.text.isEmpty == false else {
+            return false
+        }
+        let appendEnd = displayedUTF16Length + append.textUTF16Length
+        return append.textUTF16Length > 0 &&
+            append.range.location >= displayedUTF16Length &&
+            NSMaxRange(append.range) <= appendEnd &&
+            document.textUTF16Length == displayedUTF16Length + append.textUTF16Length
+    }
+
+    private func canApplyReplacement(
+        _ replacement: ReviewMonitorLogReplacement,
+        to document: ReviewMonitorLogDocument
+    ) -> Bool {
+        replacement.textUTF16Length >= 0 &&
+            replacement.range.location >= 0 &&
+            NSMaxRange(replacement.range) <= displayedUTF16Length &&
+        document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+    }
+
+    private func fallbackAppendKind(for change: ReviewMonitorLogChange) -> ReviewLogEntry.Kind {
+        if case .append(let append) = change {
+            return append.kind
+        }
+        return .event
     }
 
     @discardableResult
-    private func applyAppend(_ suffix: String) -> Bool {
-        guard suffix.isEmpty == false else {
+    private func applyAppend(_ append: ReviewMonitorLogAppend) -> Bool {
+        guard append.text.isEmpty == false else {
             return false
         }
 
         let shouldAutoFollow = isPinnedToBottom()
         noteClientStringWillChange()
-        logDocumentView.appendText(suffix)
-        displayedText += suffix
+        logDocumentView.appendText(append.text, animation: append)
+        displayedText += append.text
+        displayedUTF16Length += append.textUTF16Length
         invalidateDocumentLayout()
 #if DEBUG
         appendCount += 1
+#endif
+        if shouldAutoFollow {
+            scrollToBottom(countAsAutoFollow: true)
+        } else {
+            logDocumentView.layoutTextViewport()
+        }
+        invalidateFindIndicator()
+        return true
+    }
+
+    @discardableResult
+    private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
+        let shouldAutoFollow = isPinnedToBottom()
+        noteClientStringWillChange()
+        logDocumentView.replaceText(in: replacement.range, with: replacement.text)
+        replaceDisplayedText(in: replacement.range, with: replacement.text)
+        displayedUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        invalidateDocumentLayout()
+#if DEBUG
+        replaceCount += 1
 #endif
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
@@ -179,6 +270,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         noteClientStringWillChange()
         logDocumentView.replaceText(text)
         displayedText = text
+        displayedUTF16Length = (text as NSString).length
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
 #if DEBUG
@@ -216,6 +308,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
         let suffixStart = text.index(text.startIndex, offsetBy: displayedText.count)
         return String(text[suffixStart...])
+    }
+
+    private func replaceDisplayedText(in range: NSRange, with text: String) {
+        let mutable = NSMutableString(string: displayedText)
+        mutable.replaceCharacters(in: range, with: text)
+        displayedText = mutable as String
     }
 
     private func invalidateDocumentLayout() {
@@ -543,10 +641,12 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private let textStorage = NSTextStorage()
     private let textContentView = ReviewMonitorLogContentView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
+    private let lineGlowView = ReviewMonitorLogLineGlowView()
     private let selectionView = ReviewMonitorLogSelectionView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var lastUsedFragmentViews = Set<ReviewMonitorLogFragmentView>()
+    private var wordFadeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
     private var needsViewportLayout = true
     private var needsViewportRelayout = false
     private var lastViewportLayoutBounds: CGRect?
@@ -557,9 +657,13 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var keyboardSelectionFocusUTF16Offset: Int?
     private var preferredTextContainerWidth: CGFloat = 0
     private(set) var estimatedDocumentHeight: CGFloat = 0
+    private var glowTimer: Timer?
     var contentInsets: NSEdgeInsets = .init()
     var textContainerInset = NSSize(width: 4, height: 6)
     var onLayoutInvalidated: (() -> Void)?
+#if DEBUG
+    var reduceMotionOverrideForTesting: Bool?
+#endif
 
     private let baseFont = NSFont.monospacedSystemFont(
         ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
@@ -571,6 +675,25 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             .foregroundColor: NSColor.textColor,
         ]
     }
+
+    private static let reasoningLineGlowKinds: Set<ReviewLogEntry.Kind> = [
+        .reasoningSummary,
+        .rawReasoning,
+    ]
+
+    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
+        .agentMessage,
+        .plan,
+        .reasoningSummary,
+        .rawReasoning,
+    ]
+    private static let maxWordFadeCount = 80
+    private static let maxWordFadeUTF16Length = 8 * 1024
+    private static let maxLineFadeChunkUTF16Length = 12
+    private static let wordFadeDuration: TimeInterval = 0.34
+    private static let wordFadeInitialAlpha: CGFloat = 0
+    private static let wordFadeStagger: TimeInterval = 0.028
+    private static let wordFadeAlphaStepCount = 16
 
     override var isFlipped: Bool {
         true
@@ -615,10 +738,15 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         textContentStorage.primaryTextLayoutManager = textLayoutManager
         textLayoutManager.textViewportLayoutController.delegate = self
         addSubview(textContentView)
+        textContentView.addSubview(lineGlowView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
         estimatedDocumentHeight = measuredDocumentHeight()
         setAccessibilityElement(true)
+    }
+
+    isolated deinit {
+        glowTimer?.invalidate()
     }
 
     @available(*, unavailable)
@@ -682,19 +810,75 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             needsViewportLayout = true
             lastViewportLayoutBounds = nil
         }
+        if widthChanged || insetsChanged {
+            clearWordFadeAnimations()
+            lineGlowView.clear()
+        }
         if containerChanged || estimatedDocumentHeight <= 0 {
             updateEstimatedDocumentHeight()
         }
         return true
     }
 
-    func appendText(_ suffix: String) {
+    func appendText(_ suffix: String, animation: ReviewMonitorLogAppend?) {
         guard suffix.isEmpty == false else {
             return
         }
+        let appendBaseLocation = textStorage.length
         let invalidationStart = appendInvalidationStartUTF16Offset()
+        let fadeRanges = wordFadeRanges(in: suffix, baseLocation: appendBaseLocation, animation: animation)
+        let attributedSuffix = NSMutableAttributedString(string: suffix, attributes: baseAttributes)
+        for range in fadeRanges {
+            attributedSuffix.addAttribute(
+                .foregroundColor,
+                value: wordFadeColor(progress: 0),
+                range: NSRange(location: range.location - appendBaseLocation, length: range.length)
+            )
+        }
         textContentStorage.performEditingTransaction {
-            textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
+            textStorage.append(attributedSuffix)
+        }
+        clampSelectedRange()
+        let glowAnimationStart = CACurrentMediaTime()
+        if let animation,
+           shouldAnimateGlow,
+           animation.range.length > 0,
+           Self.wordFadeKinds.contains(animation.kind) {
+            enqueueWordFadeAnimations(ranges: fadeRanges, startedAt: glowAnimationStart)
+        }
+        invalidateTextLayout(
+            in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
+            measureEstimatedHeightImmediately: false
+        )
+        if let animation {
+            enqueueReasoningLineGlowIfNeeded(for: animation, startedAt: glowAnimationStart)
+            startGlowTimerIfNeeded()
+        }
+    }
+
+    func replaceText(_ text: String) {
+        cancelGlowAnimations()
+        textContentStorage.performEditingTransaction {
+            textStorage.setAttributedString(NSAttributedString(string: text, attributes: baseAttributes))
+        }
+        clampSelectedRange()
+        invalidateTextLayout(measureEstimatedHeightImmediately: true)
+    }
+
+    func replaceText(in range: NSRange, with text: String) {
+        cancelGlowAnimations()
+        let replacementRange = clamp(range)
+        guard replacementRange.length == range.length else {
+            replaceText(textStorage.string)
+            return
+        }
+
+        let invalidationStart = textReplacementInvalidationStartUTF16Offset(for: replacementRange)
+        textContentStorage.performEditingTransaction {
+            textStorage.replaceCharacters(
+                in: replacementRange,
+                with: NSAttributedString(string: text, attributes: baseAttributes)
+            )
         }
         clampSelectedRange()
         invalidateTextLayout(
@@ -703,12 +887,287 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         )
     }
 
-    func replaceText(_ text: String) {
-        textContentStorage.performEditingTransaction {
-            textStorage.setAttributedString(NSAttributedString(string: text, attributes: baseAttributes))
+    private func enqueueReasoningLineGlowIfNeeded(for append: ReviewMonitorLogAppend, startedAt: TimeInterval) {
+        guard shouldAnimateGlow,
+              append.range.length > 0
+        else {
+            return
         }
-        clampSelectedRange()
-        invalidateTextLayout(measureEstimatedHeightImmediately: true)
+
+        if Self.reasoningLineGlowKinds.contains(append.kind) {
+            let paragraphRange = (textStorage.string as NSString).paragraphRange(for: append.range)
+            lineGlowView.enqueueReasoningLineGlow(
+                rects: rects(forCharacterRange: paragraphRange).map(\.rectValue),
+                lastActivityAt: startedAt
+            )
+        }
+    }
+
+    private var shouldAnimateGlow: Bool {
+#if DEBUG
+        if let reduceMotionOverrideForTesting {
+            return reduceMotionOverrideForTesting == false
+        }
+#endif
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
+    }
+
+    private func enqueueWordFadeAnimations(ranges: [NSRange], startedAt: TimeInterval) {
+        guard ranges.isEmpty == false else {
+            return
+        }
+
+        for (index, range) in ranges.enumerated() {
+            let range = clamp(range)
+            guard range.length > 0 else {
+                continue
+            }
+            wordFadeAnimations.append(
+                ReviewMonitorLogWordFadeAnimation(
+                    range: range,
+                    startedAt: startedAt + TimeInterval(index) * Self.wordFadeStagger,
+                    renderedStep: 0
+                )
+            )
+        }
+        invalidateWordFadeDisplay(for: ranges)
+    }
+
+    private func wordFadeRanges(
+        in suffix: String,
+        baseLocation: Int,
+        animation: ReviewMonitorLogAppend?
+    ) -> [NSRange] {
+        guard shouldAnimateGlow,
+              let animation,
+              Self.wordFadeKinds.contains(animation.kind)
+        else {
+            return []
+        }
+
+        let nsString = suffix as NSString
+        let suffixRange = NSRange(location: baseLocation, length: nsString.length)
+        let clampedRange = NSIntersectionRange(animation.range, suffixRange)
+        guard clampedRange.length > 0 else {
+            return []
+        }
+        let localRange = NSRange(location: clampedRange.location - suffixRange.location, length: clampedRange.length)
+        let cappedRange = NSRange(
+            location: localRange.location,
+            length: min(clampedRange.length, Self.maxWordFadeUTF16Length)
+        )
+        var ranges: [NSRange] = []
+        nsString.enumerateSubstrings(
+            in: cappedRange,
+            options: [.byLines, .substringNotRequired, .localized]
+        ) { _, lineRange, _, stop in
+            ranges.append(contentsOf: self.lineFadeRanges(
+                in: nsString,
+                localLineRange: lineRange,
+                baseLocation: suffixRange.location,
+                limit: Self.maxWordFadeCount - ranges.count
+            ))
+            if ranges.count >= Self.maxWordFadeCount {
+                stop.pointee = true
+            }
+        }
+        return ranges
+    }
+
+    private func lineFadeRanges(
+        in string: NSString,
+        localLineRange: NSRange,
+        baseLocation: Int,
+        limit: Int
+    ) -> [NSRange] {
+        guard localLineRange.length > 0,
+              limit > 0
+        else {
+            return []
+        }
+
+        var ranges: [NSRange] = []
+        var chunkStart: Int?
+        var chunkEnd: Int?
+        string.enumerateSubstrings(
+            in: localLineRange,
+            options: [.byComposedCharacterSequences, .substringNotRequired, .localized]
+        ) { _, characterRange, _, characterStop in
+            if chunkStart == nil {
+                chunkStart = characterRange.location
+            }
+            chunkEnd = NSMaxRange(characterRange)
+
+            if let start = chunkStart,
+               let end = chunkEnd,
+               end - start >= Self.maxLineFadeChunkUTF16Length {
+                ranges.append(NSRange(location: baseLocation + start, length: end - start))
+                chunkStart = nil
+                chunkEnd = nil
+            }
+
+            if ranges.count >= limit {
+                characterStop.pointee = true
+            }
+        }
+
+        if ranges.count < limit,
+           let start = chunkStart,
+           let end = chunkEnd,
+           end > start {
+            ranges.append(NSRange(location: baseLocation + start, length: end - start))
+        }
+        return ranges
+    }
+
+    private func wordFadeColor(progress: Double) -> NSColor {
+        let alpha = Self.wordFadeInitialAlpha + (1 - Self.wordFadeInitialAlpha) * CGFloat(progress)
+        return NSColor.textColor.withAlphaComponent(alpha)
+    }
+
+    private func updateWordFadeAttributes(at now: TimeInterval) {
+        guard wordFadeAnimations.isEmpty == false else {
+            return
+        }
+
+        var activeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
+        var updatedRanges: [NSRange] = []
+        var colorUpdates: [(range: NSRange, color: NSColor)] = []
+        for var animation in wordFadeAnimations {
+            let progress = min(1, max(0, (now - animation.startedAt) / Self.wordFadeDuration))
+            if progress >= 1 {
+                colorUpdates.append((animation.range, NSColor.textColor))
+                updatedRanges.append(animation.range)
+                continue
+            }
+
+            let step = wordFadeAlphaStep(for: progress)
+            if step != animation.renderedStep {
+                colorUpdates.append((
+                    animation.range,
+                    wordFadeColor(progress: wordFadeProgress(forAlphaStep: step))
+                ))
+                updatedRanges.append(animation.range)
+                animation.renderedStep = step
+            }
+            activeAnimations.append(animation)
+        }
+        wordFadeAnimations = activeAnimations
+        updateWordFadeStorageColors(colorUpdates)
+        invalidateWordFadeDisplay(for: updatedRanges)
+    }
+
+    private func wordFadeAlphaStep(for progress: Double) -> Int {
+        min(
+            Self.wordFadeAlphaStepCount,
+            max(0, Int(progress * Double(Self.wordFadeAlphaStepCount)))
+        )
+    }
+
+    private func wordFadeProgress(forAlphaStep step: Int) -> Double {
+        Double(min(Self.wordFadeAlphaStepCount, max(0, step))) / Double(Self.wordFadeAlphaStepCount)
+    }
+
+    private func clearWordFadeAnimations() {
+        guard wordFadeAnimations.isEmpty == false else {
+            return
+        }
+
+        let storageRanges = wordFadeAnimations.map(\.range)
+        wordFadeAnimations.removeAll()
+        restoreWordFadeStorageColor(in: storageRanges)
+        invalidateWordFadeDisplay(for: storageRanges)
+    }
+
+    private func restoreWordFadeStorageColor(in ranges: [NSRange]) {
+        guard ranges.isEmpty == false else {
+            return
+        }
+
+        updateWordFadeStorageColors(ranges.map { ($0, NSColor.textColor) })
+    }
+
+    private func updateWordFadeStorageColors(_ updates: [(range: NSRange, color: NSColor)]) {
+        guard updates.isEmpty == false else {
+            return
+        }
+
+        textContentStorage.performEditingTransaction {
+            for (range, color) in updates {
+                let range = clamp(range)
+                if range.length > 0 {
+                    textStorage.addAttribute(.foregroundColor, value: color, range: range)
+                }
+            }
+        }
+    }
+
+    private func invalidateWordFadeDisplay(for ranges: [NSRange]) {
+        guard var invalidationRange = ranges.first else {
+            return
+        }
+        for range in ranges.dropFirst() {
+            invalidationRange = NSUnionRange(invalidationRange, range)
+        }
+
+        for fragmentView in visibleFragmentViews {
+            let fragmentRange = nsRange(for: fragmentView.layoutFragment.rangeInElement)
+            if NSIntersectionRange(fragmentRange, invalidationRange).length > 0 {
+                fragmentView.needsDisplay = true
+                fragmentView.displayIfNeeded()
+            }
+        }
+    }
+
+    private func startGlowTimerIfNeeded() {
+        guard glowTimer == nil,
+              hasActiveGlowAnimations
+        else {
+            setGlowViewsNeedDisplay()
+            return
+        }
+
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.advanceGlowAnimations()
+            }
+        }
+        glowTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        setGlowViewsNeedDisplay()
+    }
+
+    private func advanceGlowAnimations() {
+        guard shouldAnimateGlow else {
+            cancelGlowAnimations()
+            return
+        }
+
+        let now = CACurrentMediaTime()
+        updateWordFadeAttributes(at: now)
+        lineGlowView.pruneExpiredAnimations(at: now)
+        if hasActiveGlowAnimations {
+            setGlowViewsNeedDisplay()
+        } else {
+            glowTimer?.invalidate()
+            glowTimer = nil
+            setGlowViewsNeedDisplay()
+        }
+    }
+
+    fileprivate func cancelGlowAnimations() {
+        glowTimer?.invalidate()
+        glowTimer = nil
+        clearWordFadeAnimations()
+        lineGlowView.clear()
+    }
+
+    private var hasActiveGlowAnimations: Bool {
+        wordFadeAnimations.isEmpty == false || lineGlowView.hasActiveAnimations
+    }
+
+    private func setGlowViewsNeedDisplay() {
+        lineGlowView.needsDisplay = true
     }
 
     func layoutTextViewport(force: Bool = false) {
@@ -1009,6 +1468,16 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         return string.paragraphRange(for: NSRange(location: string.length - 1, length: 0)).location
     }
 
+    private func textReplacementInvalidationStartUTF16Offset(for range: NSRange) -> Int {
+        let string = textStorage.string as NSString
+        guard string.length > 0,
+              range.location < string.length
+        else {
+            return clampUTF16Offset(range.location)
+        }
+        return string.paragraphRange(for: NSRange(location: range.location, length: 0)).location
+    }
+
     @discardableResult
     private func syncTextContainerSize() -> Bool {
         let targetWidth = max(0, preferredTextContainerWidth - textContainerInset.width * 2)
@@ -1090,6 +1559,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private func syncContentSubviewFrames() {
         textContentView.frame = bounds
+        lineGlowView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
     }
@@ -1529,6 +1999,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             dy: textContainerInset.height
         )
         let fragmentView: ReviewMonitorLogFragmentView
+        var fragmentNeedsImmediateDisplay = false
         if let cachedFragmentView = fragmentViewMap.object(forKey: textLayoutFragment) {
             fragmentView = cachedFragmentView
             lastUsedFragmentViews.remove(cachedFragmentView)
@@ -1538,16 +2009,23 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 frame: backingAlignedRect(layoutFragmentFrame, options: .alignAllEdgesOutward)
             )
             fragmentViewMap.setObject(fragmentView, forKey: textLayoutFragment)
+            fragmentNeedsImmediateDisplay = true
         }
 
         let alignedFrame = backingAlignedRect(layoutFragmentFrame, options: .alignAllEdgesOutward)
         if rectsAreNearlyEqual(fragmentView.frame, alignedFrame) == false {
             fragmentView.frame = alignedFrame
             fragmentView.needsDisplay = true
+            fragmentNeedsImmediateDisplay = true
         }
 
         if fragmentView.superview !== fragmentViewportView {
             fragmentViewportView.addSubview(fragmentView)
+            fragmentNeedsImmediateDisplay = true
+        }
+        if fragmentNeedsImmediateDisplay {
+            fragmentView.needsDisplay = true
+            fragmentView.displayIfNeeded()
         }
         visibleFragmentViews.insert(fragmentView)
     }
@@ -1657,6 +2135,97 @@ private final class ReviewMonitorLogFragmentView: NSView {
         context.saveGState()
         layoutFragment.draw(at: .zero, in: context)
         context.restoreGState()
+    }
+}
+
+private struct ReviewMonitorLogWordFadeAnimation {
+    var range: NSRange
+    var startedAt: TimeInterval
+    var renderedStep: Int
+}
+
+@MainActor
+private final class ReviewMonitorLogLineGlowView: NSView {
+    private struct ReasoningLineGlow {
+        var rects: [NSRect]
+        var lastActivityAt: TimeInterval
+    }
+
+    private var reasoningLineGlow: ReasoningLineGlow?
+
+    private static let reasoningLineGlowDuration: TimeInterval = 1.2
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    var hasActiveAnimations: Bool {
+        reasoningLineGlow != nil
+    }
+
+    var reasoningLineGlowCount: Int {
+        reasoningLineGlow == nil ? 0 : 1
+    }
+
+    func enqueueReasoningLineGlow(rects: [NSRect], lastActivityAt: TimeInterval) {
+        guard rects.isEmpty == false else {
+            return
+        }
+        reasoningLineGlow = .init(rects: rects, lastActivityAt: lastActivityAt)
+        needsDisplay = true
+    }
+
+    func pruneExpiredAnimations(at now: TimeInterval) {
+        if let reasoningLineGlow,
+           now - reasoningLineGlow.lastActivityAt >= Self.reasoningLineGlowDuration {
+            self.reasoningLineGlow = nil
+        }
+    }
+
+    func clear() {
+        guard reasoningLineGlow != nil else {
+            return
+        }
+        reasoningLineGlow = nil
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        drawReasoningLineGlow(
+            dirtyRect,
+            now: CACurrentMediaTime()
+        )
+    }
+
+    private func drawReasoningLineGlow(
+        _ dirtyRect: NSRect,
+        now: TimeInterval
+    ) {
+        guard let reasoningLineGlow else {
+            return
+        }
+        let elapsed = now - reasoningLineGlow.lastActivityAt
+        let fade = max(0, 1 - elapsed / Self.reasoningLineGlowDuration)
+        let pulse = 0.72 + 0.28 * sin(now * 8)
+        let alpha = fade * pulse * 0.16
+        guard alpha > 0 else {
+            return
+        }
+
+        NSColor.controlAccentColor.withAlphaComponent(alpha).setFill()
+        for rect in reasoningLineGlow.rects where rect.intersects(dirtyRect) {
+            let lineRect = NSRect(
+                x: 0,
+                y: rect.minY - 1,
+                width: bounds.width,
+                height: rect.height + 2
+            )
+            NSBezierPath(roundedRect: lineRect, xRadius: 4, yRadius: 4).fill()
+        }
     }
 }
 
@@ -1974,11 +2543,30 @@ extension ReviewMonitorLogScrollView {
 
     @discardableResult
     func renderForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
-        render(text: text, restoring: currentScrollRestorationTarget, allowIncrementalUpdate: allowIncrementalUpdate)
+        render(
+            document: .init(text: text, revision: (displayedRevision ?? 0) &+ 1),
+            restoring: currentScrollRestorationTarget,
+            allowIncrementalUpdate: allowIncrementalUpdate
+        )
     }
 
     func copySelectionForTesting() {
         logDocumentView.copy(nil)
+    }
+
+    var wordGlowCountForTesting: Int {
+        logDocumentView.wordGlowCountForTesting
+    }
+
+    var reasoningLineGlowCountForTesting: Int {
+        logDocumentView.reasoningLineGlowCountForTesting
+    }
+
+    func setReduceMotionForTesting(_ reduceMotion: Bool?) {
+        logDocumentView.reduceMotionOverrideForTesting = reduceMotion
+        if reduceMotion == true {
+            logDocumentView.cancelGlowAnimations()
+        }
     }
 
     var overlayScrollerHideRequestCountForTesting: Int {
@@ -2032,6 +2620,14 @@ private extension ReviewMonitorLogDocumentView {
 
     var visibleFragmentViewCountForTesting: Int {
         visibleFragmentViews.count
+    }
+
+    var wordGlowCountForTesting: Int {
+        wordFadeAnimations.count
+    }
+
+    var reasoningLineGlowCountForTesting: Int {
+        lineGlowView.reasoningLineGlowCount
     }
 
     var visibleFragmentBoundsForTesting: NSRect {
