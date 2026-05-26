@@ -34,6 +34,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private let textFinderBarContainer = ReviewMonitorLogTextFinderBarContainer()
     private var displayedText = ""
     private var displayedUTF16Length = 0
+    private var displayedRevision: UInt64?
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
 
 #if DEBUG
@@ -128,7 +129,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func clear() -> Bool {
-        applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
+        displayedRevision = nil
+        return applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
     }
 
     @discardableResult
@@ -137,21 +139,32 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
+        if allowIncrementalUpdate, displayedRevision == document.revision {
+            return false
+        }
+
+        let canApplyLastChange = displayedRevision.map { $0 &+ 1 == document.revision } == true
         if allowIncrementalUpdate,
+           canApplyLastChange,
            case .append(let append) = document.lastChange,
-           canApplyAppend(append) {
-            return applyAppend(append)
+           canApplyAppend(append, to: document) {
+            let didRender = applyAppend(append)
+            displayedRevision = document.revision
+            return didRender
         }
         if allowIncrementalUpdate,
+           canApplyLastChange,
            case .replace(let replacement) = document.lastChange,
-           canApplyReplacement(replacement) {
-            return applyReplacement(replacement)
+           canApplyReplacement(replacement, to: document) {
+            let didRender = applyReplacement(replacement)
+            displayedRevision = document.revision
+            return didRender
         }
         if allowIncrementalUpdate,
            let suffix = appendedSuffix(for: document.text) {
             let suffixUTF16Length = (suffix as NSString).length
             let append = ReviewMonitorLogAppend(
-                kind: .agentMessage,
+                kind: fallbackAppendKind(for: document.lastChange),
                 blockID: ReviewMonitorLogBlockID("fallback"),
                 range: NSRange(
                     location: displayedUTF16Length,
@@ -160,25 +173,41 @@ final class ReviewMonitorLogScrollView: NSScrollView {
                 text: suffix,
                 textUTF16Length: suffixUTF16Length
             )
-            return applyAppend(append)
+            let didRender = applyAppend(append)
+            displayedRevision = document.revision
+            return didRender
         }
-        return applyReload(document.text, restoring: restorationTarget, countBottomRestoreAsAutoFollow: false)
+        let didRender = applyReload(document.text, restoring: restorationTarget, countBottomRestoreAsAutoFollow: false)
+        displayedRevision = document.revision
+        return didRender
     }
 
-    private func canApplyAppend(_ append: ReviewMonitorLogAppend) -> Bool {
+    private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
         guard append.text.isEmpty == false else {
             return false
         }
         let appendEnd = displayedUTF16Length + append.textUTF16Length
         return append.textUTF16Length > 0 &&
             append.range.location >= displayedUTF16Length &&
-            NSMaxRange(append.range) <= appendEnd
+            NSMaxRange(append.range) <= appendEnd &&
+            document.textUTF16Length == displayedUTF16Length + append.textUTF16Length
     }
 
-    private func canApplyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
+    private func canApplyReplacement(
+        _ replacement: ReviewMonitorLogReplacement,
+        to document: ReviewMonitorLogDocument
+    ) -> Bool {
         replacement.textUTF16Length >= 0 &&
             replacement.range.location >= 0 &&
-            NSMaxRange(replacement.range) <= displayedUTF16Length
+            NSMaxRange(replacement.range) <= displayedUTF16Length &&
+        document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+    }
+
+    private func fallbackAppendKind(for change: ReviewMonitorLogChange) -> ReviewLogEntry.Kind {
+        if case .append(let append) = change {
+            return append.kind
+        }
+        return .event
     }
 
     @discardableResult
@@ -2513,7 +2542,7 @@ extension ReviewMonitorLogScrollView {
     @discardableResult
     func renderForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
         render(
-            document: .init(text: text),
+            document: .init(text: text, revision: (displayedRevision ?? 0) &+ 1),
             restoring: currentScrollRestorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
