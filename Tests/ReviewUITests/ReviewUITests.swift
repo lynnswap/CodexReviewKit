@@ -3876,6 +3876,46 @@ struct ReviewUITests {
         }
     }
 
+    @Test func logFindQueryChangeRefreshesVisibleSnapshotAfterLogUpdates() async throws {
+        let job = makeJob(
+            id: "job-log-find-query-change",
+            status: .running,
+            targetSummary: "Visible find bar query change",
+            summary: "Running review.",
+            logText: "alpha initial log\n"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 720, height: 320))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        let initialLength = (job.reviewMonitorLogDocument.text as NSString).length
+        try await withFindPasteboardString(nil) {
+            viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+            #expect(transport.logFindBarVisibleForTesting)
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("alpha"))
+            #expect(transport.logFindStringLengthForTesting == initialLength)
+
+            job.appendLogEntry(.init(kind: .progress, text: "beta appended after active search"))
+            _ = try await awaitTransportRender(transport)
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringLengthForTesting == initialLength)
+
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("beta"))
+            #expect(transport.logVisibleFindBarSearchStringForTesting == "beta")
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
+            #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+        }
+    }
+
     @Test func logFindVisibleBarNormalSelectionKeepsUpdatesLive() async throws {
         let job = makeJob(
             id: "job-log-find-visible-normal-selection",
