@@ -32,31 +32,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var textFinder = NSTextFinder()
     private let textFinderClient = ReviewMonitorLogTextFinderClient()
     private let textFinderBarContainer = ReviewMonitorLogTextFinderBarContainer()
+    private var findBarSearchFieldChangeObserver: NSObjectProtocol?
+    private weak var observedFindBarSearchField: NSSearchField?
     private var displayedText = ""
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
-    private var findClientStringState = FindClientStringState.live
-    private var findClientStringChangeTimer: Timer?
-    private var shouldNotifyNextVisibleFindChange = false
-    private var hasActiveFindQuery = false
-
-    private static let findClientStringChangeCoalescingInterval: TimeInterval = 0.25
+    private var isFindQueryActive = false
+    private var activeFindQueryString: String?
 
     private enum LogTextMutation: Equatable {
         case appendPreservingPrefix
         case structural
-    }
-
-    private enum FindClientStringUpdate: Equatable {
-        case noPostMutationWork
-        case clearVisibleSelectionAfterMutation
-    }
-
-    private enum FindClientStringState: Equatable {
-        case live
-        case pendingLiveNotification
-        case visibleSnapshot
     }
 
     private enum FindIndicatorInvalidationReason {
@@ -70,7 +57,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private(set) var reloadCount = 0
     private(set) var autoFollowCount = 0
     private(set) var programmaticScrollCount = 0
-    private(set) var findClientStringWillChangeCount = 0
     private(set) var findIndicatorInvalidationCount = 0
     private(set) var overlayScrollerHideRequestCount = 0
     private var overlayScrollersShownOverrideForTesting: Bool?
@@ -91,13 +77,13 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             self?.syncDocumentFrameToTextLayout()
         }
         logDocumentView.onUserSelectionChanged = { [weak self] in
-            self?.clearActiveFindQueryAfterUserSelectionChange()
+            self?.handleUserSelectionChanged()
         }
         logDocumentView.setAccessibilityIdentifier("review-monitor.activity-log")
 
         textFinderClient.documentView = logDocumentView
         textFinderClient.onSelectedRangeChangedByFinder = { [weak self] range in
-            self?.updateActiveFindQueryAfterFinderSelectedRangeChange(range)
+            self?.handleFinderSelectedRangeChanged(range)
         }
         textFinderBarContainer.scrollView = self
         textFinderBarContainer.finderContentView = logDocumentView.finderContentView
@@ -113,7 +99,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     isolated deinit {
-        findClientStringChangeTimer?.invalidate()
+        if let findBarSearchFieldChangeObserver {
+            NotificationCenter.default.removeObserver(findBarSearchFieldChangeObserver)
+        }
     }
 
     @available(*, unavailable)
@@ -124,12 +112,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
         if newWindow == nil {
-            cancelPendingFindClientStringChange()
-            findClientStringState = .live
-            shouldNotifyNextVisibleFindChange = false
-            hasActiveFindQuery = false
-            textFinderClient.clearSnapshot()
-            textFinder.cancelFindIndicator()
+            endFindSession()
+            stopObservingFindBarSearchField()
             textFinder.client = nil
             textFinder.findBarContainer = nil
         } else if textFinder.client == nil {
@@ -138,17 +122,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     func resetFindStateForContentReuse() {
-        let shouldNotifySnapshotReset = isFindBarVisible && textFinderClient.usesSnapshot
-        cancelPendingFindClientStringChange()
-        findClientStringState = .live
-        shouldNotifyNextVisibleFindChange = isFindBarVisible
-        hasActiveFindQuery = false
-        if shouldNotifySnapshotReset {
-            beginLiveFindClientStringUpdate()
-        } else {
-            textFinderClient.clearSnapshot()
-        }
-        textFinder.cancelFindIndicator()
+        endFindSession()
     }
 
     override func tile() {
@@ -275,11 +249,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = isPinnedToBottom()
-        let findUpdate = beginFindClientStringUpdate(for: .appendPreservingPrefix)
+        let shouldClearFindSelection = prepareFindSessionForLogMutation(.appendPreservingPrefix)
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
-        finishFindClientStringUpdate(findUpdate)
+        finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
         appendCount += 1
@@ -297,14 +271,14 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
-        let findUpdate = beginFindClientStringUpdate(
-            for: .structural,
+        let shouldClearFindSelection = prepareFindSessionForLogMutation(
+            .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
         )
         logDocumentView.replaceText(in: replacement.range, with: replacement.text)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = resultingTextUTF16Length
-        finishFindClientStringUpdate(findUpdate)
+        finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
         replaceCount += 1
@@ -332,11 +306,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let mutation = reloadMutation(for: text)
-        let findUpdate = beginFindClientStringUpdate(for: mutation, resultingTextIsEmpty: text.isEmpty)
+        let shouldClearFindSelection = prepareFindSessionForLogMutation(mutation, resultingTextIsEmpty: text.isEmpty)
         logDocumentView.replaceText(text)
         displayedText = text
         displayedUTF16Length = (text as NSString).length
-        finishFindClientStringUpdate(findUpdate)
+        finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
 #if DEBUG
@@ -356,123 +330,178 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return .appendPreservingPrefix
     }
 
-    private func beginFindClientStringUpdate(
-        for mutation: LogTextMutation,
+    private func prepareFindSessionForLogMutation(
+        _ mutation: LogTextMutation,
         resultingTextIsEmpty: Bool = false
-    ) -> FindClientStringUpdate {
+    ) -> Bool {
         guard textFinder.isIncrementalSearchingEnabled else {
-            return .noPostMutationWork
+            return false
         }
 
-        if isFindBarVisible {
-            if logDocumentView.string.isEmpty || resultingTextIsEmpty || shouldNotifyNextVisibleFindChange {
-                shouldNotifyNextVisibleFindChange = false
-                beginLiveFindClientStringUpdate()
-                return .noPostMutationWork
-            }
-            shouldNotifyNextVisibleFindChange = false
-            guard hasActiveFindQuery else {
-                beginLiveFindClientStringUpdate()
-                return .noPostMutationWork
-            }
-            cancelPendingFindClientStringChange()
-            if mutation == .appendPreservingPrefix {
-                textFinderClient.captureSnapshotIfNeeded(mapsToDocument: true) { logDocumentView.string }
-            } else {
-                textFinderClient.captureSnapshotIfNeeded(mapsToDocument: false) { logDocumentView.string }
-                textFinderClient.invalidateSnapshotDocumentMapping()
-            }
-            findClientStringState = .visibleSnapshot
-            return mutation == .structural ? .clearVisibleSelectionAfterMutation : .noPostMutationWork
+        guard isFindBarVisible else {
+            endFindSession()
+            return false
+        }
+        refreshFindBarSearchFieldObservation()
+
+        guard isFindQueryActive else {
+            return false
+        }
+        guard resultingTextIsEmpty == false else {
+            endFindSession()
+            return false
         }
 
-        shouldNotifyNextVisibleFindChange = false
-        beginLiveFindClientStringUpdate()
-        return .noPostMutationWork
+        captureFindSessionSnapshotIfNeeded()
+        if mutation == .structural {
+            textFinderClient.invalidateSnapshotDocumentMapping()
+            return true
+        }
+
+        return false
     }
 
-    private func beginLiveFindClientStringUpdate() {
-        if findClientStringState != .pendingLiveNotification {
-            findClientStringState = .pendingLiveNotification
-#if DEBUG
-            findClientStringWillChangeCount += 1
-#endif
-            textFinder.noteClientStringWillChange()
-        }
-        textFinderClient.clearSnapshot()
-
-        scheduleFindClientStringChangeCompletion()
-    }
-
-    private func finishFindClientStringUpdate(_ update: FindClientStringUpdate) {
-        if update == .clearVisibleSelectionAfterMutation {
+    private func finishLogMutationForFindSession(clearSelection: Bool) {
+        if clearSelection {
             logDocumentView.setSelectedRangeFromTextFinder(NSRange(location: 0, length: 0))
         }
     }
 
-    private func scheduleFindClientStringChangeCompletion() {
-        findClientStringChangeTimer?.invalidate()
-        let timer = Timer(timeInterval: Self.findClientStringChangeCoalescingInterval, repeats: false) { [weak self] _ in
+    private func resetDeferredFindStateAfterFindBarHidden() {
+        stopObservingFindBarSearchField()
+        endFindSession()
+    }
+
+    private func handleUserSelectionChanged() {
+        guard isFindBarVisible else {
+            return
+        }
+        refreshFindBarSearchFieldObservation()
+        if hasFindQuerySignal == false {
+            endFindSession()
+        }
+    }
+
+    private func handleFinderSelectedRangeChanged(_ range: NSRange) {
+        if range.length > 0 || hasFindQuerySignal {
+            beginFindSessionIfPossible()
+        } else {
+            endFindSession()
+        }
+    }
+
+    private var hasFindQuerySignal: Bool {
+        currentFindQueryString != nil
+    }
+
+    private var currentFindQueryString: String? {
+        if let visibleSearchString = visibleFindBarSearchString {
+            return visibleSearchString.isEmpty ? nil : visibleSearchString
+        }
+        guard let findString = NSPasteboard(name: .find).string(forType: .string),
+              findString.isEmpty == false
+        else {
+            return nil
+        }
+        return findString
+    }
+
+    private var visibleFindBarSearchString: String? {
+        guard isFindBarVisible,
+              let findBarView = textFinderBarContainer.findBarView
+        else {
+            return nil
+        }
+        return findBarSearchField(in: findBarView)?.stringValue
+    }
+
+    private func refreshFindBarSearchFieldObservation() {
+        guard isFindBarVisible,
+              let findBarView = textFinderBarContainer.findBarView,
+              let searchField = findBarSearchField(in: findBarView)
+        else {
+            stopObservingFindBarSearchField()
+            return
+        }
+
+        guard observedFindBarSearchField !== searchField else {
+            return
+        }
+        stopObservingFindBarSearchField()
+        observedFindBarSearchField = searchField
+        findBarSearchFieldChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSControl.textDidChangeNotification,
+            object: searchField,
+            queue: nil
+        ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.finishPendingFindClientStringChange()
+                self?.findBarSearchStringDidChange()
             }
         }
-        findClientStringChangeTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
     }
 
-    private func finishPendingFindClientStringChange() {
-        findClientStringChangeTimer?.invalidate()
-        findClientStringChangeTimer = nil
-        guard findClientStringState == .pendingLiveNotification else {
-            return
+    private func stopObservingFindBarSearchField() {
+        if let findBarSearchFieldChangeObserver {
+            NotificationCenter.default.removeObserver(findBarSearchFieldChangeObserver)
         }
-        findClientStringState = .live
-        invalidateFindIndicator()
+        findBarSearchFieldChangeObserver = nil
+        observedFindBarSearchField = nil
     }
 
-    private func cancelPendingFindClientStringChange() {
-        findClientStringChangeTimer?.invalidate()
-        findClientStringChangeTimer = nil
-        if findClientStringState == .pendingLiveNotification {
-            findClientStringState = .live
-        }
+    private func findBarSearchStringDidChange() {
+        refreshFindBarSearchFieldObservation()
+        beginFindSessionForQueryChange(from: activeFindQueryString)
     }
 
-    private func resetDeferredFindStateAfterFindBarHidden() {
-        hasActiveFindQuery = false
-        guard findClientStringState == .visibleSnapshot else {
-            return
-        }
-        shouldNotifyNextVisibleFindChange = false
-        beginLiveFindClientStringUpdate()
-    }
-
-    private func clearActiveFindQueryAfterUserSelectionChange() {
-        clearActiveFindQuery()
-    }
-
-    private func updateActiveFindQueryAfterFinderSelectedRangeChange(_ range: NSRange) {
-        if range.length > 0 || hasNonEmptyFindPasteboardString {
-            hasActiveFindQuery = true
-        } else {
-            clearActiveFindQuery()
-        }
-    }
-
-    private var hasNonEmptyFindPasteboardString: Bool {
-        guard let findString = NSPasteboard(name: .find).string(forType: .string) else {
+    @discardableResult
+    private func beginFindSessionIfPossible() -> Bool {
+        guard isFindBarVisible, hasFindQuerySignal else {
+            endFindSession()
             return false
         }
-        return findString.isEmpty == false
+
+        isFindQueryActive = true
+        activeFindQueryString = currentFindQueryString
+        if textFinderClient.snapshotMapsToDocument == false {
+            textFinderClient.clearSnapshot()
+        }
+        captureFindSessionSnapshotIfNeeded()
+        return true
     }
 
-    private func clearActiveFindQuery() {
-        hasActiveFindQuery = false
-        guard findClientStringState == .visibleSnapshot else {
+    @discardableResult
+    private func beginFindSessionForQueryChange(from previousQuery: String?) -> Bool {
+        let currentQuery = currentFindQueryString
+        if let currentQuery, currentQuery != previousQuery {
+            textFinderClient.clearSnapshot()
+        }
+        return beginFindSessionIfPossible()
+    }
+
+    private func captureFindSessionSnapshotIfNeeded() {
+        guard textFinderClient.usesSnapshot == false else {
             return
         }
-        beginLiveFindClientStringUpdate()
+        textFinderClient.captureSnapshotIfNeeded(mapsToDocument: true) { logDocumentView.string }
+    }
+
+    private func endFindSession() {
+        isFindQueryActive = false
+        activeFindQueryString = nil
+        textFinderClient.clearSnapshot()
+        textFinder.cancelFindIndicator()
+    }
+
+    private func findBarSearchField(in view: NSView) -> NSSearchField? {
+        if let searchField = view as? NSSearchField {
+            return searchField
+        }
+        for subview in view.subviews {
+            if let searchField = findBarSearchField(in: subview) {
+                return searchField
+            }
+        }
+        return nil
     }
 
     private func configureTextFinder() {
@@ -486,8 +515,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard isFindBarVisible else {
             return
         }
-        if findClientStringState == .visibleSnapshot,
-           (reason != .viewportChanged || textFinderClient.snapshotMapsToDocument == false) {
+        if reason != .viewportChanged, textFinderClient.snapshotMapsToDocument == false {
             return
         }
 #if DEBUG
@@ -798,23 +826,26 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard textFinder.validateAction(action) else {
             return false
         }
+        let activeFindQueryStringBeforeAction = activeFindQueryString
         let selectedRangeBeforeAction = textFinderClient.firstSelectedRange
         textFinder.performAction(action)
+        refreshFindBarSearchFieldObservation()
         if action == .setSearchString {
-            if selectedRangeBeforeAction.length > 0 || hasNonEmptyFindPasteboardString {
-                hasActiveFindQuery = true
+            if selectedRangeBeforeAction.length > 0 || hasFindQuerySignal {
+                beginFindSessionForQueryChange(from: activeFindQueryStringBeforeAction)
             } else {
-                clearActiveFindQuery()
+                endFindSession()
             }
         } else if actionActivatesFindQuery(action) &&
-            (hasActiveFindQuery || textFinderClient.firstSelectedRange.length > 0) {
-            hasActiveFindQuery = true
+            (isFindQueryActive || hasFindQuerySignal || textFinderClient.firstSelectedRange.length > 0) {
+            beginFindSessionIfPossible()
         }
         return true
     }
 
     private func actionActivatesFindQuery(_ action: NSTextFinder.Action) -> Bool {
         action == .setSearchString ||
+            action == .showFindInterface ||
             action == .nextMatch ||
             action == .previousMatch ||
             action == .selectAll ||
@@ -2658,14 +2689,6 @@ extension ReviewMonitorLogScrollView {
         textFinderClient.stringLength()
     }
 
-    var findClientStringWillChangeCountForTesting: Int {
-        findClientStringWillChangeCount
-    }
-
-    var hasPendingFindClientStringChangeForTesting: Bool {
-        findClientStringState == .pendingLiveNotification
-    }
-
     var findClientUsesSnapshotForTesting: Bool {
         textFinderClient.usesSnapshotForTesting
     }
@@ -2678,12 +2701,29 @@ extension ReviewMonitorLogScrollView {
         textFinderClient.firstSelectedRange
     }
 
-    var hasActiveFindQueryForTesting: Bool {
-        hasActiveFindQuery
+    var findIncrementalMatchRangeCountForTesting: Int {
+        textFinder.incrementalMatchRanges.count
     }
 
-    func flushPendingFindClientStringChangeForTesting() {
-        finishPendingFindClientStringChange()
+    var hasActiveFindQueryForTesting: Bool {
+        isFindQueryActive
+    }
+
+    var visibleFindBarSearchStringForTesting: String? {
+        visibleFindBarSearchString
+    }
+
+    @discardableResult
+    func setVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
+        guard isFindBarVisible,
+              let findBarView = textFinderBarContainer.findBarView,
+              let searchField = findBarSearchField(in: findBarView)
+        else {
+            return false
+        }
+        searchField.stringValue = string
+        findBarSearchStringDidChange()
+        return true
     }
 
     var findIndicatorInvalidationCountForTesting: Int {
@@ -2695,10 +2735,6 @@ extension ReviewMonitorLogScrollView {
     }
 
     var findIncrementalSearchUsesSystemHighlightingForTesting: Bool {
-        textFinder.incrementalSearchingShouldDimContentView
-    }
-
-    var findFeedbackDimmingEnabledForTesting: Bool {
         textFinder.incrementalSearchingShouldDimContentView
     }
 

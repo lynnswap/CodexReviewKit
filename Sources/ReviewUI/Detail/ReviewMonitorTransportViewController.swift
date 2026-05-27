@@ -18,14 +18,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let uiStateObservationScope = ObservationScope()
     private let selectedJobObservationScope = ObservationScope()
     private let selectedWorkspaceObservationScope = ObservationScope()
+    private var selectionDelivery: ObservationDelivery?
+    private var selectedJobDelivery: ObservationDelivery?
+    private var selectedWorkspaceFindingsDelivery: ObservationDelivery?
     private var boundJob: CodexReviewJob?
     private var boundWorkspace: CodexReviewWorkspace?
     private var displayedSelection: DisplayedSelection?
     private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
-#if DEBUG
-    private var renderCountForTestingStorage = 0
-    private var renderWaitersForTesting: [Int: [CheckedContinuation<Void, Never>]] = [:]
-#endif
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
         self.store = store
@@ -90,7 +89,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func bindObservation() {
         uiStateObservationScope.cancelAll()
-        uiStateObservationScope.observe(uiState) { [weak self] event, uiState in
+        selectionDelivery = uiStateObservationScope.observe(uiState) { [weak self] event, uiState in
             let selection = uiState.selection
             guard let self else {
                 return
@@ -114,7 +113,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func updatePresentation(selection: ReviewMonitorSelection?) {
-        let previousSelection = displayedSelection
         switch selection {
         case .job(let selectedJob):
             clearDisplayedWorkspace()
@@ -138,10 +136,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
             workspaceFindingsView.isHidden = true
             displayedSelection = nil
         }
-
-        if previousSelection != displayedSelection {
-            noteRenderForTesting()
-        }
     }
 
     private func displayJob(_ selectedJob: CodexReviewJob) {
@@ -151,41 +145,39 @@ final class ReviewMonitorTransportViewController: NSViewController {
             logScrollView.resetFindStateForContentReuse()
         }
         selectedJobObservationScope.cancelAll()
+        selectedJobDelivery = nil
         boundJob = selectedJob
 
-        selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
+        selectedJobDelivery = selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
             let document = selectedJob.reviewMonitorLogDocument
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
-            let logChanged = self.renderBoundJobLog(
+            self.renderBoundJobLog(
                 document,
                 restorationTarget: event.kind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
                 allowIncrementalUpdate: event.kind != .initial
             )
-            if logChanged {
-                self.noteRenderForTesting()
-            }
         }
     }
 
     private func clearDisplayedJob() {
         cacheBoundJobScrollTarget()
         selectedJobObservationScope.cancelAll()
+        selectedJobDelivery = nil
         boundJob = nil
         logScrollView.resetFindStateForContentReuse()
-        if logScrollView.clear() {
-            noteRenderForTesting()
-        }
+        logScrollView.clear()
     }
 
     private func displayWorkspace(_ workspace: CodexReviewWorkspace) {
         if boundWorkspace !== workspace {
             selectedWorkspaceObservationScope.cancelAll()
+            selectedWorkspaceFindingsDelivery = nil
             boundWorkspace = workspace
             bindWorkspaceObservation(workspace)
         }
@@ -193,15 +185,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func clearDisplayedWorkspace() {
         selectedWorkspaceObservationScope.cancelAll()
+        selectedWorkspaceFindingsDelivery = nil
         boundWorkspace = nil
-        if workspaceFindingsView.clear() {
-            noteRenderForTesting()
-        }
+        workspaceFindingsView.clear()
         workspaceFindingsView.isHidden = true
     }
 
     private func bindWorkspaceObservation(_ workspace: CodexReviewWorkspace) {
-        selectedWorkspaceObservationScope.observe(store) { [weak self, weak workspace] _, _ in
+        selectedWorkspaceFindingsDelivery = selectedWorkspaceObservationScope.observe(store) { [weak self, weak workspace] _, _ in
             guard let self,
                   let workspace,
                   self.boundWorkspace === workspace
@@ -209,9 +200,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 return
             }
             let entries = self.workspaceFindingEntries(for: workspace)
-            if self.renderWorkspaceFindings(entries: entries) {
-                self.noteRenderForTesting()
-            }
+            self.renderWorkspaceFindings(entries: entries)
         }
     }
 
@@ -401,34 +390,59 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    private func noteRenderForTesting() {
-#if DEBUG
-        renderCountForTestingStorage += 1
-        let readyCounts = renderWaitersForTesting.keys.filter { $0 <= renderCountForTestingStorage }
-        for count in readyCounts {
-            let continuations = renderWaitersForTesting.removeValue(forKey: count) ?? []
-            for continuation in continuations {
-                continuation.resume()
-            }
-        }
-#endif
-    }
 }
 
 #if DEBUG
 @MainActor
 extension ReviewMonitorTransportViewController {
-    struct RenderSnapshotForTesting: Equatable {
+    struct RenderSnapshotForTesting: Sendable, Equatable {
         let title: String?
         let summary: String?
         let log: String
         let isShowingEmptyState: Bool
     }
 
-    struct WorkspaceFindingSnapshotForTesting: Equatable {
+    struct WorkspaceFindingSnapshotForTesting: Sendable, Equatable {
         let text: String
         let isShowingNoFindingsState: Bool
         let isShowingFindingsList: Bool
+    }
+
+    enum DisplayedSelectionForTesting: Sendable, Equatable {
+        case job(String)
+        case workspace(String)
+    }
+
+    struct RenderedStateForTesting: Sendable, Equatable {
+        let snapshot: RenderSnapshotForTesting
+        let selection: DisplayedSelectionForTesting?
+    }
+
+    var selectionDeliveryForTesting: ObservationDelivery? {
+        selectionDelivery
+    }
+
+    var selectedJobDeliveryForTesting: ObservationDelivery? {
+        selectedJobDelivery
+    }
+
+    var selectedWorkspaceFindingsDeliveryForTesting: ObservationDelivery? {
+        selectedWorkspaceFindingsDelivery
+    }
+
+    var deliveryForExpectedRenderedStateForTesting: ObservationDelivery? {
+        let expectedSelection = expectedRenderedStateForTesting.selection
+        if displayedSelectionForTesting != expectedSelection {
+            return selectionDelivery
+        }
+        switch expectedSelection {
+        case .job:
+            return selectedJobDelivery ?? selectionDelivery
+        case .workspace:
+            return selectedWorkspaceFindingsDelivery ?? selectionDelivery
+        case nil:
+            return selectionDelivery
+        }
     }
 
     var displayedTitleForTesting: String? {
@@ -463,10 +477,6 @@ extension ReviewMonitorTransportViewController {
 
     var isShowingWorkspaceFindingsListForTesting: Bool {
         workspaceFindingsView.isShowingFindingsListForTesting
-    }
-
-    var renderCountForTesting: Int {
-        renderCountForTestingStorage
     }
 
     var logAppendCountForTesting: Int {
@@ -549,14 +559,6 @@ extension ReviewMonitorTransportViewController {
         logScrollView.findStringLengthForTesting
     }
 
-    var logFindClientStringWillChangeCountForTesting: Int {
-        logScrollView.findClientStringWillChangeCountForTesting
-    }
-
-    var logHasPendingFindClientStringChangeForTesting: Bool {
-        logScrollView.hasPendingFindClientStringChangeForTesting
-    }
-
     var logFindClientUsesSnapshotForTesting: Bool {
         logScrollView.findClientUsesSnapshotForTesting
     }
@@ -573,12 +575,21 @@ extension ReviewMonitorTransportViewController {
         logScrollView.hasActiveFindQueryForTesting
     }
 
-    func flushLogPendingFindClientStringChangeForTesting() {
-        logScrollView.flushPendingFindClientStringChangeForTesting()
+    var logVisibleFindBarSearchStringForTesting: String? {
+        logScrollView.visibleFindBarSearchStringForTesting
+    }
+
+    @discardableResult
+    func setLogVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
+        logScrollView.setVisibleFindBarSearchStringForTesting(string)
     }
 
     var logFindIndicatorInvalidationCountForTesting: Int {
         logScrollView.findIndicatorInvalidationCountForTesting
+    }
+
+    var logFindIncrementalMatchRangeCountForTesting: Int {
+        logScrollView.findIncrementalMatchRangeCountForTesting
     }
 
     var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
@@ -587,10 +598,6 @@ extension ReviewMonitorTransportViewController {
 
     var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
         logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
-    }
-
-    var logFindFeedbackDimmingEnabledForTesting: Bool {
-        logScrollView.findFeedbackDimmingEnabledForTesting
     }
 
     var logHitTestTargetsDocumentViewForTesting: Bool {
@@ -644,6 +651,68 @@ extension ReviewMonitorTransportViewController {
             log: displayedLogForTesting,
             isShowingEmptyState: false
         )
+    }
+
+    var renderedStateForTesting: RenderedStateForTesting {
+        .init(
+            snapshot: renderSnapshotForTesting,
+            selection: displayedSelectionForTesting
+        )
+    }
+
+    var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
+        switch uiState.selection {
+        case .job(let job):
+            .init(
+                title: nil,
+                summary: nil,
+                log: job.reviewMonitorLogDocument.text,
+                isShowingEmptyState: false
+            )
+        case .workspace:
+            .init(
+                title: nil,
+                summary: nil,
+                log: "",
+                isShowingEmptyState: false
+            )
+        case nil:
+            .init(
+                title: nil,
+                summary: nil,
+                log: "",
+                isShowingEmptyState: true
+            )
+        }
+    }
+
+    var expectedRenderedStateForTesting: RenderedStateForTesting {
+        .init(
+            snapshot: expectedRenderSnapshotForTesting,
+            selection: expectedDisplayedSelectionForTesting
+        )
+    }
+
+    private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
+        switch displayedSelection {
+        case .job(let id):
+            .job(id)
+        case .workspace(let cwd):
+            .workspace(cwd)
+        case nil:
+            nil
+        }
+    }
+
+    private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
+        switch uiState.selection {
+        case .job(let job):
+            .job(job.id)
+        case .workspace(let workspace):
+            .workspace(workspace.cwd)
+        case nil:
+            nil
+        }
     }
 
     var workspaceFindingSnapshotForTesting: WorkspaceFindingSnapshotForTesting {
@@ -738,27 +807,6 @@ extension ReviewMonitorTransportViewController {
 
     var workspaceFindingsRenderedStorageStringForTesting: String {
         workspaceFindingsView.renderedStorageStringForTesting
-    }
-
-    func waitForRenderCountForTesting(_ targetCount: Int) async {
-        if renderCountForTestingStorage >= targetCount {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if renderCountForTestingStorage >= targetCount {
-                continuation.resume()
-                return
-            }
-            renderWaitersForTesting[targetCount, default: []].append(continuation)
-        }
-    }
-
-    func flushMainQueueForTesting() async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.main.async {
-                continuation.resume()
-            }
-        }
     }
 
     func scrollLogToTopForTesting() {

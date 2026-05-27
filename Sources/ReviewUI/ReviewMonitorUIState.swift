@@ -37,8 +37,6 @@ final class ReviewMonitorUIState {
         }
     }
 
-    var presentedContentKind: ReviewMonitorContentKind?
-
     var contentKind: ReviewMonitorContentKind {
         if auth.selectedAccount != nil || auth.hasAccounts {
             return .contentView

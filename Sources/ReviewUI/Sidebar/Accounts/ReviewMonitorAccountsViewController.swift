@@ -19,6 +19,8 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     private let outlineView = ReviewMonitorAccountsOutlineView()
 
     private let authObservationScope = ObservationScope()
+    private var accountListDelivery: ObservationDelivery?
+    private var accountPromptDelivery: ObservationDelivery?
     private var isApplyingAuthSelection = false
     private var presentedPendingAccountAction: CodexReviewAuthModel.PendingAccountAction?
     private var presentedAccountActionAlert: CodexReviewAuthModel.AccountActionAlert?
@@ -118,7 +120,9 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func bindObservation() {
-        authObservationScope.observe(auth) { [weak self] _, auth in
+        authObservationScope.cancelAll()
+
+        accountListDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
             let accounts = auth.accounts
             let selectedAccount = auth.selectedAccount
             self?.reloadAccounts(
@@ -127,16 +131,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
             )
         }
 
-        authObservationScope.observe(auth) { [weak self] _, auth in
-            let accounts = auth.accounts
-            let selectedAccount = auth.selectedAccount
-            self?.reconcileSelection(
-                selectedAccount: selectedAccount,
-                accounts: accounts
-            )
-        }
-
-        authObservationScope.observe(auth) { [weak self] _, auth in
+        accountPromptDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
             let pendingAccountAction = auth.pendingAccountAction
             let accountActionAlert = auth.accountActionAlert
             self?.presentAccountPromptsIfNeeded(
@@ -500,6 +495,14 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
 #if DEBUG
 @MainActor
 extension ReviewMonitorAccountsViewController {
+    var accountListDeliveryForTesting: ObservationDelivery? {
+        accountListDelivery
+    }
+
+    var accountPromptDeliveryForTesting: ObservationDelivery? {
+        accountPromptDelivery
+    }
+
     var displayedAccountEmailsForTesting: [String] {
         (0..<outlineView.numberOfRows).compactMap { row in
             account(atRow: row)?.email
