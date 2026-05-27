@@ -102,7 +102,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let unavailableView: NSHostingView<MCPServerUnavailableView>
     private let rowHeights: SidebarRowHeights
 
-    private let sidebarObservationScope = ObservationScope()
+    private let sidebarKindObservationScope = ObservationScope()
+    private let sidebarTopologyObservationScope = ObservationScope()
+    private var sidebarSelectionDelivery: ObservationDelivery?
+    private var sidebarStoreKindDelivery: ObservationDelivery?
+    private var sidebarTopologyDelivery: ObservationDelivery?
     private var isReconcilingSelection = false
 #if DEBUG
     private var fullReloadCountForTesting = 0
@@ -222,14 +226,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func bindObservation() {
-        sidebarObservationScope.observe(store) { [weak self] _, _ in
+        sidebarKindObservationScope.cancelAll()
+        sidebarTopologyObservationScope.cancelAll()
+
+        sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState) { [weak self] _, uiState in
+            let sidebarSelection = uiState.sidebarSelection
             guard let self else {
                 return
             }
-            self.applySidebarKind(self.sidebarKind)
+            self.applySidebarKind(self.sidebarKind(sidebarSelection: sidebarSelection))
         }
 
-        sidebarObservationScope.observe(store) { [weak self] _, _ in
+        sidebarStoreKindDelivery = sidebarKindObservationScope.observe(store) { [weak self] _, store in
+            let serverState = store.serverState
+            let hasReviewJobs = store.hasReviewJobs
+            guard let self else {
+                return
+            }
+            self.applySidebarKind(self.sidebarKind(serverState: serverState, hasReviewJobs: hasReviewJobs))
+        }
+
+        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store) { [weak self] _, _ in
             guard let self else {
                 return
             }
@@ -238,13 +255,25 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private var sidebarKind: SidebarKind {
-        if uiState.sidebarSelection == .account {
+        sidebarKind(
+            sidebarSelection: uiState.sidebarSelection,
+            serverState: store.serverState,
+            hasReviewJobs: store.hasReviewJobs
+        )
+    }
+
+    private func sidebarKind(
+        sidebarSelection: SidebarPickerSelection? = nil,
+        serverState: CodexReviewServerState? = nil,
+        hasReviewJobs: Bool? = nil
+    ) -> SidebarKind {
+        if (sidebarSelection ?? uiState.sidebarSelection) == .account {
             return .accountList
         }
-        if case .failed = store.serverState {
+        if case .failed = serverState ?? store.serverState {
             return .unavailable
         }
-        return store.hasReviewJobs ? .jobList : .empty
+        return (hasReviewJobs ?? store.hasReviewJobs) ? .jobList : .empty
     }
 
     private var sidebarWorkspaceTopologies: [SidebarWorkspaceTopology] {
@@ -1245,6 +1274,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 #if DEBUG
 @MainActor
 extension ReviewMonitorSidebarViewController {
+    var sidebarSelectionDeliveryForTesting: ObservationDelivery? {
+        sidebarSelectionDelivery
+    }
+
+    var sidebarStoreKindDeliveryForTesting: ObservationDelivery? {
+        sidebarStoreKindDelivery
+    }
+
+    var sidebarTopologyDeliveryForTesting: ObservationDelivery? {
+        sidebarTopologyDelivery
+    }
+
     var sidebarKindForTesting: SidebarKind {
         sidebarKind
     }

@@ -17,6 +17,7 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let showSettings: (@MainActor () -> Void)?
     private let observationScope = ObservationScope()
     private var windowCancellable: AnyCancellable?
+    private var presentedContentKind: ReviewMonitorContentKind?
 
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
@@ -86,7 +87,7 @@ final class ReviewMonitorRootViewController: NSViewController {
     }
 
     private func applyWindowPresentation(to window: NSWindow) {
-        switch uiState.presentedContentKind ?? uiState.contentKind {
+        switch presentedContentKind ?? uiState.contentKind {
         case .contentView:
             splitViewController.attach(to: window)
         case .signInView:
@@ -98,7 +99,7 @@ final class ReviewMonitorRootViewController: NSViewController {
         _ kind: ReviewMonitorContentKind,
         animated: Bool
     ) {
-        if uiState.presentedContentKind == kind {
+        if presentedContentKind == kind {
             return
         }
 
@@ -107,10 +108,10 @@ final class ReviewMonitorRootViewController: NSViewController {
         switch kind {
         case .contentView:
             incomingContentViewController = splitViewController
-            outgoingContentViewController = uiState.presentedContentKind == nil ? nil : signInViewController
+            outgoingContentViewController = presentedContentKind == nil ? nil : signInViewController
         case .signInView:
             incomingContentViewController = signInViewController
-            outgoingContentViewController = uiState.presentedContentKind == nil ? nil : splitViewController
+            outgoingContentViewController = presentedContentKind == nil ? nil : splitViewController
         }
 
         if incomingContentViewController.parent == nil {
@@ -127,7 +128,7 @@ final class ReviewMonitorRootViewController: NSViewController {
                 positioned: .above,
                 relativeTo: outgoingContentViewController.view
             )
-            uiState.presentedContentKind = kind
+            presentedContentKind = kind
 
             contentTransitionAnimator(
                 outgoingContentViewController.view,
@@ -138,7 +139,7 @@ final class ReviewMonitorRootViewController: NSViewController {
                 }
                 incomingContentView.alphaValue = 1
                 outgoingContentViewController?.view.alphaValue = 1
-                guard self.uiState.presentedContentKind == kind else {
+                guard self.presentedContentKind == kind else {
                     return
                 }
                 if let outgoingContentViewController {
@@ -150,7 +151,7 @@ final class ReviewMonitorRootViewController: NSViewController {
                 removeEmbeddedContent(for: outgoingContentViewController)
             }
             installEmbeddedContentView(incomingContentViewController.view)
-            uiState.presentedContentKind = kind
+            presentedContentKind = kind
         }
 
         switch kind {

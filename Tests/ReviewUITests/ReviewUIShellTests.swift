@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ObservationBridge
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReview
@@ -206,7 +207,11 @@ struct ReviewUIShellTests {
             serverState: .failed("Embedded server is unavailable in preview mode."),
             workspaces: []
         )
-        try await waitForSidebarPresentation(viewController, .unavailable)
+        try await waitForSidebarPresentation(
+            viewController,
+            .unavailable,
+            delivery: viewController.sidebarViewControllerForTesting.sidebarStoreKindDeliveryForTesting
+        )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
 
         store.loadForTesting(
@@ -214,7 +219,11 @@ struct ReviewUIShellTests {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             workspaces: []
         )
-        try await waitForSidebarPresentation(viewController, .jobList)
+        try await waitForSidebarPresentation(
+            viewController,
+            .jobList,
+            delivery: viewController.sidebarViewControllerForTesting.sidebarStoreKindDeliveryForTesting
+        )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
     }
 
@@ -258,7 +267,11 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .workspace)
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
-        try await waitForSidebarPresentation(viewController, .accountList)
+        try await waitForSidebarPresentation(
+            viewController,
+            .accountList,
+            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+        )
 
         #expect(sidebarItem.isCollapsed == false)
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .account)
@@ -298,7 +311,11 @@ struct ReviewUIShellTests {
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
         window.layoutIfNeeded()
-        try await waitForSidebarPresentation(viewController, .accountList)
+        try await waitForSidebarPresentation(
+            viewController,
+            .accountList,
+            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+        )
 
         #expect(sidebarItem.isCollapsed == false)
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .account)
@@ -316,7 +333,11 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarPickerToolbarOverflowMenuItemTitlesForTesting == ["Workspace", "Account"])
 
         viewController.selectSidebarPickerToolbarOverflowMenuItemForTesting(.account)
-        try await waitForSidebarPresentation(viewController, .accountList)
+        try await waitForSidebarPresentation(
+            viewController,
+            .accountList,
+            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+        )
 
         #expect(sidebarItem.isCollapsed == false)
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .account)
@@ -338,7 +359,10 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .workspace)
 
         uiState.sidebarSelection = .account
-        try await waitForCondition {
+        try await waitForObservedValue(
+            from: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting,
+            true
+        ) {
             viewController.sidebarPickerToolbarSelectedSelectionForTesting == .account
         }
     }
@@ -771,10 +795,8 @@ struct ReviewUIShellTests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         transport.view.layoutSubtreeIfNeeded()
 
         let logFrame = transport.logFrameForTesting
@@ -813,10 +835,8 @@ struct ReviewUIShellTests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         transport.view.layoutSubtreeIfNeeded()
 
         let textContentFrame = transport.logTextContentFrameForTesting
@@ -847,10 +867,8 @@ struct ReviewUIShellTests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
 
         window.setContentSize(NSSize(width: 360, height: 420))
         sidebarItem.isCollapsed = true
@@ -865,7 +883,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
 
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let expandedLogWidth = transport.logFrameForTesting.width
@@ -896,10 +913,8 @@ struct ReviewUIShellTests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
@@ -910,7 +925,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
 
         let compactDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let compactLogWidth = transport.logFrameForTesting.width
@@ -939,10 +953,8 @@ struct ReviewUIShellTests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let wideWidth = transport.logDocumentViewFrameForTesting.width
@@ -952,7 +964,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
         let narrowWidth = transport.logDocumentViewFrameForTesting.width
         let narrowTextWidth = transport.logTextContentFrameForTesting.width
         let narrowLogWidth = transport.logFrameForTesting.width
@@ -962,7 +973,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
         let widenedAgainWidth = transport.logDocumentViewFrameForTesting.width
         let widenedAgainTextWidth = transport.logTextContentFrameForTesting.width
         let widenedAgainLogWidth = transport.logFrameForTesting.width
@@ -1000,10 +1010,8 @@ struct ReviewUIShellTests {
             }
             window.close()
         }
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         let wideWidth = transport.logDocumentViewFrameForTesting.width
@@ -1017,7 +1025,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
 
         let narrowWidth = transport.logDocumentViewFrameForTesting.width
         let narrowDocumentHeight = transport.logDocumentViewFrameForTesting.height
@@ -1063,10 +1070,8 @@ struct ReviewUIShellTests {
             }
             window.close()
         }
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         window.layoutIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -1077,7 +1082,6 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
 
         let visibleFragmentBounds = transport.logVisibleFragmentBoundsForTesting
         let visibleBottomInViewport = visibleFragmentBounds.maxY - transport.logVerticalScrollOffsetForTesting
@@ -1111,33 +1115,31 @@ struct ReviewUIShellTests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
 
         viewController.toggleSidebar(nil)
+        await awaitNativeLayoutTurn()
         window.setContentSize(NSSize(width: 360, height: 420))
+        await awaitNativeLayoutTurn()
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
         #expect(sidebarItem.isCollapsed)
 
         viewController.toggleSidebar(nil)
+        await awaitNativeLayoutTurn()
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
         let compactDocumentWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
         window.setContentSize(NSSize(width: 960, height: 600))
+        await awaitNativeLayoutTurn()
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        await transport.flushMainQueueForTesting()
 
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         let expandedLogWidth = transport.logFrameForTesting.width
@@ -1295,11 +1297,9 @@ struct ReviewUIShellTests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-
-        let initialRenderCount = transport.renderCountForTesting
         viewController.sidebarViewControllerForTesting.selectWorkspaceForTesting(firstWorkspace)
 
-        _ = try await awaitTransportRender(transport, after: initialRenderCount)
+        _ = try await awaitTransportRender(transport)
         let accessibilityValue = try #require(transport.workspaceFindingsAccessibilityValueForTesting)
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingFindingsList)
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)

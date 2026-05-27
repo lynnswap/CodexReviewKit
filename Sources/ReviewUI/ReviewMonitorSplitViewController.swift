@@ -367,7 +367,7 @@ extension ReviewMonitorSplitViewController {
         case progress
     }
 
-    enum SidebarPresentationForTesting: Equatable {
+    enum SidebarPresentationForTesting: Sendable, Equatable {
         case jobList
         case accountList
         case unavailable
