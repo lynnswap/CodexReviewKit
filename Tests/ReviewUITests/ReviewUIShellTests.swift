@@ -233,6 +233,11 @@ struct ReviewUIShellTests {
         let viewController = harness.viewController
         let window = harness.window
         defer { window.close() }
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+        }
 
         #expect(window.toolbar != nil)
         #expect(harness.rootViewController.contentKindForTesting == .contentView)

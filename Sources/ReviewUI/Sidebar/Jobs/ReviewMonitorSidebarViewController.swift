@@ -93,6 +93,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let jobs: [CodexReviewJob]
     }
 
+    private enum SidebarMutationAnimation {
+        static let duration: TimeInterval = 0.18
+        static let insertionOptions: NSTableView.AnimationOptions = [.effectFade, .slideDown]
+        static let removalOptions: NSTableView.AnimationOptions = [.effectFade, .slideUp]
+    }
+
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let scrollView = NSScrollView()
@@ -247,19 +253,25 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             self.applySidebarKind(self.sidebarKind(serverState: serverState, hasReviewJobs: hasReviewJobs))
         }
 
-        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store) { [weak self] _, _ in
+        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store) { [weak self] event, _ in
             guard let self else {
                 return
             }
-            self.applySidebarTopology(self.sidebarWorkspaceTopologies)
+            self.applySidebarTopology(
+                self.sidebarWorkspaceTopologies,
+                animated: event.kind != .initial
+            )
         }
 
-        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState) { [weak self] _, uiState in
+        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState) { [weak self] event, uiState in
             _ = uiState.sidebarJobFilter
             guard let self else {
                 return
             }
-            self.applySidebarTopology(self.sidebarWorkspaceTopologies)
+            self.applySidebarTopology(
+                self.sidebarWorkspaceTopologies,
+                animated: event.kind != .initial
+            )
         }
     }
 
@@ -294,24 +306,42 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func applySidebarTopology(_ workspaceTopologies: [SidebarWorkspaceTopology]) {
-        applyWorkspaceMembershipChange(workspaceTopologies.map(\.workspace))
-        applyJobMembershipChange(workspaceTopologies)
+    private func applySidebarTopology(
+        _ workspaceTopologies: [SidebarWorkspaceTopology],
+        animated: Bool
+    ) {
+        let shouldAnimate = animated && shouldAnimateSidebarMutations
+        applyWorkspaceMembershipChange(
+            workspaceTopologies.map(\.workspace),
+            animated: shouldAnimate
+        )
+        applyJobMembershipChange(workspaceTopologies, animated: shouldAnimate)
     }
 
-    private func applyWorkspaceMembershipChange(_ workspaces: [CodexReviewWorkspace]) {
+    private var shouldAnimateSidebarMutations: Bool {
+        view.window != nil && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
+    }
+
+    private func applyWorkspaceMembershipChange(
+        _ workspaces: [CodexReviewWorkspace],
+        animated: Bool
+    ) {
         clearSelectionIfNeeded(for: workspaces)
         let currentWorkspaces = displayedWorkspaces()
         let insertedWorkspaces = applyMembershipChange(
             currentItems: currentWorkspaces,
             targetItems: workspaces,
-            parent: nil
+            parent: nil,
+            animated: animated
         )
         applyStoredExpansionState(for: insertedWorkspaces)
         reconcileSelectionAfterOutlineMutation()
     }
 
-    private func applyJobMembershipChange(_ workspaceTopologies: [SidebarWorkspaceTopology]) {
+    private func applyJobMembershipChange(
+        _ workspaceTopologies: [SidebarWorkspaceTopology],
+        animated: Bool
+    ) {
         let workspaces = workspaceTopologies.map(\.workspace)
         clearSelectionIfNeeded(for: workspaces)
         for workspace in displayedWorkspaces() {
@@ -323,11 +353,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard hasSameIdentityOrder(displayedJobs, targetJobs) == false else {
                 continue
             }
-            if hasSameIdentityMembership(displayedJobs, targetJobs) {
+            if outlineView.isItemExpanded(workspace) {
                 applyMembershipChange(
                     currentItems: displayedJobs,
                     targetItems: targetJobs,
-                    parent: workspace
+                    parent: workspace,
+                    animated: animated
                 )
                 reconcileSelectionAfterOutlineMutation()
                 continue
@@ -615,7 +646,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func applyMembershipChange<Item: AnyObject>(
         currentItems: [Item],
         targetItems: [Item],
-        parent: Any?
+        parent: Any?,
+        animated: Bool
     ) -> [Item] {
         guard hasSameIdentityOrder(currentItems, targetItems) == false else {
             return []
@@ -623,8 +655,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         var insertedItems: [Item] = []
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
+            context.duration = animated ? SidebarMutationAnimation.duration : 0
+            context.allowsImplicitAnimation = animated
 
             var visibleItems = currentItems
             outlineView.beginUpdates()
@@ -639,7 +671,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 outlineView.removeItems(
                     at: IndexSet(integer: sourceIndex),
                     inParent: parent,
-                    withAnimation: []
+                    withAnimation: animated ? SidebarMutationAnimation.removalOptions : []
                 )
 #if DEBUG
                 incrementalMembershipChangeCountForTesting += 1
@@ -657,7 +689,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 outlineView.insertItems(
                     at: IndexSet(integer: insertionIndex),
                     inParent: parent,
-                    withAnimation: []
+                    withAnimation: animated ? SidebarMutationAnimation.insertionOptions : []
                 )
 #if DEBUG
                 incrementalMembershipChangeCountForTesting += 1
@@ -697,13 +729,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { $0 === $1 }
     }
 
-    private func hasSameIdentityMembership<Item: AnyObject>(_ lhs: [Item], _ rhs: [Item]) -> Bool {
-        lhs.count == rhs.count
-            && lhs.allSatisfy { lhsItem in
-                rhs.contains { $0 === lhsItem }
-            }
-    }
-
     private func moveWorkspaceInOutline(cwd: String, toIndex destinationIndex: Int) {
         let currentWorkspaces = displayedWorkspaces()
         guard let sourceIndex = currentWorkspaces.firstIndex(where: { $0.cwd == cwd }),
@@ -725,9 +750,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func moveOutlineItem(from sourceIndex: Int, to destinationIndex: Int, parent: Any?) {
+        let animated = shouldAnimateSidebarMutations
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            context.allowsImplicitAnimation = false
+            context.duration = animated ? SidebarMutationAnimation.duration : 0
+            context.allowsImplicitAnimation = animated
 
             outlineView.beginUpdates()
             outlineView.moveItem(

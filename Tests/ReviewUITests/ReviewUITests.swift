@@ -588,7 +588,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange + 1)
     }
 
-    @Test func workspaceJobsChangeReloadsWorkspaceOnly() async throws {
+    @Test func workspaceJobsChangeUsesChildInsertWithoutReload() async throws {
         let firstJob = makeJob(
             id: "job-membership-1",
             cwd: "/tmp/workspace-alpha",
@@ -615,6 +615,7 @@ struct ReviewUITests {
         let fullReloadCountBeforeChange = sidebar.sidebarFullReloadCountForTesting
         let workspaceReloadCountBeforeChange = sidebar.sidebarWorkspaceReloadCountForTesting
         let incrementalMoveCountBeforeChange = sidebar.sidebarIncrementalMoveCountForTesting
+        let incrementalMembershipChangeCountBeforeChange = sidebar.sidebarIncrementalMembershipChangeCountForTesting
 
         store.loadForTesting(
             serverState: .running,
@@ -633,7 +634,8 @@ struct ReviewUITests {
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-membership-1", "job-membership-2"])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
-        #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeChange + 1)
+        #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeChange)
+        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange + 1)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange)
     }
 
