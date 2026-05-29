@@ -391,12 +391,18 @@ struct ReviewUITests {
         #expect(sidebar.jobRowHeightForTesting(secondJob) == secondJobRowHeightBeforeDrop)
     }
 
-    @Test func sidebarRunningFilterKeepsWorkspacesAndShowsOnlyRunningJobs() async throws {
+    @Test func sidebarRunningFilterKeepsWorkspacesAndShowsActiveJobs() async throws {
         let runningJob = makeJob(
             id: "job-alpha-running",
             cwd: "/tmp/workspace-alpha",
             status: .running,
             targetSummary: "Uncommitted changes"
+        )
+        let queuedJob = makeJob(
+            id: "job-alpha-queued",
+            cwd: "/tmp/workspace-alpha",
+            status: .queued,
+            targetSummary: "Base branch: main"
         )
         let completedAlphaJob = makeJob(
             id: "job-alpha-succeeded",
@@ -416,7 +422,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             workspaces: [alphaWorkspace, betaWorkspace],
-            jobs: [runningJob, completedAlphaJob, completedBetaJob]
+            jobs: [runningJob, queuedJob, completedAlphaJob, completedBetaJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
@@ -427,7 +433,7 @@ struct ReviewUITests {
 
         try await waitForObservedValue(
             from: sidebar.sidebarFilterDeliveryForTesting,
-            ["job-alpha-running"]
+            ["job-alpha-running", "job-alpha-queued"]
         ) {
             sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
         }
@@ -435,7 +441,7 @@ struct ReviewUITests {
             "workspace-alpha",
             "workspace-beta",
         ])
-        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running"])
+        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running", "job-alpha-queued"])
         #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == [])
     }
 

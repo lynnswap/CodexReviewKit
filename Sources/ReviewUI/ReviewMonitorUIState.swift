@@ -103,7 +103,7 @@ enum SidebarJobFilter: CaseIterable, Hashable, Sendable {
         case .all:
             true
         case .running:
-            job.core.lifecycle.status == .running
+            job.isTerminal == false
         }
     }
 }
