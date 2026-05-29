@@ -91,7 +91,7 @@ public enum ReviewMonitorPreviewContent {
 
     @_spi(PreviewSupport)
     public static func makeStore(
-        streamInterval: Duration = .milliseconds(40)
+        streamInterval: Duration? = .milliseconds(40)
     ) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
@@ -106,10 +106,12 @@ public enum ReviewMonitorPreviewContent {
             workspaces: previewContent.workspaces,
             jobs: previewContent.jobs
         )
-        store.previewSupportRetainer = PreviewLogStreamer(
-            store: store,
-            interval: streamInterval
-        )
+        if let streamInterval {
+            store.previewSupportRetainer = PreviewLogStreamer(
+                store: store,
+                interval: streamInterval
+            )
+        }
         return store
     }
 

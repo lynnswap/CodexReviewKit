@@ -169,7 +169,7 @@ struct ReviewUIShellTests {
 
     @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
         let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: .seconds(60)
+            streamInterval: nil
         )
         let harness = makeWindowHarness(
             store: store,
@@ -1244,7 +1244,7 @@ struct ReviewUIShellTests {
 
     @Test func previewRunningJobsAppendPseudoStreamWhenTicked() throws {
         let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: .seconds(60)
+            streamInterval: nil
         )
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
@@ -1269,7 +1269,7 @@ struct ReviewUIShellTests {
 
     @Test func previewStreamUsesMixedReviewLogKinds() throws {
         let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: .seconds(60)
+            streamInterval: nil
         )
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
@@ -1293,7 +1293,7 @@ struct ReviewUIShellTests {
 
     @Test func previewStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
         let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: .seconds(60)
+            streamInterval: nil
         )
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
@@ -1352,7 +1352,7 @@ struct ReviewUIShellTests {
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
         let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: .seconds(60)
+            streamInterval: nil
         )
         let firstWorkspace = try #require(store.workspaces.sorted { $0.cwd < $1.cwd }.first)
         let harness = makeWindowHarness(store: store)

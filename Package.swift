@@ -24,7 +24,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
-        .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.10.0")),
+        .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.11.0")),
     ],
     targets: [
         .target(
