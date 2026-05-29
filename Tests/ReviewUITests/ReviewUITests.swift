@@ -391,6 +391,153 @@ struct ReviewUITests {
         #expect(sidebar.jobRowHeightForTesting(secondJob) == secondJobRowHeightBeforeDrop)
     }
 
+    @Test func sidebarRunningFilterKeepsWorkspacesAndShowsOnlyRunningJobs() async throws {
+        let runningJob = makeJob(
+            id: "job-alpha-running",
+            cwd: "/tmp/workspace-alpha",
+            status: .running,
+            targetSummary: "Uncommitted changes"
+        )
+        let completedAlphaJob = makeJob(
+            id: "job-alpha-succeeded",
+            cwd: "/tmp/workspace-alpha",
+            status: .succeeded,
+            targetSummary: "Commit: abc123"
+        )
+        let completedBetaJob = makeJob(
+            id: "job-beta-succeeded",
+            cwd: "/tmp/workspace-beta",
+            status: .succeeded,
+            targetSummary: "Base branch: main"
+        )
+        let alphaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let betaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-beta")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [alphaWorkspace, betaWorkspace],
+            jobs: [runningJob, completedAlphaJob, completedBetaJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        uiState.sidebarJobFilter = .running
+
+        try await waitForObservedValue(
+            from: sidebar.sidebarFilterDeliveryForTesting,
+            ["job-alpha-running"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
+        }
+        #expect(sidebar.displayedSectionTitlesForTesting == [
+            "workspace-alpha",
+            "workspace-beta",
+        ])
+        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running"])
+        #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == [])
+    }
+
+    @Test func sidebarRunningFilterDoesNotClearHiddenSelectedJob() async throws {
+        let runningJob = makeJob(
+            id: "job-filter-running",
+            cwd: "/tmp/workspace-alpha",
+            status: .running,
+            targetSummary: "Uncommitted changes"
+        )
+        let completedJob = makeJob(
+            id: "job-filter-completed",
+            cwd: "/tmp/workspace-alpha",
+            status: .succeeded,
+            targetSummary: "Commit: abc123"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [runningJob, completedJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.selectJobForTesting(completedJob)
+        #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
+
+        uiState.sidebarJobFilter = .running
+        try await waitForObservedValue(
+            from: sidebar.sidebarFilterDeliveryForTesting,
+            ["job-filter-running"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-filter-running"])
+        #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
+    }
+
+    @Test func jobDropWhileFilteredMapsVisibleIndexToStoreOrder() async throws {
+        let hiddenPrefix = makeJob(
+            id: "job-hidden-prefix",
+            cwd: "/tmp/workspace-alpha",
+            status: .succeeded,
+            targetSummary: "Completed prefix"
+        )
+        let runningA = makeJob(
+            id: "job-running-a",
+            cwd: "/tmp/workspace-alpha",
+            status: .running,
+            targetSummary: "Running A"
+        )
+        let hiddenMiddle = makeJob(
+            id: "job-hidden-middle",
+            cwd: "/tmp/workspace-alpha",
+            status: .failed,
+            targetSummary: "Failed middle"
+        )
+        let runningB = makeJob(
+            id: "job-running-b",
+            cwd: "/tmp/workspace-alpha",
+            status: .running,
+            targetSummary: "Running B"
+        )
+        let hiddenSuffix = makeJob(
+            id: "job-hidden-suffix",
+            cwd: "/tmp/workspace-alpha",
+            status: .succeeded,
+            targetSummary: "Completed suffix"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [hiddenPrefix, runningA, hiddenMiddle, runningB, hiddenSuffix]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = .running
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
+
+        #expect(sidebar.performJobDropForTesting(runningA, proposedWorkspace: workspace, childIndex: 2))
+        await Task.yield()
+
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
+        #expect(store.orderedJobs(in: workspace).map(\.id) == [
+            "job-hidden-prefix",
+            "job-hidden-middle",
+            "job-running-b",
+            "job-running-a",
+            "job-hidden-suffix",
+        ])
+    }
+
     @Test func jobSameMembershipSortOrderChangeMovesRowsWithoutReloadingWorkspace() async throws {
         let firstJob = makeJob(
             id: "job-sort-order-1",

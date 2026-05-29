@@ -237,6 +237,7 @@ struct ReviewUIShellTests {
         #expect(window.toolbar != nil)
         #expect(harness.rootViewController.contentKindForTesting == .contentView)
         #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarPickerToolbarItemIdentifierForTesting))
+        #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
         #expect(viewController.toolbarIdentifiersForTesting.contains(.toggleSidebar) == false)
         #expect(viewController.toolbarIdentifiersForTesting.contains(.sidebarTrackingSeparator))
         #expect(
@@ -252,6 +253,63 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarAllowsFullHeightLayoutForTesting)
         #expect(viewController.sidebarCanCollapseFromWindowResizeForTesting == false)
         #expect(viewController.contentAutomaticallyAdjustsSafeAreaInsetsForTesting)
+    }
+
+    @Test func sidebarJobFilterToolbarItemProvidesMenuAndSelectedState() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(store: store)
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+
+        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
+        #expect(viewController.sidebarJobFilterToolbarMenuItemTitlesForTesting == [
+            "All Items",
+            "-",
+            "Running",
+        ])
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
+        #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
+
+        viewController.setSidebarJobFilterForTesting(.running)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting
+        }
+        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
+        #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
+
+        viewController.setSidebarJobFilterForTesting(.all)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false
+        }
+        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
+        #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
+    }
+
+    @Test func sidebarJobFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(store: store)
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+
+        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
+
+        viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting
+        }
+
+        viewController.selectSidebarPickerToolbarSegmentForTesting(.workspace)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+        }
     }
 
     @Test func sidebarPickerToolbarItemSwitchesSidebarPresentation() async throws {
