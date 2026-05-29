@@ -1252,13 +1252,13 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         var colorUpdates: [(range: NSRange, color: NSColor)] = []
         var finishedRanges: [NSRange] = []
         for var animation in wordFadeAnimations {
-            let progress = min(1, max(0, (now - animation.startedAt) / Self.wordFadeDuration))
-            if progress >= 1 {
+            if now >= animation.startedAt + Self.wordFadeDuration {
                 finishedRanges.append(animation.range)
                 updatedRanges.append(animation.range)
                 continue
             }
 
+            let progress = min(1, max(0, (now - animation.startedAt) / Self.wordFadeDuration))
             let step = wordFadeAlphaStep(for: progress)
             if step != animation.renderedStep {
                 colorUpdates.append((
