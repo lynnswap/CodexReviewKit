@@ -13,6 +13,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private static let addAccountToolbarItemIdentifier = NSToolbarItem.Identifier(
         "CodexReviewKit.ReviewMonitor.Toolbar.AddAccount"
     )
+    private static let sidebarJobFilterToolbarItemIdentifier = NSToolbarItem.Identifier(
+        "CodexReviewKit.ReviewMonitor.Toolbar.SidebarJobFilter"
+    )
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
@@ -23,6 +26,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var contentItem: NSSplitViewItem?
     private var toolbar: NSToolbar?
     private var sidebarPickerToolbarItem: ReviewMonitorSidebarPickerToolbarItem?
+    private var sidebarJobFilterToolbarItem: ReviewMonitorSidebarJobFilterToolbarItem?
     private var addAccountToolbarItem: ReviewMonitorAddAccountToolbarItem?
     private let toolbarObservationScope = ObservationScope()
     private var sidebarCollapseObservation: NSKeyValueObservation?
@@ -139,6 +143,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             bindToolbarState()
         }
         window.layoutIfNeeded()
+        synchronizeSidebarToolbarState()
         applyWindowTitle(Self.windowTitlePresentation(for: uiState.selection))
     }
 
@@ -159,7 +164,12 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 isSidebarCollapsed: self.isSidebarCollapsed,
                 isAuthenticating: uiState.auth.isAuthenticating
             )
+            let isShowingSidebarJobFilter = Self.isShowingSidebarJobFilterToolbarItem(
+                sidebarSelection: uiState.sidebarSelection,
+                isSidebarCollapsed: self.isSidebarCollapsed
+            )
             self.setShowingAddAccount(isShowingAddAccount)
+            self.setShowingSidebarJobFilter(isShowingSidebarJobFilter)
         }
 
         toolbarObservationScope.observe(uiState) { [weak self] _, uiState in
@@ -221,6 +231,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         [
             Self.sidebarPickerToolbarItemIdentifier,
             .flexibleSpace,
+            Self.sidebarJobFilterToolbarItemIdentifier,
             .sidebarTrackingSeparator,
             .flexibleSpace,
         ]
@@ -230,6 +241,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         [
             Self.sidebarPickerToolbarItemIdentifier,
             Self.addAccountToolbarItemIdentifier,
+            Self.sidebarJobFilterToolbarItemIdentifier,
             .sidebarTrackingSeparator,
             .space,
             .flexibleSpace,
@@ -248,6 +260,9 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         case Self.addAccountToolbarItemIdentifier:
             let item = resolvedAddAccountToolbarItem()
             return item
+
+        case Self.sidebarJobFilterToolbarItemIdentifier:
+            return resolvedSidebarJobFilterToolbarItem()
 
         case .sidebarTrackingSeparator:
             return NSTrackingSeparatorToolbarItem(
@@ -273,6 +288,19 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             self?.handleSidebarPickerSelection(selection)
         }
         sidebarPickerToolbarItem = item
+        return item
+    }
+
+    private func resolvedSidebarJobFilterToolbarItem() -> ReviewMonitorSidebarJobFilterToolbarItem {
+        if let sidebarJobFilterToolbarItem {
+            return sidebarJobFilterToolbarItem
+        }
+
+        let item = ReviewMonitorSidebarJobFilterToolbarItem(
+            itemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
+            uiState: uiState
+        )
+        sidebarJobFilterToolbarItem = item
         return item
     }
 
@@ -311,6 +339,15 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         )
     }
 
+    private func updateSidebarJobFilterToolbarVisibility() {
+        setShowingSidebarJobFilter(
+            Self.isShowingSidebarJobFilterToolbarItem(
+                sidebarSelection: uiState.sidebarSelection,
+                isSidebarCollapsed: isSidebarCollapsed
+            )
+        )
+    }
+
     private static func isShowingAddAccountToolbarItem(
         sidebarSelection: SidebarPickerSelection,
         isSidebarCollapsed: Bool,
@@ -322,12 +359,26 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         return sidebarSelection == .account && isSidebarCollapsed == false
     }
 
+    private static func isShowingSidebarJobFilterToolbarItem(
+        sidebarSelection: SidebarPickerSelection,
+        isSidebarCollapsed: Bool
+    ) -> Bool {
+        sidebarSelection == .workspace && isSidebarCollapsed == false
+    }
+
     private func setSidebarCollapsed(_ isCollapsed: Bool) {
         guard isSidebarCollapsed != isCollapsed else {
             return
         }
         isSidebarCollapsed = isCollapsed
         updateAddAccountToolbarVisibility()
+        updateSidebarJobFilterToolbarVisibility()
+    }
+
+    private func synchronizeSidebarToolbarState() {
+        isSidebarCollapsed = sidebarItem?.isCollapsed ?? isSidebarCollapsed
+        updateAddAccountToolbarVisibility()
+        updateSidebarJobFilterToolbarVisibility()
     }
 
     private func setShowingAddAccount(_ isShowing: Bool) {
@@ -349,14 +400,68 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             return
         }
 
-        let insertionIndex = toolbar.items.firstIndex(where: {
-            $0.itemIdentifier == .sidebarTrackingSeparator
-        }) ?? toolbar.items.count
+        let insertionIndex = sidebarTrailingInsertionIndex(for: toolbar)
         toolbar.insertItem(
             withItemIdentifier: Self.addAccountToolbarItemIdentifier,
             at: insertionIndex
         )
     }
+
+    private func setShowingSidebarJobFilter(_ isShowing: Bool) {
+        guard let toolbar else {
+            return
+        }
+
+        let existingIndexes = toolbar.items.indices.filter { index in
+            toolbar.items[index].itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
+        }
+        if existingIndexes.isEmpty == false {
+            if isShowing {
+                ensureSidebarJobFilterToolbarItem(in: toolbar)
+                return
+            }
+            for index in existingIndexes.reversed() {
+                toolbar.removeItem(at: index)
+            }
+            return
+        }
+
+        guard isShowing else {
+            return
+        }
+
+        let sidebarInsertionIndex = toolbar.items.firstIndex(where: {
+            $0.itemIdentifier == .sidebarTrackingSeparator
+        }) ?? toolbar.items.count
+        toolbar.insertItem(
+            withItemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
+            at: sidebarInsertionIndex
+        )
+    }
+
+    private func ensureSidebarJobFilterToolbarItem(in toolbar: NSToolbar) {
+        guard toolbar.items.contains(where: {
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
+        }) == false else {
+            return
+        }
+
+        let sidebarInsertionIndex = toolbar.items.firstIndex(where: {
+            $0.itemIdentifier == .sidebarTrackingSeparator
+        }) ?? toolbar.items.count
+        toolbar.insertItem(
+            withItemIdentifier: Self.sidebarJobFilterToolbarItemIdentifier,
+            at: sidebarInsertionIndex
+        )
+    }
+
+    private func sidebarTrailingInsertionIndex(for toolbar: NSToolbar) -> Int {
+        toolbar.items.firstIndex {
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier ||
+                $0.itemIdentifier == .sidebarTrackingSeparator
+        } ?? toolbar.items.count
+    }
+
 }
 
 #if DEBUG
@@ -432,6 +537,10 @@ extension ReviewMonitorSplitViewController {
         Self.sidebarPickerToolbarItemIdentifier
     }
 
+    var sidebarJobFilterToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {
+        Self.sidebarJobFilterToolbarItemIdentifier
+    }
+
     var sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting: [String] {
         sidebarPickerToolbarItem?.segmentAccessibilityDescriptionsForTesting ?? []
     }
@@ -464,6 +573,43 @@ extension ReviewMonitorSplitViewController {
             fatalError("Sidebar picker toolbar item is not configured yet.")
         }
         sidebarPickerToolbarItem.selectOverflowMenuItemForTesting(selection)
+    }
+
+    var sidebarJobFilterToolbarItemIsHiddenForTesting: Bool {
+        toolbar?.items.contains(where: {
+            $0.itemIdentifier == Self.sidebarJobFilterToolbarItemIdentifier
+        }) != true
+    }
+
+    var sidebarJobFilterToolbarShowsActiveBackgroundForTesting: Bool {
+        sidebarJobFilterToolbarItem?.buttonShowsActiveBackgroundForTesting ?? false
+    }
+
+    var selectedToolbarItemIdentifierForTesting: NSToolbarItem.Identifier? {
+        toolbar?.selectedItemIdentifier
+    }
+
+    var sidebarJobFilterToolbarMenuItemTitlesForTesting: [String] {
+        sidebarJobFilterToolbarItem?.menuItemTitlesForTesting ?? []
+    }
+
+    var sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting: [String] {
+        sidebarJobFilterToolbarItem?.selectedMenuItemTitlesForTesting ?? []
+    }
+
+    var sidebarJobFilterToolbarSelectedFilterForTesting: SidebarJobFilter? {
+        sidebarJobFilterToolbarItem?.selectedFilterForTesting
+    }
+
+    func setSidebarJobFilterForTesting(_ filter: SidebarJobFilter) {
+        uiState.sidebarJobFilter = filter
+    }
+
+    func selectSidebarJobFilterForTesting(_ filter: SidebarJobFilter) {
+        guard let sidebarJobFilterToolbarItem else {
+            fatalError("Sidebar job filter toolbar item is not configured yet.")
+        }
+        sidebarJobFilterToolbarItem.selectFilterForTesting(filter)
     }
 
     var addAccountToolbarItemIdentifierForTesting: NSToolbarItem.Identifier {

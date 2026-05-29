@@ -8,6 +8,7 @@ final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
     var selection: ReviewMonitorSelection?
     var sidebarSelection = SidebarPickerSelection.workspace
+    var sidebarJobFilter = SidebarJobFilter.all
 
     init(auth: CodexReviewAuthModel) {
         self.auth = auth
@@ -75,6 +76,34 @@ enum SidebarPickerSelection: CaseIterable, Hashable {
             "list.bullet"
         case .account:
             "person"
+        }
+    }
+}
+
+enum SidebarJobFilter: CaseIterable, Hashable, Sendable {
+    case all
+    case running
+
+    var localized: LocalizedStringResource {
+        switch self {
+        case .all:
+            "All Items"
+        case .running:
+            "Running"
+        }
+    }
+
+    var isActive: Bool {
+        self != .all
+    }
+
+    @MainActor
+    func includes(_ job: CodexReviewJob) -> Bool {
+        switch self {
+        case .all:
+            true
+        case .running:
+            job.isTerminal == false
         }
     }
 }
