@@ -1109,7 +1109,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             ? visibleInsertionIndex - 1
             : visibleInsertionIndex
         let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, visibleJobs.count - 1))
-        let operation: SidebarResolvedDrop.Operation = clampedStoreDestinationIndex == sourceIndex
+        let operation: SidebarResolvedDrop.Operation = clampedDisplayDestinationIndex == visibleSourceIndex
+            || clampedStoreDestinationIndex == sourceIndex
             ? .none
             : .reorderJob(
                 id: id,

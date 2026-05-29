@@ -531,6 +531,18 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
 
+        #expect(sidebar.performJobDropForTesting(runningA, proposedWorkspace: workspace, childIndex: 1))
+        await Task.yield()
+
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
+        #expect(store.orderedJobs(in: workspace).map(\.id) == [
+            "job-hidden-prefix",
+            "job-running-a",
+            "job-hidden-middle",
+            "job-running-b",
+            "job-hidden-suffix",
+        ])
+
         #expect(sidebar.performJobDropForTesting(runningA, proposedWorkspace: workspace, childIndex: 2))
         await Task.yield()
 
