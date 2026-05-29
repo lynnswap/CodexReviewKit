@@ -642,7 +642,7 @@ struct CodexReviewMCPHTTPServerTests {
                 bodyData: requestBody
             )
             await backend.waitForStartReview()
-            await server.runSessionCleanupForTesting(now: Date().addingTimeInterval(2))
+            await server.runSessionCleanupForTesting(now: .distantFuture)
             await gate.open()
             await backend.waitForEventStream()
             await backend.yield(.completed(summary: "Done", result: "review text"))
@@ -688,7 +688,7 @@ struct CodexReviewMCPHTTPServerTests {
             let httpResponse = try #require(response as? HTTPURLResponse)
             #expect(httpResponse.statusCode == 200)
 
-            await server.runSessionCleanupForTesting(now: Date().addingTimeInterval(2))
+            await server.runSessionCleanupForTesting(now: .distantFuture)
 
             let tools = try await postJSONRPC(
                 endpoint: endpoint,
@@ -728,7 +728,7 @@ struct CodexReviewMCPHTTPServerTests {
             }
             #expect(streamReleased)
 
-            await server.runSessionCleanupForTesting(now: Date().addingTimeInterval(2))
+            await server.runSessionCleanupForTesting(now: .distantFuture)
             #expect(await server.sessionActiveRequestCountForTesting(sessionID: sessionID) == nil)
         }
     }

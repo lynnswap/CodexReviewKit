@@ -2890,6 +2890,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.wordFadeDisplayInvalidationCountForTesting
     }
 
+    func completeWordGlowAnimationsForTesting() {
+        logDocumentView.completeWordGlowAnimationsForTesting()
+    }
+
     func setReduceMotionForTesting(_ reduceMotion: Bool?) {
         logDocumentView.reduceMotionOverrideForTesting = reduceMotion
         if reduceMotion == true {
@@ -2991,6 +2995,17 @@ private extension ReviewMonitorLogDocumentView {
 
     var wordFadeDisplayInvalidationCountForTesting: Int {
         wordFadeDisplayInvalidationCount
+    }
+
+    func completeWordGlowAnimationsForTesting() {
+        glowTimer?.invalidate()
+        glowTimer = nil
+        let completionTime = wordFadeAnimations
+            .map(\.startedAt)
+            .max()
+            .map { $0 + Self.wordFadeDuration }
+            ?? CACurrentMediaTime()
+        updateWordFadeAnimations(at: completionTime)
     }
 
     func contextMenuForTesting() -> NSMenu? {

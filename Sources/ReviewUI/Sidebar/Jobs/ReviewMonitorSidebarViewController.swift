@@ -253,7 +253,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             self.applySidebarKind(self.sidebarKind(serverState: serverState, hasReviewJobs: hasReviewJobs))
         }
 
-        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store) { [weak self] event, _ in
+        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
+            Self.trackSidebarStoreTopology(store)
+        }) { [weak self] event, _ in
             guard let self else {
                 return
             }
@@ -263,8 +265,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             )
         }
 
-        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState) { [weak self] event, uiState in
+        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState, tracking: { uiState in
             _ = uiState.sidebarJobFilter
+        }) { [weak self] event, _ in
             guard let self else {
                 return
             }
@@ -272,6 +275,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 self.sidebarWorkspaceTopologies,
                 animated: event.kind != .initial
             )
+        }
+    }
+
+    private static func trackSidebarStoreTopology(_ store: CodexReviewStore) {
+        for workspace in store.orderedWorkspaces {
+            _ = workspace.sortOrder
+            _ = workspace.isExpanded
+
+            for job in store.orderedJobs(in: workspace) {
+                _ = job.sortOrder
+                _ = job.isTerminal
+            }
         }
     }
 

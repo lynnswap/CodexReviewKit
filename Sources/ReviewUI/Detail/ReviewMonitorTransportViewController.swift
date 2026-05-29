@@ -511,6 +511,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordFadeDisplayInvalidationCountForTesting
     }
 
+    func completeLogWordGlowAnimationsForTesting() {
+        logScrollView.completeWordGlowAnimationsForTesting()
+    }
+
     func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
         logScrollView.setReduceMotionForTesting(reduceMotion)
     }

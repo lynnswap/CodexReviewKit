@@ -393,7 +393,11 @@ struct AppServerClientTests {
             .responseError(code: -32001, message: "Server overloaded; retry later."),
             for: "test/request"
         )
-        let client = AppServerClient(transport: transport)
+        let client = AppServerClient(
+            transport: transport,
+            overloadRetryDelay: { _ in .milliseconds(100) },
+            retrySleep: { _ in }
+        )
 
         let response: EmptyResponse = try await client.send(
             method: "test/request",

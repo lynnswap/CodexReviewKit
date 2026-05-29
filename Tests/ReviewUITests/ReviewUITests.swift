@@ -445,6 +445,47 @@ struct ReviewUITests {
         #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == [])
     }
 
+    @Test func sidebarRunningFilterFollowsJobTerminalStateChanges() async throws {
+        let runningJob = makeJob(
+            id: "job-filter-state",
+            cwd: "/tmp/workspace-alpha",
+            status: .running,
+            targetSummary: "Uncommitted changes"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [runningJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = .running
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-filter-state"])
+
+        runningJob.core.lifecycle.status = .succeeded
+        runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 201)
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyDeliveryForTesting,
+            [String]()
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+
+        runningJob.core.lifecycle.status = .running
+        runningJob.core.lifecycle.endedAt = nil
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyDeliveryForTesting,
+            ["job-filter-state"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+    }
+
     @Test func sidebarRunningFilterDoesNotClearHiddenSelectedJob() async throws {
         let runningJob = makeJob(
             id: "job-filter-running",
@@ -3060,9 +3101,7 @@ struct ReviewUITests {
         #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting > 0)
         #expect(transport.logWordFadeStorageUsesOpaqueTextColorForTesting)
 
-        try await waitForCondition(timeout: .seconds(3)) {
-            transport.logWordGlowCountForTesting == 0
-        }
+        transport.completeLogWordGlowAnimationsForTesting()
 
         #expect(transport.logWordGlowCountForTesting == 0)
         #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting == 0)
@@ -4626,7 +4665,7 @@ final class UncheckedSendableBox<Value>: @unchecked Sendable {
 func makeJob(
     id: String = UUID().uuidString,
     cwd: String = "/tmp/repo",
-    startedAt: Date = Date(),
+    startedAt: Date = Date(timeIntervalSince1970: 200),
     status: ReviewJobState,
     targetSummary: String,
     summary: String? = nil,

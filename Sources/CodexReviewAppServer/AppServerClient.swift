@@ -12,6 +12,8 @@ package actor AppServerClient {
     ]
 
     private let transport: any JSONRPCTransport
+    private let overloadRetryDelay: @Sendable (Int) -> Duration?
+    private let retrySleep: @Sendable (Duration) async throws -> Void
     private let serializer = RequestSerializer()
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -19,8 +21,14 @@ package actor AppServerClient {
     private var initializationResponse: InitializeResponse?
     private var initializationTask: Task<InitializeResponse, Error>?
 
-    package init(transport: any JSONRPCTransport) {
+    package init(
+        transport: any JSONRPCTransport,
+        overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient.defaultOverloadRetryDelay,
+        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    ) {
         self.transport = transport
+        self.overloadRetryDelay = overloadRetryDelay
+        self.retrySleep = retrySleep
     }
 
     package func initialize(
@@ -91,13 +99,16 @@ package actor AppServerClient {
                     let response = try decoder.decode(responseType, from: rawResponse)
                     logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
                     return response
-                } catch let error as JSONRPCError
-                    where Self.shouldRetry(error, retryAttempt: retryAttempt)
-                {
-                    let delay = Self.overloadRetryDelay(for: retryAttempt)
+                } catch let error as JSONRPCError {
+                    guard Self.isAppServerOverload(error),
+                          let delay = overloadRetryDelay(retryAttempt)
+                    else {
+                        logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        throw error
+                    }
                     retryAttempt += 1
                     logger.warning("JSON-RPC request \(requestID, privacy: .public) overloaded for \(method, privacy: .public); retrying in \(String(describing: delay), privacy: .public)")
-                    try await Task.sleep(for: delay)
+                    try await retrySleep(delay)
                 } catch {
                     logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     throw error
@@ -131,17 +142,17 @@ package actor AppServerClient {
         return nextRequestID
     }
 
-    private nonisolated static func shouldRetry(_ error: JSONRPCError, retryAttempt: Int) -> Bool {
-        guard retryAttempt < overloadRetryDelays.count else {
-            return false
-        }
+    private nonisolated static func isAppServerOverload(_ error: JSONRPCError) -> Bool {
         if case .responseError(let code, _) = error {
             return code == appServerOverloadedErrorCode
         }
         return false
     }
 
-    private nonisolated static func overloadRetryDelay(for retryAttempt: Int) -> Duration {
+    private nonisolated static func defaultOverloadRetryDelay(for retryAttempt: Int) -> Duration? {
+        guard retryAttempt < overloadRetryDelays.count else {
+            return nil
+        }
         let base = overloadRetryDelays[retryAttempt]
         let jitter = Duration.milliseconds(Int.random(in: 0...50))
         return base + jitter
