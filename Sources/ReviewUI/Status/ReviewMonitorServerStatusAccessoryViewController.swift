@@ -119,50 +119,10 @@ struct AccountRateLimitsSectionView: View {
 struct StatusView: View {
     var store: CodexReviewStore
     var showSettings: (@MainActor () -> Void)? = nil
+    @State private var isReviewSettingsPopoverPresented = false
 
     private var settings: SettingsStore {
         store.settings
-    }
-
-    private var modelSelection: Binding<String?> {
-        Binding(
-            get: { settings.selectedModel },
-            set: { model in
-                Task { @MainActor in
-                    if let model {
-                        await store.updateSettingsModel(model)
-                    } else {
-                        await store.clearSettingsModelOverride()
-                    }
-                }
-            }
-        )
-    }
-
-    private var serviceTierSelection: Binding<CodexReviewServiceTier?> {
-        Binding(
-            get: { settings.selectedServiceTier },
-            set: { serviceTier in
-                Task { @MainActor in
-                    await store.updateSettingsServiceTier(serviceTier)
-                }
-            }
-        )
-    }
-
-    private var reasoningSelection: Binding<CodexReviewReasoningEffort?> {
-        Binding(
-            get: { settings.selectedReasoningEffort },
-            set: { reasoningEffort in
-                Task { @MainActor in
-                    if let reasoningEffort {
-                        await store.updateSettingsReasoningEffort(reasoningEffort)
-                    } else {
-                        await store.clearSettingsReasoningEffort()
-                    }
-                }
-            }
-        )
     }
 
     var body: some View {
@@ -199,49 +159,32 @@ struct StatusView: View {
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
-            HStack{
-                Menu{
-                    // Deliberately mirror the concrete reasoning choices from the model catalog
-                    // instead of adding an extra "default" menu row that upstream clients lack.
-                    Picker("Reasoning", selection: reasoningSelection) {
-                        ForEach(settings.availableReasoningOptions) { item in
-                            Text(item.reasoningEffort.displayText)
-                                .tag(Optional(item.reasoningEffort))
-                        }
-                    }
-                    .pickerStyle(.inline)
+            HStack {
+                ZStack{
+                    Button {
+                        isReviewSettingsPopoverPresented.toggle()
+                    } label: {
+                        Label{
+                            Text("\(settings.effectiveModelItem?.compactDisplayName ?? settings.effectiveModel ?? "Model")  \(settings.effectiveReasoningEffort?.displayText ?? "Reasoning")")
 
-                    // Keep this picker aligned with Codex CLI/App behavior and avoid
-                    // inventing a synthetic inherited/default row that those clients do not expose.
-                    Picker("Model", selection: modelSelection) {
-                        ForEach(settings.displayedModels) { item in
-                            LabeledContent{
-                                if item.supportedServiceTiers.contains(.fast) {
-                                    Image(systemName: "bolt.fill")
-                                }
-                            }label:{
-                                Text(item.normalizedDisplayName)
+                        }icon:{
+                            if settings.selectedServiceTier == .fast{
+                                Image(systemName:"bolt.fill")
                             }
-                            .tag(Optional(item.model))
                         }
                     }
-                    .pickerStyle(.inline)
-                    
-                    Picker("Tier", selection: serviceTierSelection) {
-                        Text("Normal").tag(Optional<CodexReviewServiceTier>.none)
-                        ForEach(settings.availableServiceTiers, id: \.self) { item in
-                            Text(item.displayText).tag(Optional(item))
+                }
+                .background(alignment: .bottomLeading) {
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(width: 100)
+                        .popover(
+                            isPresented: $isReviewSettingsPopoverPresented
+                        ) {
+                            ReviewSettingsPickerPopoverView(
+                                store: store
+                            )
                         }
-                    }
-                    .pickerStyle(.inline)
-                }label:{
-                    LabeledContent{
-                        if settings.selectedServiceTier == .fast{
-                            Image(systemName:"bolt.fill")
-                        }
-                    }label:{
-                        Text("\(settings.effectiveModelItem?.compactDisplayName ?? settings.effectiveModel ?? "Model")  \(settings.effectiveReasoningEffort?.displayText ?? "Reasoning")")
-                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -261,6 +204,89 @@ struct StatusView: View {
         case .running:
             false
         }
+    }
+}
+
+private struct ReviewSettingsPickerPopoverView: View {
+    var store: CodexReviewStore
+
+    private var settings: SettingsStore {
+        store.settings
+    }
+
+    var body: some View {
+        Form {
+            Section{
+                // Match Codex CLI/App by listing only concrete reasoning choices from the model catalog.
+                Picker("Reasoning", selection: reasoningSelection) {
+                    ForEach(settings.availableReasoningOptions) { item in
+                        Text(item.reasoningEffort.displayText)
+                            .tag(Optional(item.reasoningEffort))
+                    }
+                }
+            }
+            // Keep this aligned with Codex CLI/App behavior without inventing an inherited/default row.
+            Picker("Model", selection: modelSelection) {
+                ForEach(settings.displayedModels) { item in
+                    Label{
+                        Text(item.normalizedDisplayName)
+                    }icon:{
+                        if item.supportedServiceTiers.contains(.fast) {
+                            Image(systemName:"bolt.fill")
+                        }
+                    }
+                    .tag(Optional(item.model))
+                }
+            }
+            Picker("Tier", selection: serviceTierSelection) {
+                Text("Normal").tag(Optional<CodexReviewServiceTier>.none)
+                ForEach(settings.availableServiceTiers, id: \.self) { item in
+                    Text(item.displayText).tag(Optional(item))
+                }
+            }
+        }
+        .pickerStyle(.inline)
+        .formStyle(.columns)
+        .scenePadding()
+    }
+    private var modelSelection: Binding<String?> {
+        Binding(
+            get: { settings.selectedModel },
+            set: { model in
+                Task { @MainActor in
+                    if let model {
+                        await store.updateSettingsModel(model)
+                    } else {
+                        await store.clearSettingsModelOverride()
+                    }
+                }
+            }
+        )
+    }
+    private var serviceTierSelection: Binding<CodexReviewServiceTier?> {
+        Binding(
+            get: { settings.selectedServiceTier },
+            set: { serviceTier in
+                Task { @MainActor in
+                    await store.updateSettingsServiceTier(serviceTier)
+                }
+            }
+        )
+    }
+
+    private var reasoningSelection: Binding<CodexReviewReasoningEffort?> {
+        Binding(
+            get: { settings.selectedReasoningEffort },
+            set: { reasoningEffort in
+                Task { @MainActor in
+                    if let reasoningEffort {
+                        await store.updateSettingsReasoningEffort(reasoningEffort)
+                    } else {
+                        await store.clearSettingsReasoningEffort()
+                    }
+                }
+            }
+        )
     }
 }
 
