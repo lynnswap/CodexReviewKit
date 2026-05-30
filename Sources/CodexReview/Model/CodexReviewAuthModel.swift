@@ -81,7 +81,7 @@ public final class CodexReviewAuthModel {
     public package(set) var persistedAccounts: [CodexAccount] = []
     public package(set) var persistedActiveAccountKey: String?
     package private(set) var detachedAccount: CodexAccount?
-    public private(set) var selectedAccount :CodexAccount?
+    public private(set) var selectedAccount: CodexAccount?
 
     public package(set) var authenticationFailureCount = 0
     public package(set) var warningMessage: String?
@@ -264,7 +264,13 @@ public final class CodexReviewAuthModel {
     }
 
     private func reusableAccount(for accountKey: String) -> CodexAccount? {
-        persistedAccounts.first(where: { $0.accountKey == accountKey })
+        if let persistedAccount = persistedAccounts.first(where: { $0.accountKey == accountKey }) {
+            return persistedAccount
+        }
+        if detachedAccount?.accountKey == accountKey {
+            return detachedAccount
+        }
+        return nil
     }
 
     private func reconcileDetachedAccount() {

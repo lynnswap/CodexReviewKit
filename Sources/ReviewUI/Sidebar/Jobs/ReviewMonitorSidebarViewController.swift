@@ -120,6 +120,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var workspaceReloadCountForTesting = 0
     private var incrementalMoveCountForTesting = 0
     private var incrementalMembershipChangeCountForTesting = 0
+    private var sidebarSelectionKindDeliveryCount = 0
+    private var sidebarStoreKindDeliveryCount = 0
 #endif
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
@@ -236,22 +238,40 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarKindObservationScope.cancelAll()
         sidebarTopologyObservationScope.cancelAll()
 
-        sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState) { [weak self] _, uiState in
+        sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState, tracking: { uiState in
+            _ = uiState.sidebarSelection
+        }) { [weak self] _, uiState in
             let sidebarSelection = uiState.sidebarSelection
             guard let self else {
                 return
             }
-            self.applySidebarKind(self.sidebarKind(sidebarSelection: sidebarSelection))
+#if DEBUG
+            self.sidebarSelectionKindDeliveryCount += 1
+#endif
+            self.applySidebarKind(Self.sidebarKind(
+                sidebarSelection: sidebarSelection,
+                serverState: self.store.serverState,
+                hasReviewJobs: self.store.hasReviewJobs,
+                hasWorkspaces: self.store.workspaces.isEmpty == false
+            ))
         }
 
-        sidebarStoreKindDelivery = sidebarKindObservationScope.observe(store) { [weak self] _, store in
+        sidebarStoreKindDelivery = sidebarKindObservationScope.observe(store, tracking: { store in
+            _ = store.serverState
+            _ = store.hasReviewJobs
+            _ = store.workspaces.isEmpty
+        }) { [weak self] _, store in
             let serverState = store.serverState
             let hasReviewJobs = store.hasReviewJobs
             let hasWorkspaces = store.workspaces.isEmpty == false
             guard let self else {
                 return
             }
-            self.applySidebarKind(self.sidebarKind(
+#if DEBUG
+            self.sidebarStoreKindDeliveryCount += 1
+#endif
+            self.applySidebarKind(Self.sidebarKind(
+                sidebarSelection: self.uiState.sidebarSelection,
                 serverState: serverState,
                 hasReviewJobs: hasReviewJobs,
                 hasWorkspaces: hasWorkspaces
@@ -296,7 +316,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private var sidebarKind: SidebarKind {
-        sidebarKind(
+        Self.sidebarKind(
             sidebarSelection: uiState.sidebarSelection,
             serverState: store.serverState,
             hasReviewJobs: store.hasReviewJobs,
@@ -304,20 +324,19 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         )
     }
 
-    private func sidebarKind(
-        sidebarSelection: SidebarPickerSelection? = nil,
-        serverState: CodexReviewServerState? = nil,
-        hasReviewJobs: Bool? = nil,
-        hasWorkspaces: Bool? = nil
+    private static func sidebarKind(
+        sidebarSelection: SidebarPickerSelection?,
+        serverState: CodexReviewServerState,
+        hasReviewJobs: Bool,
+        hasWorkspaces: Bool
     ) -> SidebarKind {
-        if (sidebarSelection ?? uiState.sidebarSelection) == .account {
+        if sidebarSelection == .account {
             return .accountList
         }
-        if case .failed = serverState ?? store.serverState {
+        if case .failed = serverState {
             return .unavailable
         }
-        let hasStoredWorkspaces = hasWorkspaces ?? (store.workspaces.isEmpty == false)
-        let hasSidebarContent = (hasReviewJobs ?? store.hasReviewJobs) || hasStoredWorkspaces
+        let hasSidebarContent = hasReviewJobs || hasWorkspaces
         return hasSidebarContent ? .jobList : .empty
     }
 
@@ -1429,6 +1448,14 @@ extension ReviewMonitorSidebarViewController {
 
     var sidebarIncrementalMembershipChangeCountForTesting: Int {
         incrementalMembershipChangeCountForTesting
+    }
+
+    var sidebarSelectionKindDeliveryCountForTesting: Int {
+        sidebarSelectionKindDeliveryCount
+    }
+
+    var sidebarStoreKindDeliveryCountForTesting: Int {
+        sidebarStoreKindDeliveryCount
     }
 
     var isShowingEmptyStateForTesting: Bool {

@@ -149,14 +149,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundJob = selectedJob
 
         selectedJobDelivery = selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
-            let document = selectedJob.reviewMonitorLogDocument
+            let logEntries = selectedJob.logEntries
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
             self.renderBoundJobLog(
-                document,
+                logEntries,
                 restorationTarget: event.kind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
@@ -327,12 +327,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderSelectedJobLog(
-        _ document: ReviewMonitorLogDocument,
+        entries: [ReviewLogEntry],
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
         logScrollView.render(
-            document: document,
+            entries: entries,
             restoring: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -340,7 +340,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderBoundJobLog(
-        _ document: ReviewMonitorLogDocument,
+        _ entries: [ReviewLogEntry],
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -348,7 +348,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return false
         }
         return renderSelectedJobLog(
-            document,
+            entries: entries,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -670,7 +670,10 @@ extension ReviewMonitorTransportViewController {
             .init(
                 title: nil,
                 summary: nil,
-                log: job.reviewMonitorLogDocument.text,
+                log: {
+                    var projection = ReviewMonitorLogProjection()
+                    return projection.render(entries: job.logEntries).text
+                }(),
                 isShowingEmptyState: false
             )
         case .workspace:

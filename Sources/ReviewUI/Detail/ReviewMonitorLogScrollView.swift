@@ -37,6 +37,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedText = ""
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
+    private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
     private var activeFindQueryString: String?
@@ -161,12 +162,27 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func clear() -> Bool {
+        logProjection = ReviewMonitorLogProjection()
         displayedRevision = nil
         return applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
     }
 
     @discardableResult
     func render(
+        entries: [ReviewLogEntry],
+        restoring restorationTarget: ScrollRestorationTarget,
+        allowIncrementalUpdate: Bool
+    ) -> Bool {
+        let document = logProjection.render(entries: entries)
+        return render(
+            document: document,
+            restoring: restorationTarget,
+            allowIncrementalUpdate: allowIncrementalUpdate
+        )
+    }
+
+    @discardableResult
+    private func render(
         document: ReviewMonitorLogDocument,
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool

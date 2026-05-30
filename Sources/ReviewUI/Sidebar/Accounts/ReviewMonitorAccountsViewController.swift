@@ -20,10 +20,17 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
 
     private let authObservationScope = ObservationScope()
     private var accountListDelivery: ObservationDelivery?
+    private var accountSelectionDelivery: ObservationDelivery?
     private var accountPromptDelivery: ObservationDelivery?
     private var isApplyingAuthSelection = false
     private var presentedPendingAccountAction: CodexReviewAuthModel.PendingAccountAction?
     private var presentedAccountActionAlert: CodexReviewAuthModel.AccountActionAlert?
+
+#if DEBUG
+    private var fullReloadCountForTesting = 0
+    private var incrementalMembershipChangeCountForTesting = 0
+    private var incrementalMoveCountForTesting = 0
+#endif
 
     init(store: CodexReviewStore) {
         self.store = store
@@ -122,16 +129,34 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     private func bindObservation() {
         authObservationScope.cancelAll()
 
-        accountListDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
+        accountListDelivery = authObservationScope.observe(auth, tracking: { auth in
+            for account in auth.accounts {
+                _ = account.accountKey
+            }
+        }) { [weak self] _, auth in
             let accounts = auth.accounts
             let selectedAccount = auth.selectedAccount
-            self?.reloadAccounts(
+            self?.applyAccountTopology(
                 accounts: accounts,
                 selectedAccount: selectedAccount
             )
         }
 
-        accountPromptDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
+        accountSelectionDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
+            let selectedAccount = auth.selectedAccount
+            guard let self else {
+                return
+            }
+            self.reconcileSelection(
+                selectedAccount: selectedAccount,
+                accounts: self.displayedAccounts()
+            )
+        }
+
+        accountPromptDelivery = authObservationScope.observe(auth, tracking: { auth in
+            _ = auth.pendingAccountAction
+            _ = auth.accountActionAlert
+        }) { [weak self] _, auth in
             let pendingAccountAction = auth.pendingAccountAction
             let accountActionAlert = auth.accountActionAlert
             self?.presentAccountPromptsIfNeeded(
@@ -141,12 +166,94 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         }
     }
 
-    private func reloadAccounts(
+    private func applyAccountTopology(
         accounts: [CodexAccount],
         selectedAccount: CodexAccount?
     ) {
-        outlineView.reloadData()
+        applyAccountMembershipChange(accounts)
         reconcileSelection(selectedAccount: selectedAccount, accounts: accounts)
+    }
+
+    private func displayedAccounts() -> [CodexAccount] {
+        (0..<outlineView.numberOfRows).compactMap { row in
+            account(atRow: row)
+        }
+    }
+
+    private func applyAccountMembershipChange(_ targetAccounts: [CodexAccount]) {
+        let currentAccounts = displayedAccounts()
+        guard hasSameIdentityOrder(currentAccounts, targetAccounts) == false else {
+            return
+        }
+
+        var visibleAccounts = currentAccounts
+        outlineView.beginUpdates()
+        defer {
+            outlineView.endUpdates()
+        }
+
+        for sourceIndex in visibleAccounts.indices.reversed() {
+            guard targetAccounts.contains(where: { $0 === visibleAccounts[sourceIndex] }) == false else {
+                continue
+            }
+            outlineView.removeItems(
+                at: IndexSet(integer: sourceIndex),
+                inParent: nil,
+                withAnimation: []
+            )
+#if DEBUG
+            incrementalMembershipChangeCountForTesting += 1
+#endif
+            visibleAccounts.remove(at: sourceIndex)
+        }
+
+        for targetIndex in targetAccounts.indices {
+            let targetAccount = targetAccounts[targetIndex]
+            if visibleAccounts.contains(where: { $0 === targetAccount }) {
+                continue
+            }
+            let insertionIndex = min(targetIndex, visibleAccounts.count)
+            outlineView.insertItems(
+                at: IndexSet(integer: insertionIndex),
+                inParent: nil,
+                withAnimation: []
+            )
+#if DEBUG
+            incrementalMembershipChangeCountForTesting += 1
+#endif
+            visibleAccounts.insert(targetAccount, at: insertionIndex)
+        }
+
+        for targetIndex in targetAccounts.indices {
+            guard targetIndex < visibleAccounts.count else {
+                continue
+            }
+            let targetAccount = targetAccounts[targetIndex]
+            if visibleAccounts[targetIndex] === targetAccount {
+                continue
+            }
+            guard let sourceIndex = visibleAccounts.firstIndex(where: { $0 === targetAccount }) else {
+                continue
+            }
+            outlineView.moveItem(
+                at: sourceIndex,
+                inParent: nil,
+                to: targetIndex,
+                inParent: nil
+            )
+#if DEBUG
+            incrementalMoveCountForTesting += 1
+#endif
+            let movedAccount = visibleAccounts.remove(at: sourceIndex)
+            visibleAccounts.insert(movedAccount, at: targetIndex)
+        }
+    }
+
+    private func hasSameIdentityOrder(_ lhs: [CodexAccount], _ rhs: [CodexAccount]) -> Bool {
+        lhs.count == rhs.count &&
+            zip(lhs, rhs).allSatisfy { left, right in
+                left === right
+            }
     }
 
     private func reconcileSelection() {
@@ -499,8 +606,24 @@ extension ReviewMonitorAccountsViewController {
         accountListDelivery
     }
 
+    var accountSelectionDeliveryForTesting: ObservationDelivery? {
+        accountSelectionDelivery
+    }
+
     var accountPromptDeliveryForTesting: ObservationDelivery? {
         accountPromptDelivery
+    }
+
+    var accountFullReloadCountForTesting: Int {
+        fullReloadCountForTesting
+    }
+
+    var accountIncrementalMembershipChangeCountForTesting: Int {
+        incrementalMembershipChangeCountForTesting
+    }
+
+    var accountIncrementalMoveCountForTesting: Int {
+        incrementalMoveCountForTesting
     }
 
     var displayedAccountEmailsForTesting: [String] {

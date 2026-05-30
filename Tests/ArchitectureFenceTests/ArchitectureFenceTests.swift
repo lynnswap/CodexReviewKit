@@ -44,4 +44,26 @@ struct ArchitectureFenceTests {
 
         #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
     }
+
+    @Test func codexReviewTargetDoesNotOwnReviewMonitorRenderingArtifacts() throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let codexReviewSources = repo.appending(path: "Sources/CodexReview")
+        let files = try FileManager.default
+            .subpathsOfDirectory(atPath: codexReviewSources.path)
+            .filter { $0.hasSuffix(".swift") }
+
+        var violations: [String] = []
+        for file in files {
+            let url = codexReviewSources.appending(path: file)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            if text.contains("ReviewMonitor") {
+                violations.append(file)
+            }
+        }
+
+        #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
+    }
 }
