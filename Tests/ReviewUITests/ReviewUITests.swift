@@ -1968,21 +1968,15 @@ struct ReviewUITests {
         }
         #expect(window.title == "Commit: def456")
         #expect(window.subtitle == recentJob.cwd)
-        let selectedJobDelivery = try #require(transport.selectedJobDeliveryForTesting)
-        let renderedJob = await selectedJobDelivery.values {
-            transport.renderSnapshotForTesting
-        }
         activeJob.core.output.summary = "Old selection should not render."
         activeJob.replaceLogEntries([.init(kind: .agentMessage, text: "Old selection log")])
         recentJob.appendLogEntry(.init(kind: .progress, text: "Current selection log after stale mutation"))
 
-        let updatedSnapshot = try #require(await renderedJob.waitUntil { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
-        })
+        }
         #expect(updatedSnapshot.log.contains("Old selection log") == false)
-        #expect(renderedJob.snapshot().allSatisfy { snapshot in
-            snapshot.log.contains("Old selection log") == false
-        })
+        #expect(transport.displayedLogForTesting.contains("Old selection log") == false)
     }
 
     @Test func selectingWorkspaceShowsStructuredFindings() async throws {
@@ -2626,20 +2620,14 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
         _ = try await awaitTransportRender(transport)
-        let selectedJobDelivery = try #require(transport.selectedJobDeliveryForTesting)
-        let renderedJob = await selectedJobDelivery.values {
-            transport.renderSnapshotForTesting
-        }
         activeJob.appendLogEntry(.init(kind: .progress, text: "stale update"))
         recentJob.appendLogEntry(.init(kind: .progress, text: "fresh update"))
 
-        let updatedSnapshot = try #require(await renderedJob.waitUntil { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("fresh update")
-        })
+        }
         #expect(updatedSnapshot.log.contains("stale update") == false)
-        #expect(renderedJob.snapshot().allSatisfy { snapshot in
-            snapshot.log.contains("stale update") == false
-        })
+        #expect(transport.displayedLogForTesting.contains("stale update") == false)
     }
 
     @Test func clickingSidebarBlankAreaKeepsSelectionAndDetailPane() async throws {
@@ -2917,7 +2905,7 @@ struct ReviewUITests {
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
 
-    @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
+    @Test func logCanonicalEquivalentPrefixReloadsWhenUTF16LengthChanges() async throws {
         let decomposedPrefix = "Caf\u{0065}\u{0301}"
         let precomposedUpdate = "Caf\u{00E9} appended"
         let job = CodexReviewJob.makeForTesting(
@@ -2946,8 +2934,8 @@ struct ReviewUITests {
         #expect(transport.renderLogForTesting(text: precomposedUpdate, allowIncrementalUpdate: true))
 
         #expect(transport.displayedLogForTesting.hasSuffix(" appended"))
-        #expect(transport.logAppendCountForTesting == appendCount + 1)
-        #expect(transport.logReloadCountForTesting == reloadCount)
+        #expect(transport.logAppendCountForTesting == appendCount)
+        #expect(transport.logReloadCountForTesting == reloadCount + 1)
     }
 
     @Test func coalescedLogTextUpdateUsesAppendPathWhenSuffixCanBeDerived() async throws {
@@ -3081,6 +3069,59 @@ struct ReviewUITests {
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func selectedJobMarkdownAppendReplacesTailBlockWithoutReload() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-markdown-append-fallback",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg_1", text: "**bo")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        let appendCount = transport.logAppendCountForTesting
+        let replaceCount = transport.logReplaceCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
+
+        let snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log == "bold")
+        #expect(transport.logAppendCountForTesting == appendCount)
+        #expect(transport.logReplaceCountForTesting == replaceCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func skippedMarkdownRestyleReloadsBeforeSuffixAppendFallback() {
+        let logScrollView = ReviewMonitorLogScrollView()
+        let initialEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: "bold")
+        let restyledEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", replacesGroup: true, text: "**bold**")
+        let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: " tail")
+        var projection = ReviewMonitorLogProjection()
+        let initialDocument = projection.render(entries: [initialEntry])
+        logScrollView.render(document: initialDocument, restoring: .top, allowIncrementalUpdate: false)
+        let appendCount = logScrollView.appendCount
+        let reloadCount = logScrollView.reloadCount
+
+        _ = projection.render(entries: [initialEntry, restyledEntry])
+        let latestDocument = projection.render(entries: [initialEntry, restyledEntry, appendedEntry])
+        logScrollView.render(document: latestDocument, restoring: .top, allowIncrementalUpdate: true)
+
+        #expect(logScrollView.displayedTextForTesting == "bold tail")
+        #expect(logScrollView.appendCount == appendCount)
+        #expect(logScrollView.reloadCount == reloadCount + 1)
     }
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
@@ -3258,6 +3299,40 @@ struct ReviewUITests {
         job.appendLogEntry(.init(kind: .progress, text: "Pinned update"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
+        #expect(transport.isLogPinnedToBottomForTesting)
+    }
+
+    @Test func logAutoFollowKeepsBottomAfterWrappedSingleLineAppend() async throws {
+        let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
+        let job = makeJob(
+            id: "job-autofollow-wrapped-append",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 560, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        transport.scrollLogToBottomForTesting()
+        #expect(transport.isLogPinnedToBottomForTesting)
+        let pinnedAutoFollow = transport.logAutoFollowCountForTesting
+        let wrappedLine = (0..<140)
+            .map { "wrapped-append-segment-\($0)" }
+            .joined(separator: " ")
+        job.appendLogEntry(.init(kind: .progress, text: wrappedLine))
+        _ = try await awaitTransportRender(transport)
+
+        #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
+        #expect(transport.isLogPinnedToBottomForTesting)
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
         #expect(transport.isLogPinnedToBottomForTesting)
     }
 
@@ -4709,24 +4784,30 @@ func awaitTransportRender(
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
-    let delivery = try #require(
-        explicitDelivery
-            ?? transport.deliveryForExpectedRenderedStateForTesting
-    )
+    _ = try #require(explicitDelivery ?? transport.deliveryForExpectedRenderedStateForTesting)
     let expectedState = transport.expectedRenderedStateForTesting
-    let values = await delivery.values {
-        transport.renderedStateForTesting
-    }
     let resolvedPredicate: @Sendable (ReviewMonitorTransportViewController.RenderedStateForTesting) -> Bool = { state in
         if let predicate {
             return predicate(state.snapshot)
         }
         return state == expectedState
     }
-    guard let state = await values.waitUntil(timeout: timeout, resolvedPredicate) else {
-        throw TestFailure("timed out waiting for rendered transport state")
+
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        let state = transport.renderedStateForTesting
+        if transport.logRenderIsIdleForTesting, resolvedPredicate(state) {
+            return state.snapshot
+        }
+        await Task.yield()
+    } while clock.now < deadline
+
+    let state = transport.renderedStateForTesting
+    if transport.logRenderIsIdleForTesting, resolvedPredicate(state) {
+        return state.snapshot
     }
-    return state.snapshot
+    throw TestFailure("timed out waiting for rendered transport state")
 }
 
 @MainActor

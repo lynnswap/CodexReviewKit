@@ -1838,43 +1838,73 @@ struct AppServerClientTests {
             kind: .command,
             text: "$ swift test",
             groupID: "cmd-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                title: "Command",
+                status: "started",
+                command: "swift test"
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
             text: "Tests",
             groupID: "cmd-1",
-            replacesGroup: false
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
             text: "Tests passed",
             groupID: "cmd-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", status: "completed")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .command,
             text: "$ pwd",
             groupID: "cmd-2",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                title: "Command",
+                status: "started",
+                command: "pwd"
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
             text: "MCP codex_review.review_read started.",
             groupID: "tool-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "codex_review.review_read",
+                status: "started",
+                server: "codex_review",
+                tool: "review_read"
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
             text: "Reading review job",
             groupID: "tool-1",
-            replacesGroup: false
+            replacesGroup: false,
+            metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
             text: "codex_review.review_read completed. Result: ok",
             groupID: "tool-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "codex_review.review_read",
+                status: "completed",
+                server: "codex_review",
+                tool: "review_read",
+                resultText: "ok"
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .reasoningSummary,
@@ -1946,13 +1976,15 @@ struct AppServerClientTests {
             kind: .event,
             text: "Context compaction started.",
             groupID: "compact-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "contextCompaction", title: "Context compaction", status: "started")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .event,
             text: "Context compacted.",
             groupID: "compact-1",
-            replacesGroup: true
+            replacesGroup: true,
+            metadata: .init(sourceType: "contextCompaction", title: "Context compaction", status: "completed")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
@@ -1993,6 +2025,176 @@ struct AppServerClientTests {
             replacesGroup: true
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+    }
+
+    @Test func backendCarriesRichToolAndFileMetadata() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "webSearch", id: "web-1", query: "TextKit 2 markdown")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "imageView", id: "image-1", status: "completed", path: "/tmp/screenshot.png")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "fileChange", id: "file-1", path: "Sources/App.swift")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/fileChange/patchUpdated",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", itemID: "file-1", message: "patch")
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "hookPrompt", id: "hook-1", status: "completed", prompt: "Allow command?")
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Web search: TextKit 2 markdown",
+            groupID: "web-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "webSearch",
+                title: "Web search",
+                status: "started",
+                query: "TextKit 2 markdown"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Image viewed: /tmp/screenshot.png.",
+            groupID: "image-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "imageView",
+                title: "Image view",
+                status: "completed",
+                path: "/tmp/screenshot.png"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Applying file changes.",
+            groupID: "file-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "fileChange",
+                title: "File changes",
+                status: "started",
+                path: "Sources/App.swift"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "File changes updated.",
+            groupID: "file-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .event,
+            text: "Hook prompt completed.",
+            groupID: "hook-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "hookPrompt",
+                title: "Hook prompt",
+                status: "completed",
+                detail: "Allow command?"
+            )
+        ))
+    }
+
+    @Test func backendMarksErroredToolCompletionsAsFailedMetadata() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "mcpToolCall",
+                    id: "tool-error",
+                    server: "codex_review",
+                    tool: "review_read",
+                    error: "denied"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "dynamicToolCall",
+                    id: "tool-success-false",
+                    namespace: "web",
+                    tool: "search",
+                    result: "no matches",
+                    success: false
+                )
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "codex_review.review_read completed. Error: denied",
+            groupID: "tool-error",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "codex_review.review_read",
+                status: "failed",
+                server: "codex_review",
+                tool: "review_read",
+                errorText: "denied"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Dynamic tool web.search completed. Result: no matches",
+            groupID: "tool-success-false",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "dynamicToolCall",
+                title: "web.search",
+                status: "failed",
+                namespace: "web",
+                tool: "search",
+                resultText: "no matches"
+            )
+        ))
     }
 
     @Test func backendWaitsForFinalReviewItemAfterTurnCompletes() async throws {
@@ -2372,11 +2574,19 @@ private struct TestItem: Encodable, Sendable {
     var id: String
     var review: String?
     var command: String?
+    var cwd: String?
     var aggregatedOutput: String?
+    var exitCode: Int?
     var status: String?
+    var namespace: String?
     var server: String?
     var tool: String?
+    var query: String?
+    var path: String?
     var result: String?
+    var error: String?
+    var success: Bool?
+    var prompt: String?
     var summary: [String]?
     var content: [String]?
 
@@ -2385,11 +2595,19 @@ private struct TestItem: Encodable, Sendable {
         id: String,
         review: String? = nil,
         command: String? = nil,
+        cwd: String? = nil,
         aggregatedOutput: String? = nil,
+        exitCode: Int? = nil,
         status: String? = nil,
+        namespace: String? = nil,
         server: String? = nil,
         tool: String? = nil,
+        query: String? = nil,
+        path: String? = nil,
         result: String? = nil,
+        error: String? = nil,
+        success: Bool? = nil,
+        prompt: String? = nil,
         summary: [String]? = nil,
         content: [String]? = nil
     ) {
@@ -2397,11 +2615,19 @@ private struct TestItem: Encodable, Sendable {
         self.id = id
         self.review = review
         self.command = command
+        self.cwd = cwd
         self.aggregatedOutput = aggregatedOutput
+        self.exitCode = exitCode
         self.status = status
+        self.namespace = namespace
         self.server = server
         self.tool = tool
+        self.query = query
+        self.path = path
         self.result = result
+        self.error = error
+        self.success = success
+        self.prompt = prompt
         self.summary = summary
         self.content = content
     }

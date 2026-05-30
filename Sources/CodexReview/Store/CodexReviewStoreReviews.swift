@@ -483,7 +483,7 @@ extension CodexReviewStore {
             ))
         case .log(let text):
             job.appendLogEntry(.init(kind: .progress, text: text, timestamp: clock.now()))
-        case .logEntry(let kind, let text, let groupID, let replacesGroup):
+        case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
             if kind == .agentMessage {
                 if let groupID, replacesGroup {
                     job.noteCompletedAgentMessage(itemID: groupID, text: text)
@@ -496,6 +496,7 @@ extension CodexReviewStore {
                 groupID: groupID,
                 replacesGroup: replacesGroup,
                 text: text,
+                metadata: metadata,
                 timestamp: clock.now()
             ))
         case .completed(let summary, let result):

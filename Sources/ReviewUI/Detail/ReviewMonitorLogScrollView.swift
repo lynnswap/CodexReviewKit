@@ -13,7 +13,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private typealias BoolGetter = @convention(c) (AnyObject, Selector) -> Bool
     private typealias VoidMethod = @convention(c) (AnyObject, Selector) -> Void
 
-    enum ScrollRestorationTarget: Equatable {
+    enum ScrollRestorationTarget: Equatable, Sendable {
         case top
         case offset(CGFloat)
         case bottom
@@ -37,6 +37,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedText = ""
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
+    private var displayedPresentationSignature: Int?
     private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
@@ -164,7 +165,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     func clear() -> Bool {
         logProjection = ReviewMonitorLogProjection()
         displayedRevision = nil
-        return applyReload("", restoring: .top, countBottomRestoreAsAutoFollow: false)
+        return applyReload(
+            "",
+            document: .init(),
+            restoring: .top,
+            countBottomRestoreAsAutoFollow: false
+        )
     }
 
     @discardableResult
@@ -182,7 +188,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     @discardableResult
-    private func render(
+    func render(
         document: ReviewMonitorLogDocument,
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
@@ -196,7 +202,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
            canApplyLastChange,
            case .append(let append) = document.lastChange,
            canApplyAppend(append, to: document) {
-            let didRender = applyAppend(append)
+            let didRender = applyAppend(
+                append,
+                document: document,
+                forceAutoFollow: restorationTarget == .bottom
+            )
             displayedRevision = document.revision
             return didRender
         }
@@ -204,12 +214,13 @@ final class ReviewMonitorLogScrollView: NSScrollView {
            canApplyLastChange,
            case .replace(let replacement) = document.lastChange,
            canApplyReplacement(replacement, to: document) {
-            let didRender = applyReplacement(replacement)
+            let didRender = applyReplacement(replacement, document: document)
             displayedRevision = document.revision
             return didRender
         }
         if allowIncrementalUpdate,
-           let suffix = appendedSuffix(for: document.text) {
+           let suffix = appendedSuffix(for: document.text),
+           canApplyFallbackAppend(suffix, to: document) {
             let suffixUTF16Length = (suffix as NSString).length
             let append = ReviewMonitorLogAppend(
                 kind: fallbackAppendKind(for: document.lastChange),
@@ -221,11 +232,20 @@ final class ReviewMonitorLogScrollView: NSScrollView {
                 text: suffix,
                 textUTF16Length: suffixUTF16Length
             )
-            let didRender = applyAppend(append)
+            let didRender = applyAppend(
+                append,
+                document: document,
+                forceAutoFollow: restorationTarget == .bottom
+            )
             displayedRevision = document.revision
             return didRender
         }
-        let didRender = applyReload(document.text, restoring: restorationTarget, countBottomRestoreAsAutoFollow: false)
+        let didRender = applyReload(
+            document.text,
+            document: document,
+            restoring: restorationTarget,
+            countBottomRestoreAsAutoFollow: false
+        )
         displayedRevision = document.revision
         return didRender
     }
@@ -258,17 +278,39 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return .event
     }
 
+    private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLogDocument) -> Bool {
+        guard let displayedPresentationSignature else {
+            return false
+        }
+        guard document.textUTF16Length == displayedUTF16Length + (suffix as NSString).length else {
+            return false
+        }
+        return displayedPresentationSignature == presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
+    }
+
     @discardableResult
-    private func applyAppend(_ append: ReviewMonitorLogAppend) -> Bool {
+    private func applyAppend(
+        _ append: ReviewMonitorLogAppend,
+        document: ReviewMonitorLogDocument,
+        forceAutoFollow: Bool
+    ) -> Bool {
         guard append.text.isEmpty == false else {
             return false
         }
 
-        let shouldAutoFollow = isPinnedToBottom()
+        let shouldAutoFollow = forceAutoFollow || isPinnedToBottom()
         let shouldClearFindSelection = prepareFindSessionForLogMutation(.appendPreservingPrefix)
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
+        logDocumentView.applyPresentation(document, appended: append)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -276,15 +318,16 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 #endif
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
-        } else {
-            logDocumentView.layoutTextViewport()
         }
         invalidateFindIndicator()
         return true
     }
 
     @discardableResult
-    private func applyReplacement(_ replacement: ReviewMonitorLogReplacement) -> Bool {
+    private func applyReplacement(
+        _ replacement: ReviewMonitorLogReplacement,
+        document: ReviewMonitorLogDocument
+    ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
         let shouldClearFindSelection = prepareFindSessionForLogMutation(
@@ -294,6 +337,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         logDocumentView.replaceText(in: replacement.range, with: replacement.text)
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = resultingTextUTF16Length
+        logDocumentView.applyPresentation(document, replacement: replacement)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -301,8 +349,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 #endif
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
-        } else {
-            logDocumentView.layoutTextViewport()
         }
         invalidateFindIndicator()
         return true
@@ -311,11 +357,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReload(
         _ text: String,
+        document: ReviewMonitorLogDocument,
         restoring restorationTarget: ScrollRestorationTarget,
         countBottomRestoreAsAutoFollow: Bool
     ) -> Bool {
         if displayedText == text {
             let previousOrigin = contentView.bounds.origin
+            logDocumentView.applyPresentation(document)
+            displayedPresentationSignature = presentationSignature(
+                forPrefixUTF16Length: displayedUTF16Length,
+                in: document
+            )
             invalidateDocumentLayout()
             restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
             return contentView.bounds.origin != previousOrigin
@@ -326,6 +378,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         logDocumentView.replaceText(text)
         displayedText = text
         displayedUTF16Length = (text as NSString).length
+        logDocumentView.applyPresentation(document)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
@@ -550,6 +607,64 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return String(text[suffixStart...])
     }
 
+    private func presentationSignature(
+        forPrefixUTF16Length prefixLength: Int,
+        in document: ReviewMonitorLogDocument
+    ) -> Int {
+        let clampedPrefixLength = min(max(0, prefixLength), document.textUTF16Length)
+        var hasher = Hasher()
+        hasher.combine(clampedPrefixLength)
+
+        for block in document.blocks {
+            guard let range = clippedRange(block.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("block")
+            hasher.combine(block.id)
+            hasher.combine(block.kind)
+            hasher.combine(block.groupID)
+            combine(range, into: &hasher)
+            hasher.combine(block.metadata)
+        }
+
+        for styleRun in document.styleRuns {
+            guard let range = clippedRange(styleRun.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("style")
+            combine(range, into: &hasher)
+            hasher.combine(styleRun.style)
+        }
+
+        for decoration in document.decorations {
+            guard let range = clippedRange(decoration.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("decoration")
+            hasher.combine(decoration.blockID)
+            combine(range, into: &hasher)
+            hasher.combine(decoration.style)
+        }
+
+        return hasher.finalize()
+    }
+
+    private func clippedRange(_ range: NSRange, upperBound: Int) -> NSRange? {
+        guard range.location < upperBound else {
+            return nil
+        }
+        let end = min(NSMaxRange(range), upperBound)
+        guard end > range.location else {
+            return nil
+        }
+        return NSRange(location: range.location, length: end - range.location)
+    }
+
+    private func combine(_ range: NSRange, into hasher: inout Hasher) {
+        hasher.combine(range.location)
+        hasher.combine(range.length)
+    }
+
     private func replaceDisplayedText(in range: NSRange, with text: String) {
         let mutable = NSMutableString(string: displayedText)
         mutable.replaceCharacters(in: range, with: text)
@@ -580,7 +695,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             contentInsets: contentView.contentInsets
         )
         var frameChanged = syncDocumentFrame(contentSize: contentSize)
-        if metricsChanged || frameChanged {
+        if metricsChanged {
             logDocumentView.layoutTextViewport()
             if syncDocumentFrame(contentSize: contentSize) {
                 frameChanged = true
@@ -629,6 +744,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
                 autoFollowCount += 1
             }
 #endif
+            if hideOverlayScroller {
+                hideOverlayScrollerAfterProgrammaticScrollIfNeeded()
+            }
             return
         }
 
@@ -893,6 +1011,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 }
 
+private extension ReviewLogEntry.Kind {
+    var requiresMarkdownPresentationInvalidationOnAppend: Bool {
+        switch self {
+        case .agentMessage, .plan, .reasoning, .reasoningSummary, .rawReasoning:
+            return true
+        case .command, .commandOutput, .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+            return false
+        }
+    }
+}
+
 @MainActor
 private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @preconcurrency NSTextViewportLayoutControllerDelegate {
     private let textContentStorage = NSTextContentStorage()
@@ -902,6 +1031,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     )
     private let textStorage = NSTextStorage()
     private let textContentView = ReviewMonitorLogContentView()
+    private let decorationView = ReviewMonitorLogDecorationView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
     private let selectionView = ReviewMonitorLogSelectionView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
@@ -918,10 +1048,11 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var keyboardSelectionAnchorUTF16Offset: Int?
     private var keyboardSelectionFocusUTF16Offset: Int?
     private var preferredTextContainerWidth: CGFloat = 0
+    private var currentDecorations: [ReviewMonitorLogDecoration] = []
     private(set) var estimatedDocumentHeight: CGFloat = 0
     private var glowTimer: Timer?
     var contentInsets: NSEdgeInsets = .init()
-    var textContainerInset = NSSize(width: 4, height: 6)
+    var textContainerInset = NSSize(width: 12, height: 10)
     var onLayoutInvalidated: (() -> Void)?
     var onUserSelectionChanged: (() -> Void)?
 #if DEBUG
@@ -929,20 +1060,24 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var wordFadeDisplayInvalidationCount = 0
 #endif
 
-    private let baseFont = NSFont.monospacedSystemFont(
+    private let baseFont = NSFont.systemFont(
+        ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize
+    )
+    private let monoFont = NSFont.monospacedSystemFont(
         ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
         weight: .regular
     )
     private var baseAttributes: [NSAttributedString.Key: Any] {
         [
             .font: baseFont,
-            .foregroundColor: NSColor.textColor,
+            .foregroundColor: normalTextColor,
         ]
     }
 
     private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
         .agentMessage,
         .plan,
+        .reasoning,
         .reasoningSummary,
         .rawReasoning,
     ]
@@ -953,6 +1088,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private static let wordFadeInitialAlpha: CGFloat = 0
     private static let wordFadeStagger: TimeInterval = 0.028
     private static let wordFadeAlphaStepCount = 16
+    private static let maxReadableTextWidth: CGFloat = 980
 
     override var isFlipped: Bool {
         true
@@ -990,13 +1126,14 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         super.init(frame: .zero)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        textContainer.lineFragmentPadding = 5
+        textContainer.lineFragmentPadding = 4
         textLayoutManager.textContainer = textContainer
         textContentStorage.textStorage = textStorage
         textContentStorage.addTextLayoutManager(textLayoutManager)
         textContentStorage.primaryTextLayoutManager = textLayoutManager
         textLayoutManager.textViewportLayoutController.delegate = self
         addSubview(textContentView)
+        textContentView.addSubview(decorationView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
         estimatedDocumentHeight = measuredDocumentHeight()
@@ -1063,6 +1200,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
         self.contentInsets = contentInsets
         self.preferredTextContainerWidth = preferredTextContainerWidth
+        textContainerInset.width = max(12, floor((preferredTextContainerWidth - Self.maxReadableTextWidth) / 2))
         let containerChanged = syncTextContainerSize()
         if insetsChanged {
             needsViewportLayout = true
@@ -1088,6 +1226,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
         }
         clampSelectedRange()
+        increaseEstimatedDocumentHeightForAppend(suffix)
         let glowAnimationStart = CACurrentMediaTime()
         if let animation,
            shouldAnimateGlow,
@@ -1102,6 +1241,58 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         if animation != nil {
             startGlowTimerIfNeeded()
         }
+    }
+
+    private func increaseEstimatedDocumentHeightForAppend(_ suffix: String) {
+        estimatedDocumentHeight += CGFloat(estimatedLineCount(in: suffix)) * estimatedBaseLineHeight
+        invalidateIntrinsicContentSize()
+    }
+
+    private var estimatedBaseLineHeight: CGFloat {
+        ceil(baseFont.ascender - baseFont.descender + baseFont.leading)
+    }
+
+    private func estimatedLineCount(in text: String) -> Int {
+        let unitsPerLine = estimatedUTF16UnitsPerVisualLine
+        var currentLineLength = 0
+        var lineCount = 0
+        for codeUnit in text.utf16 {
+            if codeUnit == 10 {
+                lineCount += estimatedVisualLineCount(
+                    forUTF16Length: currentLineLength,
+                    unitsPerLine: unitsPerLine
+                )
+                currentLineLength = 0
+            } else {
+                currentLineLength += 1
+            }
+        }
+        lineCount += estimatedVisualLineCount(
+            forUTF16Length: currentLineLength,
+            unitsPerLine: unitsPerLine
+        )
+        return max(1, lineCount)
+    }
+
+    private var estimatedUTF16UnitsPerVisualLine: Int {
+        let availableWidth = max(
+            1,
+            textContainer.size.width > 0
+                ? textContainer.size.width
+                : preferredTextContainerWidth - textContainerInset.width * 2
+        )
+        let estimatedCharacterWidth = max(
+            1,
+            ceil(max(baseFont.maximumAdvancement.width, monoFont.maximumAdvancement.width))
+        )
+        return max(1, Int(floor(availableWidth / estimatedCharacterWidth)))
+    }
+
+    private func estimatedVisualLineCount(
+        forUTF16Length length: Int,
+        unitsPerLine: Int
+    ) -> Int {
+        max(1, Int(ceil(CGFloat(max(1, length)) / CGFloat(unitsPerLine))))
     }
 
     func replaceText(_ text: String) {
@@ -1122,6 +1313,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
 
         let invalidationStart = textReplacementInvalidationStartUTF16Offset(for: replacementRange)
+        let replacedText = (textStorage.string as NSString).substring(with: replacementRange)
         textContentStorage.performEditingTransaction {
             textStorage.replaceCharacters(
                 in: replacementRange,
@@ -1129,10 +1321,195 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             )
         }
         clampSelectedRange()
+        adjustEstimatedDocumentHeight(replacing: replacedText, with: text)
         invalidateTextLayout(
             in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
             measureEstimatedHeightImmediately: false
         )
+    }
+
+    private func adjustEstimatedDocumentHeight(replacing replacedText: String, with replacementText: String) {
+        let delta = estimatedLineCount(in: replacementText) - estimatedLineCount(in: replacedText)
+        guard delta != 0 else {
+            return
+        }
+        estimatedDocumentHeight = max(
+            ceil(textContainerInset.height * 2),
+            estimatedDocumentHeight + CGFloat(delta) * estimatedBaseLineHeight
+        )
+        invalidateIntrinsicContentSize()
+    }
+
+    func applyPresentation(
+        _ document: ReviewMonitorLogDocument,
+        appended append: ReviewMonitorLogAppend? = nil,
+        replacement: ReviewMonitorLogReplacement? = nil
+    ) {
+        guard document.textUTF16Length == textStorage.length,
+              append != nil || replacement != nil || document.text == textStorage.string
+        else {
+            currentDecorations = []
+            decorationView.decorations = []
+            return
+        }
+
+        currentDecorations = document.decorations
+        if let append,
+           let invalidationRange = styleInvalidationRange(for: append, in: document) {
+            applyStyleRuns(document.styleRuns, in: invalidationRange)
+        } else if let replacement,
+                  let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
+            applyStyleRuns(document.styleRuns, in: invalidationRange)
+        } else {
+            applyStyleRuns(document.styleRuns)
+        }
+        updateDecorationRects()
+    }
+
+    private func applyStyleRuns(_ styleRuns: [ReviewMonitorLogTextRun]) {
+        guard textStorage.length > 0 else {
+            return
+        }
+
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        textContentStorage.performEditingTransaction {
+            textStorage.setAttributes(baseAttributes, range: fullRange)
+            for styleRun in styleRuns {
+                let range = NSIntersectionRange(styleRun.range, fullRange)
+                guard range.length > 0 else {
+                    continue
+                }
+                textStorage.addAttributes(attributes(for: styleRun.style), range: range)
+            }
+        }
+        invalidateTextLayout(measureEstimatedHeightImmediately: true)
+    }
+
+    private func applyStyleRuns(_ styleRuns: [ReviewMonitorLogTextRun], in invalidationRange: NSRange) {
+        guard textStorage.length > 0 else {
+            return
+        }
+
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        let targetRange = NSIntersectionRange(invalidationRange, fullRange)
+        guard targetRange.length > 0 else {
+            return
+        }
+
+        textContentStorage.performEditingTransaction {
+            textStorage.setAttributes(baseAttributes, range: targetRange)
+            for styleRun in styleRuns {
+                let range = NSIntersectionRange(styleRun.range, targetRange)
+                guard range.length > 0 else {
+                    continue
+                }
+                textStorage.addAttributes(attributes(for: styleRun.style), range: range)
+            }
+        }
+        invalidateTextLayout(in: targetRange, measureEstimatedHeightImmediately: false)
+    }
+
+    private func styleInvalidationRange(
+        for append: ReviewMonitorLogAppend,
+        in document: ReviewMonitorLogDocument
+    ) -> NSRange? {
+        guard let block = document.blocks.last(where: { $0.id == append.blockID }) else {
+            return append.range
+        }
+
+        if block.kind.requiresMarkdownPresentationInvalidationOnAppend {
+            return block.range
+        }
+        return append.range
+    }
+
+    private func styleInvalidationRange(
+        for replacement: ReviewMonitorLogReplacement,
+        in document: ReviewMonitorLogDocument
+    ) -> NSRange? {
+        guard let block = document.blocks.last(where: { $0.id == replacement.blockID }) else {
+            return NSRange(location: replacement.range.location, length: replacement.textUTF16Length)
+        }
+
+        return block.range
+    }
+
+    private func attributes(for style: ReviewMonitorLogTextStyle) -> [NSAttributedString.Key: Any] {
+        var attributes = baseAttributes
+        switch style {
+        case .body:
+            break
+        case .heading(let level):
+            attributes[.font] = boldFont(
+                size: baseFont.pointSize + max(1, 5 - CGFloat(level))
+            )
+            attributes[.foregroundColor] = normalTextColor
+        case .bullet:
+            attributes[.foregroundColor] = normalTextColor
+        case .blockquote:
+            attributes[.font] = italicFont(baseFont)
+            attributes[.foregroundColor] = normalTextColor
+        case .strong:
+            attributes[.font] = boldFont(size: baseFont.pointSize)
+            attributes[.foregroundColor] = normalTextColor
+        case .emphasis:
+            attributes[.font] = italicFont(baseFont)
+            attributes[.foregroundColor] = normalTextColor
+        case .link:
+            attributes[.foregroundColor] = normalTextColor
+            attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        case .strikethrough:
+            attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+            attributes[.foregroundColor] = normalTextColor
+        case .inlineCode:
+            attributes[.font] = monoFont
+            attributes[.foregroundColor] = normalTextColor
+            attributes[.backgroundColor] = NSColor.textColor.withAlphaComponent(0.07)
+        case .codeFence:
+            attributes[.font] = monoFont
+            attributes[.foregroundColor] = normalTextColor
+        case .markdownSyntax:
+            attributes[.foregroundColor] = normalTextColor
+        case .command:
+            attributes[.foregroundColor] = normalTextColor
+        case .terminalOutput:
+            attributes[.font] = monoFont
+            attributes[.foregroundColor] = secondaryTextColor
+        case .plan(let status):
+            attributes[.foregroundColor] = planTextColor(for: status)
+        case .tool:
+            attributes[.foregroundColor] = normalTextColor
+        case .diagnostic:
+            attributes[.foregroundColor] = normalTextColor
+        case .error:
+            attributes[.font] = boldFont(size: baseFont.pointSize)
+            attributes[.foregroundColor] = normalTextColor
+        case .event:
+            attributes[.foregroundColor] = normalTextColor
+        case .muted:
+            attributes[.foregroundColor] = normalTextColor
+        }
+        return attributes
+    }
+
+    private var normalTextColor: NSColor {
+        NSColor.textColor
+    }
+
+    private var secondaryTextColor: NSColor {
+        NSColor.systemGray
+    }
+
+    private func boldFont(size: CGFloat) -> NSFont {
+        NSFont.systemFont(ofSize: size, weight: .semibold)
+    }
+
+    private func italicFont(_ font: NSFont) -> NSFont {
+        NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+    }
+
+    private func planTextColor(for status: ReviewMonitorLogPlanStatus?) -> NSColor {
+        normalTextColor
     }
 
     private var shouldAnimateGlow: Bool {
@@ -1149,20 +1526,27 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             return
         }
 
+        var initialColorUpdates: [(range: NSRange, color: NSColor)] = []
         for (index, range) in ranges.enumerated() {
             let range = clamp(range)
             guard range.length > 0 else {
                 continue
             }
+            let baseColor = foregroundColor(at: range.location)
+            initialColorUpdates.append((
+                range,
+                wordFadeColor(progress: 0, baseColor: baseColor)
+            ))
             wordFadeAnimations.append(
                 ReviewMonitorLogWordFadeAnimation(
                     range: range,
                     startedAt: startedAt + TimeInterval(index) * Self.wordFadeStagger,
-                    renderedStep: 0
+                    renderedStep: 0,
+                    baseColor: baseColor
                 )
             )
         }
-        updateWordFadeRenderingColors(ranges.map { ($0, wordFadeColor(progress: 0)) })
+        updateWordFadeRenderingColors(initialColorUpdates)
         invalidateWordFadeDisplay(for: ranges)
     }
 
@@ -1253,9 +1637,21 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         return ranges
     }
 
-    private func wordFadeColor(progress: Double) -> NSColor {
+    private func wordFadeColor(progress: Double, baseColor: NSColor) -> NSColor {
         let alpha = Self.wordFadeInitialAlpha + (1 - Self.wordFadeInitialAlpha) * CGFloat(progress)
-        return NSColor.textColor.withAlphaComponent(alpha)
+        return baseColor.withAlphaComponent(alpha)
+    }
+
+    private func foregroundColor(at location: Int) -> NSColor {
+        guard textStorage.length > 0 else {
+            return normalTextColor
+        }
+        let clampedLocation = min(max(0, location), textStorage.length - 1)
+        return textStorage.attribute(
+            .foregroundColor,
+            at: clampedLocation,
+            effectiveRange: nil
+        ) as? NSColor ?? normalTextColor
     }
 
     private func updateWordFadeAnimations(at now: TimeInterval) {
@@ -1279,7 +1675,10 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             if step != animation.renderedStep {
                 colorUpdates.append((
                     animation.range,
-                    wordFadeColor(progress: wordFadeProgress(forAlphaStep: step))
+                    wordFadeColor(
+                        progress: wordFadeProgress(forAlphaStep: step),
+                        baseColor: animation.baseColor
+                    )
                 ))
                 updatedRanges.append(animation.range)
                 animation.renderedStep = step
@@ -1361,7 +1760,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             let fragmentRange = nsRange(for: fragmentView.layoutFragment.rangeInElement)
             if NSIntersectionRange(fragmentRange, invalidationRange).length > 0 {
                 fragmentView.needsDisplay = true
-                fragmentView.displayIfNeeded()
             }
         }
     }
@@ -1426,6 +1824,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         defer {
             isLayingOutViewport = false
             updateSelectionRects()
+            updateDecorationRects()
         }
 
         var iterations = 5
@@ -1706,10 +2105,10 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         if measureEstimatedHeightImmediately {
             updateEstimatedDocumentHeight()
             onLayoutInvalidated?()
+            layoutTextViewport()
         }
         needsLayout = true
         needsDisplay = true
-        layoutTextViewport()
     }
 
     private func appendInvalidationStartUTF16Offset() -> Int {
@@ -1815,8 +2214,52 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         selectionView.selectionRects = rects
     }
 
+    private func updateDecorationRects() {
+        let visibleDecorations = currentDecorations.filter { decorationNeedsResolvedRect($0.style) }
+        guard visibleDecorations.isEmpty == false,
+              bounds.width > 0
+        else {
+            decorationView.decorations = []
+            return
+        }
+
+        let horizontalInset = max(8, textContainerInset.width - 8)
+        let verticalInset: CGFloat = 4
+        let panelWidth = min(
+            max(0, textContentView.bounds.width - horizontalInset * 2),
+            textContainer.size.width + 16
+        )
+        let resolved = visibleDecorations.compactMap { decoration -> ReviewMonitorLogResolvedDecoration? in
+            let segmentRects = rects(forCharacterRange: decoration.range).map(\.rectValue)
+            guard var rect = segmentRects.first else {
+                return nil
+            }
+            for segmentRect in segmentRects.dropFirst() {
+                rect = rect.union(segmentRect)
+            }
+            rect = NSRect(
+                x: horizontalInset,
+                y: max(0, rect.minY - verticalInset),
+                width: panelWidth,
+                height: rect.height + verticalInset * 2
+            )
+            return ReviewMonitorLogResolvedDecoration(style: decoration.style, rect: rect)
+        }
+        decorationView.decorations = resolved
+    }
+
+    private func decorationNeedsResolvedRect(_ style: ReviewMonitorLogDecorationStyle) -> Bool {
+        switch style {
+        case .terminal:
+            return true
+        case .transcript, .command, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
+            return false
+        }
+    }
+
     private func syncContentSubviewFrames() {
         textContentView.frame = bounds
+        decorationView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
     }
@@ -2282,7 +2725,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         if fragmentNeedsImmediateDisplay {
             fragmentView.needsDisplay = true
-            fragmentView.displayIfNeeded()
         }
         visibleFragmentViews.insert(fragmentView)
     }
@@ -2302,6 +2744,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             onLayoutInvalidated?()
         }
         updateSelectionRects()
+        updateDecorationRects()
     }
 
     private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
@@ -2356,6 +2799,70 @@ private final class ReviewMonitorLogContentView: ReviewMonitorLogTiledContentVie
 @MainActor
 private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentView {}
 
+private struct ReviewMonitorLogResolvedDecoration: Equatable {
+    var style: ReviewMonitorLogDecorationStyle
+    var rect: NSRect
+}
+
+@MainActor
+private final class ReviewMonitorLogDecorationView: NSView {
+    var decorations: [ReviewMonitorLogResolvedDecoration] = [] {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard decorations.isEmpty == false else {
+            return
+        }
+
+        for decoration in decorations where decoration.rect.intersects(dirtyRect) {
+            draw(decoration)
+        }
+    }
+
+    private func draw(_ decoration: ReviewMonitorLogResolvedDecoration) {
+        let palette = palette(for: decoration.style)
+        guard palette.background.alphaComponent > 0 else {
+            return
+        }
+        let rect = decoration.rect
+        let backgroundPath = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+        palette.background.setFill()
+        backgroundPath.fill()
+    }
+
+    private func palette(for style: ReviewMonitorLogDecorationStyle) -> Palette {
+        switch style {
+        case .transcript, .command, .plan, .reasoning, .tool, .diagnostic, .event:
+            return .init(
+                background: NSColor.clear
+            )
+        case .terminal:
+            return .init(
+                background: NSColor.labelColor.withAlphaComponent(0.055)
+            )
+        case .codeBlock, .error:
+            return .init(
+                background: NSColor.clear
+            )
+        }
+    }
+
+    private struct Palette {
+        var background: NSColor
+    }
+}
+
 @MainActor
 private final class ReviewMonitorLogFragmentView: NSView {
     var layoutFragment: NSTextLayoutFragment {
@@ -2399,6 +2906,7 @@ private struct ReviewMonitorLogWordFadeAnimation {
     var range: NSRange
     var startedAt: TimeInterval
     var renderedStep: Int
+    var baseColor: NSColor
 }
 
 @MainActor
@@ -2820,12 +3328,12 @@ extension ReviewMonitorLogScrollView {
     }
 
     var visibleFragmentViewCountForTesting: Int {
-        logDocumentView.layoutTextViewport()
+        logDocumentView.layoutTextViewport(force: true)
         return logDocumentView.visibleFragmentViewCountForTesting
     }
 
     var visibleFragmentBoundsForTesting: NSRect {
-        logDocumentView.layoutTextViewport()
+        logDocumentView.layoutTextViewport(force: true)
         return logDocumentView.visibleFragmentBoundsForTesting
     }
 

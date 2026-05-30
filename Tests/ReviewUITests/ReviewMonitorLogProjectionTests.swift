@@ -6,7 +6,7 @@ import Testing
 @Suite("ReviewMonitor log projection")
 @MainActor
 struct ReviewMonitorLogProjectionTests {
-    @Test func documentOmitsCommandOutputButKeepsCommandEntry() {
+    @Test func documentIncludesCommandOutputAndKeepsPlainTranscript() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",
             cwd: "/tmp/workspace",
@@ -24,20 +24,26 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.text == """
         $ git diff --stat
 
+        README.md | 1 +
+
         No correctness issues found.
         """)
-        #expect(document.blocks.map(\.kind) == [.command, .agentMessage])
+        #expect(document.blocks.map(\.kind) == [.command, .commandOutput, .agentMessage])
         #expect(document.blocks[0].range == NSRange(
             location: 0,
             length: ("$ git diff --stat" as NSString).length
         ))
         #expect(document.blocks[1].range == NSRange(
             location: ("$ git diff --stat\n\n" as NSString).length,
+            length: ("README.md | 1 +" as NSString).length
+        ))
+        #expect(document.blocks[2].range == NSRange(
+            location: ("$ git diff --stat\n\nREADME.md | 1 +\n\n" as NSString).length,
             length: ("No correctness issues found." as NSString).length
         ))
     }
 
-    @Test func commandOutputAppendDoesNotAdvanceRevision() {
+    @Test func commandOutputAppendUsesAppendChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",
             cwd: "/tmp/workspace",
@@ -55,11 +61,186 @@ struct ReviewMonitorLogProjectionTests {
         job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd-1", text: "\nSources/App.swift | 2 +"))
         let updatedDocument = projection.render(entries: job.logEntries)
 
-        #expect(updatedDocument == initialDocument)
+        #expect(updatedDocument.text == """
+        $ git diff --stat
+
+        README.md | 1 +
+        Sources/App.swift | 2 +
+        """)
+        #expect(updatedDocument.revision == initialDocument.revision &+ 1)
+        #expect(updatedDocument.lastChange == .append(.init(
+            kind: .commandOutput,
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            range: NSRange(
+                location: ("$ git diff --stat\n\nREADME.md | 1 +" as NSString).length,
+                length: ("\nSources/App.swift | 2 +" as NSString).length
+            ),
+            text: "\nSources/App.swift | 2 +"
+        )))
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
-    @Test func tailAgentMessageDeltaUsesAppendChange() {
+    @Test func metadataIsPreservedOnBlocks() {
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "commandExecution",
+            title: "Command",
+            status: "started",
+            command: "swift test",
+            cwd: "/tmp/workspace",
+            exitCode: 0
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-metadata",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test", metadata: metadata),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.blocks.first?.metadata == metadata)
+        #expect(document.decorations.first?.style == .command(tone: .success))
+    }
+
+    @Test func groupedReplacementCanClearMetadata() {
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "commandExecution",
+            title: "Command",
+            status: "started",
+            command: "swift test"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-metadata-clear",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .commandOutput, groupID: "cmd-1", text: "running", metadata: metadata),
+                .init(kind: .commandOutput, groupID: "cmd-1", replacesGroup: true, text: "finished"),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == "finished")
+        #expect(document.blocks.first?.metadata == nil)
+        #expect(document.decorations.first?.style == .terminal(tone: .neutral))
+    }
+
+    @Test func documentRendersMarkdownWithStandardParserAndKeepsSourceTranscript() {
+        let text = """
+        # Heading
+        - `inline` item with **strong**, *emphasis*, [link](https://example.com), and ~~old~~
+        > quote
+        ```swift
+        let value = 1
+        ```
+        """
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-markdown-lite",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(kind: .agentMessage, text: text),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == """
+        Heading
+
+        - inline item with strong, emphasis, link, and old
+
+        quote
+
+        let value = 1
+
+        """)
+        #expect(document.sourceText == text)
+        #expect(document.styleRuns.contains { $0.style == .heading(level: 1) })
+        #expect(document.styleRuns.contains { $0.style == .bullet })
+        #expect(document.styleRuns.contains { $0.style == .inlineCode })
+        #expect(document.styleRuns.contains { $0.style == .strong })
+        #expect(document.styleRuns.contains { $0.style == .emphasis })
+        #expect(document.styleRuns.contains { $0.style == .link })
+        #expect(document.styleRuns.contains { $0.style == .strikethrough })
+        #expect(document.styleRuns.contains { $0.style == .blockquote })
+        #expect(document.styleRuns.contains { $0.style == .codeFence })
+        #expect(document.decorations.contains { $0.style == .codeBlock })
+    }
+
+    @Test func plainMultilineAgentTextKeepsLineBreaks() {
+        let text = "line 1\nline 2\nline 3"
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-plain-lines",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(kind: .agentMessage, text: text),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == text)
+        #expect(document.sourceText == text)
+    }
+
+    @Test func planStatusStylesAreProjected() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-plan-style",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .todoList, groupID: "plan-1", text: "[completed] Inspect\n[in_progress] Render\n[pending] Test"),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == """
+        ✓ Inspect
+        • Render
+        □ Test
+        """)
+        #expect(document.sourceText == "[completed] Inspect\n[in_progress] Render\n[pending] Test")
+        #expect(document.styleRuns.contains { $0.style == .plan(status: .completed) })
+        #expect(document.styleRuns.contains { $0.style == .plan(status: .inProgress) })
+        #expect(document.styleRuns.contains { $0.style == .plan(status: .pending) })
+    }
+
+    @Test func rawDiffEventRemainsMonospacedEventWithoutDiffParsing() {
+        let diff = """
+        diff --git a/A.swift b/A.swift
+        +let value = 1
+        """
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-raw-diff",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .event, groupID: "turn-1", replacesGroup: true, text: diff),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == diff)
+        #expect(document.styleRuns == [
+            .init(range: NSRange(location: 0, length: (diff as NSString).length), style: .event)
+        ])
+        #expect(document.decorations.map(\.style) == [.event])
+    }
+
+    @Test func tailAgentMessageDeltaUsesAppendChangeWhenRenderedTextKeepsPrefix() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-agent-delta",
             cwd: "/tmp/workspace",
@@ -93,6 +274,61 @@ struct ReviewMonitorLogProjectionTests {
                 length: (" log" as NSString).length
             ),
             text: " log"
+        )))
+    }
+
+    @Test func tailAgentMessageDeltaRerendersMarkdownBlockWhenMarkupChangesPrefix() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-agent-markdown-delta",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg-1", text: "**bo"),
+            ]
+        )
+        var projection = ReviewMonitorLogProjection()
+        _ = projection.render(entries: job.logEntries)
+
+        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg-1", text: "ld**"))
+        let document = projection.render(entries: job.logEntries)
+
+        #expect(document.text == "bold")
+        #expect(document.sourceText == "**bold**")
+        #expect(document.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
+        )))
+        #expect(document.styleRuns.contains { $0.style == .strong })
+    }
+
+    @Test func incrementalAppendReplacesTailMarkdownBlockWithoutFullReload() {
+        let firstEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "**bo")
+        let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "ld**")
+        var projection = ReviewMonitorLogProjection()
+        _ = projection.render(entries: [firstEntry])
+
+        let incrementalDocument = projection.append(entries: [appendedEntry], sourceRange: 1..<2)
+        #expect(incrementalDocument?.text == "bold")
+        #expect(incrementalDocument?.sourceText == "**bold**")
+        #expect(incrementalDocument?.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
+        )))
+
+        let document = projection.render(entries: [firstEntry, appendedEntry])
+        #expect(document.text == "bold")
+        #expect(document.sourceText == "**bold**")
+        #expect(document.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
         )))
     }
 

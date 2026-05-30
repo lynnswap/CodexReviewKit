@@ -223,7 +223,13 @@ package enum BackendReviewEvent: Equatable, Sendable {
     case message(String)
     case messageDelta(String, itemID: String)
     case log(String)
-    case logEntry(kind: ReviewLogEntry.Kind, text: String, groupID: String?, replacesGroup: Bool)
+    case logEntry(
+        kind: ReviewLogEntry.Kind,
+        text: String,
+        groupID: String?,
+        replacesGroup: Bool,
+        metadata: ReviewLogEntry.Metadata? = nil
+    )
     case completed(summary: String, result: String?)
     case failed(String)
     case cancelled(String)
