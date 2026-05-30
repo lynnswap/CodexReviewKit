@@ -819,6 +819,36 @@ struct ReviewMonitorLogProjection: Sendable {
         var metadata: ReviewLogEntry.Metadata?
     }
 
+    private struct EntrySignature: Equatable, Sendable {
+        var id: UUID
+        var kind: ReviewLogEntry.Kind
+        var groupID: String?
+        var replacesGroup: Bool
+        var textUTF16Length: Int
+        var textHash: Int
+        var metadata: ReviewLogEntry.Metadata?
+        var timestamp: Date
+
+        init(_ entry: ReviewLogEntry) {
+            var hasher = Hasher()
+            hasher.combine(entry.text)
+            self.id = entry.id
+            self.kind = entry.kind
+            self.groupID = entry.groupID
+            self.replacesGroup = entry.replacesGroup
+            self.textUTF16Length = ReviewMonitorLogProjection.utf16Length(entry.text)
+            self.textHash = hasher.finalize()
+            self.metadata = entry.metadata
+            self.timestamp = entry.timestamp
+        }
+    }
+
+    private enum AppendResult: Sendable {
+        case noVisibleChange
+        case changed(ReviewMonitorLogChange)
+        case needsReload(replacementBlockID: ReviewMonitorLogBlockID?)
+    }
+
     private struct Accumulator: Sendable {
         private(set) var document = ReviewMonitorLogDocument()
         private(set) var hasVisibleSections = false
@@ -935,7 +965,7 @@ struct ReviewMonitorLogProjection: Sendable {
     }
 
     private struct State: Sendable {
-        var entries: [ReviewLogEntry]
+        var entrySignatures: [EntrySignature]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
         var projection: Accumulator
@@ -950,7 +980,7 @@ struct ReviewMonitorLogProjection: Sendable {
 
         static func rebuild(entries: [ReviewLogEntry]) -> State {
             var state = State(
-                entries: entries,
+                entrySignatures: entries.map(EntrySignature.init),
                 blocks: [],
                 indexByGroup: [:],
                 projection: .init()
@@ -988,38 +1018,27 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         private init(
-            entries: [ReviewLogEntry],
+            entrySignatures: [EntrySignature],
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             projection: Accumulator
         ) {
-            self.entries = entries
+            self.entrySignatures = entrySignatures
             self.blocks = blocks
             self.indexByGroup = indexByGroup
             self.projection = projection
         }
 
-        mutating func append(
-            _ entry: ReviewLogEntry,
-            previousDocument: ReviewMonitorLogDocument
-        ) -> ReviewMonitorLogChange? {
-            entries.append(entry)
+        mutating func append(_ entry: ReviewLogEntry) -> AppendResult {
+            entrySignatures.append(.init(entry))
 
             if let key = ReviewMonitorLogProjection.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
                     let oldText = blocks[blockIndex].text
                     if entry.replacesGroup || blockIndex != blocks.indices.last {
-                        let blockID = blocks[blockIndex].id
-                        self = Self.rebuild(entries: entries)
-                        if entry.replacesGroup,
-                           let replacement = Self.replacement(
-                               previous: previousDocument,
-                               current: projection.document,
-                               blockID: blockID
-                           ) {
-                            return .replace(replacement)
-                        }
-                        return .reload
+                        return .needsReload(
+                            replacementBlockID: entry.replacesGroup ? blocks[blockIndex].id : nil
+                        )
                     }
 
                     blocks[blockIndex].text.append(entry.text)
@@ -1044,37 +1063,34 @@ struct ReviewMonitorLogProjection: Sendable {
                             blockID: blockID
                         )
                         if newRendered == oldRendered {
-                            self = Self.rebuild(entries: entries)
-                            return .reload
+                            return .needsReload(replacementBlockID: nil)
                         }
                         if let renderedDelta = ReviewMonitorLogProjection.suffix(
                             in: newRendered,
                             afterPrefix: oldRendered
                         ) {
-                            return projection.appendToCurrentBlock(
+                            if let append = projection.appendToCurrentBlock(
                                 blocks[blockIndex],
                                 at: blockIndex,
                                 sourceDelta: entry.text,
                                 renderedDelta: renderedDelta
-                            ).map(ReviewMonitorLogChange.append)
+                            ) {
+                                return .changed(.append(append))
+                            }
+                            return .noVisibleChange
                         }
-                        self = Self.rebuild(entries: entries)
-                        if let replacement = Self.replacement(
-                            previous: previousDocument,
-                            current: projection.document,
-                            blockID: blockID
-                        ) {
-                            return .replace(replacement)
-                        }
-                        return .reload
+                        return .needsReload(replacementBlockID: blockID)
                     }
-                    return appendTailGroupDelta(
+                    if let append = appendTailGroupDelta(
                         block: blocks[blockIndex],
                         oldText: oldText,
                         newText: newText,
                         blockIndex: blockIndex,
                         delta: entry.text
-                    ).map(ReviewMonitorLogChange.append)
+                    ) {
+                        return .changed(.append(append))
+                    }
+                    return .noVisibleChange
                 }
 
                 indexByGroup[key] = blocks.count
@@ -1089,7 +1105,10 @@ struct ReviewMonitorLogProjection: Sendable {
                 metadata: entry.metadata
             )
             blocks.append(block)
-            return appendBlock(block, at: blockIndex).map(ReviewMonitorLogChange.append)
+            if let append = appendBlock(block, at: blockIndex) {
+                return .changed(.append(append))
+            }
+            return .noVisibleChange
         }
 
         private mutating func appendBlock(
@@ -1138,7 +1157,7 @@ struct ReviewMonitorLogProjection: Sendable {
             }
         }
 
-        private static func replacement(
+        static func replacement(
             previous: ReviewMonitorLogDocument,
             current: ReviewMonitorLogDocument,
             blockID: ReviewMonitorLogBlockID
@@ -1165,17 +1184,39 @@ struct ReviewMonitorLogProjection: Sendable {
     private var state = State(entries: [])
     private var document = ReviewMonitorLogDocument()
 
+    var entryCount: Int {
+        state.entrySignatures.count
+    }
+
     mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLogDocument {
-        guard entries != state.entries else {
+        let entrySignatures = entries.map(EntrySignature.init)
+        guard entrySignatures != state.entrySignatures else {
             return document
         }
 
         let previousDocument = document
         let preferredChange: ReviewMonitorLogChange?
-        if entries.count == state.entries.count + 1,
-           entries.dropLast().elementsEqual(state.entries),
+        if entrySignatures.count == state.entrySignatures.count + 1,
+           entrySignatures.dropLast().elementsEqual(state.entrySignatures),
            let entry = entries.last {
-            preferredChange = state.append(entry, previousDocument: previousDocument)
+            switch state.append(entry) {
+            case .changed(let change):
+                preferredChange = change
+            case .noVisibleChange:
+                preferredChange = nil
+            case .needsReload(let replacementBlockID):
+                state = State.rebuild(entries: entries)
+                if let replacementBlockID,
+                   let replacement = State.replacement(
+                       previous: previousDocument,
+                       current: state.document,
+                       blockID: replacementBlockID
+                   ) {
+                    preferredChange = .replace(replacement)
+                } else {
+                    preferredChange = .reload
+                }
+            }
         } else {
             state = State.rebuild(entries: entries)
             preferredChange = .reload
@@ -1187,6 +1228,44 @@ struct ReviewMonitorLogProjection: Sendable {
             preferredChange: preferredChange
         ) {
             document = resolved
+        }
+        return document
+    }
+
+    mutating func append(
+        entries: [ReviewLogEntry],
+        sourceRange: Range<Int>
+    ) -> ReviewMonitorLogDocument? {
+        guard sourceRange.lowerBound <= state.entrySignatures.count else {
+            return nil
+        }
+        guard state.entrySignatures.count < sourceRange.upperBound else {
+            return document
+        }
+
+        let skipCount = state.entrySignatures.count - sourceRange.lowerBound
+        guard skipCount >= 0,
+              skipCount <= entries.count
+        else {
+            return nil
+        }
+
+        for entry in entries.dropFirst(skipCount) {
+            let previousDocument = document
+            switch state.append(entry) {
+            case .changed(let preferredChange):
+                if let resolved = Self.resolveDocument(
+                    previous: previousDocument,
+                    current: state.document,
+                    preferredChange: preferredChange
+                ) {
+                    document = resolved
+                }
+            case .noVisibleChange:
+                continue
+            case .needsReload:
+                return nil
+            }
         }
         return document
     }
