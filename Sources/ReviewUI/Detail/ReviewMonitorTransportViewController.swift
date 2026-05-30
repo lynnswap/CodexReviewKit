@@ -12,6 +12,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let logScrollView = ReviewMonitorLogScrollView()
+    private var logRenderer = ReviewMonitorLogRenderer()
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
@@ -25,6 +26,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var boundWorkspace: CodexReviewWorkspace?
     private var displayedSelection: DisplayedSelection?
     private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
+    private var logRenderTask: Task<Void, Never>?
+    private var logRenderGeneration: UInt64 = 0
+    private var appliedLogRenderGeneration: UInt64 = 0
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
         self.store = store
@@ -35,6 +39,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        logRenderTask?.cancel()
     }
 
     override func loadView() {
@@ -146,6 +154,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedJobObservationScope.cancelAll()
         selectedJobDelivery = nil
+        resetLogRenderer()
         boundJob = selectedJob
 
         selectedJobDelivery = selectedJobObservationScope.observe(selectedJob) { [weak self] event, selectedJob in
@@ -170,6 +179,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservationScope.cancelAll()
         selectedJobDelivery = nil
         boundJob = nil
+        resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
         logScrollView.clear()
     }
@@ -331,11 +341,34 @@ final class ReviewMonitorTransportViewController: NSViewController {
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        logScrollView.render(
-            entries: entries,
-            restoring: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate
-        )
+        guard let boundJob else {
+            return false
+        }
+
+        logRenderGeneration &+= 1
+        let generation = logRenderGeneration
+        let renderer = logRenderer
+        let jobID = boundJob.id
+        logRenderTask?.cancel()
+        logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
+            let document = await renderer.render(entries: entries)
+            await MainActor.run { [weak self] in
+                guard Task.isCancelled == false,
+                      let self,
+                      self.logRenderGeneration == generation,
+                      self.boundJob?.id == jobID
+                else {
+                    return
+                }
+                _ = self.logScrollView.render(
+                    document: document,
+                    restoring: restorationTarget,
+                    allowIncrementalUpdate: allowIncrementalUpdate
+                )
+                self.appliedLogRenderGeneration = generation
+            }
+        }
+        return true
     }
 
     @discardableResult
@@ -359,6 +392,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return
         }
         logScrollTargetsByJobID[boundJob.id] = logScrollView.currentScrollRestorationTarget
+    }
+
+    private func resetLogRenderer() {
+        logRenderTask?.cancel()
+        logRenderTask = nil
+        logRenderGeneration &+= 1
+        appliedLogRenderGeneration = logRenderGeneration
+        logRenderer = ReviewMonitorLogRenderer()
     }
 
     private func restorationTarget(
@@ -614,6 +655,10 @@ extension ReviewMonitorTransportViewController {
 
     var logOverlayScrollerHideRequestCountForTesting: Int {
         logScrollView.overlayScrollerHideRequestCountForTesting
+    }
+
+    var logRenderIsIdleForTesting: Bool {
+        appliedLogRenderGeneration == logRenderGeneration
     }
 
     var logFrameForTesting: NSRect {

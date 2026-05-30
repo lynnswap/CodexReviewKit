@@ -1968,21 +1968,15 @@ struct ReviewUITests {
         }
         #expect(window.title == "Commit: def456")
         #expect(window.subtitle == recentJob.cwd)
-        let selectedJobDelivery = try #require(transport.selectedJobDeliveryForTesting)
-        let renderedJob = await selectedJobDelivery.values {
-            transport.renderSnapshotForTesting
-        }
         activeJob.core.output.summary = "Old selection should not render."
         activeJob.replaceLogEntries([.init(kind: .agentMessage, text: "Old selection log")])
         recentJob.appendLogEntry(.init(kind: .progress, text: "Current selection log after stale mutation"))
 
-        let updatedSnapshot = try #require(await renderedJob.waitUntil { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
-        })
+        }
         #expect(updatedSnapshot.log.contains("Old selection log") == false)
-        #expect(renderedJob.snapshot().allSatisfy { snapshot in
-            snapshot.log.contains("Old selection log") == false
-        })
+        #expect(transport.displayedLogForTesting.contains("Old selection log") == false)
     }
 
     @Test func selectingWorkspaceShowsStructuredFindings() async throws {
@@ -2626,20 +2620,14 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
         _ = try await awaitTransportRender(transport)
-        let selectedJobDelivery = try #require(transport.selectedJobDeliveryForTesting)
-        let renderedJob = await selectedJobDelivery.values {
-            transport.renderSnapshotForTesting
-        }
         activeJob.appendLogEntry(.init(kind: .progress, text: "stale update"))
         recentJob.appendLogEntry(.init(kind: .progress, text: "fresh update"))
 
-        let updatedSnapshot = try #require(await renderedJob.waitUntil { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("fresh update")
-        })
+        }
         #expect(updatedSnapshot.log.contains("stale update") == false)
-        #expect(renderedJob.snapshot().allSatisfy { snapshot in
-            snapshot.log.contains("stale update") == false
-        })
+        #expect(transport.displayedLogForTesting.contains("stale update") == false)
     }
 
     @Test func clickingSidebarBlankAreaKeepsSelectionAndDetailPane() async throws {
@@ -4709,24 +4697,30 @@ func awaitTransportRender(
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
-    let delivery = try #require(
-        explicitDelivery
-            ?? transport.deliveryForExpectedRenderedStateForTesting
-    )
+    _ = try #require(explicitDelivery ?? transport.deliveryForExpectedRenderedStateForTesting)
     let expectedState = transport.expectedRenderedStateForTesting
-    let values = await delivery.values {
-        transport.renderedStateForTesting
-    }
     let resolvedPredicate: @Sendable (ReviewMonitorTransportViewController.RenderedStateForTesting) -> Bool = { state in
         if let predicate {
             return predicate(state.snapshot)
         }
         return state == expectedState
     }
-    guard let state = await values.waitUntil(timeout: timeout, resolvedPredicate) else {
-        throw TestFailure("timed out waiting for rendered transport state")
+
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        let state = transport.renderedStateForTesting
+        if transport.logRenderIsIdleForTesting, resolvedPredicate(state) {
+            return state.snapshot
+        }
+        await Task.yield()
+    } while clock.now < deadline
+
+    let state = transport.renderedStateForTesting
+    if transport.logRenderIsIdleForTesting, resolvedPredicate(state) {
+        return state.snapshot
     }
-    return state.snapshot
+    throw TestFailure("timed out waiting for rendered transport state")
 }
 
 @MainActor

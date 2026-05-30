@@ -197,6 +197,22 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
             ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
         }
     }
+
+    mutating func rebuildPresentation(forBlockAt blockIndex: Int) {
+        guard blocks.indices.contains(blockIndex) else {
+            rebuildPresentation()
+            return
+        }
+
+        let block = blocks[blockIndex]
+        styleRuns.removeAll {
+            NSIntersectionRange($0.range, block.range).length > 0
+        }
+        decorations.removeAll {
+            $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
+        }
+        ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
+    }
 }
 
 private enum ReviewMonitorLogStyler {
@@ -789,13 +805,13 @@ private enum ReviewMonitorLogStyler {
 
 }
 
-struct ReviewMonitorLogProjection {
-    private struct GroupKey: Hashable {
+struct ReviewMonitorLogProjection: Sendable {
+    private struct GroupKey: Hashable, Sendable {
         var kind: ReviewLogEntry.Kind
         var groupID: String
     }
 
-    private struct RenderedBlock {
+    private struct RenderedBlock: Sendable {
         var id: ReviewMonitorLogBlockID
         var kind: ReviewLogEntry.Kind
         var groupID: String?
@@ -803,7 +819,7 @@ struct ReviewMonitorLogProjection {
         var metadata: ReviewLogEntry.Metadata?
     }
 
-    private struct Accumulator {
+    private struct Accumulator: Sendable {
         private(set) var document = ReviewMonitorLogDocument()
         private(set) var hasVisibleSections = false
         private(set) var lastBlockIndex: Int?
@@ -890,7 +906,7 @@ struct ReviewMonitorLogProjection {
             document.blocks[blockIndexInDocument].range.length += deltaLength
             document.blocks[blockIndexInDocument].sourceRange.length += sourceDeltaLength
             document.blocks[blockIndexInDocument].metadata = block.metadata
-            document.rebuildPresentation()
+            document.rebuildPresentation(forBlockAt: blockIndexInDocument)
             lastBlockIndex = blockIndex
             return .init(
                 kind: block.kind,
@@ -918,7 +934,7 @@ struct ReviewMonitorLogProjection {
         }
     }
 
-    private struct State {
+    private struct State: Sendable {
         var entries: [ReviewLogEntry]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
