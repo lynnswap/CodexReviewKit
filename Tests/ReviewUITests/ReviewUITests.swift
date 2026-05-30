@@ -3282,6 +3282,40 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
     }
 
+    @Test func logAutoFollowKeepsBottomAfterWrappedSingleLineAppend() async throws {
+        let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
+        let job = makeJob(
+            id: "job-autofollow-wrapped-append",
+            status: .running,
+            targetSummary: "Uncommitted changes",
+            summary: "Running review.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 560, height: 360))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        transport.scrollLogToBottomForTesting()
+        #expect(transport.isLogPinnedToBottomForTesting)
+        let pinnedAutoFollow = transport.logAutoFollowCountForTesting
+        let wrappedLine = (0..<140)
+            .map { "wrapped-append-segment-\($0)" }
+            .joined(separator: " ")
+        job.appendLogEntry(.init(kind: .progress, text: wrappedLine))
+        _ = try await awaitTransportRender(transport)
+
+        #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
+        #expect(transport.isLogPinnedToBottomForTesting)
+        #expect(transport.logVisibleFragmentViewCountForTesting > 0)
+        #expect(transport.isLogPinnedToBottomForTesting)
+    }
+
     @Test func logAppendDoesNotScrollWhenNearBottomButUnpinned() async throws {
         let longLog = (0..<500)
             .map { "scroll stability line \($0) with enough text to keep TextKit 2 viewport layout active" }

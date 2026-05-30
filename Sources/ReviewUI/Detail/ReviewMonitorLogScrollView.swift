@@ -1164,11 +1164,46 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     }
 
     private func estimatedLineCount(in text: String) -> Int {
-        max(1, text.utf16.reduce(into: 1) { count, codeUnit in
+        let unitsPerLine = estimatedUTF16UnitsPerVisualLine
+        var currentLineLength = 0
+        var lineCount = 0
+        for codeUnit in text.utf16 {
             if codeUnit == 10 {
-                count += 1
+                lineCount += estimatedVisualLineCount(
+                    forUTF16Length: currentLineLength,
+                    unitsPerLine: unitsPerLine
+                )
+                currentLineLength = 0
+            } else {
+                currentLineLength += 1
             }
-        })
+        }
+        lineCount += estimatedVisualLineCount(
+            forUTF16Length: currentLineLength,
+            unitsPerLine: unitsPerLine
+        )
+        return max(1, lineCount)
+    }
+
+    private var estimatedUTF16UnitsPerVisualLine: Int {
+        let availableWidth = max(
+            1,
+            textContainer.size.width > 0
+                ? textContainer.size.width
+                : preferredTextContainerWidth - textContainerInset.width * 2
+        )
+        let estimatedCharacterWidth = max(
+            1,
+            ceil(max(baseFont.maximumAdvancement.width, monoFont.maximumAdvancement.width))
+        )
+        return max(1, Int(floor(availableWidth / estimatedCharacterWidth)))
+    }
+
+    private func estimatedVisualLineCount(
+        forUTF16Length length: Int,
+        unitsPerLine: Int
+    ) -> Int {
+        max(1, Int(ceil(CGFloat(max(1, length)) / CGFloat(unitsPerLine))))
     }
 
     func replaceText(_ text: String) {
