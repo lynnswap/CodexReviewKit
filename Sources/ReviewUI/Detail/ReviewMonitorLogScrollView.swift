@@ -1785,7 +1785,12 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             attributes[.font] = monoFont
             attributes[.foregroundColor] = secondaryTextColor
         case .commandOutputControl:
-            attributes[.foregroundColor] = NSColor.clear
+            attributes[.font] = commandOutputControlFont
+            attributes[.foregroundColor] = secondaryTextColor
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.firstLineHeadIndent = commandOutputControlTextIndent
+            paragraphStyle.headIndent = commandOutputControlTextIndent
+            attributes[.paragraphStyle] = paragraphStyle
         case .plan(let status):
             attributes[.foregroundColor] = planTextColor(for: status)
         case .tool:
@@ -1809,6 +1814,16 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private var secondaryTextColor: NSColor {
         NSColor.systemGray
+    }
+
+    private var commandOutputControlFont: NSFont {
+        NSFont.systemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize
+        )
+    }
+
+    private var commandOutputControlTextIndent: CGFloat {
+        ReviewMonitorCommandOutputPanelView.chevronSlotWidth(for: commandOutputControlFont)
     }
 
     private func boldFont(size: CGFloat) -> NSFont {
@@ -2578,8 +2593,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             }
             visibleBlockIDs.insert(panel.blockID)
             let panelView = commandOutputPanelView(for: panel.blockID)
-            panelView.configure(panel, titleLeadingOffset: placement.titleLeadingOffset)
-            panelView.frame = placement.frame
+            panelView.configure(panel)
+            panelView.frame = placement
             if panelView.superview !== commandOutputPanelContainerView {
                 commandOutputPanelContainerView.addSubview(panelView)
             }
@@ -2612,16 +2627,17 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private func commandOutputPanelPlacement(
         for panel: ReviewMonitorLogCommandOutputPanel
-    ) -> (frame: NSRect, titleLeadingOffset: CGFloat)? {
+    ) -> NSRect? {
         let segmentRects = rects(forCharacterRange: panel.range).map(\.rectValue)
-        guard var rect = segmentRects.first else {
+        guard let firstTextRect = segmentRects.first else {
             return nil
         }
+        var rect = firstTextRect
         for segmentRect in segmentRects.dropFirst() {
             rect = rect.union(segmentRect)
         }
-        let textLeadingX = rect.minX
-        let panelX = floor(max(0, textLeadingX - ReviewMonitorCommandOutputPanelView.preferredTitleLeadingOffset))
+        let textLeadingX = firstTextRect.minX - commandOutputControlTextIndent
+        let panelX = textLeadingX
         let trailingInset: CGFloat = 8
         let panelRightEdge = min(
             max(panelX, textContentView.bounds.width - trailingInset),
@@ -2632,7 +2648,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         let expandedHeight = Self.commandOutputPanelCollapsedHeight +
             commandOutputPanelLineHeight * CGFloat(Self.commandOutputPanelVisibleLineCount) +
             8
-        let frame = NSRect(
+        return NSRect(
             x: panelX,
             y: max(0, rect.minY - verticalInset),
             width: panelWidth,
@@ -2641,7 +2657,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 rect.height + verticalInset * 2
             )
         )
-        return (frame, textLeadingX - panelX)
     }
 
     private static let commandOutputPanelCollapsedHeight: CGFloat = 28
@@ -3246,16 +3261,13 @@ private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
 @MainActor
 private final class ReviewMonitorCommandOutputPanelView: NSView {
     static let visibleOutputLineCount = 5
-    static let preferredTitleLeadingOffset: CGFloat = 16
 
     private let blockID: ReviewMonitorLogBlockID
-    private let toggleButton = ReviewMonitorCommandOutputChevronButton()
-    private let titleLabel = NSTextField(labelWithString: "")
+    private let chevronImageView = NSImageView()
     private let outputScrollView = NSScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
     private var panel: ReviewMonitorLogCommandOutputPanel?
     private var toggleSymbolName = "chevron.forward"
-    private var titleLeadingOffset = ReviewMonitorCommandOutputPanelView.preferredTitleLeadingOffset
     var onToggle: ((ReviewMonitorLogBlockID) -> Void)?
 
     override var isFlipped: Bool {
@@ -3269,29 +3281,10 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     init(blockID: ReviewMonitorLogBlockID) {
         self.blockID = blockID
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.masksToBounds = true
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.055).cgColor
 
-        toggleButton.target = self
-        toggleButton.action = #selector(toggle)
-        toggleButton.title = ""
-        toggleButton.bezelStyle = .inline
-        toggleButton.isBordered = false
-        toggleButton.alignment = .left
-        toggleButton.imagePosition = .imageOnly
-        toggleButton.imageScaling = .scaleProportionallyDown
-        toggleButton.contentTintColor = .secondaryLabelColor
-        toggleButton.setButtonType(.momentaryPushIn)
-        addSubview(toggleButton)
-
-        titleLabel.font = NSFont.systemFont(
-            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize
-        )
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingTail
-        addSubview(titleLabel)
+        chevronImageView.imageScaling = .scaleProportionallyDown
+        chevronImageView.contentTintColor = .secondaryLabelColor
+        addSubview(chevronImageView)
 
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
@@ -3322,21 +3315,24 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         nil
     }
 
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel, titleLeadingOffset: CGFloat) {
+    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
         let previousPanel = self.panel
         self.panel = panel
-        self.titleLeadingOffset = max(0, titleLeadingOffset)
-        titleLabel.stringValue = panelTitle(panel)
         toggleSymbolName = panel.isExpanded ? "chevron.down" : "chevron.forward"
         let accessibilityDescription = panel.isExpanded ? "Collapse command output" : "Expand command output"
+        let symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: titleFont.pointSize,
+            weight: .regular
+        )
         let image = NSImage(
             systemSymbolName: toggleSymbolName,
             accessibilityDescription: accessibilityDescription
-        )
+        )?.withSymbolConfiguration(symbolConfiguration)
         image?.isTemplate = true
-        toggleButton.image = image
-        toggleButton.toolTip = accessibilityDescription
-        toggleButton.setAccessibilityLabel(accessibilityDescription)
+        chevronImageView.image = image
+        chevronImageView.toolTip = accessibilityDescription
+        toolTip = accessibilityDescription
+        setAccessibilityLabel(accessibilityDescription)
         outputScrollView.isHidden = panel.isExpanded == false
         if previousPanel?.outputText != panel.outputText {
             outputTextView.string = panel.outputText
@@ -3346,28 +3342,22 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
 
     override func layout() {
         super.layout()
-        let buttonSize: CGFloat = 16
-        let buttonY = floor((Self.headerHeight - buttonSize) / 2)
-        toggleButton.frame = NSRect(
-            x: max(0, titleLeadingOffset - buttonSize),
-            y: buttonY,
-            width: buttonSize,
-            height: buttonSize
-        )
-        titleLabel.frame = NSRect(
-            x: titleLeadingOffset,
-            y: 0,
-            width: max(0, bounds.width - titleLeadingOffset - 8),
-            height: Self.headerHeight
+        let symbolSize = chevronSize
+        let symbolY = floor((Self.headerHeight - symbolSize) / 2)
+        chevronImageView.frame = NSRect(
+            x: 0,
+            y: symbolY,
+            width: symbolSize,
+            height: symbolSize
         )
         guard panel?.isExpanded == true else {
             outputScrollView.frame = .zero
             return
         }
         outputScrollView.frame = NSRect(
-            x: titleLeadingOffset,
+            x: 0,
             y: Self.headerHeight,
-            width: max(0, bounds.width - titleLeadingOffset - 8),
+            width: bounds.width,
             height: max(0, bounds.height - Self.headerHeight - 8)
         )
         outputTextView.minSize = NSSize(width: outputScrollView.contentSize.width, height: 0)
@@ -3386,18 +3376,17 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
            outputScrollView.frame.contains(point) {
             return outputScrollView.hitTest(convert(point, to: outputScrollView))
         }
-        if Self.headerRect(in: bounds).contains(point) {
-            if toggleButton.frame.contains(point) {
-                return toggleButton.hitTest(convert(point, to: toggleButton)) ?? toggleButton
-            }
+        if Self.headerRect(in: bounds).contains(point),
+           chevronHitRect.contains(point) {
             return self
         }
-        return super.hitTest(point)
+        return nil
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if Self.headerRect(in: bounds).contains(point) {
+        if Self.headerRect(in: bounds).contains(point),
+           chevronHitRect.contains(point) {
             toggle()
             return
         }
@@ -3408,18 +3397,28 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         onToggle?(blockID)
     }
 
-    private func panelTitle(_ panel: ReviewMonitorLogCommandOutputPanel) -> String {
-        let lineLabel = panel.lineCount == 1 ? "1 line" : "\(panel.lineCount) lines"
-        if let statusText = panel.statusText, statusText.isEmpty == false {
-            return "\(panel.title) - \(lineLabel) - \(statusText)"
-        }
-        return "\(panel.title) - \(lineLabel)"
-    }
-
     private static let headerHeight: CGFloat = 28
 
     private static func headerRect(in bounds: NSRect) -> NSRect {
         NSRect(x: 0, y: 0, width: bounds.width, height: headerHeight)
+    }
+
+    static func chevronSlotWidth(for font: NSFont) -> CGFloat {
+        ceil(font.pointSize) + 6
+    }
+
+    private var titleFont: NSFont {
+        NSFont.systemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize
+        )
+    }
+
+    private var chevronSize: CGFloat {
+        ceil(titleFont.pointSize)
+    }
+
+    private var chevronHitRect: NSRect {
+        chevronImageView.frame.insetBy(dx: -4, dy: -4)
     }
 
 #if DEBUG
@@ -3431,8 +3430,12 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         toggleSymbolName
     }
 
-    var titleLeadingOffsetForTesting: CGFloat {
-        titleLeadingOffset
+    var chevronSizeForTesting: CGFloat {
+        chevronImageView.frame.width
+    }
+
+    var titleFontPointSizeForTesting: CGFloat {
+        titleFont.pointSize
     }
 
     var visibleLineCapacityForTesting: Int {
@@ -3448,13 +3451,6 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         return Int(floor(outputScrollView.contentSize.height / lineHeight))
     }
 #endif
-}
-
-@MainActor
-private final class ReviewMonitorCommandOutputChevronButton: NSButton {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
 }
 
 private struct ReviewMonitorLogResolvedDecoration: Equatable {
@@ -4014,8 +4010,16 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelToggleSymbolNameForTesting
     }
 
-    var commandOutputPanelTitleAlignmentDeltaForTesting: CGFloat? {
-        logDocumentView.commandOutputPanelTitleAlignmentDeltaForTesting
+    var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
+        logDocumentView.commandOutputPanelLeadingAlignmentDeltaForTesting
+    }
+
+    var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+        logDocumentView.commandOutputPanelChevronSizeDeltaForTesting
+    }
+
+    func hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(_ text: String) -> Bool {
+        logDocumentView.hitTestTargetsDocumentViewForFirstOccurrenceForTesting(text)
     }
 
     func toggleFirstCommandOutputPanelForTesting() {
@@ -4203,15 +4207,34 @@ private extension ReviewMonitorLogDocumentView {
         return firstVisibleCommandOutputPanelViewForTesting()?.toggleSymbolNameForTesting
     }
 
-    var commandOutputPanelTitleAlignmentDeltaForTesting: CGFloat? {
+    var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
         guard let panel = currentCommandOutputPanels.first,
               let panelView = firstVisibleCommandOutputPanelViewForTesting(),
-              let textLeadingX = rects(forCharacterRange: panel.range).map(\.rectValue.minX).min()
+              let firstTextLeadingX = rects(forCharacterRange: panel.range).first?.rectValue.minX
         else {
             return nil
         }
-        return panelView.frame.minX + panelView.titleLeadingOffsetForTesting - textLeadingX
+        return panelView.frame.minX - (firstTextLeadingX - commandOutputControlTextIndent)
+    }
+
+    var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+        layoutTextViewport(force: true)
+        guard let panelView = firstVisibleCommandOutputPanelViewForTesting() else {
+            return nil
+        }
+        return panelView.chevronSizeForTesting - panelView.titleFontPointSizeForTesting
+    }
+
+    func hitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
+        layoutTextViewport(force: true)
+        let range = (textStorage.string as NSString).range(of: text)
+        guard range.location != NSNotFound,
+              let rect = rects(forCharacterRange: range).first?.rectValue
+        else {
+            return false
+        }
+        return hitTest(NSPoint(x: rect.midX, y: rect.midY)) === self
     }
 
     func toggleFirstCommandOutputPanelForTesting() {
@@ -4228,7 +4251,7 @@ private extension ReviewMonitorLogDocumentView {
         guard let panelView = firstVisibleCommandOutputPanelViewForTesting(),
               let event = NSEvent.mouseEvent(
                   with: .leftMouseDown,
-                  location: panelView.convert(NSPoint(x: 44, y: 14), to: nil),
+                  location: panelView.convert(NSPoint(x: 6, y: 14), to: nil),
                   modifierFlags: [],
                   timestamp: 0,
                   windowNumber: window?.windowNumber ?? 0,

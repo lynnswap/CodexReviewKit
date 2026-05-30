@@ -655,8 +655,16 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelToggleSymbolNameForTesting
     }
 
-    var logCommandOutputPanelTitleAlignmentDeltaForTesting: CGFloat? {
-        logScrollView.commandOutputPanelTitleAlignmentDeltaForTesting
+    var logCommandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelLeadingAlignmentDeltaForTesting
+    }
+
+    var logCommandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelChevronSizeDeltaForTesting
+    }
+
+    func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
+        logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
     }
 
     func toggleFirstLogCommandOutputPanelForTesting() {
