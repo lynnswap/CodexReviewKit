@@ -105,7 +105,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.decorations.first?.style == .command(tone: .success))
     }
 
-    @Test func documentBuildsMarkdownLiteStyleRunsWithoutChangingText() {
+    @Test func documentRendersMarkdownWithStandardParserAndKeepsSourceTranscript() {
         let text = """
         # Heading
         - `inline` item with **strong**, *emphasis*, [link](https://example.com), and ~~old~~
@@ -126,7 +126,17 @@ struct ReviewMonitorLogProjectionTests {
         )
         let document = document(for: job)
 
-        #expect(document.text == text)
+        #expect(document.text == """
+        Heading
+
+        - inline item with strong, emphasis, link, and old
+
+        quote
+
+        let value = 1
+
+        """)
+        #expect(document.sourceText == text)
         #expect(document.styleRuns.contains { $0.style == .heading(level: 1) })
         #expect(document.styleRuns.contains { $0.style == .bullet })
         #expect(document.styleRuns.contains { $0.style == .inlineCode })
@@ -134,10 +144,27 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.styleRuns.contains { $0.style == .emphasis })
         #expect(document.styleRuns.contains { $0.style == .link })
         #expect(document.styleRuns.contains { $0.style == .strikethrough })
-        #expect(document.styleRuns.contains { $0.style == .markdownSyntax })
         #expect(document.styleRuns.contains { $0.style == .blockquote })
         #expect(document.styleRuns.contains { $0.style == .codeFence })
         #expect(document.decorations.contains { $0.style == .codeBlock })
+    }
+
+    @Test func plainMultilineAgentTextKeepsLineBreaks() {
+        let text = "line 1\nline 2\nline 3"
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-plain-lines",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(kind: .agentMessage, text: text),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == text)
+        #expect(document.sourceText == text)
     }
 
     @Test func planStatusStylesAreProjected() {
@@ -153,6 +180,12 @@ struct ReviewMonitorLogProjectionTests {
         )
         let document = document(for: job)
 
+        #expect(document.text == """
+        ✓ Inspect
+        • Render
+        □ Test
+        """)
+        #expect(document.sourceText == "[completed] Inspect\n[in_progress] Render\n[pending] Test")
         #expect(document.styleRuns.contains { $0.style == .plan(status: .completed) })
         #expect(document.styleRuns.contains { $0.style == .plan(status: .inProgress) })
         #expect(document.styleRuns.contains { $0.style == .plan(status: .pending) })
@@ -182,7 +215,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.decorations.map(\.style) == [.event])
     }
 
-    @Test func tailAgentMessageDeltaUsesAppendChange() {
+    @Test func tailAgentMessageDeltaUsesAppendChangeWhenRenderedTextKeepsPrefix() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-agent-delta",
             cwd: "/tmp/workspace",
@@ -217,6 +250,34 @@ struct ReviewMonitorLogProjectionTests {
             ),
             text: " log"
         )))
+    }
+
+    @Test func tailAgentMessageDeltaRerendersMarkdownBlockWhenMarkupChangesPrefix() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-agent-markdown-delta",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg-1", text: "**bo"),
+            ]
+        )
+        var projection = ReviewMonitorLogProjection()
+        _ = projection.render(entries: job.logEntries)
+
+        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg-1", text: "ld**"))
+        let document = projection.render(entries: job.logEntries)
+
+        #expect(document.text == "bold")
+        #expect(document.sourceText == "**bold**")
+        #expect(document.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
+        )))
+        #expect(document.styleRuns.contains { $0.style == .strong })
     }
 
     @Test func replacingGroupedPlanUsesReplacementChange() {

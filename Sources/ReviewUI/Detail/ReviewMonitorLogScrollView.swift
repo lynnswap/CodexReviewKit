@@ -969,6 +969,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
         .agentMessage,
         .plan,
+        .reasoning,
         .reasoningSummary,
         .rawReasoning,
     ]
