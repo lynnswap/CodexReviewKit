@@ -1197,6 +1197,30 @@ struct ReviewUITests {
         #expect(workspaceCellMinX >= disclosureMaxX - 0.5)
     }
 
+    @Test func workspaceDisclosureStaysNativeWhenWorkspaceHasNoJobs() throws {
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: []
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 360, height: 260))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["workspace-alpha"])
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == [])
+        #expect(sidebar.isShowingEmptyStateForTesting == false)
+        let workspaceCellMinX = try #require(sidebar.workspaceCellMinXForTesting(workspace))
+        let disclosureMaxX = try #require(sidebar.workspaceDisclosureMaxXForTesting(workspace))
+        #expect(workspaceCellMinX >= disclosureMaxX - 0.5)
+    }
+
     @Test func scrollingSidebarDoesNotFloatWorkspaceRows() throws {
         let primaryJobs = (0..<8).map { index in
             makeJob(
