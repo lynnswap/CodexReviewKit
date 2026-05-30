@@ -635,6 +635,26 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordFadeDisplayInvalidationCountForTesting
     }
 
+    var logCommandOutputPanelCountForTesting: Int {
+        logScrollView.commandOutputPanelCountForTesting
+    }
+
+    var logExpandedCommandOutputPanelCountForTesting: Int {
+        logScrollView.expandedCommandOutputPanelCountForTesting
+    }
+
+    var logCommandOutputPanelUsesTextKit2ForTesting: Bool {
+        logScrollView.commandOutputPanelUsesTextKit2ForTesting
+    }
+
+    var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
+        logScrollView.commandOutputPanelVisibleLineCapacityForTesting
+    }
+
+    func toggleFirstLogCommandOutputPanelForTesting() {
+        logScrollView.toggleFirstCommandOutputPanelForTesting()
+    }
+
     func completeLogWordGlowAnimationsForTesting() {
         logScrollView.completeWordGlowAnimationsForTesting()
     }
@@ -800,7 +820,8 @@ extension ReviewMonitorTransportViewController {
                 summary: nil,
                 log: {
                     var projection = ReviewMonitorLogProjection()
-                    return projection.render(entries: job.logEntries).text
+                    let document = projection.render(entries: job.logEntries)
+                    return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),
                 isShowingEmptyState: false
             )

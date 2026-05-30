@@ -2,6 +2,265 @@ import AppKit
 import ObjectiveC.runtime
 import CodexReview
 
+private enum ReviewMonitorCommandOutputDisplayDocument {
+    private static let expandedPlaceholderLineCount = 7
+
+    static func make(
+        from source: ReviewMonitorLogDocument,
+        expandedBlockIDs: Set<ReviewMonitorLogBlockID>
+    ) -> ReviewMonitorLogDocument {
+        guard source.blocks.contains(where: { $0.kind == .commandOutput }) else {
+            return source
+        }
+
+        let sourceString = source.text as NSString
+        var text = ""
+        var textUTF16Length = 0
+        var blocks: [ReviewMonitorLogBlock] = []
+        var styleRuns: [ReviewMonitorLogTextRun] = []
+        var decorations: [ReviewMonitorLogDecoration] = []
+        var panels: [ReviewMonitorLogCommandOutputPanel] = []
+        var cursor = 0
+
+        func appendText(_ segment: String) -> NSRange {
+            let range = NSRange(location: textUTF16Length, length: (segment as NSString).length)
+            text += segment
+            textUTF16Length += range.length
+            return range
+        }
+
+        for block in source.blocks.sorted(by: { $0.range.location < $1.range.location }) {
+            if cursor < block.range.location {
+                let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
+                _ = appendText(sourceString.substring(with: gapRange))
+            }
+
+            if block.kind == .commandOutput {
+                let outputText = sourceString.substring(with: block.range)
+                let isExpanded = expandedBlockIDs.contains(block.id)
+                let placeholder = commandOutputPlaceholder(
+                    title: commandOutputTitle(for: block),
+                    outputText: outputText,
+                    isExpanded: isExpanded
+                )
+                let displayRange = appendText(placeholder)
+                blocks.append(.init(
+                    id: block.id,
+                    kind: block.kind,
+                    groupID: block.groupID,
+                    range: displayRange,
+                    sourceRange: block.sourceRange,
+                    metadata: block.metadata
+                ))
+                styleRuns.append(.init(range: displayRange, style: .commandOutputControl))
+                decorations.append(.init(
+                    blockID: block.id,
+                    range: displayRange,
+                    style: terminalDecorationStyle(for: block, in: source)
+                ))
+                panels.append(.init(
+                    blockID: block.id,
+                    range: displayRange,
+                    outputText: outputText,
+                    lineCount: commandOutputLineCount(outputText),
+                    isExpanded: isExpanded,
+                    title: commandOutputTitle(for: block),
+                    statusText: commandOutputStatusText(for: block)
+                ))
+            } else {
+                let displayRange = appendText(sourceString.substring(with: block.range))
+                blocks.append(.init(
+                    id: block.id,
+                    kind: block.kind,
+                    groupID: block.groupID,
+                    range: displayRange,
+                    sourceRange: block.sourceRange,
+                    metadata: block.metadata
+                ))
+                appendPresentationRuns(
+                    from: source,
+                    sourceRange: block.range,
+                    displayRange: displayRange,
+                    styleRuns: &styleRuns,
+                    decorations: &decorations
+                )
+            }
+
+            cursor = NSMaxRange(block.range)
+        }
+
+        if cursor < source.textUTF16Length {
+            let gapRange = NSRange(location: cursor, length: source.textUTF16Length - cursor)
+            _ = appendText(sourceString.substring(with: gapRange))
+        }
+
+        return .init(
+            text: text,
+            textUTF16Length: textUTF16Length,
+            sourceText: source.sourceText,
+            sourceTextUTF16Length: source.sourceTextUTF16Length,
+            blocks: blocks,
+            styleRuns: styleRuns,
+            decorations: decorations,
+            commandOutputPanels: panels,
+            revision: source.revision,
+            lastChange: mappedLastChange(
+                source.lastChange,
+                sourceBlocks: source.blocks,
+                displayBlocks: blocks
+            )
+        )
+    }
+
+    private static func appendPresentationRuns(
+        from source: ReviewMonitorLogDocument,
+        sourceRange: NSRange,
+        displayRange: NSRange,
+        styleRuns: inout [ReviewMonitorLogTextRun],
+        decorations: inout [ReviewMonitorLogDecoration]
+    ) {
+        for styleRun in source.styleRuns {
+            let intersection = NSIntersectionRange(styleRun.range, sourceRange)
+            guard intersection.length > 0 else {
+                continue
+            }
+            styleRuns.append(.init(
+                range: map(intersection, from: sourceRange, to: displayRange),
+                style: styleRun.style
+            ))
+        }
+
+        for decoration in source.decorations {
+            let intersection = NSIntersectionRange(decoration.range, sourceRange)
+            guard intersection.length > 0 else {
+                continue
+            }
+            decorations.append(.init(
+                blockID: decoration.blockID,
+                range: map(intersection, from: sourceRange, to: displayRange),
+                style: decoration.style
+            ))
+        }
+    }
+
+    private static func map(_ range: NSRange, from sourceRange: NSRange, to displayRange: NSRange) -> NSRange {
+        NSRange(
+            location: displayRange.location + range.location - sourceRange.location,
+            length: range.length
+        )
+    }
+
+    private static func commandOutputPlaceholder(
+        title: String,
+        outputText: String,
+        isExpanded: Bool
+    ) -> String {
+        let lineCount = commandOutputLineCount(outputText)
+        let lineLabel = lineCount == 1 ? "1 line" : "\(lineCount) lines"
+        let label = "\(title) - \(lineLabel)"
+        guard isExpanded else {
+            return label
+        }
+        return ([label] + Array(repeating: "", count: expandedPlaceholderLineCount - 1)).joined(separator: "\n")
+    }
+
+    private static func commandOutputLineCount(_ text: String) -> Int {
+        guard text.isEmpty == false else {
+            return 0
+        }
+        let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
+    }
+
+    private static func commandOutputTitle(for block: ReviewMonitorLogBlock) -> String {
+        let trimmedTitle = block.metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmedTitle, trimmedTitle.isEmpty == false else {
+            return "Command output"
+        }
+        return trimmedTitle
+    }
+
+    private static func commandOutputStatusText(for block: ReviewMonitorLogBlock) -> String? {
+        if let exitCode = block.metadata?.exitCode {
+            return "exit \(exitCode)"
+        }
+        return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func terminalDecorationStyle(
+        for block: ReviewMonitorLogBlock,
+        in source: ReviewMonitorLogDocument
+    ) -> ReviewMonitorLogDecorationStyle {
+        source.decorations.first { decoration in
+            decoration.blockID == block.id &&
+                NSIntersectionRange(decoration.range, block.range).length > 0
+        }?.style ?? .terminal(tone: .neutral)
+    }
+
+    private static func mappedLastChange(
+        _ change: ReviewMonitorLogChange,
+        sourceBlocks: [ReviewMonitorLogBlock],
+        displayBlocks: [ReviewMonitorLogBlock]
+    ) -> ReviewMonitorLogChange {
+        switch change {
+        case .append(let append):
+            guard let mappedRange = mappedChangeRange(
+                append.range,
+                blockID: append.blockID,
+                sourceBlocks: sourceBlocks,
+                displayBlocks: displayBlocks
+            ) else {
+                return .reload
+            }
+            return .append(.init(
+                kind: append.kind,
+                blockID: append.blockID,
+                range: mappedRange,
+                text: append.text,
+                textUTF16Length: append.textUTF16Length
+            ))
+        case .replace(let replacement):
+            guard let mappedRange = mappedChangeRange(
+                replacement.range,
+                blockID: replacement.blockID,
+                sourceBlocks: sourceBlocks,
+                displayBlocks: displayBlocks
+            ) else {
+                return .reload
+            }
+            return .replace(.init(
+                kind: replacement.kind,
+                blockID: replacement.blockID,
+                range: mappedRange,
+                text: replacement.text,
+                textUTF16Length: replacement.textUTF16Length
+            ))
+        case .reload:
+            return .reload
+        }
+    }
+
+    private static func mappedChangeRange(
+        _ range: NSRange,
+        blockID: ReviewMonitorLogBlockID,
+        sourceBlocks: [ReviewMonitorLogBlock],
+        displayBlocks: [ReviewMonitorLogBlock]
+    ) -> NSRange? {
+        guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
+              sourceBlock.kind != .commandOutput,
+              let displayBlock = displayBlocks.first(where: { $0.id == blockID }),
+              NSMaxRange(range) <= NSMaxRange(sourceBlock.range)
+        else {
+            return nil
+        }
+        let mappedRange = map(range, from: sourceBlock.range, to: displayBlock.range)
+        guard NSMaxRange(mappedRange) <= NSMaxRange(displayBlock.range) else {
+            return nil
+        }
+        return mappedRange
+    }
+}
+
 @MainActor
 final class ReviewMonitorLogScrollView: NSScrollView {
     private static let scrollerImpPairSelector = NSSelectorFromString("scrollerImpPair")
@@ -38,6 +297,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
     private var displayedPresentationSignature: Int?
+    private var sourceDocument: ReviewMonitorLogDocument?
+    private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLogBlockID>()
     private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
@@ -80,6 +341,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
         logDocumentView.onUserSelectionChanged = { [weak self] in
             self?.handleUserSelectionChanged()
+        }
+        logDocumentView.onCommandOutputPanelToggle = { [weak self] blockID in
+            self?.toggleCommandOutputPanel(blockID)
         }
         logDocumentView.setAccessibilityIdentifier("review-monitor.activity-log")
 
@@ -165,6 +429,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     func clear() -> Bool {
         logProjection = ReviewMonitorLogProjection()
         displayedRevision = nil
+        displayedPresentationSignature = nil
+        sourceDocument = nil
+        expandedCommandOutputBlockIDs.removeAll()
         return applyReload(
             "",
             document: .init(),
@@ -193,6 +460,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
+        sourceDocument = document
+        pruneExpandedCommandOutputState(for: document)
+        let document = displayDocument(for: document)
         if allowIncrementalUpdate, displayedRevision == document.revision {
             return false
         }
@@ -248,6 +518,36 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         )
         displayedRevision = document.revision
         return didRender
+    }
+
+    private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) {
+        if expandedCommandOutputBlockIDs.contains(blockID) {
+            expandedCommandOutputBlockIDs.remove(blockID)
+        } else {
+            expandedCommandOutputBlockIDs.insert(blockID)
+        }
+        guard let sourceDocument else {
+            return
+        }
+        _ = render(
+            document: sourceDocument,
+            restoring: currentScrollRestorationTarget,
+            allowIncrementalUpdate: false
+        )
+    }
+
+    private func pruneExpandedCommandOutputState(for document: ReviewMonitorLogDocument) {
+        let commandOutputBlockIDs = Set(document.blocks.lazy
+            .filter { $0.kind == .commandOutput }
+            .map(\.id))
+        expandedCommandOutputBlockIDs.formIntersection(commandOutputBlockIDs)
+    }
+
+    private func displayDocument(for document: ReviewMonitorLogDocument) -> ReviewMonitorLogDocument {
+        ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document,
+            expandedBlockIDs: expandedCommandOutputBlockIDs
+        )
     }
 
     private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
@@ -1034,7 +1334,9 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private let decorationView = ReviewMonitorLogDecorationView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
     private let selectionView = ReviewMonitorLogSelectionView()
+    private let commandOutputPanelContainerView = ReviewMonitorCommandOutputPanelContainerView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
+    private var commandOutputPanelViews: [ReviewMonitorLogBlockID: ReviewMonitorCommandOutputPanelView] = [:]
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var lastUsedFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var wordFadeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
@@ -1049,12 +1351,14 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private var keyboardSelectionFocusUTF16Offset: Int?
     private var preferredTextContainerWidth: CGFloat = 0
     private var currentDecorations: [ReviewMonitorLogDecoration] = []
+    private var currentCommandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = []
     private(set) var estimatedDocumentHeight: CGFloat = 0
     private var glowTimer: Timer?
     var contentInsets: NSEdgeInsets = .init()
     var textContainerInset = NSSize(width: 12, height: 10)
     var onLayoutInvalidated: (() -> Void)?
     var onUserSelectionChanged: (() -> Void)?
+    var onCommandOutputPanelToggle: ((ReviewMonitorLogBlockID) -> Void)?
 #if DEBUG
     var reduceMotionOverrideForTesting: Bool?
     private var wordFadeDisplayInvalidationCount = 0
@@ -1136,6 +1440,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         textContentView.addSubview(decorationView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
+        addSubview(commandOutputPanelContainerView)
         estimatedDocumentHeight = measuredDocumentHeight()
         setAccessibilityElement(true)
     }
@@ -1349,11 +1654,14 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
               append != nil || replacement != nil || document.text == textStorage.string
         else {
             currentDecorations = []
+            currentCommandOutputPanels = []
             decorationView.decorations = []
+            updateCommandOutputPanelViews()
             return
         }
 
         currentDecorations = document.decorations
+        currentCommandOutputPanels = document.commandOutputPanels
         if let append,
            let invalidationRange = styleInvalidationRange(for: append, in: document) {
             applyStyleRuns(document.styleRuns, in: invalidationRange)
@@ -1364,6 +1672,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             applyStyleRuns(document.styleRuns)
         }
         updateDecorationRects()
+        updateCommandOutputPanelViews()
     }
 
     private func applyStyleRuns(_ styleRuns: [ReviewMonitorLogTextRun]) {
@@ -1475,6 +1784,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         case .terminalOutput:
             attributes[.font] = monoFont
             attributes[.foregroundColor] = secondaryTextColor
+        case .commandOutputControl:
+            attributes[.foregroundColor] = NSColor.clear
         case .plan(let status):
             attributes[.foregroundColor] = planTextColor(for: status)
         case .tool:
@@ -1825,6 +2136,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             isLayingOutViewport = false
             updateSelectionRects()
             updateDecorationRects()
+            updateCommandOutputPanelViews()
         }
 
         var iterations = 5
@@ -2248,17 +2560,130 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         decorationView.decorations = resolved
     }
 
+    private func updateCommandOutputPanelViews() {
+        guard currentCommandOutputPanels.isEmpty == false,
+              bounds.width > 0
+        else {
+            removeAllCommandOutputPanelViews()
+            return
+        }
+
+        let viewportRange = visibleCommandOutputPanelRange()
+        let horizontalInset = max(8, textContainerInset.width - 8)
+        let panelWidth = min(
+            max(0, textContentView.bounds.width - horizontalInset * 2),
+            textContainer.size.width + 16
+        )
+        var visibleBlockIDs = Set<ReviewMonitorLogBlockID>()
+        for panel in currentCommandOutputPanels {
+            guard NSIntersectionRange(panel.range, viewportRange).length > 0,
+                  let rect = commandOutputPanelRect(
+                      for: panel,
+                      horizontalInset: horizontalInset,
+                      panelWidth: panelWidth
+                  )
+            else {
+                continue
+            }
+            visibleBlockIDs.insert(panel.blockID)
+            let panelView = commandOutputPanelView(for: panel.blockID)
+            panelView.configure(panel)
+            panelView.frame = rect
+            if panelView.superview !== commandOutputPanelContainerView {
+                commandOutputPanelContainerView.addSubview(panelView)
+            }
+        }
+
+        let invisibleBlockIDs = commandOutputPanelViews.keys.filter {
+            visibleBlockIDs.contains($0) == false
+        }
+        for blockID in invisibleBlockIDs {
+            guard let panelView = commandOutputPanelViews.removeValue(forKey: blockID) else {
+                continue
+            }
+            panelView.removeFromSuperview()
+        }
+    }
+
+    private func visibleCommandOutputPanelRange() -> NSRange {
+        if let viewportRange = textLayoutManager.textViewportLayoutController.viewportRange {
+            let range = nsRange(for: viewportRange)
+            let margin = max(200, Int(ceil(visibleBoundsForViewportLayout().height)))
+            let location = max(0, range.location - margin)
+            let end = min(textStorage.length, NSMaxRange(range) + margin)
+            return NSRange(
+                location: location,
+                length: max(0, end - location)
+            )
+        }
+        return NSRange(location: 0, length: textStorage.length)
+    }
+
+    private func commandOutputPanelRect(
+        for panel: ReviewMonitorLogCommandOutputPanel,
+        horizontalInset: CGFloat,
+        panelWidth: CGFloat
+    ) -> NSRect? {
+        let segmentRects = rects(forCharacterRange: panel.range).map(\.rectValue)
+        guard var rect = segmentRects.first else {
+            return nil
+        }
+        for segmentRect in segmentRects.dropFirst() {
+            rect = rect.union(segmentRect)
+        }
+        let verticalInset: CGFloat = 2
+        let expandedHeight = Self.commandOutputPanelCollapsedHeight +
+            commandOutputPanelLineHeight * CGFloat(Self.commandOutputPanelVisibleLineCount) +
+            8
+        return NSRect(
+            x: horizontalInset,
+            y: max(0, rect.minY - verticalInset),
+            width: panelWidth,
+            height: max(
+                panel.isExpanded ? expandedHeight : Self.commandOutputPanelCollapsedHeight,
+                rect.height + verticalInset * 2
+            )
+        )
+    }
+
+    private static let commandOutputPanelCollapsedHeight: CGFloat = 28
+    private static let commandOutputPanelVisibleLineCount = 5
+
+    private var commandOutputPanelLineHeight: CGFloat {
+        ceil(monoFont.ascender - monoFont.descender + monoFont.leading)
+    }
+
+    private func commandOutputPanelView(
+        for blockID: ReviewMonitorLogBlockID
+    ) -> ReviewMonitorCommandOutputPanelView {
+        if let view = commandOutputPanelViews[blockID] {
+            return view
+        }
+        let view = ReviewMonitorCommandOutputPanelView(blockID: blockID)
+        view.onToggle = { [weak self] blockID in
+            self?.onCommandOutputPanelToggle?(blockID)
+        }
+        commandOutputPanelViews[blockID] = view
+        return view
+    }
+
+    private func removeAllCommandOutputPanelViews() {
+        for view in commandOutputPanelViews.values {
+            view.removeFromSuperview()
+        }
+        commandOutputPanelViews.removeAll(keepingCapacity: false)
+    }
+
     private func decorationNeedsResolvedRect(_ style: ReviewMonitorLogDecorationStyle) -> Bool {
         switch style {
-        case .terminal:
-            return true
-        case .transcript, .command, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
+        case .transcript, .command, .terminal, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
             return false
         }
     }
 
     private func syncContentSubviewFrames() {
         textContentView.frame = bounds
+        commandOutputPanelContainerView.frame = bounds
         decorationView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
@@ -2745,6 +3170,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         updateSelectionRects()
         updateDecorationRects()
+        updateCommandOutputPanelViews()
     }
 
     private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
@@ -2798,6 +3224,154 @@ private final class ReviewMonitorLogContentView: ReviewMonitorLogTiledContentVie
 
 @MainActor
 private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentView {}
+
+@MainActor
+private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isHidden == false, alphaValue > 0 else {
+            return nil
+        }
+        for subview in subviews.reversed() {
+            let subviewPoint = convert(point, to: subview)
+            if let hitView = subview.hitTest(subviewPoint) {
+                return hitView
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor
+private final class ReviewMonitorCommandOutputPanelView: NSView {
+    static let visibleOutputLineCount = 5
+
+    private let blockID: ReviewMonitorLogBlockID
+    private let toggleButton = NSButton()
+    private let outputScrollView = NSScrollView()
+    private let outputTextView = NSTextView(usingTextLayoutManager: true)
+    private var panel: ReviewMonitorLogCommandOutputPanel?
+    var onToggle: ((ReviewMonitorLogBlockID) -> Void)?
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    init(blockID: ReviewMonitorLogBlockID) {
+        self.blockID = blockID
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.055).cgColor
+
+        toggleButton.target = self
+        toggleButton.action = #selector(toggle)
+        toggleButton.bezelStyle = .inline
+        toggleButton.isBordered = false
+        toggleButton.alignment = .left
+        toggleButton.imagePosition = .imageLeading
+        toggleButton.contentTintColor = .secondaryLabelColor
+        toggleButton.setButtonType(.momentaryPushIn)
+        addSubview(toggleButton)
+
+        outputScrollView.drawsBackground = false
+        outputScrollView.borderType = .noBorder
+        outputScrollView.hasVerticalScroller = true
+        outputScrollView.autohidesScrollers = true
+        outputScrollView.scrollerStyle = .overlay
+        outputScrollView.documentView = outputTextView
+        outputScrollView.isHidden = true
+        addSubview(outputScrollView)
+
+        outputTextView.isEditable = false
+        outputTextView.isSelectable = true
+        outputTextView.drawsBackground = false
+        outputTextView.textContainerInset = NSSize(width: 8, height: 7)
+        outputTextView.font = NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
+            weight: .regular
+        )
+        outputTextView.textColor = .secondaryLabelColor
+        outputTextView.isHorizontallyResizable = false
+        outputTextView.isVerticallyResizable = true
+        outputTextView.autoresizingMask = [.width]
+        outputTextView.textContainer?.widthTracksTextView = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
+        let previousPanel = self.panel
+        self.panel = panel
+        toggleButton.title = panelTitle(panel)
+        toggleButton.image = NSImage(
+            systemSymbolName: panel.isExpanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: nil
+        )
+        outputScrollView.isHidden = panel.isExpanded == false
+        if previousPanel?.outputText != panel.outputText {
+            outputTextView.string = panel.outputText
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let buttonHeight: CGFloat = 28
+        toggleButton.frame = NSRect(x: 8, y: 0, width: max(0, bounds.width - 16), height: buttonHeight)
+        guard panel?.isExpanded == true else {
+            outputScrollView.frame = .zero
+            return
+        }
+        outputScrollView.frame = NSRect(
+            x: 8,
+            y: buttonHeight,
+            width: max(0, bounds.width - 16),
+            height: max(0, bounds.height - buttonHeight - 8)
+        )
+        outputTextView.minSize = NSSize(width: outputScrollView.contentSize.width, height: 0)
+        outputTextView.maxSize = NSSize(width: outputScrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        outputTextView.frame.size.width = outputScrollView.contentSize.width
+    }
+
+    @objc private func toggle() {
+        onToggle?(blockID)
+    }
+
+    private func panelTitle(_ panel: ReviewMonitorLogCommandOutputPanel) -> String {
+        let lineLabel = panel.lineCount == 1 ? "1 line" : "\(panel.lineCount) lines"
+        if let statusText = panel.statusText, statusText.isEmpty == false {
+            return "\(panel.title) - \(lineLabel) - \(statusText)"
+        }
+        return "\(panel.title) - \(lineLabel)"
+    }
+
+#if DEBUG
+    var usesTextKit2ForTesting: Bool {
+        outputTextView.textLayoutManager != nil
+    }
+
+    var visibleLineCapacityForTesting: Int {
+        guard panel?.isExpanded == true else {
+            return 0
+        }
+        layoutSubtreeIfNeeded()
+        let font = outputTextView.font ?? NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
+            weight: .regular
+        )
+        let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
+        return Int(floor(outputScrollView.contentSize.height / lineHeight))
+    }
+#endif
+}
 
 private struct ReviewMonitorLogResolvedDecoration: Equatable {
     var style: ReviewMonitorLogDecorationStyle
@@ -3169,6 +3743,10 @@ extension ReviewMonitorLogScrollView {
         displayedText
     }
 
+    func displayTextForTesting(sourceDocument: ReviewMonitorLogDocument) -> String {
+        displayDocument(for: sourceDocument).text
+    }
+
     var usesCustomTextKit2SurfaceForTesting: Bool {
         logDocumentView.usesTextKit2ForTesting
     }
@@ -3332,6 +3910,26 @@ extension ReviewMonitorLogScrollView {
         return logDocumentView.visibleFragmentViewCountForTesting
     }
 
+    var commandOutputPanelCountForTesting: Int {
+        logDocumentView.commandOutputPanelCountForTesting
+    }
+
+    var expandedCommandOutputPanelCountForTesting: Int {
+        logDocumentView.expandedCommandOutputPanelCountForTesting
+    }
+
+    var commandOutputPanelUsesTextKit2ForTesting: Bool {
+        logDocumentView.commandOutputPanelUsesTextKit2ForTesting
+    }
+
+    var commandOutputPanelVisibleLineCapacityForTesting: Int {
+        logDocumentView.commandOutputPanelVisibleLineCapacityForTesting
+    }
+
+    func toggleFirstCommandOutputPanelForTesting() {
+        logDocumentView.toggleFirstCommandOutputPanelForTesting()
+    }
+
     var visibleFragmentBoundsForTesting: NSRect {
         logDocumentView.layoutTextViewport(force: true)
         return logDocumentView.visibleFragmentBoundsForTesting
@@ -3476,6 +4074,39 @@ private extension ReviewMonitorLogDocumentView {
 
     var visibleFragmentViewCountForTesting: Int {
         visibleFragmentViews.count
+    }
+
+    var commandOutputPanelCountForTesting: Int {
+        layoutTextViewport(force: true)
+        return currentCommandOutputPanels.count
+    }
+
+    var expandedCommandOutputPanelCountForTesting: Int {
+        layoutTextViewport(force: true)
+        return currentCommandOutputPanels.filter(\.isExpanded).count
+    }
+
+    var commandOutputPanelUsesTextKit2ForTesting: Bool {
+        layoutTextViewport(force: true)
+        guard currentCommandOutputPanels.isEmpty == false else {
+            return false
+        }
+        return commandOutputPanelViews.values.allSatisfy(\.usesTextKit2ForTesting)
+    }
+
+    var commandOutputPanelVisibleLineCapacityForTesting: Int {
+        layoutTextViewport(force: true)
+        return commandOutputPanelViews.values
+            .map(\.visibleLineCapacityForTesting)
+            .max() ?? 0
+    }
+
+    func toggleFirstCommandOutputPanelForTesting() {
+        layoutTextViewport(force: true)
+        guard let blockID = currentCommandOutputPanels.first?.blockID else {
+            return
+        }
+        onCommandOutputPanelToggle?(blockID)
     }
 
     var wordGlowCountForTesting: Int {

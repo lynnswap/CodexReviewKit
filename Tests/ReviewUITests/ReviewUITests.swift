@@ -2308,7 +2308,74 @@ struct ReviewUITests {
         #expect(window.subtitle == job.cwd)
 
         let displayedLog = transport.displayedLogForTesting
-        #expect(displayedLog == reviewMonitorLogText(for: job))
+        #expect(selectedSnapshot.log == displayedLog)
+        #expect(displayedLog.contains("$ git diff --stat"))
+        #expect(displayedLog.contains("Command output - 1 line"))
+        #expect(displayedLog.contains("README.md | 1 +") == false)
+        #expect(displayedLog.contains("No correctness issues found."))
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
+    }
+
+    @Test func commandOutputRendersCollapsedTextKitPanelAndExpandsInline() async throws {
+        let outputText = (1...9)
+            .map { "output line \($0)" }
+            .joined(separator: "\n")
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-panel",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_1",
+                    text: outputText,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 17s",
+                        status: "succeeded",
+                        exitCode: 0
+                    )
+                ),
+                .init(kind: .agentMessage, text: "Continuing after the command.")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.displayedLogForTesting.contains("Ran command for 17s - 9 lines"))
+        #expect(transport.displayedLogForTesting.contains("output line 1") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
+
+        transport.toggleFirstLogCommandOutputPanelForTesting()
+        await awaitNativeLayoutTurn()
+
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
+        #expect((5...6).contains(transport.logCommandOutputPanelVisibleLineCapacityForTesting))
+        #expect(transport.displayedLogForTesting.contains("output line 9") == false)
     }
 
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
@@ -3153,10 +3220,17 @@ struct ReviewUITests {
         ))
         _ = try await awaitTransportRender(transport)
         let replaceCount = transport.logReplaceCountForTesting
+        let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
+        _ = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.contains("Command output - 1 line")
+        }
 
-        #expect(transport.displayedLogForTesting == "- updated with longer replacement text")
+        #expect(transport.displayedLogForTesting.contains("- updated with longer replacement text"))
+        #expect(transport.displayedLogForTesting.contains("Command output - 1 line"))
+        #expect(transport.displayedLogForTesting.contains("hidden output") == false)
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReplaceCountForTesting == replaceCount)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }

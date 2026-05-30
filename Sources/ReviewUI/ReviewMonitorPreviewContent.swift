@@ -116,6 +116,39 @@ public enum ReviewMonitorPreviewContent {
     }
 
     @_spi(PreviewSupport)
+    public static func makeCommandOutputStore() -> CodexReviewStore {
+        let store = CodexReviewStore.makePreviewStore(
+            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
+        )
+        let accounts = makePreviewAccounts()
+        let cwd = "/path/to/workspace-alpha"
+        let now = Date()
+        let job = makeJob(
+            id: "preview-command-output-panel",
+            cwd: cwd,
+            model: "gpt-5.4",
+            status: .running,
+            targetSummary: "Command output panel",
+            startedAt: now.addingTimeInterval(-135),
+            endedAt: nil,
+            summary: "A command output block is collapsed by default.",
+            hasFinalReview: false,
+            reviewResult: nil,
+            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
+            logEntries: makeCommandOutputPreviewLogEntries()
+        )
+        store.loadForTesting(
+            serverState: .running,
+            account: accounts.first,
+            persistedAccounts: accounts,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: [CodexReviewWorkspace(cwd: cwd)],
+            jobs: [job]
+        )
+        return store
+    }
+
+    @_spi(PreviewSupport)
     public static func appendPreviewStreamTick(to store: CodexReviewStore) {
         _ = appendPreviewStreamTick(to: store, after: 0)
     }
@@ -290,6 +323,56 @@ public enum ReviewMonitorPreviewContent {
     ]
 
     private static let previewStreamTimeline = streamTimeline(from: previewStreamTemplates)
+
+    private static func makeCommandOutputPreviewLogEntries() -> [ReviewLogEntry] {
+        let output = """
+        Command line invocation:
+            /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
+
+        Resolve Package Graph
+
+        Resolved source packages:
+            ObservationBridge: /Users/kn/Dev/ObservationBridge
+            CodexReviewKit: /Users/kn/Dev/CodexReviewKit
+
+        Test Suite 'Selected tests' started.
+        Test Case '-[ReviewUITests commandOutputRendersCollapsedTextKitPanel]' passed (0.142 seconds).
+        Test Suite 'Selected tests' passed.
+        """
+        return [
+            .init(kind: .event, text: "Turn started: preview-command-output-panel"),
+            .init(
+                kind: .agentMessage,
+                text: """
+                Checking the command output rendering path.
+
+                - Keep the transcript readable.
+                - Collapse terminal output by default.
+                - Expand into a bounded TextKit 2 scroll view.
+                """
+            ),
+            .init(
+                kind: .command,
+                groupID: "preview-command-output",
+                text: "$ xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
+            ),
+            .init(
+                kind: .commandOutput,
+                groupID: "preview-command-output",
+                text: output,
+                metadata: .init(
+                    sourceType: "command",
+                    title: "Ran command for 17s",
+                    status: "succeeded",
+                    exitCode: 0
+                )
+            ),
+            .init(
+                kind: .agentMessage,
+                text: "The output remains available without taking over the whole log."
+            ),
+        ]
+    }
 
     @_spi(PreviewSupport)
     public static func makePreviewAccounts() -> [CodexAccount] {
