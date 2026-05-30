@@ -13,7 +13,6 @@ func configureReviewMonitorWindowBase(_ window: NSWindow) {
     window.titlebarSeparatorStyle = .automatic
 }
 
-@Observable
 public final class ReviewMonitorWindowController: NSWindowController {
     private static let defaultContentSize = NSSize(width: 600, height: 400)
     private static let frameAutosaveName = NSWindow.FrameAutosaveName("ReviewMonitor.MainWindow")

@@ -525,6 +525,46 @@ struct ReviewUIShellTests {
         }
     }
 
+    @Test func sidebarKindObservationsKeepSelectionAndStoreTriggersSeparate() async throws {
+        let store = CodexReviewStore.makePreviewStore()
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.attach(to: window)
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        let storeDeliveryCountBeforeSelection = sidebar.sidebarStoreKindDeliveryCountForTesting
+        uiState.sidebarSelection = .account
+        try await waitForSidebarPresentation(
+            viewController,
+            .accountList,
+            delivery: sidebar.sidebarSelectionDeliveryForTesting
+        )
+
+        #expect(sidebar.sidebarStoreKindDeliveryCountForTesting == storeDeliveryCountBeforeSelection)
+
+        uiState.sidebarSelection = .workspace
+        try await waitForSidebarPresentation(
+            viewController,
+            .jobList,
+            delivery: sidebar.sidebarSelectionDeliveryForTesting
+        )
+        let selectionDeliveryCountBeforeStoreChange = sidebar.sidebarSelectionKindDeliveryCountForTesting
+
+        store.loadForTesting(
+            serverState: .failed("Embedded server is unavailable in preview mode."),
+            content: makeSidebarContent(from: [])
+        )
+        try await waitForSidebarPresentation(
+            viewController,
+            .unavailable,
+            delivery: sidebar.sidebarStoreKindDeliveryForTesting
+        )
+
+        #expect(sidebar.sidebarSelectionKindDeliveryCountForTesting == selectionDeliveryCountBeforeStoreChange)
+    }
+
     @Test func splitViewShowsAddAccountToolbarItemOnlyForAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -1361,16 +1401,14 @@ struct ReviewUIShellTests {
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
         )
-        let initialRevision = runningJob.reviewMonitorRevision
-        let initialLog = runningJob.reviewMonitorLogDocument.text
+        let initialLog = reviewMonitorLogText(for: runningJob)
         let initialEntryCount = runningJob.logEntries.count
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
 
-        let appendedText = String(runningJob.reviewMonitorLogDocument.text.dropFirst(initialLog.count))
+        let appendedText = String(reviewMonitorLogText(for: runningJob).dropFirst(initialLog.count))
         let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
-        #expect(runningJob.reviewMonitorRevision > initialRevision)
-        #expect(runningJob.reviewMonitorLogDocument.text != initialLog)
+        #expect(reviewMonitorLogText(for: runningJob) != initialLog)
         #expect(appendedText.contains("Turn started"))
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)

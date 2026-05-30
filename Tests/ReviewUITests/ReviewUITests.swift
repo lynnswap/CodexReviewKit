@@ -933,6 +933,10 @@ struct ReviewUITests {
         let displayedFirstAccount = try #require(
             store.auth.persistedAccounts.first { $0.email == "first@example.com" }
         )
+        let fullReloadCountBeforeDrop = accountsViewController.accountFullReloadCountForTesting
+        let incrementalMembershipChangeCountBeforeDrop = accountsViewController
+            .accountIncrementalMembershipChangeCountForTesting
+        let incrementalMoveCountBeforeDrop = accountsViewController.accountIncrementalMoveCountForTesting
 
         #expect(await accountsViewController.performAccountDropForTesting(
             displayedFirstAccount,
@@ -943,6 +947,22 @@ struct ReviewUITests {
             "first@example.com",
             "third@example.com",
         ])
+        try await waitForObservedValue(
+            from: accountsViewController.accountListDeliveryForTesting,
+            [
+                "second@example.com",
+                "first@example.com",
+                "third@example.com",
+            ]
+        ) {
+            accountsViewController.displayedAccountEmailsForTesting
+        }
+        #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeDrop)
+        #expect(
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
+                incrementalMembershipChangeCountBeforeDrop
+        )
+        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
     @Test func accountDropBeforeDetachedCurrentSessionMovesToLastSavedPosition() async throws {
@@ -1595,7 +1615,7 @@ struct ReviewUITests {
         )
 
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountSelectionDeliveryForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1634,7 +1654,7 @@ struct ReviewUITests {
             store.auth.persistedAccounts.first { $0.email == "other@example.com" }
         )
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountSelectionDeliveryForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1668,7 +1688,7 @@ struct ReviewUITests {
             .sidebarViewControllerForTesting
             .accountsViewControllerForTesting
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountSelectionDeliveryForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1708,16 +1728,20 @@ struct ReviewUITests {
             store.auth.persistedAccounts.first { $0.email == "other@example.com" }
         )
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountSelectionDeliveryForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
         }
         let displayedEmails = accountsViewController.displayedAccountEmailsForTesting
+        let fullReloadCountBeforeSelectionChange = accountsViewController.accountFullReloadCountForTesting
+        let incrementalMembershipChangeCountBeforeSelectionChange = accountsViewController
+            .accountIncrementalMembershipChangeCountForTesting
+        let incrementalMoveCountBeforeSelectionChange = accountsViewController.accountIncrementalMoveCountForTesting
 
         store.auth.selectPersistedAccount(displayedOtherAccount.accountKey)
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountSelectionDeliveryForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "other@example.com"
@@ -1725,6 +1749,52 @@ struct ReviewUITests {
 
         #expect(accountsViewController.selectedAccountEmailForTesting == "other@example.com")
         #expect(accountsViewController.displayedAccountEmailsForTesting == displayedEmails)
+        #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeSelectionChange)
+        #expect(
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
+                incrementalMembershipChangeCountBeforeSelectionChange
+        )
+        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeSelectionChange)
+    }
+
+    @Test func accountContentUpdateDoesNotReloadOutlineTopology() async throws {
+        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            account: activeAccount,
+            persistedAccounts: [activeAccount],
+            workspaces: []
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarSelection = .account
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let accountsViewController = viewController
+            .sidebarViewControllerForTesting
+            .accountsViewControllerForTesting
+        let displayedActiveAccount = try #require(store.auth.persistedAccounts.first)
+        let fullReloadCountBeforeUpdate = accountsViewController.accountFullReloadCountForTesting
+        let incrementalMembershipChangeCountBeforeUpdate = accountsViewController
+            .accountIncrementalMembershipChangeCountForTesting
+        let incrementalMoveCountBeforeUpdate = accountsViewController.accountIncrementalMoveCountForTesting
+
+        let updatedAccount = CodexAccount(email: "active@example.com", planType: "team")
+        store.auth.applyPersistedAccountStates([savedAccountPayload(from: updatedAccount)])
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        #expect(store.auth.persistedAccounts.first === displayedActiveAccount)
+        #expect(store.auth.persistedAccounts.first?.planType == "team")
+        #expect(accountsViewController.displayedAccountEmailsForTesting == ["active@example.com"])
+        #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeUpdate)
+        #expect(
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
+                incrementalMembershipChangeCountBeforeUpdate
+        )
+        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeUpdate)
     }
 
     @Test func accountListTracksDetachedCurrentSessionMembership() async throws {
@@ -1748,6 +1818,10 @@ struct ReviewUITests {
             .sidebarViewControllerForTesting
             .accountsViewControllerForTesting
         #expect(accountsViewController.displayedAccountEmailsForTesting == ["saved@example.com"])
+        let fullReloadCountBeforeMembershipChanges = accountsViewController.accountFullReloadCountForTesting
+        let incrementalMembershipChangeCountBeforeMembershipChanges = accountsViewController
+            .accountIncrementalMembershipChangeCountForTesting
+        let incrementalMoveCountBeforeMembershipChanges = accountsViewController.accountIncrementalMoveCountForTesting
 
         store.auth.updateCurrentAccount(CodexAccount(email: "detached@example.com", planType: "pro"))
         try await waitForObservedValue(
@@ -1765,6 +1839,12 @@ struct ReviewUITests {
             "detached@example.com",
         ])
         #expect(accountsViewController.selectedAccountEmailForTesting == "detached@example.com")
+        #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeMembershipChanges)
+        #expect(
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
+                incrementalMembershipChangeCountBeforeMembershipChanges + 1
+        )
+        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
 
         store.auth.selectPersistedAccount(savedAccount.accountKey)
         try await waitForObservedValue(
@@ -1776,6 +1856,12 @@ struct ReviewUITests {
 
         #expect(accountsViewController.displayedAccountEmailsForTesting == ["saved@example.com"])
         #expect(accountsViewController.selectedAccountEmailForTesting == "saved@example.com")
+        #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeMembershipChanges)
+        #expect(
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
+                incrementalMembershipChangeCountBeforeMembershipChanges + 2
+        )
+        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
     }
 
     @Test func accountActionAlertRestoresSelectionToAuthenticatedAccount() async throws {
@@ -2228,7 +2314,7 @@ struct ReviewUITests {
         #expect(window.subtitle == job.cwd)
 
         let displayedLog = transport.displayedLogForTesting
-        #expect(displayedLog == job.reviewMonitorLogDocument.text)
+        #expect(displayedLog == reviewMonitorLogText(for: job))
     }
 
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
@@ -3654,7 +3740,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let renderedInitialLog = job.reviewMonitorLogDocument.text
+        let renderedInitialLog = reviewMonitorLogText(for: job)
         let renderedInitialLength = (renderedInitialLog as NSString).length
         let visibleRanges = transport.logFindVisibleCharacterRangesForTesting
         #expect(transport.logFindIncrementalSearchUsesSystemHighlightingForTesting)
@@ -3678,7 +3764,7 @@ struct ReviewUITests {
         job.appendLogEntry(.init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
 
-        let appendedLength = (job.reviewMonitorLogDocument.text as NSString).length
+        let appendedLength = (reviewMonitorLogText(for: job) as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
         #expect(transport.logFindStringLengthForTesting == renderedInitialLength)
         #expect(transport.logSelectedTextForTesting == "needle")
@@ -3708,7 +3794,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
 
-        var burstText = job.reviewMonitorLogDocument.text
+        var burstText = reviewMonitorLogText(for: job)
         for index in 0..<8 {
             burstText += "\nneedle burst \(index)"
             #expect(transport.renderLogForTesting(text: burstText, allowIncrementalUpdate: true))
@@ -3792,7 +3878,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (firstJob.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -3810,7 +3896,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (secondJob.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
     }
 
     @Test func logFindContentReuseClearsSnapshotWhenSameTextSkipsRender() async throws {
@@ -3843,14 +3929,14 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (firstJob.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         firstJob.appendLogEntry(.init(kind: .progress, text: appendedLine))
         _ = try await awaitTransportRender(transport)
-        #expect(transport.displayedLogForTesting == secondJob.reviewMonitorLogDocument.text)
+        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: secondJob))
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -3859,7 +3945,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (secondJob.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
     }
 
     @Test func logFindContentReuseClearsSnapshotForPrefixRelatedLogs() async throws {
@@ -3890,7 +3976,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (firstJob.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -3906,7 +3992,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logTextFinderIdentifierForTesting == finderIdentifierBeforeSwitch)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (secondJob.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
     }
 
     @Test func logFindHidingVisibleSnapshotReturnsClientToLiveString() async throws {
@@ -3929,7 +4015,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (job.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -3942,7 +4028,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting == false)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
     }
 
     @Test func logFindClearedSelectionReturnsVisibleUpdatesToLiveString() async throws {
@@ -3965,7 +4051,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (job.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -3985,7 +4071,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
     }
 
     @Test func logFindClearedQueryReturnsVisibleUpdatesToLiveString() async throws {
@@ -4008,7 +4094,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let firstNeedleRange = (job.reviewMonitorLogDocument.text as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -4029,7 +4115,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
         }
     }
 
@@ -4064,7 +4150,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
         }
     }
 
@@ -4088,7 +4174,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let initialLength = (job.reviewMonitorLogDocument.text as NSString).length
+        let initialLength = (reviewMonitorLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
@@ -4126,7 +4212,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        let initialLength = (job.reviewMonitorLogDocument.text as NSString).length
+        let initialLength = (reviewMonitorLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
@@ -4142,7 +4228,7 @@ struct ReviewUITests {
             #expect(transport.logVisibleFindBarSearchStringForTesting == "beta")
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
         }
     }
 
@@ -4171,7 +4257,7 @@ struct ReviewUITests {
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
-            let normalSelectionRange = (job.reviewMonitorLogDocument.text as NSString).range(of: "copyable")
+            let normalSelectionRange = (reviewMonitorLogText(for: job) as NSString).range(of: "copyable")
             #expect(normalSelectionRange.location != NSNotFound)
             transport.setSelectedLogRangeForTesting(normalSelectionRange)
             #expect(transport.logSelectedTextForTesting == "copyable")
@@ -4181,7 +4267,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
         }
     }
 
@@ -4213,7 +4299,7 @@ struct ReviewUITests {
             transport.simulateLogFinderEmptySelectedRangesForTesting()
             #expect(transport.logHasActiveFindQueryForTesting)
 
-            let initialLength = (job.reviewMonitorLogDocument.text as NSString).length
+            let initialLength = (reviewMonitorLogText(for: job) as NSString).length
             job.appendLogEntry(.init(kind: .progress, text: "active query appears after no-result search"))
             _ = try await awaitTransportRender(transport)
 
@@ -4275,7 +4361,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (job.reviewMonitorLogDocument.text as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
     }
 
     @Test func authFailedJobShowsNormalFailureDetails() async throws {
