@@ -30,6 +30,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var appliedLogEntryCount = 0
+    private var hasAppliedBoundJobLog = false
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
         self.store = store
@@ -370,6 +371,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 )
                 self.appliedLogEntryCount = targetEntryCount
                 self.appliedLogRenderGeneration = generation
+                self.hasAppliedBoundJobLog = true
             }
         }
         return true
@@ -426,6 +428,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 )
                 self.appliedLogEntryCount = resolved.entryCount
                 self.appliedLogRenderGeneration = generation
+                self.hasAppliedBoundJobLog = true
             }
         }
         return true
@@ -443,6 +446,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let entries = job.logEntries
         let targetEntryCount = entries.count
         if allowIncrementalUpdate,
+           hasAppliedBoundJobLog,
            job.lastLogMutation == .append,
            appliedLogEntryCount <= targetEntryCount {
             let appendedEntries = Array(entries.dropFirst(appliedLogEntryCount))
@@ -477,6 +481,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderGeneration &+= 1
         appliedLogRenderGeneration = logRenderGeneration
         appliedLogEntryCount = 0
+        hasAppliedBoundJobLog = false
         logRenderer = ReviewMonitorLogRenderer()
     }
 
