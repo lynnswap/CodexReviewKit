@@ -826,19 +826,25 @@ struct ReviewMonitorLogProjection: Sendable {
         var replacesGroup: Bool
         var textUTF16Length: Int
         var textHash: Int
-        var metadata: ReviewLogEntry.Metadata?
+        var metadataHash: Int?
         var timestamp: Date
 
         init(_ entry: ReviewLogEntry) {
-            var hasher = Hasher()
-            hasher.combine(entry.text)
+            var textHasher = Hasher()
+            textHasher.combine(entry.text)
+            if let metadata = entry.metadata {
+                var metadataHasher = Hasher()
+                metadataHasher.combine(metadata)
+                metadataHash = metadataHasher.finalize()
+            } else {
+                metadataHash = nil
+            }
             self.id = entry.id
             self.kind = entry.kind
             self.groupID = entry.groupID
             self.replacesGroup = entry.replacesGroup
             self.textUTF16Length = ReviewMonitorLogProjection.utf16Length(entry.text)
-            self.textHash = hasher.finalize()
-            self.metadata = entry.metadata
+            self.textHash = textHasher.finalize()
             self.timestamp = entry.timestamp
         }
     }
@@ -944,6 +950,68 @@ struct ReviewMonitorLogProjection: Sendable {
                 range: NSRange(location: previousLength, length: document.textUTF16Length - previousLength),
                 text: renderedDelta,
                 textUTF16Length: document.textUTF16Length - previousLength
+            )
+        }
+
+        mutating func replaceCurrentBlock(
+            _ block: RenderedBlock,
+            at blockIndex: Int
+        ) -> ReviewMonitorLogReplacement? {
+            guard let blockIndexInDocument = document.blocks.lastIndex(where: { $0.id == block.id })
+            else {
+                return nil
+            }
+
+            let previousBlock = document.blocks[blockIndexInDocument]
+            guard NSMaxRange(previousBlock.range) == document.textUTF16Length,
+                  NSMaxRange(previousBlock.sourceRange) == document.sourceTextUTF16Length
+            else {
+                return nil
+            }
+
+            let renderedText = ReviewMonitorLogStyler.renderedText(
+                for: block.kind,
+                source: block.text,
+                blockID: block.id
+            )
+            let renderedLength = ReviewMonitorLogProjection.utf16Length(renderedText)
+            let sourceLength = ReviewMonitorLogProjection.utf16Length(block.text)
+            let textPrefix = (document.text as NSString).substring(
+                with: NSRange(location: 0, length: previousBlock.range.location)
+            )
+            let sourcePrefix = (document.sourceText as NSString).substring(
+                with: NSRange(location: 0, length: previousBlock.sourceRange.location)
+            )
+
+            document.text = textPrefix + renderedText
+            document.textUTF16Length = previousBlock.range.location + renderedLength
+            document.sourceText = sourcePrefix + block.text
+            document.sourceTextUTF16Length = previousBlock.sourceRange.location + sourceLength
+            document.blocks[blockIndexInDocument] = ReviewMonitorLogBlock(
+                id: block.id,
+                kind: block.kind,
+                groupID: block.groupID,
+                range: NSRange(location: previousBlock.range.location, length: renderedLength),
+                sourceRange: NSRange(location: previousBlock.sourceRange.location, length: sourceLength),
+                metadata: block.metadata
+            )
+            document.styleRuns.removeAll {
+                $0.range.location >= previousBlock.range.location ||
+                    NSIntersectionRange($0.range, previousBlock.range).length > 0
+            }
+            document.decorations.removeAll {
+                $0.blockID == block.id ||
+                    $0.range.location >= previousBlock.range.location ||
+                    NSIntersectionRange($0.range, previousBlock.range).length > 0
+            }
+            ReviewMonitorLogStyler.appendPresentation(for: document.blocks[blockIndexInDocument], to: &document)
+            lastBlockIndex = blockIndex
+            return .init(
+                kind: block.kind,
+                blockID: block.id,
+                range: previousBlock.range,
+                text: renderedText,
+                textUTF16Length: renderedLength
             )
         }
 
@@ -1062,9 +1130,6 @@ struct ReviewMonitorLogProjection: Sendable {
                             source: newText,
                             blockID: blockID
                         )
-                        if newRendered == oldRendered {
-                            return .needsReload(replacementBlockID: nil)
-                        }
                         if let renderedDelta = ReviewMonitorLogProjection.suffix(
                             in: newRendered,
                             afterPrefix: oldRendered
@@ -1077,7 +1142,19 @@ struct ReviewMonitorLogProjection: Sendable {
                             ) {
                                 return .changed(.append(append))
                             }
+                            if let replacement = projection.replaceCurrentBlock(
+                                blocks[blockIndex],
+                                at: blockIndex
+                            ) {
+                                return .changed(.replace(replacement))
+                            }
                             return .noVisibleChange
+                        }
+                        if let replacement = projection.replaceCurrentBlock(
+                            blocks[blockIndex],
+                            at: blockIndex
+                        ) {
+                            return .changed(.replace(replacement))
                         }
                         return .needsReload(replacementBlockID: blockID)
                     }

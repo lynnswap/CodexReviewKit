@@ -3071,7 +3071,7 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
-    @Test func selectedJobMarkdownAppendFallsBackWhenIncrementalProjectionNeedsReload() async throws {
+    @Test func selectedJobMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-markdown-append-fallback",
             cwd: "/tmp/workspace-alpha",

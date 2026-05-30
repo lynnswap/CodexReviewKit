@@ -379,8 +379,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func renderSelectedJobLogAppend(
         entries: [ReviewLogEntry],
         sourceRange: Range<Int>,
-        targetEntryCount: Int,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
+        targetEntryCount: Int
     ) -> Bool {
         guard let boundJob else {
             return false
@@ -422,7 +421,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 }
                 _ = self.logScrollView.render(
                     document: resolved.document,
-                    restoring: restorationTarget,
+                    restoring: self.logScrollView.currentScrollRestorationTarget,
                     allowIncrementalUpdate: true
                 )
                 self.appliedLogEntryCount = resolved.entryCount
@@ -454,8 +453,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return renderSelectedJobLogAppend(
                 entries: appendedEntries,
                 sourceRange: appliedLogEntryCount..<targetEntryCount,
-                targetEntryCount: targetEntryCount,
-                restorationTarget: restorationTarget
+                targetEntryCount: targetEntryCount
             )
         }
         return renderSelectedJobLog(

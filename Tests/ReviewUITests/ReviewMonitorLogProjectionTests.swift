@@ -280,14 +280,21 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.styleRuns.contains { $0.style == .strong })
     }
 
-    @Test func incrementalAppendNeedingReloadDoesNotPoisonProjectionState() {
+    @Test func incrementalAppendReplacesTailMarkdownBlockWithoutFullReload() {
         let firstEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "**bo")
         let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "ld**")
         var projection = ReviewMonitorLogProjection()
         _ = projection.render(entries: [firstEntry])
 
         let incrementalDocument = projection.append(entries: [appendedEntry], sourceRange: 1..<2)
-        #expect(incrementalDocument == nil)
+        #expect(incrementalDocument?.text == "bold")
+        #expect(incrementalDocument?.sourceText == "**bold**")
+        #expect(incrementalDocument?.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
+        )))
 
         let document = projection.render(entries: [firstEntry, appendedEntry])
         #expect(document.text == "bold")
