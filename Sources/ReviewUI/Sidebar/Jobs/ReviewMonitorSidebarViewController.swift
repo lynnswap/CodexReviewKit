@@ -247,10 +247,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarStoreKindDelivery = sidebarKindObservationScope.observe(store) { [weak self] _, store in
             let serverState = store.serverState
             let hasReviewJobs = store.hasReviewJobs
+            let hasWorkspaces = store.workspaces.isEmpty == false
             guard let self else {
                 return
             }
-            self.applySidebarKind(self.sidebarKind(serverState: serverState, hasReviewJobs: hasReviewJobs))
+            self.applySidebarKind(self.sidebarKind(
+                serverState: serverState,
+                hasReviewJobs: hasReviewJobs,
+                hasWorkspaces: hasWorkspaces
+            ))
         }
 
         sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
@@ -294,14 +299,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarKind(
             sidebarSelection: uiState.sidebarSelection,
             serverState: store.serverState,
-            hasReviewJobs: store.hasReviewJobs
+            hasReviewJobs: store.hasReviewJobs,
+            hasWorkspaces: store.workspaces.isEmpty == false
         )
     }
 
     private func sidebarKind(
         sidebarSelection: SidebarPickerSelection? = nil,
         serverState: CodexReviewServerState? = nil,
-        hasReviewJobs: Bool? = nil
+        hasReviewJobs: Bool? = nil,
+        hasWorkspaces: Bool? = nil
     ) -> SidebarKind {
         if (sidebarSelection ?? uiState.sidebarSelection) == .account {
             return .accountList
@@ -309,7 +316,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if case .failed = serverState ?? store.serverState {
             return .unavailable
         }
-        return (hasReviewJobs ?? store.hasReviewJobs) ? .jobList : .empty
+        let hasStoredWorkspaces = hasWorkspaces ?? (store.workspaces.isEmpty == false)
+        let hasSidebarContent = (hasReviewJobs ?? store.hasReviewJobs) || hasStoredWorkspaces
+        return hasSidebarContent ? .jobList : .empty
     }
 
     private var sidebarWorkspaceTopologies: [SidebarWorkspaceTopology] {
@@ -1217,10 +1226,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        guard let workspace = workspace(from: item) else {
-            return false
-        }
-        return filteredJobCount(in: workspace) > 0
+        workspace(from: item) != nil
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
@@ -1235,10 +1241,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return rowHeights.job
         }
         return rowHeights.job
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {
-        self.outlineView(outlineView, isItemExpandable: item)
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
