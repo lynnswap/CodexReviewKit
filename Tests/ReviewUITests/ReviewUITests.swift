@@ -3071,6 +3071,39 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
+    @Test func selectedJobMarkdownAppendFallsBackWhenIncrementalProjectionNeedsReload() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-markdown-append-fallback",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .agentMessage, groupID: "msg_1", text: "**bo")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        let appendCount = transport.logAppendCountForTesting
+        let replaceCount = transport.logReplaceCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
+
+        let snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log == "bold")
+        #expect(transport.logAppendCountForTesting == appendCount)
+        #expect(transport.logReplaceCountForTesting == replaceCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-stale-replacement",

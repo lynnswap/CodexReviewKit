@@ -280,6 +280,26 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.styleRuns.contains { $0.style == .strong })
     }
 
+    @Test func incrementalAppendNeedingReloadDoesNotPoisonProjectionState() {
+        let firstEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "**bo")
+        let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "ld**")
+        var projection = ReviewMonitorLogProjection()
+        _ = projection.render(entries: [firstEntry])
+
+        let incrementalDocument = projection.append(entries: [appendedEntry], sourceRange: 1..<2)
+        #expect(incrementalDocument == nil)
+
+        let document = projection.render(entries: [firstEntry, appendedEntry])
+        #expect(document.text == "bold")
+        #expect(document.sourceText == "**bold**")
+        #expect(document.lastChange == .replace(.init(
+            kind: .agentMessage,
+            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            range: NSRange(location: 0, length: ("**bo" as NSString).length),
+            text: "bold"
+        )))
+    }
+
     @Test func replacingGroupedPlanUsesReplacementChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-plan-reload",

@@ -20,6 +20,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
         var text: String
     }
 
+    package enum LogMutation: Sendable, Equatable {
+        case reload
+        case append
+    }
+
     private struct ProjectionAccumulator {
         enum JoinMode {
             case rendered
@@ -69,7 +74,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private struct LogState {
-        var entries: [ReviewLogEntry]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
         var logProjection: ProjectionAccumulator
@@ -80,7 +84,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
         var cappedProjection: ProjectionAccumulator
 
         init(
-            entries: [ReviewLogEntry],
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             logProjection: ProjectionAccumulator,
@@ -90,7 +93,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
             rawProjection: ProjectionAccumulator,
             cappedProjection: ProjectionAccumulator
         ) {
-            self.entries = entries
             self.blocks = blocks
             self.indexByGroup = indexByGroup
             self.logProjection = logProjection
@@ -136,7 +138,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
         static func rebuild(entries: [ReviewLogEntry]) -> LogState {
             var state = LogState(
-                entries: entries,
                 blocks: [],
                 indexByGroup: [:],
                 logProjection: .init(joinMode: .rendered),
@@ -173,16 +174,21 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return state
         }
 
-        mutating func append(_ entry: ReviewLogEntry) {
-            entries.append(entry)
+        func supportsIncrementalAppend(_ entry: ReviewLogEntry) -> Bool {
+            guard entry.replacesGroup == false,
+                  let key = CodexReviewJob.mergeKey(for: entry),
+                  let blockIndex = indexByGroup[key]
+            else {
+                return entry.replacesGroup == false
+            }
+            return blockIndex == blocks.indices.last
+        }
 
+        mutating func append(_ entry: ReviewLogEntry) {
             if let key = CodexReviewJob.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
                     let oldText = blocks[blockIndex].text
-                    if entry.replacesGroup || blockIndex != blocks.indices.last {
-                        self = Self.rebuild(entries: entries)
-                        return
-                    }
+                    precondition(entry.replacesGroup == false && blockIndex == blocks.indices.last)
 
                     blocks[blockIndex].text.append(entry.text)
                     let newText = blocks[blockIndex].text
@@ -408,6 +414,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
     }
 
+    private struct TrimmedLogState {
+        var entries: [ReviewLogEntry]
+        var logState: LogState
+    }
+
     @ObservationIgnored
     private var logState: LogState
 
@@ -429,6 +440,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public private(set) var activityLogText: String
     public private(set) var diagnosticText: String
     package private(set) var cappedLogBytes: Int
+    package private(set) var logRevision: UInt64
+    @ObservationIgnored
+    package private(set) var lastLogMutation: LogMutation
 
     public var isTerminal: Bool {
         core.isTerminal
@@ -462,14 +476,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.cancellationRequested = cancellationRequested
         self.agentMessagesByItemID = [:]
         self.completedAgentMessageItemIDs = []
-        self.logState = initialState
+        self.logState = initialState.logState
         self.logEntries = initialState.entries
-        self.logText = initialState.logText
-        self.rawLogText = initialState.rawLogText
-        self.reviewOutputText = initialState.reviewOutputText
-        self.activityLogText = initialState.activityLogText
-        self.diagnosticText = initialState.diagnosticText
-        self.cappedLogBytes = initialState.cappedBytes
+        self.logText = initialState.logState.logText
+        self.rawLogText = initialState.logState.rawLogText
+        self.reviewOutputText = initialState.logState.reviewOutputText
+        self.activityLogText = initialState.logState.activityLogText
+        self.diagnosticText = initialState.logState.diagnosticText
+        self.cappedLogBytes = initialState.logState.cappedBytes
+        self.logRevision = 0
+        self.lastLogMutation = .reload
     }
 
     public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
@@ -481,14 +497,23 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func replaceLogEntries(_ entries: [ReviewLogEntry]) {
-        logState = Self.trimmedLogState(entries: entries)
-        syncLogState()
+        let trimmedState = Self.trimmedLogState(entries: entries)
+        logEntries = trimmedState.entries
+        logState = trimmedState.logState
+        syncLogState(mutation: .reload)
     }
 
     package func appendLogEntry(_ entry: ReviewLogEntry) {
-        logState.append(entry)
-        _ = applyReviewLogLimit()
-        syncLogState()
+        let supportsIncrementalAppend = logState.supportsIncrementalAppend(entry)
+        if supportsIncrementalAppend {
+            logState.append(entry)
+        }
+        logEntries.append(entry)
+        if supportsIncrementalAppend == false {
+            logState = LogState(entries: logEntries)
+        }
+        let didTrim = applyReviewLogLimit()
+        syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
     @discardableResult
@@ -497,11 +522,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return false
         }
 
-        let trimmedState = Self.trimmedLogState(from: logState)
-        guard trimmedState.entries != logState.entries else {
+        let trimmedState = Self.trimmedLogState(entries: logEntries)
+        guard trimmedState.entries != logEntries else {
             return false
         }
-        logState = trimmedState
+        logEntries = trimmedState.entries
+        logState = trimmedState.logState
         return true
     }
 
@@ -540,32 +566,31 @@ public final class CodexReviewJob: Identifiable, Hashable {
         replaceLogEntries(entries)
     }
 
-    private func syncLogState() {
-        logEntries = logState.entries
+    private func syncLogState(mutation: LogMutation) {
         logText = logState.logText
         rawLogText = logState.rawLogText
         reviewOutputText = logState.reviewOutputText
         activityLogText = logState.activityLogText
         diagnosticText = logState.diagnosticText
         cappedLogBytes = logState.cappedBytes
+        lastLogMutation = mutation
+        logRevision &+= 1
     }
 
-    private nonisolated static func trimmedLogState(entries: [ReviewLogEntry]) -> LogState {
-        trimmedLogState(from: LogState(entries: entries))
-    }
+    private nonisolated static func trimmedLogState(entries initialEntries: [ReviewLogEntry]) -> TrimmedLogState {
+        var entries = initialEntries
+        var logState = LogState(entries: entries)
 
-    private nonisolated static func trimmedLogState(from initialState: LogState) -> LogState {
-        var state = initialState
-
-        while state.cappedBytes > logLimitBytes {
-            let overflowBytes = state.cappedBytes - logLimitBytes
-            guard let trimmedEntries = trimOnce(entries: state.entries, overflowBytes: overflowBytes) else {
+        while logState.cappedBytes > logLimitBytes {
+            let overflowBytes = logState.cappedBytes - logLimitBytes
+            guard let trimmedEntries = trimOnce(entries: entries, overflowBytes: overflowBytes) else {
                 break
             }
-            state = LogState(entries: trimmedEntries)
+            entries = trimmedEntries
+            logState = LogState(entries: entries)
         }
 
-        return state
+        return .init(entries: entries, logState: logState)
     }
 
     private nonisolated static func trimOnce(
