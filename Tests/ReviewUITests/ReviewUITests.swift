@@ -2905,7 +2905,7 @@ struct ReviewUITests {
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
 
-    @Test func logAppendSuffixUsesNewTextIndexForCanonicalEquivalentPrefix() async throws {
+    @Test func logCanonicalEquivalentPrefixReloadsWhenUTF16LengthChanges() async throws {
         let decomposedPrefix = "Caf\u{0065}\u{0301}"
         let precomposedUpdate = "Caf\u{00E9} appended"
         let job = CodexReviewJob.makeForTesting(
@@ -2934,8 +2934,8 @@ struct ReviewUITests {
         #expect(transport.renderLogForTesting(text: precomposedUpdate, allowIncrementalUpdate: true))
 
         #expect(transport.displayedLogForTesting.hasSuffix(" appended"))
-        #expect(transport.logAppendCountForTesting == appendCount + 1)
-        #expect(transport.logReloadCountForTesting == reloadCount)
+        #expect(transport.logAppendCountForTesting == appendCount)
+        #expect(transport.logReloadCountForTesting == reloadCount + 1)
     }
 
     @Test func coalescedLogTextUpdateUsesAppendPathWhenSuffixCanBeDerived() async throws {
@@ -3102,6 +3102,26 @@ struct ReviewUITests {
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func skippedMarkdownRestyleReloadsBeforeSuffixAppendFallback() {
+        let logScrollView = ReviewMonitorLogScrollView()
+        let initialEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: "bold")
+        let restyledEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", replacesGroup: true, text: "**bold**")
+        let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: " tail")
+        var projection = ReviewMonitorLogProjection()
+        let initialDocument = projection.render(entries: [initialEntry])
+        logScrollView.render(document: initialDocument, restoring: .top, allowIncrementalUpdate: false)
+        let appendCount = logScrollView.appendCount
+        let reloadCount = logScrollView.reloadCount
+
+        _ = projection.render(entries: [initialEntry, restyledEntry])
+        let latestDocument = projection.render(entries: [initialEntry, restyledEntry, appendedEntry])
+        logScrollView.render(document: latestDocument, restoring: .top, allowIncrementalUpdate: true)
+
+        #expect(logScrollView.displayedTextForTesting == "bold tail")
+        #expect(logScrollView.appendCount == appendCount)
+        #expect(logScrollView.reloadCount == reloadCount + 1)
     }
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {

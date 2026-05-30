@@ -37,6 +37,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedText = ""
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
+    private var displayedPresentationSignature: Int?
     private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
@@ -218,7 +219,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             return didRender
         }
         if allowIncrementalUpdate,
-           let suffix = appendedSuffix(for: document.text) {
+           let suffix = appendedSuffix(for: document.text),
+           canApplyFallbackAppend(suffix, to: document) {
             let suffixUTF16Length = (suffix as NSString).length
             let append = ReviewMonitorLogAppend(
                 kind: fallbackAppendKind(for: document.lastChange),
@@ -276,6 +278,19 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return .event
     }
 
+    private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLogDocument) -> Bool {
+        guard let displayedPresentationSignature else {
+            return false
+        }
+        guard document.textUTF16Length == displayedUTF16Length + (suffix as NSString).length else {
+            return false
+        }
+        return displayedPresentationSignature == presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
+    }
+
     @discardableResult
     private func applyAppend(
         _ append: ReviewMonitorLogAppend,
@@ -292,6 +307,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         displayedText += append.text
         displayedUTF16Length += append.textUTF16Length
         logDocumentView.applyPresentation(document, appended: append)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -319,6 +338,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         replaceDisplayedText(in: replacement.range, with: replacement.text)
         displayedUTF16Length = resultingTextUTF16Length
         logDocumentView.applyPresentation(document, replacement: replacement)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -341,6 +364,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if displayedText == text {
             let previousOrigin = contentView.bounds.origin
             logDocumentView.applyPresentation(document)
+            displayedPresentationSignature = presentationSignature(
+                forPrefixUTF16Length: displayedUTF16Length,
+                in: document
+            )
             invalidateDocumentLayout()
             restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
             return contentView.bounds.origin != previousOrigin
@@ -352,6 +379,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         displayedText = text
         displayedUTF16Length = (text as NSString).length
         logDocumentView.applyPresentation(document)
+        displayedPresentationSignature = presentationSignature(
+            forPrefixUTF16Length: displayedUTF16Length,
+            in: document
+        )
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
@@ -574,6 +605,64 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
         let suffixStart = text.index(text.startIndex, offsetBy: displayedText.count)
         return String(text[suffixStart...])
+    }
+
+    private func presentationSignature(
+        forPrefixUTF16Length prefixLength: Int,
+        in document: ReviewMonitorLogDocument
+    ) -> Int {
+        let clampedPrefixLength = min(max(0, prefixLength), document.textUTF16Length)
+        var hasher = Hasher()
+        hasher.combine(clampedPrefixLength)
+
+        for block in document.blocks {
+            guard let range = clippedRange(block.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("block")
+            hasher.combine(block.id)
+            hasher.combine(block.kind)
+            hasher.combine(block.groupID)
+            combine(range, into: &hasher)
+            hasher.combine(block.metadata)
+        }
+
+        for styleRun in document.styleRuns {
+            guard let range = clippedRange(styleRun.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("style")
+            combine(range, into: &hasher)
+            hasher.combine(styleRun.style)
+        }
+
+        for decoration in document.decorations {
+            guard let range = clippedRange(decoration.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("decoration")
+            hasher.combine(decoration.blockID)
+            combine(range, into: &hasher)
+            hasher.combine(decoration.style)
+        }
+
+        return hasher.finalize()
+    }
+
+    private func clippedRange(_ range: NSRange, upperBound: Int) -> NSRange? {
+        guard range.location < upperBound else {
+            return nil
+        }
+        let end = min(NSMaxRange(range), upperBound)
+        guard end > range.location else {
+            return nil
+        }
+        return NSRange(location: range.location, length: end - range.location)
+    }
+
+    private func combine(_ range: NSRange, into hasher: inout Hasher) {
+        hasher.combine(range.location)
+        hasher.combine(range.length)
     }
 
     private func replaceDisplayedText(in range: NSRange, with text: String) {

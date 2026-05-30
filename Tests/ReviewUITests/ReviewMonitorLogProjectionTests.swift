@@ -105,6 +105,31 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.decorations.first?.style == .command(tone: .success))
     }
 
+    @Test func groupedReplacementCanClearMetadata() {
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "commandExecution",
+            title: "Command",
+            status: "started",
+            command: "swift test"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-metadata-clear",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .commandOutput, groupID: "cmd-1", text: "running", metadata: metadata),
+                .init(kind: .commandOutput, groupID: "cmd-1", replacesGroup: true, text: "finished"),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == "finished")
+        #expect(document.blocks.first?.metadata == nil)
+        #expect(document.decorations.first?.style == .terminal(tone: .neutral))
+    }
+
     @Test func documentRendersMarkdownWithStandardParserAndKeepsSourceTranscript() {
         let text = """
         # Heading

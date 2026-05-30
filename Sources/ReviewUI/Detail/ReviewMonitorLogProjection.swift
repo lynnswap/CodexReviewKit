@@ -34,7 +34,7 @@ struct ReviewMonitorLogBlock: Equatable, Sendable {
     }
 }
 
-enum ReviewMonitorLogStatusTone: Equatable, Sendable {
+enum ReviewMonitorLogStatusTone: Hashable, Sendable {
     case neutral
     case running
     case success
@@ -42,14 +42,14 @@ enum ReviewMonitorLogStatusTone: Equatable, Sendable {
     case failure
 }
 
-enum ReviewMonitorLogPlanStatus: String, Equatable, Sendable {
+enum ReviewMonitorLogPlanStatus: String, Hashable, Sendable {
     case pending
     case inProgress
     case completed
     case failed
 }
 
-enum ReviewMonitorLogTextStyle: Equatable, Sendable {
+enum ReviewMonitorLogTextStyle: Hashable, Sendable {
     case body
     case heading(level: Int)
     case bullet
@@ -76,7 +76,7 @@ struct ReviewMonitorLogTextRun: Equatable, Sendable {
     var style: ReviewMonitorLogTextStyle
 }
 
-enum ReviewMonitorLogDecorationStyle: Equatable, Sendable {
+enum ReviewMonitorLogDecorationStyle: Hashable, Sendable {
     case transcript
     case command(tone: ReviewMonitorLogStatusTone)
     case terminal(tone: ReviewMonitorLogStatusTone)
@@ -1059,11 +1059,12 @@ struct ReviewMonitorLogProjection: Sendable {
                     if let index = state.indexByGroup[key] {
                         if entry.replacesGroup {
                             state.blocks[index].text = entry.text
+                            state.blocks[index].metadata = entry.metadata
                         } else {
                             state.blocks[index].text.append(entry.text)
-                        }
-                        if let metadata = entry.metadata {
-                            state.blocks[index].metadata = metadata
+                            if let metadata = entry.metadata {
+                                state.blocks[index].metadata = metadata
+                            }
                         }
                         continue
                     }
