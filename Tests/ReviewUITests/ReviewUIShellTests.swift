@@ -295,6 +295,101 @@ struct ReviewUIShellTests {
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
     }
 
+    @Test func sidebarJobFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
+        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+        let defaults = defaultsContext.defaults
+        defer {
+            defaults.removePersistentDomain(forName: defaultsContext.suiteName)
+        }
+
+        do {
+            let store = CodexReviewStore.makePreviewStore()
+            let harness = makeWindowHarness(
+                store: store,
+                sidebarJobFilterDefaults: defaults
+            )
+            let viewController = harness.viewController
+            let sidebarItem = try #require(viewController.splitViewItems.first)
+            sidebarItem.isCollapsed = false
+
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+            }
+            viewController.selectSidebarJobFilterForTesting(.running)
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
+            }
+            #expect(
+                defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+                    == SidebarJobFilter.running.rawValue
+            )
+            harness.window.close()
+        }
+
+        do {
+            let store = CodexReviewStore.makePreviewStore()
+            let harness = makeWindowHarness(
+                store: store,
+                sidebarJobFilterDefaults: defaults
+            )
+            let viewController = harness.viewController
+            let sidebarItem = try #require(viewController.splitViewItems.first)
+            sidebarItem.isCollapsed = false
+
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
+            }
+            viewController.selectSidebarJobFilterForTesting(.all)
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+            }
+            #expect(
+                defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+                    == SidebarJobFilter.all.rawValue
+            )
+            harness.window.close()
+        }
+
+        do {
+            let store = CodexReviewStore.makePreviewStore()
+            let harness = makeWindowHarness(
+                store: store,
+                sidebarJobFilterDefaults: defaults
+            )
+            let viewController = harness.viewController
+            let sidebarItem = try #require(viewController.splitViewItems.first)
+            sidebarItem.isCollapsed = false
+            defer { harness.window.close() }
+
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+            }
+        }
+    }
+
+    @Test func sidebarJobFilterDefaultsToAllForInvalidPersistedValue() async throws {
+        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+        let defaults = defaultsContext.defaults
+        defer {
+            defaults.removePersistentDomain(forName: defaultsContext.suiteName)
+        }
+        defaults.set("invalid-filter", forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+
+        let store = CodexReviewStore.makePreviewStore()
+        let harness = makeWindowHarness(
+            store: store,
+            sidebarJobFilterDefaults: defaults
+        )
+        let viewController = harness.viewController
+        let sidebarItem = try #require(viewController.splitViewItems.first)
+        sidebarItem.isCollapsed = false
+        defer { harness.window.close() }
+
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+        }
+    }
+
     @Test func sidebarJobFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(store: store)
@@ -503,7 +598,11 @@ struct ReviewUIShellTests {
             initialAuthState: .signedIn(accountID: "review@example.com")
         )
         let store = makeStore(backend: backend)
-        let windowController = ReviewMonitorWindowController(store: store)
+        let windowController = ReviewMonitorWindowController(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            sidebarJobFilterDefaults: nil
+        )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
             return
@@ -526,7 +625,8 @@ struct ReviewUIShellTests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            frameAutosaveName: autosaveName
+            frameAutosaveName: autosaveName,
+            sidebarJobFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -552,7 +652,11 @@ struct ReviewUIShellTests {
             persistedAccounts: [],
             workspaces: []
         )
-        let windowController = ReviewMonitorWindowController(store: store)
+        let windowController = ReviewMonitorWindowController(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            sidebarJobFilterDefaults: nil
+        )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
             return
@@ -617,7 +721,11 @@ struct ReviewUIShellTests {
             persistedAccounts: [CodexAccount(email: "saved@example.com", planType: "pro")],
             workspaces: []
         )
-        let windowController = ReviewMonitorWindowController(store: store)
+        let windowController = ReviewMonitorWindowController(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            sidebarJobFilterDefaults: nil
+        )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
             return
@@ -639,7 +747,11 @@ struct ReviewUIShellTests {
     @Test func windowControllerDoesNotRefreshAuthStateBeforeStoreStart() async {
         let backend = AuthActionBackend()
         let store = makeStore(backend: backend)
-        let windowController = ReviewMonitorWindowController(store: store)
+        let windowController = ReviewMonitorWindowController(
+            store: store,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            sidebarJobFilterDefaults: nil
+        )
         defer { windowController.window?.close() }
         await Task.yield()
 
@@ -1368,4 +1480,11 @@ struct ReviewUIShellTests {
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
         #expect(accessibilityValue.isEmpty == false)
     }
+}
+
+private func makeSidebarJobFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {
+    let suiteName = "ReviewMonitorSidebarJobFilterDefaultsTests-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defaults.removePersistentDomain(forName: suiteName)
+    return (defaults, suiteName)
 }

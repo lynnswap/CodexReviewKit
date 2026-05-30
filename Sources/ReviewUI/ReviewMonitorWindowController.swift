@@ -42,12 +42,14 @@ public final class ReviewMonitorWindowController: NSWindowController {
     convenience init(
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
+        sidebarJobFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             contentTransitionAnimator: contentTransitionAnimator,
             frameAutosaveName: Self.frameAutosaveName,
+            sidebarJobFilterDefaults: sidebarJobFilterDefaults,
             showSettings: showSettings
         )
     }
@@ -56,9 +58,13 @@ public final class ReviewMonitorWindowController: NSWindowController {
         store: CodexReviewStore,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         frameAutosaveName: NSWindow.FrameAutosaveName,
+        sidebarJobFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
-        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let uiState = Self.makeUIState(
+            auth: store.auth,
+            sidebarJobFilterDefaults: sidebarJobFilterDefaults
+        )
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
             uiState: uiState,
@@ -85,5 +91,38 @@ public final class ReviewMonitorWindowController: NSWindowController {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    private static func makeUIState(
+        auth: CodexReviewAuthModel,
+        sidebarJobFilterDefaults: UserDefaults?
+    ) -> ReviewMonitorUIState {
+        guard let sidebarJobFilterDefaults else {
+            return ReviewMonitorUIState(auth: auth)
+        }
+        return ReviewMonitorUIState(
+            auth: auth,
+            sidebarJobFilter: ReviewMonitorSidebarJobFilterPersistence.load(from: sidebarJobFilterDefaults),
+            persistSidebarJobFilter: { filter in
+                ReviewMonitorSidebarJobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
+            }
+        )
+    }
+}
+
+enum ReviewMonitorSidebarJobFilterPersistence {
+    static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
+
+    static func load(from defaults: UserDefaults) -> SidebarJobFilter {
+        guard let rawValue = defaults.string(forKey: defaultsKey),
+              let filter = SidebarJobFilter(rawValue: rawValue)
+        else {
+            return .all
+        }
+        return filter
+    }
+
+    static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
+        defaults.set(filter.rawValue, forKey: defaultsKey)
     }
 }

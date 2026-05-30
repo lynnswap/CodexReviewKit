@@ -6,12 +6,26 @@ import SwiftUI
 @Observable
 final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
+    private let persistSidebarJobFilter: (SidebarJobFilter) -> Void
     var selection: ReviewMonitorSelection?
     var sidebarSelection = SidebarPickerSelection.workspace
-    var sidebarJobFilter = SidebarJobFilter.all
+    var sidebarJobFilter: SidebarJobFilter {
+        didSet {
+            guard sidebarJobFilter != oldValue else {
+                return
+            }
+            persistSidebarJobFilter(sidebarJobFilter)
+        }
+    }
 
-    init(auth: CodexReviewAuthModel) {
+    init(
+        auth: CodexReviewAuthModel,
+        sidebarJobFilter: SidebarJobFilter = .all,
+        persistSidebarJobFilter: @escaping (SidebarJobFilter) -> Void = { _ in }
+    ) {
         self.auth = auth
+        self.sidebarJobFilter = sidebarJobFilter
+        self.persistSidebarJobFilter = persistSidebarJobFilter
     }
 
     var selectedJobEntry: CodexReviewJob? {
@@ -80,7 +94,7 @@ enum SidebarPickerSelection: CaseIterable, Hashable {
     }
 }
 
-enum SidebarJobFilter: CaseIterable, Hashable, Sendable {
+enum SidebarJobFilter: String, CaseIterable, Hashable, Sendable {
     case all
     case running
 

@@ -4331,12 +4331,14 @@ func makeWindowHarness(
     store: CodexReviewStore,
     authState: TestAuthState = .signedIn(accountID: "review@example.com"),
     contentSize: NSSize? = nil,
+    sidebarJobFilterDefaults: UserDefaults? = nil,
     contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
     let windowController = ReviewMonitorWindowController(
         store: store,
-        contentTransitionAnimator: contentTransitionAnimator
+        contentTransitionAnimator: contentTransitionAnimator,
+        sidebarJobFilterDefaults: sidebarJobFilterDefaults
     )
     guard let window = windowController.window else {
         fatalError("ReviewMonitorWindowController did not create a window.")
