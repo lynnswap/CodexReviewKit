@@ -14,18 +14,82 @@ struct ReviewMonitorLogBlock: Equatable, Sendable {
     var kind: ReviewLogEntry.Kind
     var groupID: String?
     var range: NSRange
+    var metadata: ReviewLogEntry.Metadata?
 
     init(
         id: ReviewMonitorLogBlockID,
         kind: ReviewLogEntry.Kind,
         groupID: String?,
-        range: NSRange
+        range: NSRange,
+        metadata: ReviewLogEntry.Metadata? = nil
     ) {
         self.id = id
         self.kind = kind
         self.groupID = groupID
         self.range = range
+        self.metadata = metadata
     }
+}
+
+enum ReviewMonitorLogStatusTone: Equatable, Sendable {
+    case neutral
+    case running
+    case success
+    case warning
+    case failure
+}
+
+enum ReviewMonitorLogPlanStatus: String, Equatable, Sendable {
+    case pending
+    case inProgress
+    case completed
+    case failed
+}
+
+enum ReviewMonitorLogTextStyle: Equatable, Sendable {
+    case body
+    case heading(level: Int)
+    case bullet
+    case blockquote
+    case strong
+    case emphasis
+    case link
+    case strikethrough
+    case inlineCode
+    case codeFence
+    case markdownSyntax
+    case command
+    case terminalOutput
+    case plan(status: ReviewMonitorLogPlanStatus?)
+    case tool
+    case diagnostic
+    case error
+    case event
+    case muted
+}
+
+struct ReviewMonitorLogTextRun: Equatable, Sendable {
+    var range: NSRange
+    var style: ReviewMonitorLogTextStyle
+}
+
+enum ReviewMonitorLogDecorationStyle: Equatable, Sendable {
+    case transcript
+    case command(tone: ReviewMonitorLogStatusTone)
+    case terminal(tone: ReviewMonitorLogStatusTone)
+    case codeBlock
+    case plan(tone: ReviewMonitorLogStatusTone)
+    case reasoning
+    case tool(tone: ReviewMonitorLogStatusTone)
+    case diagnostic(tone: ReviewMonitorLogStatusTone)
+    case error
+    case event
+}
+
+struct ReviewMonitorLogDecoration: Equatable, Sendable {
+    var blockID: ReviewMonitorLogBlockID
+    var range: NSRange
+    var style: ReviewMonitorLogDecorationStyle
 }
 
 struct ReviewMonitorLogAppend: Equatable, Sendable {
@@ -90,6 +154,8 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     var text: String
     var textUTF16Length: Int
     var blocks: [ReviewMonitorLogBlock]
+    var styleRuns: [ReviewMonitorLogTextRun]
+    var decorations: [ReviewMonitorLogDecoration]
     var revision: UInt64
     var lastChange: ReviewMonitorLogChange
 
@@ -97,18 +163,526 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         text: String = "",
         textUTF16Length: Int? = nil,
         blocks: [ReviewMonitorLogBlock] = [],
+        styleRuns: [ReviewMonitorLogTextRun] = [],
+        decorations: [ReviewMonitorLogDecoration] = [],
         revision: UInt64 = 0,
         lastChange: ReviewMonitorLogChange = .reload
     ) {
         self.text = text
         self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
         self.blocks = blocks
+        self.styleRuns = styleRuns
+        self.decorations = decorations
         self.revision = revision
         self.lastChange = lastChange
     }
 
     private static func utf16Length(_ text: String) -> Int {
         (text as NSString).length
+    }
+
+    mutating func rebuildPresentation() {
+        styleRuns.removeAll(keepingCapacity: true)
+        decorations.removeAll(keepingCapacity: true)
+        for block in blocks {
+            ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
+        }
+    }
+}
+
+private enum ReviewMonitorLogStyler {
+    static func appendPresentation(for block: ReviewMonitorLogBlock, to document: inout ReviewMonitorLogDocument) {
+        guard block.range.location >= 0,
+              block.range.length >= 0,
+              NSMaxRange(block.range) <= document.textUTF16Length
+        else {
+            return
+        }
+
+        if block.range.length > 0 {
+            document.styleRuns.append(.init(range: block.range, style: baseTextStyle(for: block.kind)))
+            document.decorations.append(.init(
+                blockID: block.id,
+                range: block.range,
+                style: decorationStyle(for: block.kind, metadata: block.metadata)
+            ))
+        }
+
+        switch block.kind {
+        case .agentMessage, .reasoning, .reasoningSummary, .rawReasoning:
+            appendMarkdownLiteRuns(
+                for: block.range,
+                in: document.text,
+                blockID: block.id,
+                styleRuns: &document.styleRuns,
+                decorations: &document.decorations
+            )
+        case .plan, .todoList:
+            appendPlanRuns(for: block.range, in: document.text, to: &document.styleRuns)
+        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event:
+            break
+        }
+    }
+
+    private static func baseTextStyle(for kind: ReviewLogEntry.Kind) -> ReviewMonitorLogTextStyle {
+        switch kind {
+        case .agentMessage:
+            .body
+        case .command:
+            .body
+        case .commandOutput:
+            .terminalOutput
+        case .plan, .todoList:
+            .body
+        case .reasoning, .reasoningSummary, .rawReasoning:
+            .body
+        case .toolCall:
+            .body
+        case .diagnostic, .error:
+            .body
+        case .progress, .event:
+            .event
+        }
+    }
+
+    private static func decorationStyle(
+        for kind: ReviewLogEntry.Kind,
+        metadata: ReviewLogEntry.Metadata?
+    ) -> ReviewMonitorLogDecorationStyle {
+        let tone = statusTone(for: metadata)
+        switch kind {
+        case .agentMessage:
+            return .transcript
+        case .command:
+            return .command(tone: tone)
+        case .commandOutput:
+            return .terminal(tone: tone)
+        case .plan, .todoList:
+            return .plan(tone: tone)
+        case .reasoning, .reasoningSummary, .rawReasoning:
+            return .reasoning
+        case .toolCall:
+            return .tool(tone: tone)
+        case .diagnostic:
+            return .diagnostic(tone: tone)
+        case .error:
+            return .error
+        case .progress, .event:
+            return .event
+        }
+    }
+
+    private static func statusTone(for metadata: ReviewLogEntry.Metadata?) -> ReviewMonitorLogStatusTone {
+        if let exitCode = metadata?.exitCode {
+            return exitCode == 0 ? .success : .failure
+        }
+
+        let normalized = metadata?.status?
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch normalized {
+        case "started", "running", "inprogress":
+            return .running
+        case "completed", "complete", "succeeded", "success", "passed", "applied":
+            return .success
+        case "failed", "failure", "errored", "error", "cancelled", "canceled":
+            return .failure
+        case "warning", "warn", "updated":
+            return .warning
+        default:
+            return .neutral
+        }
+    }
+
+    private static func appendMarkdownLiteRuns(
+        for range: NSRange,
+        in text: String,
+        blockID: ReviewMonitorLogBlockID,
+        styleRuns: inout [ReviewMonitorLogTextRun],
+        decorations: inout [ReviewMonitorLogDecoration]
+    ) {
+        guard range.length > 0 else {
+            return
+        }
+
+        let nsText = text as NSString
+        var inCodeFence = false
+        var localRuns: [ReviewMonitorLogTextRun] = []
+        var localDecorations: [ReviewMonitorLogDecoration] = []
+        var codeFenceRange: NSRange?
+        nsText.enumerateSubstrings(
+            in: range,
+            options: [.byLines, .localized]
+        ) { substring, lineRange, _, _ in
+            guard let line = substring else {
+                return
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                localRuns.append(.init(range: lineRange, style: .codeFence))
+                codeFenceRange = codeFenceRange.map { NSUnionRange($0, lineRange) } ?? lineRange
+                inCodeFence.toggle()
+                if inCodeFence == false, let range = codeFenceRange {
+                    localDecorations.append(.init(blockID: blockID, range: range, style: .codeBlock))
+                    codeFenceRange = nil
+                }
+                return
+            }
+            if inCodeFence {
+                localRuns.append(.init(range: lineRange, style: .codeFence))
+                codeFenceRange = codeFenceRange.map { NSUnionRange($0, lineRange) } ?? lineRange
+                return
+            }
+
+            if let level = markdownHeadingLevel(in: trimmed) {
+                localRuns.append(.init(range: lineRange, style: .heading(level: level)))
+            } else if trimmed.hasPrefix(">") {
+                localRuns.append(.init(range: lineRange, style: .blockquote))
+                appendLeadingMarkerStyle(marker: ">", in: line, lineRange: lineRange, to: &localRuns)
+            } else if isBulletLine(trimmed) {
+                localRuns.append(.init(range: lineRange, style: .bullet))
+                appendBulletMarkerStyle(line: line, lineRange: lineRange, to: &localRuns)
+            }
+            if let headingMarkerRange = markdownHeadingMarkerRange(in: line, lineRange: lineRange) {
+                localRuns.append(.init(range: headingMarkerRange, style: .markdownSyntax))
+            }
+
+            appendInlineMarkdownRuns(line: line, lineRange: lineRange, to: &localRuns)
+        }
+        if let codeFenceRange {
+            localDecorations.append(.init(blockID: blockID, range: codeFenceRange, style: .codeBlock))
+        }
+        styleRuns.append(contentsOf: localRuns)
+        decorations.append(contentsOf: localDecorations)
+    }
+
+    private static func appendPlanRuns(
+        for range: NSRange,
+        in text: String,
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        guard range.length > 0 else {
+            return
+        }
+
+        let nsText = text as NSString
+        var localRuns: [ReviewMonitorLogTextRun] = []
+        nsText.enumerateSubstrings(
+            in: range,
+            options: [.byLines, .localized]
+        ) { substring, lineRange, _, _ in
+            guard let line = substring,
+                  let status = planStatus(in: line)
+            else {
+                return
+            }
+            localRuns.append(.init(range: lineRange, style: .plan(status: status)))
+        }
+        runs.append(contentsOf: localRuns)
+    }
+
+    private static func markdownHeadingLevel(in trimmedLine: String) -> Int? {
+        var count = 0
+        for character in trimmedLine {
+            if character == "#" {
+                count += 1
+            } else {
+                break
+            }
+        }
+        guard (1...6).contains(count) else {
+            return nil
+        }
+        let afterHashes = trimmedLine.dropFirst(count)
+        return afterHashes.first == " " ? count : nil
+    }
+
+    private static func markdownHeadingMarkerRange(in line: String, lineRange: NSRange) -> NSRange? {
+        let nsLine = line as NSString
+        var index = 0
+        while index < nsLine.length {
+            let character = nsLine.character(at: index)
+            if character == 32 || character == 9 {
+                index += 1
+                continue
+            }
+            break
+        }
+
+        var markerLength = 0
+        while index + markerLength < nsLine.length,
+              nsLine.character(at: index + markerLength) == 35 {
+            markerLength += 1
+        }
+        guard (1...6).contains(markerLength),
+              index + markerLength < nsLine.length,
+              nsLine.character(at: index + markerLength) == 32
+        else {
+            return nil
+        }
+        return NSRange(location: lineRange.location + index, length: markerLength + 1)
+    }
+
+    private static func isBulletLine(_ trimmedLine: String) -> Bool {
+        if trimmedLine.hasPrefix("- ") || trimmedLine.hasPrefix("* ") || trimmedLine.hasPrefix("+ ") {
+            return true
+        }
+        let pattern = #"^\d+[.)]\s+"#
+        return trimmedLine.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    private static func appendLeadingMarkerStyle(
+        marker: String,
+        in line: String,
+        lineRange: NSRange,
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        let nsLine = line as NSString
+        let markerRange = nsLine.range(of: marker)
+        guard markerRange.location != NSNotFound else {
+            return
+        }
+        runs.append(.init(
+            range: NSRange(location: lineRange.location + markerRange.location, length: markerRange.length),
+            style: .markdownSyntax
+        ))
+    }
+
+    private static func appendBulletMarkerStyle(
+        line: String,
+        lineRange: NSRange,
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        let nsLine = line as NSString
+        guard let expression = try? NSRegularExpression(pattern: #"^\s*(?:[-*+]|\d+[.)])\s+"#) else {
+            return
+        }
+        let fullRange = NSRange(location: 0, length: nsLine.length)
+        guard let match = expression.firstMatch(in: line, options: [], range: fullRange) else {
+            return
+        }
+        runs.append(.init(
+            range: NSRange(location: lineRange.location + match.range.location, length: match.range.length),
+            style: .markdownSyntax
+        ))
+    }
+
+    private static func appendInlineMarkdownRuns(
+        line: String,
+        lineRange: NSRange,
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        var protectedRanges: [NSRange] = []
+        appendDelimitedInlineRuns(
+            delimiter: "`",
+            style: .inlineCode,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+        appendLinkRuns(line: line, lineRange: lineRange, protectedRanges: &protectedRanges, to: &runs)
+        appendDelimitedInlineRuns(
+            delimiter: "**",
+            style: .strong,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+        appendDelimitedInlineRuns(
+            delimiter: "__",
+            style: .strong,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+        appendDelimitedInlineRuns(
+            delimiter: "~~",
+            style: .strikethrough,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+        appendDelimitedInlineRuns(
+            delimiter: "*",
+            style: .emphasis,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+        appendDelimitedInlineRuns(
+            delimiter: "_",
+            style: .emphasis,
+            line: line,
+            lineRange: lineRange,
+            protectedRanges: &protectedRanges,
+            to: &runs
+        )
+    }
+
+    private static func appendDelimitedInlineRuns(
+        delimiter: String,
+        style: ReviewMonitorLogTextStyle,
+        line: String,
+        lineRange: NSRange,
+        protectedRanges: inout [NSRange],
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        let nsLine = line as NSString
+        var searchLocation = 0
+        let delimiterLength = (delimiter as NSString).length
+        while searchLocation < nsLine.length {
+            let openRange = nsLine.range(
+                of: delimiter,
+                options: [],
+                range: NSRange(location: searchLocation, length: nsLine.length - searchLocation)
+            )
+            guard openRange.location != NSNotFound else {
+                return
+            }
+
+            guard isProtected(openRange, protectedRanges) == false,
+                  isUsableSingleDelimiter(delimiter, in: nsLine, at: openRange.location)
+            else {
+                searchLocation = NSMaxRange(openRange)
+                continue
+            }
+
+            let closeSearchStart = NSMaxRange(openRange)
+            guard closeSearchStart < nsLine.length else {
+                return
+            }
+            let closeRange = nsLine.range(
+                of: delimiter,
+                options: [],
+                range: NSRange(location: closeSearchStart, length: nsLine.length - closeSearchStart)
+            )
+            guard closeRange.location != NSNotFound else {
+                return
+            }
+            guard isProtected(closeRange, protectedRanges) == false,
+                  isUsableSingleDelimiter(delimiter, in: nsLine, at: closeRange.location)
+            else {
+                searchLocation = NSMaxRange(closeRange)
+                continue
+            }
+
+            let contentRange = NSRange(
+                location: NSMaxRange(openRange),
+                length: closeRange.location - NSMaxRange(openRange)
+            )
+            guard contentRange.length > 0 else {
+                searchLocation = NSMaxRange(closeRange)
+                continue
+            }
+            let protectedRange = NSRange(
+                location: openRange.location,
+                length: closeRange.location - openRange.location + delimiterLength
+            )
+            runs.append(.init(
+                range: NSRange(
+                    location: lineRange.location + contentRange.location,
+                    length: contentRange.length
+                ),
+                style: style
+            ))
+            appendSyntaxRun(openRange, lineRange: lineRange, to: &runs)
+            appendSyntaxRun(closeRange, lineRange: lineRange, to: &runs)
+            protectedRanges.append(protectedRange)
+            searchLocation = NSMaxRange(closeRange)
+        }
+    }
+
+    private static func appendLinkRuns(
+        line: String,
+        lineRange: NSRange,
+        protectedRanges: inout [NSRange],
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        guard let expression = try? NSRegularExpression(pattern: #"\[([^\]\n]+)\]\(([^\)\n]+)\)"#) else {
+            return
+        }
+        let nsLine = line as NSString
+        let fullRange = NSRange(location: 0, length: nsLine.length)
+        for match in expression.matches(in: line, options: [], range: fullRange) {
+            guard match.numberOfRanges >= 3,
+                  isProtected(match.range, protectedRanges) == false
+            else {
+                continue
+            }
+            let labelRange = match.range(at: 1)
+            let urlRange = match.range(at: 2)
+            runs.append(.init(
+                range: NSRange(location: lineRange.location + labelRange.location, length: labelRange.length),
+                style: .link
+            ))
+            appendSyntaxRun(NSRange(location: match.range.location, length: 1), lineRange: lineRange, to: &runs)
+            appendSyntaxRun(NSRange(location: NSMaxRange(labelRange), length: 2), lineRange: lineRange, to: &runs)
+            appendSyntaxRun(NSRange(location: NSMaxRange(urlRange), length: 1), lineRange: lineRange, to: &runs)
+            protectedRanges.append(match.range)
+        }
+    }
+
+    private static func appendSyntaxRun(
+        _ localRange: NSRange,
+        lineRange: NSRange,
+        to runs: inout [ReviewMonitorLogTextRun]
+    ) {
+        guard localRange.length > 0 else {
+            return
+        }
+        runs.append(.init(
+            range: NSRange(location: lineRange.location + localRange.location, length: localRange.length),
+            style: .markdownSyntax
+        ))
+    }
+
+    private static func isProtected(_ range: NSRange, _ protectedRanges: [NSRange]) -> Bool {
+        protectedRanges.contains { NSIntersectionRange($0, range).length > 0 }
+    }
+
+    private static func isUsableSingleDelimiter(_ delimiter: String, in string: NSString, at location: Int) -> Bool {
+        guard delimiter == "*" || delimiter == "_" else {
+            return true
+        }
+        let delimiterCharacter = (delimiter as NSString).character(at: 0)
+        if location > 0, string.character(at: location - 1) == delimiterCharacter {
+            return false
+        }
+        if location + 1 < string.length, string.character(at: location + 1) == delimiterCharacter {
+            return false
+        }
+        return true
+    }
+
+    private static func planStatus(in line: String) -> ReviewMonitorLogPlanStatus? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("["),
+              let closingIndex = trimmed.firstIndex(of: "]")
+        else {
+            return nil
+        }
+        let rawStatus = trimmed[trimmed.index(after: trimmed.startIndex)..<closingIndex]
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch rawStatus {
+        case "pending":
+            return .pending
+        case "inprogress":
+            return .inProgress
+        case "completed", "complete", "done":
+            return .completed
+        case "failed", "failure", "error":
+            return .failed
+        default:
+            return nil
+        }
     }
 }
 
@@ -123,6 +697,7 @@ struct ReviewMonitorLogProjection {
         var kind: ReviewLogEntry.Kind
         var groupID: String?
         var text: String
+        var metadata: ReviewLogEntry.Metadata?
     }
 
     private struct Accumulator {
@@ -158,12 +733,15 @@ struct ReviewMonitorLogProjection {
 
             document.text += appended
             document.textUTF16Length += suffixLength
-            document.blocks.append(.init(
+            let logBlock = ReviewMonitorLogBlock(
                 id: block.id,
                 kind: block.kind,
                 groupID: block.groupID,
-                range: blockRange
-            ))
+                range: blockRange,
+                metadata: block.metadata
+            )
+            document.blocks.append(logBlock)
+            ReviewMonitorLogStyler.appendPresentation(for: logBlock, to: &document)
             lastBlockIndex = blockIndex
             return .init(
                 kind: block.kind,
@@ -190,6 +768,8 @@ struct ReviewMonitorLogProjection {
             document.text += delta
             document.textUTF16Length += deltaLength
             document.blocks[blockIndexInDocument].range.length += deltaLength
+            document.blocks[blockIndexInDocument].metadata = block.metadata
+            document.rebuildPresentation()
             lastBlockIndex = blockIndex
             return .init(
                 kind: block.kind,
@@ -231,6 +811,9 @@ struct ReviewMonitorLogProjection {
                         } else {
                             state.blocks[index].text.append(entry.text)
                         }
+                        if let metadata = entry.metadata {
+                            state.blocks[index].metadata = metadata
+                        }
                         continue
                     }
                     state.indexByGroup[key] = state.blocks.count
@@ -240,7 +823,8 @@ struct ReviewMonitorLogProjection {
                     id: ReviewMonitorLogProjection.blockID(for: entry),
                     kind: entry.kind,
                     groupID: entry.groupID,
-                    text: entry.text
+                    text: entry.text,
+                    metadata: entry.metadata
                 ))
             }
 
@@ -286,6 +870,9 @@ struct ReviewMonitorLogProjection {
                     }
 
                     blocks[blockIndex].text.append(entry.text)
+                    if let metadata = entry.metadata {
+                        blocks[blockIndex].metadata = metadata
+                    }
                     let newText = blocks[blockIndex].text
                     return appendTailGroupDelta(
                         block: blocks[blockIndex],
@@ -304,7 +891,8 @@ struct ReviewMonitorLogProjection {
                 id: ReviewMonitorLogProjection.blockID(for: entry),
                 kind: entry.kind,
                 groupID: entry.groupID,
-                text: entry.text
+                text: entry.text,
+                metadata: entry.metadata
             )
             blocks.append(block)
             return appendBlock(block, at: blockIndex).map(ReviewMonitorLogChange.append)
@@ -451,6 +1039,12 @@ struct ReviewMonitorLogProjection {
         if previous.blocks != current.blocks {
             return true
         }
+        if previous.styleRuns != current.styleRuns {
+            return true
+        }
+        if previous.decorations != current.decorations {
+            return true
+        }
         return previous.text != current.text
     }
 
@@ -517,6 +1111,7 @@ struct ReviewMonitorLogProjection {
     private static let displayedKinds: Set<ReviewLogEntry.Kind> = [
         .agentMessage,
         .command,
+        .commandOutput,
         .plan,
         .todoList,
         .reasoning,

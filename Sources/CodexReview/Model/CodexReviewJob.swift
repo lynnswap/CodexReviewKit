@@ -533,6 +533,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 groupID: entry.groupID,
                 replacesGroup: entry.replacesGroup,
                 text: truncatedText,
+                metadata: entry.metadata,
                 timestamp: entry.timestamp
             )
         }
@@ -669,6 +670,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             groupID: entry.groupID,
             replacesGroup: entry.replacesGroup,
             text: truncatedText,
+            metadata: entry.metadata,
             timestamp: entry.timestamp
         )
         return trimmedEntries

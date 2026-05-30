@@ -814,21 +814,46 @@ private func decodeReviewNotification(
             kind: .rawReasoning,
             groupID: payload.rawReasoningGroupKey
         ).map { [$0] } ?? []
-    case "item/commandExecution/outputDelta",
-        "item/fileChange/outputDelta":
-        events = payload.deltaLog(kind: .commandOutput).map { [$0] } ?? []
+    case "item/commandExecution/outputDelta":
+        events = payload.deltaLog(
+            kind: .commandOutput,
+            metadata: .init(sourceType: "commandExecution", title: "Command output")
+        ).map { [$0] } ?? []
+    case "item/fileChange/outputDelta":
+        events = payload.deltaLog(
+            kind: .commandOutput,
+            metadata: .init(sourceType: "fileChange", title: "File change output")
+        ).map { [$0] } ?? []
     case "command/exec/outputDelta",
         "process/outputDelta":
-        events = payload.base64OutputLog(kind: .commandOutput).map { [$0] } ?? []
+        events = payload.base64OutputLog(
+            kind: .commandOutput,
+            metadata: .init(sourceType: "commandExecution", title: "Command output")
+        ).map { [$0] } ?? []
     case "item/mcpToolCall/progress":
-        events = payload.messageLog(kind: .toolCall).map { [$0] } ?? []
+        events = payload.messageLog(
+            kind: .toolCall,
+            metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+        ).map { [$0] } ?? []
     case "item/fileChange/patchUpdated":
         events = payload.itemID.map {
-            [.logEntry(kind: .toolCall, text: "File changes updated.", groupID: $0, replacesGroup: false)]
+            [.logEntry(
+                kind: .toolCall,
+                text: "File changes updated.",
+                groupID: $0,
+                replacesGroup: false,
+                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+            )]
         } ?? []
     case "item/commandExecution/terminalInteraction":
         events = payload.itemID.map {
-            [.logEntry(kind: .commandOutput, text: payload.message ?? "Terminal interaction.", groupID: $0, replacesGroup: false)]
+            [.logEntry(
+                kind: .commandOutput,
+                text: payload.message ?? "Terminal interaction.",
+                groupID: $0,
+                replacesGroup: false,
+                metadata: .init(sourceType: "commandExecution", title: "Terminal interaction")
+            )]
         } ?? []
     case "item/autoApprovalReview/started":
         events = payload.itemID.map {
@@ -970,7 +995,11 @@ private func rawReasoningGroupID(itemID: String, contentIndex: Int) -> String {
 }
 
 private extension TurnNotificationPayload {
-    func deltaLog(kind: ReviewLogEntry.Kind, groupID explicitGroupID: String? = nil) -> BackendReviewEvent? {
+    func deltaLog(
+        kind: ReviewLogEntry.Kind,
+        groupID explicitGroupID: String? = nil,
+        metadata: ReviewLogEntry.Metadata? = nil
+    ) -> BackendReviewEvent? {
         guard let delta,
               delta.isEmpty == false
         else {
@@ -980,11 +1009,15 @@ private extension TurnNotificationPayload {
             kind: kind,
             text: delta,
             groupID: explicitGroupID ?? itemID,
-            replacesGroup: false
+            replacesGroup: false,
+            metadata: metadata
         )
     }
 
-    func base64OutputLog(kind: ReviewLogEntry.Kind) -> BackendReviewEvent? {
+    func base64OutputLog(
+        kind: ReviewLogEntry.Kind,
+        metadata: ReviewLogEntry.Metadata? = nil
+    ) -> BackendReviewEvent? {
         guard let deltaBase64,
               let data = Data(base64Encoded: deltaBase64),
               let text = String(data: data, encoding: .utf8),
@@ -996,11 +1029,15 @@ private extension TurnNotificationPayload {
             kind: kind,
             text: text,
             groupID: itemID,
-            replacesGroup: false
+            replacesGroup: false,
+            metadata: metadata
         )
     }
 
-    func messageLog(kind: ReviewLogEntry.Kind) -> BackendReviewEvent? {
+    func messageLog(
+        kind: ReviewLogEntry.Kind,
+        metadata: ReviewLogEntry.Metadata? = nil
+    ) -> BackendReviewEvent? {
         guard let message,
               message.isEmpty == false
         else {
@@ -1010,7 +1047,8 @@ private extension TurnNotificationPayload {
             kind: kind,
             text: message,
             groupID: itemID,
-            replacesGroup: false
+            replacesGroup: false,
+            metadata: metadata
         )
     }
 
@@ -1141,29 +1179,31 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "enteredReviewMode":
             return review.map { [.logEntry(kind: .progress, text: "Reviewing \($0)", groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
-            return command.map { [.logEntry(kind: .command, text: "$ \($0)", groupID: id, replacesGroup: true)] } ?? []
+            return command.map {
+                [logEntry(kind: .command, text: "$ \($0)", replacesGroup: true, title: "Command", status: "started")]
+            } ?? []
         case "mcpToolCall":
-            return [.logEntry(kind: .toolCall, text: "MCP \(toolLabel) started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "MCP \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
         case "dynamicToolCall":
-            return [.logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
         case "collabAgentToolCall":
-            return [.logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
         case "webSearch":
-            return [.logEntry(kind: .toolCall, text: "Web search: \(query ?? "started")", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Web search: \(query ?? "started")", replacesGroup: true, title: "Web search", status: "started")]
         case "imageView":
-            return [.logEntry(kind: .toolCall, text: "View image: \(path ?? "image")", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "View image: \(path ?? "image")", replacesGroup: true, title: "Image view", status: "started")]
         case "imageGeneration":
-            return [.logEntry(kind: .toolCall, text: "Image generation started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Image generation started.", replacesGroup: true, title: "Image generation", status: "started")]
         case "fileChange":
-            return [.logEntry(kind: .toolCall, text: "Applying file changes.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Applying file changes.", replacesGroup: true, title: "File changes", status: "started")]
         case "plan":
             return text.map { [.logEntry(kind: .plan, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
         case "contextCompaction":
-            return [.logEntry(kind: .event, text: "Context compaction started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .event, text: "Context compaction started.", replacesGroup: true, title: "Context compaction", status: "started")]
         case "hookPrompt":
-            return [.logEntry(kind: .event, text: "Hook prompt started.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .event, text: "Hook prompt started.", replacesGroup: true, title: "Hook prompt", status: "started", detail: prompt)]
         case "agentMessage":
             return []
         default:
@@ -1179,7 +1219,13 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty {
-                return [.logEntry(kind: .commandOutput, text: output, groupID: id, replacesGroup: true)]
+                return [logEntry(
+                    kind: .commandOutput,
+                    text: output,
+                    replacesGroup: true,
+                    title: "Command output",
+                    status: completedStatus
+                )]
             }
             return []
         case "plan":
@@ -1187,28 +1233,72 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
         case "mcpToolCall":
-            return [.logEntry(kind: .toolCall, text: "\(toolLabel) \(status ?? "completed").\(resultSuffix)", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "\(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "dynamicToolCall":
-            return [.logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(status ?? "completed").\(resultSuffix)", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "collabAgentToolCall":
-            return [.logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) \(status ?? "completed").\(promptSuffix)", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) \(status ?? "completed").\(promptSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus, detail: prompt)]
         case "webSearch":
-            return [.logEntry(kind: .toolCall, text: "Web search completed: \(query ?? "search").", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Web search completed: \(query ?? "search").", replacesGroup: true, title: "Web search", status: completedStatus)]
         case "imageView":
-            return [.logEntry(kind: .toolCall, text: "Image viewed: \(path ?? "image").", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Image viewed: \(path ?? "image").", replacesGroup: true, title: "Image view", status: completedStatus)]
         case "imageGeneration":
-            return [.logEntry(kind: .toolCall, text: "Image generation \(status ?? "completed").\(resultSuffix)", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "Image generation \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: "Image generation", status: completedStatus)]
         case "fileChange":
-            return [.logEntry(kind: .toolCall, text: "File changes \(status ?? "completed").", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .toolCall, text: "File changes \(status ?? "completed").", replacesGroup: true, title: "File changes", status: completedStatus)]
         case "contextCompaction":
-            return [.logEntry(kind: .event, text: "Context compacted.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .event, text: "Context compacted.", replacesGroup: true, title: "Context compaction", status: completedStatus)]
         case "hookPrompt":
-            return [.logEntry(kind: .event, text: "Hook prompt completed.", groupID: id, replacesGroup: true)]
+            return [logEntry(kind: .event, text: "Hook prompt completed.", replacesGroup: true, title: "Hook prompt", status: completedStatus, detail: prompt)]
         case "enteredReviewMode":
             return []
         default:
             return [.logEntry(kind: .event, text: "App-server item completed: \(type).", groupID: id, replacesGroup: true)]
         }
+    }
+
+    private func logEntry(
+        kind: ReviewLogEntry.Kind,
+        text: String,
+        replacesGroup: Bool,
+        title: String?,
+        status explicitStatus: String? = nil,
+        detail: String? = nil
+    ) -> BackendReviewEvent {
+        .logEntry(
+            kind: kind,
+            text: text,
+            groupID: id,
+            replacesGroup: replacesGroup,
+            metadata: metadata(title: title, status: explicitStatus, detail: detail)
+        )
+    }
+
+    private func metadata(
+        title: String?,
+        status explicitStatus: String?,
+        detail: String?
+    ) -> ReviewLogEntry.Metadata {
+        .init(
+            sourceType: type,
+            title: title?.nilIfEmpty,
+            status: explicitStatus?.nilIfEmpty ?? status?.nilIfEmpty,
+            detail: detail?.nilIfEmpty,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: result?.nonNullDebugText?.nilIfEmpty,
+            errorText: error?.nonNullDebugText?.nilIfEmpty
+        )
+    }
+
+    private var completedStatus: String? {
+        status?.nilIfEmpty ?? exitCode.map { $0 == 0 ? "succeeded" : "failed" } ?? "completed"
     }
 
     private var toolLabel: String {
