@@ -1298,7 +1298,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     private var completedStatus: String? {
-        status?.nilIfEmpty ?? exitCode.map { $0 == 0 ? "succeeded" : "failed" } ?? "completed"
+        if let status = status?.nilIfEmpty {
+            return status
+        }
+        if let exitCode {
+            return exitCode == 0 ? "succeeded" : "failed"
+        }
+        if error?.nonNullDebugText?.nilIfEmpty != nil {
+            return "failed"
+        }
+        if let success {
+            return success ? "succeeded" : "failed"
+        }
+        return "completed"
     }
 
     private var toolLabel: String {

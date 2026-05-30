@@ -2129,6 +2129,74 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendMarksErroredToolCompletionsAsFailedMetadata() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "mcpToolCall",
+                    id: "tool-error",
+                    server: "codex_review",
+                    tool: "review_read",
+                    error: "denied"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "dynamicToolCall",
+                    id: "tool-success-false",
+                    namespace: "web",
+                    tool: "search",
+                    result: "no matches",
+                    success: false
+                )
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "codex_review.review_read completed. Error: denied",
+            groupID: "tool-error",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "codex_review.review_read",
+                status: "failed",
+                server: "codex_review",
+                tool: "review_read",
+                errorText: "denied"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Dynamic tool web.search completed. Result: no matches",
+            groupID: "tool-success-false",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "dynamicToolCall",
+                title: "web.search",
+                status: "failed",
+                namespace: "web",
+                tool: "search",
+                resultText: "no matches"
+            )
+        ))
+    }
+
     @Test func backendWaitsForFinalReviewItemAfterTurnCompletes() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -2517,6 +2585,7 @@ private struct TestItem: Encodable, Sendable {
     var path: String?
     var result: String?
     var error: String?
+    var success: Bool?
     var prompt: String?
     var summary: [String]?
     var content: [String]?
@@ -2537,6 +2606,7 @@ private struct TestItem: Encodable, Sendable {
         path: String? = nil,
         result: String? = nil,
         error: String? = nil,
+        success: Bool? = nil,
         prompt: String? = nil,
         summary: [String]? = nil,
         content: [String]? = nil
@@ -2556,6 +2626,7 @@ private struct TestItem: Encodable, Sendable {
         self.path = path
         self.result = result
         self.error = error
+        self.success = success
         self.prompt = prompt
         self.summary = summary
         self.content = content
