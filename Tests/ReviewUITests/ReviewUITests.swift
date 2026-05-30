@@ -2367,13 +2367,16 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 1") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
+        #expect(abs(transport.logCommandOutputPanelTitleAlignmentDeltaForTesting ?? .infinity) <= 0.5)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
 
-        transport.toggleFirstLogCommandOutputPanelForTesting()
+        #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
         await awaitNativeLayoutTurn()
 
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.down")
         #expect((5...6).contains(transport.logCommandOutputPanelVisibleLineCapacityForTesting))
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
     }

@@ -651,8 +651,21 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelVisibleLineCapacityForTesting
     }
 
+    var logCommandOutputPanelToggleSymbolNameForTesting: String? {
+        logScrollView.commandOutputPanelToggleSymbolNameForTesting
+    }
+
+    var logCommandOutputPanelTitleAlignmentDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelTitleAlignmentDeltaForTesting
+    }
+
     func toggleFirstLogCommandOutputPanelForTesting() {
         logScrollView.toggleFirstCommandOutputPanelForTesting()
+    }
+
+    @discardableResult
+    func clickFirstLogCommandOutputPanelHeaderForTesting() -> Bool {
+        logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
     }
 
     func completeLogWordGlowAnimationsForTesting() {
