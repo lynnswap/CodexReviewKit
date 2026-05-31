@@ -109,6 +109,37 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.text.contains("Ran command for 3s"))
     }
 
+    @Test func commandOutputDisplayLetsExitCodeOverrideCompletedStatus() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-exit-code",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests failed",
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 10s",
+                        status: "completed",
+                        exitCode: 1
+                    )
+                ),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+        )
+
+        #expect(displayDocument.commandOutputPanels.first?.exitText == "exit 1")
+    }
+
     @Test func metadataIsPreservedOnBlocks() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",

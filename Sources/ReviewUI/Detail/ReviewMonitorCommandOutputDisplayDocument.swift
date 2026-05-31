@@ -253,6 +253,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputResultText(for block: ReviewMonitorLogBlock) -> String? {
+        if let exitCode = block.metadata?.exitCode {
+            return exitCode == 0 ? "Success" : "exit \(exitCode)"
+        }
+
         let normalizedStatus = block.metadata?.status?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -264,9 +268,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 return "exit \(exitCode)"
             }
             return "Failed"
-        }
-        if let exitCode = block.metadata?.exitCode {
-            return "exit \(exitCode)"
         }
         return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
