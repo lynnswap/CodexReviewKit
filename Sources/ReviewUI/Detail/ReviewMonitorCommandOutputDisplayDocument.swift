@@ -19,6 +19,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         var styleRuns: [ReviewMonitorLogTextRun] = []
         var decorations: [ReviewMonitorLogDecoration] = []
         var panels: [ReviewMonitorLogCommandOutputPanel] = []
+        var usedPanelBlockIDs: Set<ReviewMonitorLogBlockID> = []
         var cursor = 0
 
         func appendText(_ segment: String) -> NSRange {
@@ -56,7 +57,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 commandBlocksByGroupID: commandBlocksByGroupID,
                 commandOutputBlocksByGroupID: commandOutputBlocksByGroupID
             ) {
-                let blockID = commandPanelBlockID(for: panelSource.anchor)
+                let blockID = uniqueCommandPanelBlockID(
+                    for: panelSource.anchor,
+                    usedBlockIDs: &usedPanelBlockIDs
+                )
                 let metadata = panelSource.output?.metadata ?? panelSource.command?.metadata ?? panelSource.anchor.metadata
                 let isExpanded = expandedBlockIDs.contains(blockID)
                 let title = commandOutputTitle(
@@ -216,6 +220,29 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return ReviewMonitorLogBlockID("commandOutput:\(groupID)")
         }
         return block.id
+    }
+
+    private static func uniqueCommandPanelBlockID(
+        for block: ReviewMonitorLogBlock,
+        usedBlockIDs: inout Set<ReviewMonitorLogBlockID>
+    ) -> ReviewMonitorLogBlockID {
+        let preferredBlockID = commandPanelBlockID(for: block)
+        if usedBlockIDs.insert(preferredBlockID).inserted {
+            return preferredBlockID
+        }
+
+        if usedBlockIDs.insert(block.id).inserted {
+            return block.id
+        }
+
+        var suffix = 2
+        while true {
+            let candidate = ReviewMonitorLogBlockID("\(block.id.rawValue):\(suffix)")
+            if usedBlockIDs.insert(candidate).inserted {
+                return candidate
+            }
+            suffix += 1
+        }
     }
 
     private static func commandPanelSourceRange(_ source: CommandPanelSource) -> NSRange {

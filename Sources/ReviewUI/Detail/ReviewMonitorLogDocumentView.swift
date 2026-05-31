@@ -512,8 +512,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         from previousPanels: [ReviewMonitorLogCommandOutputPanel],
         to nextPanels: [ReviewMonitorLogCommandOutputPanel]
     ) -> [NSRange] {
-        let previousPanelsByID = Dictionary(uniqueKeysWithValues: previousPanels.map { ($0.blockID, $0) })
-        let nextPanelsByID = Dictionary(uniqueKeysWithValues: nextPanels.map { ($0.blockID, $0) })
+        let previousPanelsByID = firstCommandOutputPanelsByID(previousPanels)
+        let nextPanelsByID = firstCommandOutputPanelsByID(nextPanels)
         var ranges: [NSRange] = []
         for panel in nextPanels where previousPanelsByID[panel.blockID] != panel {
             ranges.append(panel.range)
@@ -522,6 +522,16 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             ranges.append(panel.range)
         }
         return ranges
+    }
+
+    private func firstCommandOutputPanelsByID(
+        _ panels: [ReviewMonitorLogCommandOutputPanel]
+    ) -> [ReviewMonitorLogBlockID: ReviewMonitorLogCommandOutputPanel] {
+        var panelsByID: [ReviewMonitorLogBlockID: ReviewMonitorLogCommandOutputPanel] = [:]
+        for panel in panels where panelsByID[panel.blockID] == nil {
+            panelsByID[panel.blockID] = panel
+        }
+        return panelsByID
     }
 
     private func normalizedRanges(_ ranges: [NSRange], in fullRange: NSRange) -> [NSRange] {

@@ -109,6 +109,30 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
     }
 
+    @Test func duplicateStartedCommandsKeepUniquePanelIDs() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-duplicate-command-started",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test --filter ReviewUI"),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+        let blockIDs = displayDocument.commandOutputPanels.map(\.blockID)
+
+        #expect(displayDocument.commandOutputPanels.count == 2)
+        #expect(Set(blockIDs).count == blockIDs.count)
+        #expect(blockIDs.first == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+    }
+
     @Test func commandOutputDisplayKeepsCommandPanelBeforeInterleavedBlocks() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output-interleaved",
