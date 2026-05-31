@@ -107,23 +107,21 @@ private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
 
 final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
     let blockID: ReviewMonitorLogBlockID
-    let symbolName: String
+    let isExpanded: Bool
     let symbolSize: CGFloat
     let fontPointSize: CGFloat
     let slotWidth: CGFloat
-    let renderedSymbolSize: NSSize
+
+    var symbolName: String {
+        isExpanded ? "chevron.down" : "chevron.forward"
+    }
 
     init(blockID: ReviewMonitorLogBlockID, isExpanded: Bool, font: NSFont) {
         self.blockID = blockID
-        self.symbolName = isExpanded ? "chevron.down" : "chevron.forward"
+        self.isExpanded = isExpanded
         self.symbolSize = ceil(font.pointSize + 1)
         self.fontPointSize = font.pointSize
         self.slotWidth = ReviewMonitorCommandOutputPanelView.chevronSlotWidth(for: font)
-        self.renderedSymbolSize = Self.renderedSymbolSize(
-            name: symbolName,
-            symbolSize: symbolSize,
-            pointSize: symbolSize
-        )
         super.init(data: nil, ofType: nil)
 
         allowsTextAttachmentView = true
@@ -171,31 +169,6 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
         textContainer: NSTextContainer?
     ) -> NSImage? {
         Self.transparentImage
-    }
-
-    private static func renderedSymbolSize(
-        name: String,
-        symbolSize: CGFloat,
-        pointSize: CGFloat
-    ) -> NSSize {
-        let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
-            .applying(.init(hierarchicalColor: .secondaryLabelColor))
-        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(symbolConfiguration)
-        else {
-            return .zero
-        }
-
-        let naturalSize = symbol.size
-        let scale = min(
-            symbolSize / max(1, naturalSize.width),
-            symbolSize / max(1, naturalSize.height)
-        )
-        let drawSize = NSSize(
-            width: max(1, floor(naturalSize.width * scale)),
-            height: max(1, floor(naturalSize.height * scale))
-        )
-        return drawSize
     }
 
     private static let transparentImage: NSImage = {
@@ -330,24 +303,19 @@ final class ReviewMonitorCommandOutputPanelAttachmentViewProvider: NSTextAttachm
 @MainActor
 final class ReviewMonitorCommandOutputToggleButton: NSButton {
     private(set) var blockID: ReviewMonitorLogBlockID
-    private(set) var symbolName: String
+    private(set) var isExpanded: Bool
     private var buttonSize: NSSize
-    private var symbolImage: NSImage?
-    private var symbolDrawSize = NSSize(width: 0, height: 0)
 
     init(attachment: ReviewMonitorCommandOutputToggleAttachment) {
         self.blockID = attachment.blockID
-        self.symbolName = attachment.symbolName
+        self.isExpanded = attachment.isExpanded
         self.buttonSize = NSSize(width: attachment.slotWidth, height: attachment.symbolSize)
         super.init(frame: NSRect(origin: .zero, size: buttonSize))
 
         title = ""
-        isBordered = false
-        setButtonType(.momentaryChange)
-        imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyDown
+        setButtonType(.pushOnPushOff)
+        bezelStyle = .disclosure
         focusRingType = .none
-        bezelStyle = .regularSquare
         target = self
         action = #selector(toggleCommandOutputPanel(_:))
         configure(attachment: attachment)
@@ -360,26 +328,17 @@ final class ReviewMonitorCommandOutputToggleButton: NSButton {
 
     func configure(attachment: ReviewMonitorCommandOutputToggleAttachment) {
         blockID = attachment.blockID
-        symbolName = attachment.symbolName
+        isExpanded = attachment.isExpanded
         buttonSize = NSSize(width: attachment.slotWidth, height: attachment.symbolSize)
         frame.size = buttonSize
         invalidateIntrinsicContentSize()
-        symbolDrawSize = attachment.renderedSymbolSize
+        state = isExpanded ? .on : .off
 
-        let accessibilityLabel = symbolName == "chevron.down"
+        let accessibilityLabel = isExpanded
             ? "Collapse command output"
             : "Expand command output"
         toolTip = accessibilityLabel
         setAccessibilityLabel(accessibilityLabel)
-
-        let symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: attachment.symbolSize,
-            weight: .medium
-        )
-            .applying(.init(hierarchicalColor: isHighlighted ? .labelColor : .secondaryLabelColor))
-        symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(symbolConfiguration)
-        needsDisplay = true
     }
 
     override var intrinsicContentSize: NSSize {
@@ -388,35 +347,6 @@ final class ReviewMonitorCommandOutputToggleButton: NSButton {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
-    }
-
-    override func highlight(_ flag: Bool) {
-        super.highlight(flag)
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard let symbolImage else {
-            return
-        }
-
-        let drawSize = NSSize(
-            width: min(bounds.width, max(1, symbolDrawSize.width)),
-            height: min(bounds.height, max(1, symbolDrawSize.height))
-        )
-        symbolImage.draw(
-            in: NSRect(
-                x: floor((bounds.width - drawSize.width) / 2),
-                y: floor((bounds.height - drawSize.height) / 2),
-                width: drawSize.width,
-                height: drawSize.height
-            ),
-            from: .zero,
-            operation: .sourceOver,
-            fraction: isEnabled ? 1 : 0.45,
-            respectFlipped: true,
-            hints: nil
-        )
     }
 
     @objc private func toggleCommandOutputPanel(_ sender: ReviewMonitorCommandOutputToggleButton) {
@@ -457,6 +387,8 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
         self.blockID = attachment.blockID
         self.panelView = ReviewMonitorCommandOutputPanelView(blockID: attachment.blockID)
         super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
 
         backgroundView.material = .contentBackground
         backgroundView.blendingMode = .withinWindow

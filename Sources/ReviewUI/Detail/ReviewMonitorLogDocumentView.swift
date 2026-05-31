@@ -1,5 +1,6 @@
 import AppKit
 import CodexReview
+import QuartzCore
 
 private extension ReviewLogEntry.Kind {
     var requiresMarkdownPresentationInvalidationOnAppend: Bool {
@@ -40,6 +41,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private var preferredTextContainerWidth: CGFloat = 0
     private var currentDecorations: [ReviewMonitorLogDecoration] = []
     private var currentCommandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = []
+    private var pendingCommandOutputPanelLayoutAnimation: CommandOutputPanelLayoutAnimation?
     private(set) var estimatedDocumentHeight: CGFloat = 0
     private var glowTimer: Timer?
     var contentInsets: NSEdgeInsets = .init()
@@ -81,6 +83,23 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private static let wordFadeStagger: TimeInterval = 0.028
     private static let wordFadeAlphaStepCount = 16
     private static let maxReadableTextWidth: CGFloat = 980
+    private static let commandOutputPanelExpansionDuration: TimeInterval = 0.26
+
+    private struct FragmentRangeKey: Hashable {
+        var location: Int
+        var length: Int
+
+        init(_ range: NSRange) {
+            location = range.location
+            length = range.length
+        }
+    }
+
+    private struct CommandOutputPanelLayoutAnimation {
+        var fragmentFramesByRange: [FragmentRangeKey: NSRect]
+        var orderedFragmentFrames: [NSRect]
+        var collapsingPanelSnapshots: [NSImageView]
+    }
 
     override var isFlipped: Bool {
         true
@@ -133,14 +152,14 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         observeAccessibilityDisplayOptions()
     }
 
-    isolated deinit {
-        glowTimer?.invalidate()
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-    }
-
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        glowTimer?.invalidate()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     override func layout() {
@@ -345,6 +364,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             currentDecorations = []
             currentCommandOutputPanels = []
             decorationView.decorations = []
+            pendingCommandOutputPanelLayoutAnimation = nil
             return
         }
 
@@ -588,6 +608,142 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
 #endif
         return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
+    }
+
+    var shouldAnimateCommandOutputPanelTransitions: Bool {
+#if DEBUG
+        if let reduceMotionOverrideForTesting {
+            return reduceMotionOverrideForTesting == false
+        }
+#endif
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
+    }
+
+    func prepareCommandOutputPanelLayoutAnimation() {
+        guard shouldAnimateCommandOutputPanelTransitions else {
+            pendingCommandOutputPanelLayoutAnimation = nil
+            return
+        }
+
+        layoutTextViewport(force: true)
+        let orderedFragmentViews = visibleFragmentViews.sorted { $0.frame.minY < $1.frame.minY }
+        var fragmentFramesByRange: [FragmentRangeKey: NSRect] = [:]
+        var orderedFragmentFrames: [NSRect] = []
+        fragmentFramesByRange.reserveCapacity(orderedFragmentViews.count)
+        orderedFragmentFrames.reserveCapacity(orderedFragmentViews.count)
+        for fragmentView in orderedFragmentViews {
+            let range = nsRange(for: fragmentView.layoutFragment.rangeInElement)
+            fragmentFramesByRange[FragmentRangeKey(range)] = fragmentView.frame
+            orderedFragmentFrames.append(fragmentView.frame)
+        }
+
+        pendingCommandOutputPanelLayoutAnimation = CommandOutputPanelLayoutAnimation(
+            fragmentFramesByRange: fragmentFramesByRange,
+            orderedFragmentFrames: orderedFragmentFrames,
+            collapsingPanelSnapshots: commandOutputPanelSnapshotViewsForAnimation()
+        )
+    }
+
+    func performPreparedCommandOutputPanelLayoutAnimation() {
+        guard let animation = pendingCommandOutputPanelLayoutAnimation,
+              shouldAnimateCommandOutputPanelTransitions
+        else {
+            pendingCommandOutputPanelLayoutAnimation = nil
+            return
+        }
+        pendingCommandOutputPanelLayoutAnimation = nil
+
+        layoutTextViewport(force: true)
+        let orderedFragmentViews = visibleFragmentViews.sorted { $0.frame.minY < $1.frame.minY }
+        let panelViews = visibleCommandOutputPanelAttachmentViews()
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.commandOutputPanelExpansionDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+
+            for (index, fragmentView) in orderedFragmentViews.enumerated() {
+                let finalFrame = fragmentView.frame
+                let range = nsRange(for: fragmentView.layoutFragment.rangeInElement)
+                let fallbackFrame = index < animation.orderedFragmentFrames.count
+                    ? animation.orderedFragmentFrames[index]
+                    : nil
+                guard let initialFrame = animation.fragmentFramesByRange[FragmentRangeKey(range)] ?? fallbackFrame,
+                      verticalFrameComponentsAreNearlyEqual(initialFrame, finalFrame) == false
+                else {
+                    continue
+                }
+                fragmentView.frame = NSRect(
+                    x: finalFrame.minX,
+                    y: initialFrame.minY,
+                    width: finalFrame.width,
+                    height: initialFrame.height
+                )
+                fragmentView.animator().frame = finalFrame
+            }
+
+            for panelView in panelViews {
+                let finalFrame = panelView.frame
+                guard finalFrame.height > 1 else {
+                    continue
+                }
+                panelView.frame = NSRect(
+                    x: finalFrame.minX,
+                    y: finalFrame.minY,
+                    width: finalFrame.width,
+                    height: 1
+                )
+                panelView.animator().frame = finalFrame
+            }
+
+            for snapshot in animation.collapsingPanelSnapshots {
+                let finalFrame = NSRect(
+                    x: snapshot.frame.minX,
+                    y: snapshot.frame.minY,
+                    width: snapshot.frame.width,
+                    height: 1
+                )
+                snapshot.animator().frame = finalFrame
+                snapshot.animator().alphaValue = 0
+            }
+        } completionHandler: {
+            Task { @MainActor in
+                for snapshot in animation.collapsingPanelSnapshots {
+                    snapshot.removeFromSuperview()
+                }
+            }
+        }
+    }
+
+    private func commandOutputPanelSnapshotViewsForAnimation() -> [NSImageView] {
+        let panelViews = visibleCommandOutputPanelAttachmentViews()
+        guard panelViews.isEmpty == false else {
+            return []
+        }
+
+        var snapshots: [NSImageView] = []
+        snapshots.reserveCapacity(panelViews.count)
+        for panelView in panelViews {
+            let panelBounds = panelView.bounds
+            guard panelBounds.isEmpty == false,
+                  let bitmap = panelView.bitmapImageRepForCachingDisplay(in: panelBounds)
+            else {
+                continue
+            }
+            panelView.cacheDisplay(in: panelBounds, to: bitmap)
+            let image = NSImage(size: panelBounds.size)
+            image.addRepresentation(bitmap)
+
+            let snapshot = NSImageView(frame: panelView.convert(panelBounds, to: fragmentViewportView))
+            snapshot.image = image
+            snapshot.imageScaling = .scaleAxesIndependently
+            snapshot.alphaValue = panelView.alphaValue
+            snapshot.wantsLayer = true
+            snapshot.layer?.masksToBounds = true
+            fragmentViewportView.addSubview(snapshot)
+            snapshots.append(snapshot)
+        }
+        return snapshots
     }
 
     private func enqueueWordFadeAnimations(ranges: [NSRange], startedAt: TimeInterval) {
@@ -1904,9 +2060,20 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             abs(lhs.height - rhs.height) <= 0.5
     }
 
+    private func verticalFrameComponentsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.minY - rhs.minY) <= 0.5 &&
+            abs(lhs.height - rhs.height) <= 0.5
+    }
+
     private func sizesAreNearlyEqual(_ lhs: NSSize, _ rhs: NSSize) -> Bool {
         abs(lhs.width - rhs.width) <= 0.5 &&
             abs(lhs.height - rhs.height) <= 0.5
+    }
+
+    private func visibleCommandOutputPanelAttachmentViews() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
+        visibleFragmentViews.flatMap { fragmentView in
+            fragmentView.subviews.compactMap { $0 as? ReviewMonitorCommandOutputPanelAttachmentView }
+        }
     }
 
     private func edgeInsetsAreNearlyEqual(_ lhs: NSEdgeInsets, _ rhs: NSEdgeInsets) -> Bool {
@@ -2137,7 +2304,7 @@ extension ReviewMonitorLogDocumentView {
     }
 
     private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {
-        visibleCommandOutputPanelAttachmentViewsForTesting()
+        visibleCommandOutputPanelAttachmentViews()
             .sorted { lhs, rhs in
                 lhs.convert(lhs.bounds.origin, to: self).y < rhs.convert(rhs.bounds.origin, to: self).y
             }
@@ -2145,9 +2312,7 @@ extension ReviewMonitorLogDocumentView {
     }
 
     private func visibleCommandOutputPanelAttachmentViewsForTesting() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
-        visibleFragmentViews.flatMap { fragmentView in
-            fragmentView.subviews.compactMap { $0 as? ReviewMonitorCommandOutputPanelAttachmentView }
-        }
+        visibleCommandOutputPanelAttachmentViews()
     }
 
     var wordGlowCountForTesting: Int {

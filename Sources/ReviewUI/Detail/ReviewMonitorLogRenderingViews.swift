@@ -135,15 +135,18 @@ final class ReviewMonitorLogFragmentView: NSView {
             guard let attachmentView else {
                 continue
             }
-            attachmentView.frame = layoutFragment
+            let targetFrame = layoutFragment
                 .frameForTextAttachment(at: provider.location)
                 .integral
-            guard attachmentView.frame.isEmpty == false else {
+            guard targetFrame.isEmpty == false else {
                 continue
             }
             attachmentView.needsLayout = true
             if attachmentView.superview !== self {
+                attachmentView.frame = targetFrame
                 addSubview(attachmentView)
+            } else {
+                attachmentView.frame = targetFrame
             }
             visibleAttachmentViews.insert(ObjectIdentifier(attachmentView))
         }

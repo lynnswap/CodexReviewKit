@@ -262,19 +262,23 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) {
+        guard let sourceDocument else {
+            return
+        }
+        if logDocumentView.shouldAnimateCommandOutputPanelTransitions {
+            logDocumentView.prepareCommandOutputPanelLayoutAnimation()
+        }
         if expandedCommandOutputBlockIDs.contains(blockID) {
             expandedCommandOutputBlockIDs.remove(blockID)
         } else {
             expandedCommandOutputBlockIDs.insert(blockID)
-        }
-        guard let sourceDocument else {
-            return
         }
         _ = render(
             document: sourceDocument,
             restoring: currentScrollRestorationTarget,
             allowIncrementalUpdate: false
         )
+        logDocumentView.performPreparedCommandOutputPanelLayoutAnimation()
     }
 
     private func pruneExpandedCommandOutputState(for document: ReviewMonitorLogDocument) {
