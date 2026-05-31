@@ -673,6 +673,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(block.kind)
             hasher.combine(block.groupID)
             combine(range, into: &hasher)
+            combine(block.sourceRange, into: &hasher)
             hasher.combine(block.metadata)
         }
 
@@ -693,6 +694,23 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(decoration.blockID)
             combine(range, into: &hasher)
             hasher.combine(decoration.style)
+        }
+
+        for panel in document.commandOutputPanels {
+            guard let range = clippedRange(panel.range, upperBound: clampedPrefixLength) else {
+                continue
+            }
+            hasher.combine("commandOutputPanel")
+            hasher.combine(panel.blockID)
+            combine(range, into: &hasher)
+            hasher.combine(panel.commandText)
+            hasher.combine(panel.lineCount)
+            hasher.combine(panel.isExpanded)
+            hasher.combine(panel.title)
+            hasher.combine(panel.exitText)
+            if panel.isExpanded {
+                hasher.combine(panel.outputText)
+            }
         }
 
         return hasher.finalize()

@@ -59,7 +59,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             skippedCommandGroupID = nil
 
             if block.kind == .commandOutput {
-                let outputText = sourceString.substring(with: block.range)
                 let isExpanded = expandedBlockIDs.contains(block.id)
                 let title = commandOutputTitle(
                     for: block,
@@ -88,6 +87,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     range: displayRange,
                     style: terminalDecorationStyle(for: block, in: source)
                 ))
+                let outputText = commandOutputText(
+                    for: block,
+                    sourceString: sourceString,
+                    isExpanded: isExpanded
+                )
                 panels.append(.init(
                     blockID: block.id,
                     range: displayRange,
@@ -198,6 +202,17 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
         let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
         return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
+    }
+
+    private static func commandOutputText(
+        for block: ReviewMonitorLogBlock,
+        sourceString: NSString,
+        isExpanded: Bool
+    ) -> String {
+        guard isExpanded else {
+            return ""
+        }
+        return sourceString.substring(with: block.range)
     }
 
     private static func commandOutputTitle(
