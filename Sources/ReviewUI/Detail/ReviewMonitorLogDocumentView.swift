@@ -1392,11 +1392,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             appendDocumentRange(NSRange(location: cursor, length: NSMaxRange(panel.range) - cursor))
             cursor = NSMaxRange(panel.range)
 
-            guard panel.isExpanded, panel.outputText.isEmpty == false else {
+            let panelFinderText = commandOutputFinderText(for: panel)
+            guard panel.isExpanded, panelFinderText.isEmpty == false else {
                 continue
             }
-            let outputRange = NSRange(location: 0, length: (panel.outputText as NSString).length)
-            let finderRange = append(panel.outputText)
+            let outputRange = NSRange(location: 0, length: (panelFinderText as NSString).length)
+            let finderRange = append(panelFinderText)
             segments.append(.init(
                 finderRange: finderRange,
                 target: .commandOutput(
@@ -1411,6 +1412,19 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         let mapping = FinderStringMapping(string: finderString, segments: segments)
         cachedFinderStringMapping = mapping
         return mapping
+    }
+
+    private func commandOutputFinderText(for panel: ReviewMonitorLogCommandOutputPanel) -> String {
+        let trimmedCommandText = panel.commandText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandLineText = trimmedCommandText.isEmpty ? "" : "$ \(trimmedCommandText)"
+        let trimmedOutputText = panel.outputText.trimmingCharacters(in: .newlines)
+        if commandLineText.isEmpty {
+            return panel.outputText
+        }
+        if trimmedOutputText.isEmpty {
+            return commandLineText
+        }
+        return "\(commandLineText)\n\(trimmedOutputText)"
     }
 
     private func invalidateFinderStringMapping() {
