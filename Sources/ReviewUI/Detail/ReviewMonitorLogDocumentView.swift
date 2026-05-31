@@ -1349,6 +1349,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     func scrollFinderRangeToVisible(_ range: NSRange) {
+        scrollCommandOutputFinderRangesToVisible(range)
         let rects = rects(forFinderCharacterRange: range).map(\.rectValue)
         guard let firstRect = rects.first else {
             return
@@ -1372,7 +1373,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             case .document:
                 rects.append(contentsOf: self.rects(forCharacterRange: mapFinderRange(intersection, in: segment)))
             case .commandOutput(let blockID, _, let panelRange):
-                let panelRects = commandOutputPanelRects(blockID: blockID, fallbackPanelRange: panelRange)
+                let panelRects = commandOutputPanelRects(
+                    blockID: blockID,
+                    terminalRange: mapFinderRange(intersection, in: segment),
+                    fallbackPanelRange: panelRange
+                )
                 rects.append(contentsOf: panelRects.map(NSValue.init(rect:)))
             }
         }
@@ -1429,6 +1434,14 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 continue
             }
             guard case .document = segment.target else {
+                if case .commandOutput(let blockID, _, let panelRange) = segment.target {
+                    drawCommandOutputCharacters(
+                        blockID: blockID,
+                        terminalRange: mapFinderRange(intersection, in: segment),
+                        fallbackPanelRange: panelRange,
+                        forContentView: view
+                    )
+                }
                 continue
             }
             drawCharacters(in: mapFinderRange(intersection, in: segment), forContentView: view)
@@ -1619,12 +1632,46 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func commandOutputPanelRects(
         blockID: ReviewMonitorLogBlockID,
+        terminalRange: NSRange,
         fallbackPanelRange: NSRange
     ) -> [NSRect] {
         if let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID }) {
+            let rects = panelView.rects(forTerminalRange: terminalRange, convertedTo: self)
+            if rects.isEmpty == false {
+                return rects
+            }
             return [panelView.convert(panelView.bounds, to: self)]
         }
         return rects(forCharacterRange: fallbackPanelRange).map(\.rectValue)
+    }
+
+    private func scrollCommandOutputFinderRangesToVisible(_ range: NSRange) {
+        let mapping = finderStringMapping()
+        for segment in mapping.segments {
+            let intersection = NSIntersectionRange(segment.finderRange, range)
+            guard intersection.length > 0 else {
+                continue
+            }
+            guard case .commandOutput(let blockID, _, _) = segment.target,
+                  let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID })
+            else {
+                continue
+            }
+            panelView.scrollTerminalRangeToVisible(mapFinderRange(intersection, in: segment))
+        }
+    }
+
+    private func drawCommandOutputCharacters(
+        blockID: ReviewMonitorLogBlockID,
+        terminalRange: NSRange,
+        fallbackPanelRange: NSRange,
+        forContentView view: NSView
+    ) {
+        guard let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID }) else {
+            drawCharacters(in: fallbackPanelRange, forContentView: view)
+            return
+        }
+        panelView.drawTerminalCharacters(in: terminalRange, forContentView: view)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -2663,6 +2710,24 @@ extension ReviewMonitorLogDocumentView {
     func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
         layoutTextViewport(force: true)
         return firstVisibleCommandOutputPanelViewForTesting()?.scrollOutputForTesting(deltaY: deltaY) ?? false
+    }
+
+    var commandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.outputHitTestTargetsTextViewForTesting ?? false
+    }
+
+    func finderRectsForTesting(_ range: NSRange) -> [NSRect] {
+        layoutTextViewport(force: true)
+        return rects(forFinderCharacterRange: range).map(\.rectValue)
+    }
+
+    var firstCommandOutputPanelRectForTesting: NSRect? {
+        layoutTextViewport(force: true)
+        guard let panelView = firstVisibleCommandOutputPanelViewForTesting() else {
+            return nil
+        }
+        return panelView.convert(panelView.bounds, to: self)
     }
 
     var commandOutputPanelToggleSymbolNameForTesting: String? {

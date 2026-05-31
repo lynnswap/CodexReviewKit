@@ -58,52 +58,7 @@ final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentVie
 }
 
 @MainActor
-private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
-    override func mouseDown(with event: NSEvent) {
-        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseDown(with: event) }) else {
-            super.mouseDown(with: event)
-            return
-        }
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseDragged(with: event) }) else {
-            super.mouseDragged(with: event)
-            return
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseUp(with: event) }) else {
-            super.mouseUp(with: event)
-            return
-        }
-    }
-
-    private func forwardMouseEventToDocumentView(
-        _ event: NSEvent,
-        perform: (NSView) -> Void
-    ) -> Bool {
-        let point = convert(event.locationInWindow, from: nil)
-        if let verticalScroller, verticalScroller.isHidden == false,
-           verticalScroller.frame.contains(point) {
-            return false
-        }
-        if let horizontalScroller, horizontalScroller.isHidden == false,
-           horizontalScroller.frame.contains(point) {
-            return false
-        }
-        guard let documentView else {
-            return false
-        }
-        let documentPoint = documentView.convert(event.locationInWindow, from: nil)
-        guard documentView.bounds.contains(documentPoint) else {
-            return false
-        }
-        perform(documentView)
-        return true
-    }
-}
+private final class ReviewMonitorCommandOutputScrollView: NSScrollView {}
 
 final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
     let blockID: ReviewMonitorLogBlockID
@@ -448,6 +403,28 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
         return panelView.hitTest(convert(point, to: panelView))
     }
 
+    func rects(
+        forTerminalRange range: NSRange,
+        convertedTo targetView: NSView
+    ) -> [NSRect] {
+        prepareForRangeQueries()
+        return panelView.rects(forTerminalRange: range, convertedTo: targetView)
+    }
+
+    func scrollTerminalRangeToVisible(_ range: NSRange) {
+        prepareForRangeQueries()
+        panelView.scrollTerminalRangeToVisible(range)
+    }
+
+    func drawTerminalCharacters(in range: NSRange, forContentView view: NSView) {
+        prepareForRangeQueries()
+        panelView.drawTerminalCharacters(in: range, forContentView: view)
+    }
+
+    private func prepareForRangeQueries() {
+        layoutSubtreeIfNeeded()
+    }
+
 #if DEBUG
     private func prepareForTesting() {
         layoutSubtreeIfNeeded()
@@ -508,6 +485,11 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
     func scrollOutputForTesting(deltaY: CGFloat) -> Bool {
         prepareForTesting()
         return panelView.scrollOutputForTesting(deltaY: deltaY)
+    }
+
+    var outputHitTestTargetsTextViewForTesting: Bool {
+        prepareForTesting()
+        return panelView.outputHitTestTargetsTextViewForTesting
     }
 #endif
 }
@@ -730,13 +712,60 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         }
         if outputScrollView.isHidden == false,
            outputScrollView.frame.contains(point) {
-            return outputScrollView
+            let scrollPoint = convert(point, to: outputScrollView)
+            if let verticalScroller = outputScrollView.verticalScroller,
+               verticalScroller.isHidden == false,
+               verticalScroller.frame.contains(scrollPoint) {
+                return outputScrollView.hitTest(scrollPoint)
+            }
+            let outputPoint = convert(point, to: outputTextView)
+            if outputTextView.bounds.contains(outputPoint) {
+                return outputTextView.hitTest(outputPoint)
+            }
+            return outputScrollView.hitTest(scrollPoint)
         }
         if commandTextView.isHidden == false,
            commandTextView.frame.contains(point) {
             return commandTextView.hitTest(convert(point, to: commandTextView))
         }
         return nil
+    }
+
+    func rects(
+        forTerminalRange range: NSRange,
+        convertedTo targetView: NSView
+    ) -> [NSRect] {
+        guard panel?.isExpanded == true else {
+            return []
+        }
+
+        var rects: [NSRect] = []
+        for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
+            rects.append(contentsOf: textRects(
+                forCharacterRange: mappedRange.range,
+                in: mappedRange.textView,
+                convertedTo: targetView
+            ))
+        }
+        return rects
+    }
+
+    func scrollTerminalRangeToVisible(_ range: NSRange) {
+        guard panel?.isExpanded == true else {
+            return
+        }
+        for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
+            mappedRange.textView.scrollRangeToVisible(mappedRange.range)
+        }
+    }
+
+    func drawTerminalCharacters(in range: NSRange, forContentView view: NSView) {
+        guard panel?.isExpanded == true else {
+            return
+        }
+        for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
+            drawCharacters(in: mappedRange.range, textView: mappedRange.textView, forContentView: view)
+        }
     }
 
     private var outputLineHeight: CGFloat {
@@ -766,6 +795,163 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: maxY))
         outputScrollView.reflectScrolledClipView(clipView)
         shouldScrollOutputToBottomOnNextLayout = false
+    }
+
+    private struct MappedTextViewRange {
+        var textView: NSTextView
+        var range: NSRange
+    }
+
+    private func mappedTextViewRanges(forTerminalRange range: NSRange) -> [MappedTextViewRange] {
+        let terminalRange = NSRange(location: 0, length: (terminalText as NSString).length)
+        let clampedRange = NSIntersectionRange(range, terminalRange)
+        guard clampedRange.length > 0 else {
+            return []
+        }
+
+        let commandLength = (commandLineText as NSString).length
+        let outputFinderText: String
+        let outputFinderStart: Int
+        let outputTextStart: Int
+        if commandLength > 0 {
+            outputFinderText = outputText.trimmingCharacters(in: .newlines)
+            outputFinderStart = outputFinderText.isEmpty ? commandLength : commandLength + 1
+            outputTextStart = Self.leadingNewlineUTF16Length(in: outputText)
+        } else {
+            outputFinderText = outputText
+            outputFinderStart = 0
+            outputTextStart = 0
+        }
+
+        var ranges: [MappedTextViewRange] = []
+        if commandLength > 0 {
+            let commandIntersection = NSIntersectionRange(
+                clampedRange,
+                NSRange(location: 0, length: commandLength)
+            )
+            if commandIntersection.length > 0 {
+                ranges.append(.init(textView: commandTextView, range: commandIntersection))
+            }
+        }
+
+        let outputFinderLength = (outputFinderText as NSString).length
+        if outputFinderLength > 0 {
+            let outputIntersection = NSIntersectionRange(
+                clampedRange,
+                NSRange(location: outputFinderStart, length: outputFinderLength)
+            )
+            if outputIntersection.length > 0 {
+                ranges.append(.init(
+                    textView: outputTextView,
+                    range: NSRange(
+                        location: outputTextStart + outputIntersection.location - outputFinderStart,
+                        length: outputIntersection.length
+                    )
+                ))
+            }
+        }
+        return ranges
+    }
+
+    private func textRects(
+        forCharacterRange range: NSRange,
+        in textView: NSTextView,
+        convertedTo targetView: NSView
+    ) -> [NSRect] {
+        let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+        let targetRange = NSIntersectionRange(range, fullRange)
+        guard targetRange.length > 0 else {
+            return []
+        }
+
+        var rects: [NSRect] = []
+        let sourceString = textView.string as NSString
+        sourceString.enumerateSubstrings(
+            in: targetRange,
+            options: [.byLines, .substringNotRequired]
+        ) { _, lineRange, _, _ in
+            let lineIntersection = NSIntersectionRange(targetRange, lineRange)
+            guard lineIntersection.length > 0,
+                  let rect = self.textRect(
+                      forCharacterRange: lineIntersection,
+                      in: textView,
+                      convertedTo: targetView
+                  )
+            else {
+                return
+            }
+            rects.append(rect)
+        }
+
+        if rects.isEmpty,
+           let rect = textRect(forCharacterRange: targetRange, in: textView, convertedTo: targetView) {
+            rects.append(rect)
+        }
+        return rects
+    }
+
+    private func textRect(
+        forCharacterRange range: NSRange,
+        in textView: NSTextView,
+        convertedTo targetView: NSView
+    ) -> NSRect? {
+        var actualRange = NSRange(location: 0, length: 0)
+        let screenRect = textView.firstRect(forCharacterRange: range, actualRange: &actualRange)
+        guard screenRect.isNull == false,
+              screenRect.isEmpty == false,
+              let window = textView.window
+        else {
+            return nil
+        }
+
+        let windowRect = window.convertFromScreen(screenRect)
+        let rect = targetView.convert(windowRect, from: nil)
+        if let scrollView = textView.enclosingScrollView {
+            let visibleRect = scrollView.convert(scrollView.contentView.bounds, to: targetView)
+            let clippedRect = rect.intersection(visibleRect)
+            return clippedRect.isNull || clippedRect.isEmpty ? nil : clippedRect
+        }
+        return rect
+    }
+
+    private func drawCharacters(
+        in range: NSRange,
+        textView: NSTextView,
+        forContentView view: NSView
+    ) {
+        let rects = textRects(forCharacterRange: range, in: textView, convertedTo: view)
+            .filter { $0.isNull == false && $0.isEmpty == false }
+        guard rects.isEmpty == false else {
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        defer {
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        let clipPath = NSBezierPath()
+        for rect in rects {
+            clipPath.appendRect(rect)
+        }
+        clipPath.addClip()
+
+        let origin = textView.convert(NSPoint.zero, to: view)
+        let transform = NSAffineTransform()
+        transform.translateX(by: origin.x, yBy: origin.y)
+        transform.concat()
+        textView.draw(textView.bounds)
+    }
+
+    private nonisolated static func leadingNewlineUTF16Length(in text: String) -> Int {
+        var length = 0
+        for scalar in text.unicodeScalars {
+            guard CharacterSet.newlines.contains(scalar) else {
+                break
+            }
+            length += String(scalar).utf16.count
+        }
+        return length
     }
 
     private nonisolated static func labelFont(weight: NSFont.Weight = .regular) -> NSFont {
@@ -984,6 +1170,22 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: nextY))
         outputScrollView.reflectScrolledClipView(clipView)
         return abs(clipView.bounds.origin.y - before) > 0.5
+    }
+
+    var outputHitTestTargetsTextViewForTesting: Bool {
+        layoutSubtreeIfNeeded()
+        guard outputScrollView.isHidden == false,
+              outputTextView.string.isEmpty == false
+        else {
+            return false
+        }
+        let visibleBounds = outputScrollView.contentView.bounds
+        let outputPoint = NSPoint(
+            x: min(max(4, visibleBounds.midX), max(4, outputTextView.bounds.maxX - 1)),
+            y: min(max(visibleBounds.minY + outputLineHeight / 2, outputTextView.bounds.minY + 1), max(outputTextView.bounds.minY + 1, outputTextView.bounds.maxY - 1))
+        )
+        let panelPoint = outputTextView.convert(outputPoint, to: self)
+        return hitTest(panelPoint) === outputTextView
     }
 #endif
 }

@@ -699,6 +699,18 @@ extension ReviewMonitorTransportViewController {
         logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
     }
 
+    var logCommandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+        logScrollView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
+    }
+
+    func logFinderRectsForTesting(_ range: NSRange) -> [NSRect] {
+        logScrollView.finderRectsForTesting(range)
+    }
+
+    var logFirstCommandOutputPanelRectForTesting: NSRect? {
+        logScrollView.firstCommandOutputPanelRectForTesting
+    }
+
     var logCommandOutputPanelToggleSymbolNameForTesting: String? {
         logScrollView.commandOutputPanelToggleSymbolNameForTesting
     }

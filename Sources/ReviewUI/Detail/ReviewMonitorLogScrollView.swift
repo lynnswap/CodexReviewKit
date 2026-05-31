@@ -1384,6 +1384,18 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
     }
 
+    var commandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+        logDocumentView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
+    }
+
+    func finderRectsForTesting(_ range: NSRange) -> [NSRect] {
+        logDocumentView.finderRectsForTesting(range)
+    }
+
+    var firstCommandOutputPanelRectForTesting: NSRect? {
+        logDocumentView.firstCommandOutputPanelRectForTesting
+    }
+
     var commandOutputPanelToggleSymbolNameForTesting: String? {
         logDocumentView.commandOutputPanelToggleSymbolNameForTesting
     }
