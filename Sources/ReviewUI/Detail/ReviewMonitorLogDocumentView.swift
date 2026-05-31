@@ -35,6 +35,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private var isLayingOutViewport = false
     private var selectedRange = NSRange(location: 0, length: 0)
     private var isApplyingTextFinderSelection = false
+    private var supplementalSelectedText: String?
     private var dragAnchorUTF16Offset: Int?
     private var keyboardSelectionAnchorUTF16Offset: Int?
     private var keyboardSelectionFocusUTF16Offset: Int?
@@ -1168,9 +1169,34 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         isApplyingTextFinderSelection = false
     }
 
+    @discardableResult
+    func setSelectedFinderRangeFromTextFinder(_ range: NSRange) -> NSRange {
+        let mapping = finderStringMapping()
+        let clampedRange = clampFinderRange(range, in: mapping)
+        let documentRange = firstDocumentRange(for: clampedRange, in: mapping) ?? NSRange(location: 0, length: 0)
+        let supplementalText = supplementalSelectionText(forFinderRange: clampedRange, in: mapping)
+        isApplyingTextFinderSelection = true
+        setSelectedRange(
+            documentRange,
+            preserveKeyboardSelection: false,
+            supplementalSelectedText: supplementalText
+        )
+        isApplyingTextFinderSelection = false
+        return documentRange
+    }
+
     private func setSelectedRange(_ range: NSRange, preserveKeyboardSelection: Bool) {
+        setSelectedRange(range, preserveKeyboardSelection: preserveKeyboardSelection, supplementalSelectedText: nil)
+    }
+
+    private func setSelectedRange(
+        _ range: NSRange,
+        preserveKeyboardSelection: Bool,
+        supplementalSelectedText: String?
+    ) {
         let clampedRange = clamp(range)
         selectedRange = clampedRange
+        self.supplementalSelectedText = supplementalSelectedText
         if preserveKeyboardSelection == false {
             keyboardSelectionAnchorUTF16Offset = nil
             keyboardSelectionFocusUTF16Offset = nil
@@ -1485,6 +1511,42 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         return nil
     }
 
+    private func supplementalSelectionText(
+        forFinderRange range: NSRange,
+        in mapping: FinderStringMapping
+    ) -> String? {
+        guard range.length > 0,
+              mapping.segments.contains(where: { segment in
+                  if case .commandOutput = segment.target {
+                      return NSIntersectionRange(segment.finderRange, range).length > 0
+                  }
+                  return false
+              })
+        else {
+            return nil
+        }
+
+        let finderString = mapping.string as NSString
+        let clampedRange = NSIntersectionRange(
+            range,
+            NSRange(location: 0, length: finderString.length)
+        )
+        guard clampedRange.length > 0 else {
+            return nil
+        }
+        return finderString.substring(with: clampedRange)
+    }
+
+    private func clampFinderRange(_ range: NSRange, in mapping: FinderStringMapping) -> NSRange {
+        let fullRange = NSRange(location: 0, length: (mapping.string as NSString).length)
+        let intersection = NSIntersectionRange(range, fullRange)
+        if intersection.location == range.location,
+           intersection.length == range.length {
+            return range
+        }
+        return NSRange(location: min(max(0, range.location), fullRange.length), length: 0)
+    }
+
     private func mapDocumentRange(
         _ range: NSRange,
         in segment: FinderStringSegment
@@ -1617,12 +1679,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     @objc func copy(_ sender: Any?) {
-        guard selectedRange.length > 0 else {
+        guard let selectedText = selectedTextForUserActions() else {
             return
         }
-        let selectedText = (textStorage.string as NSString).substring(with: selectedRange)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(Self.userVisibleString(selectedText), forType: .string)
+        NSPasteboard.general.setString(selectedText, forType: .string)
     }
 
     override func selectAll(_ sender: Any?) {
@@ -1638,6 +1699,13 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     override func accessibilitySelectedText() -> String? {
+        selectedTextForUserActions()
+    }
+
+    private func selectedTextForUserActions() -> String? {
+        if let supplementalSelectedText {
+            return supplementalSelectedText.isEmpty ? nil : supplementalSelectedText
+        }
         guard selectedRange.length > 0 else {
             return nil
         }

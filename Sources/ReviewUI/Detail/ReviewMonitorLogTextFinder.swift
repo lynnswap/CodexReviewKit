@@ -142,8 +142,7 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
                 return
             }
             let range = rangeClampedToActiveString(rawRange)
-            let documentRange = documentView?.documentRangeForFinderRange(range) ?? NSRange(location: 0, length: 0)
-            documentView?.setSelectedRangeFromTextFinder(documentRange)
+            let documentRange = documentView?.setSelectedFinderRangeFromTextFinder(range) ?? NSRange(location: 0, length: 0)
             onSelectedRangeChangedByFinder?(documentRange)
             selectedFinderRangeOverride = range
         }
