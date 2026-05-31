@@ -80,6 +80,35 @@ struct ReviewMonitorLogProjectionTests {
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
+    @Test func commandOutputDisplaySuppressesSkippedCommandGapBeforeInterleavedBlocks() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-interleaved",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(kind: .toolCall, text: "MCP codex_review.review_read started."),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests passed",
+                    metadata: .init(sourceType: "command", title: "Ran command for 3s")
+                ),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+
+        #expect(displayDocument.text.hasPrefix("MCP codex_review.review_read started."))
+        #expect(displayDocument.text.contains("$ swift test") == false)
+        #expect(displayDocument.text.contains("Ran command for 3s"))
+    }
+
     @Test func metadataIsPreservedOnBlocks() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",

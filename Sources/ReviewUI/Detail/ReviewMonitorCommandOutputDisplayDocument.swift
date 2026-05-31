@@ -37,26 +37,27 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             commandOutputGroupIDs: commandOutputGroupIDs
         )
 
-        var skippedCommandGroupID: String?
+        var shouldSuppressGapAfterSkippedCommand = false
         for block in sourceBlocks {
             if cursor < block.range.location {
-                if block.kind == .commandOutput,
-                   block.groupID == skippedCommandGroupID {
+                if shouldSuppressGapAfterSkippedCommand {
                     cursor = block.range.location
+                    shouldSuppressGapAfterSkippedCommand = false
                 } else {
                     let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
                     _ = appendText(sourceString.substring(with: gapRange))
                 }
+            } else if shouldSuppressGapAfterSkippedCommand {
+                shouldSuppressGapAfterSkippedCommand = false
             }
 
             if block.kind == .command,
                let groupID = block.groupID,
                commandOutputGroupIDs.contains(groupID) {
-                skippedCommandGroupID = groupID
+                shouldSuppressGapAfterSkippedCommand = true
                 cursor = NSMaxRange(block.range)
                 continue
             }
-            skippedCommandGroupID = nil
 
             if block.kind == .commandOutput {
                 let isExpanded = expandedBlockIDs.contains(block.id)
