@@ -84,6 +84,15 @@ private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
         _ event: NSEvent,
         perform: (NSView) -> Void
     ) -> Bool {
+        let point = convert(event.locationInWindow, from: nil)
+        if let verticalScroller, verticalScroller.isHidden == false,
+           verticalScroller.frame.contains(point) {
+            return false
+        }
+        if let horizontalScroller, horizontalScroller.isHidden == false,
+           horizontalScroller.frame.contains(point) {
+            return false
+        }
         guard let documentView else {
             return false
         }

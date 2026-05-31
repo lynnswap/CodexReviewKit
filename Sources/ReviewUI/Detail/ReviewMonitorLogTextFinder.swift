@@ -55,6 +55,7 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
     }
 
     private var snapshot: Snapshot?
+    private var selectedFinderRangeOverride: NSRange?
 
     var usesSnapshot: Bool {
         snapshot != nil
@@ -84,6 +85,11 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
 
     func clearSnapshot() {
         snapshot = nil
+        selectedFinderRangeOverride = nil
+    }
+
+    func clearSelectedRangeOverride() {
+        selectedFinderRangeOverride = nil
     }
 
     var isSelectable: Bool {
@@ -114,18 +120,23 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
             guard snapshot?.mapsToDocument != false else {
                 return [NSValue(range: NSRange(location: 0, length: 0))]
             }
+            if let selectedFinderRangeOverride {
+                return [NSValue(range: rangeClampedToActiveString(selectedFinderRangeOverride))]
+            }
             let finderRange = documentView.finderRangeForDocumentRange(documentView.selectedRangeForFinding)
             return [NSValue(range: rangeClampedToActiveString(finderRange))]
         }
         set {
             guard snapshot?.mapsToDocument != false else {
                 let range = NSRange(location: 0, length: 0)
+                selectedFinderRangeOverride = nil
                 documentView?.setSelectedRangeFromTextFinder(range)
                 onSelectedRangeChangedByFinder?(range)
                 return
             }
             guard let rawRange = newValue.first?.rangeValue else {
                 let range = NSRange(location: 0, length: 0)
+                selectedFinderRangeOverride = nil
                 documentView?.setSelectedRangeFromTextFinder(range)
                 onSelectedRangeChangedByFinder?(range)
                 return
@@ -134,6 +145,7 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
             let documentRange = documentView?.documentRangeForFinderRange(range) ?? NSRange(location: 0, length: 0)
             documentView?.setSelectedRangeFromTextFinder(documentRange)
             onSelectedRangeChangedByFinder?(documentRange)
+            selectedFinderRangeOverride = range
         }
     }
 

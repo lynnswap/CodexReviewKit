@@ -497,6 +497,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func handleUserSelectionChanged() {
+        textFinderClient.clearSelectedRangeOverride()
         guard isFindBarVisible else {
             return
         }
@@ -1156,10 +1157,7 @@ extension ReviewMonitorLogScrollView {
     }
 
     var findStringForTesting: String {
-        textFinderClient.string.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        textFinderClient.string
     }
 
     var findClientUsesSnapshotForTesting: Bool {
@@ -1172,6 +1170,10 @@ extension ReviewMonitorLogScrollView {
 
     var findClientFirstSelectedRangeForTesting: NSRange {
         textFinderClient.firstSelectedRange
+    }
+
+    func setFinderSelectedRangeForTesting(_ range: NSRange) {
+        textFinderClient.selectedRanges = [NSValue(range: range)]
     }
 
     var findIncrementalMatchRangeCountForTesting: Int {
