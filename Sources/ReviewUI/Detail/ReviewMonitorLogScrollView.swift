@@ -2593,8 +2593,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             }
             visibleBlockIDs.insert(panel.blockID)
             let panelView = commandOutputPanelView(for: panel.blockID)
-            panelView.configure(panel)
-            panelView.frame = placement
+            panelView.configure(panel, textLineRect: placement.textLineRect)
+            panelView.frame = placement.frame
             if panelView.superview !== commandOutputPanelContainerView {
                 commandOutputPanelContainerView.addSubview(panelView)
             }
@@ -2627,7 +2627,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private func commandOutputPanelPlacement(
         for panel: ReviewMonitorLogCommandOutputPanel
-    ) -> NSRect? {
+    ) -> ReviewMonitorCommandOutputPanelPlacement? {
         let segmentRects = rects(forCharacterRange: panel.range).map(\.rectValue)
         guard let firstTextRect = segmentRects.first else {
             return nil
@@ -2648,7 +2648,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         let expandedHeight = Self.commandOutputPanelCollapsedHeight +
             commandOutputPanelLineHeight * CGFloat(Self.commandOutputPanelVisibleLineCount) +
             8
-        return NSRect(
+        let frame = NSRect(
             x: panelX,
             y: max(0, rect.minY - verticalInset),
             width: panelWidth,
@@ -2656,6 +2656,10 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 panel.isExpanded ? expandedHeight : Self.commandOutputPanelCollapsedHeight,
                 rect.height + verticalInset * 2
             )
+        )
+        return .init(
+            frame: frame,
+            textLineRect: firstTextRect.offsetBy(dx: -frame.minX, dy: -frame.minY)
         )
     }
 
@@ -3258,6 +3262,11 @@ private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
     }
 }
 
+private struct ReviewMonitorCommandOutputPanelPlacement {
+    var frame: NSRect
+    var textLineRect: NSRect
+}
+
 @MainActor
 private final class ReviewMonitorCommandOutputPanelView: NSView {
     static let visibleOutputLineCount = 5
@@ -3268,6 +3277,7 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
     private var panel: ReviewMonitorLogCommandOutputPanel?
     private var toggleSymbolName = "chevron.forward"
+    private var textLineRect = NSRect(x: 0, y: 0, width: 0, height: 28)
     var onToggle: ((ReviewMonitorLogBlockID) -> Void)?
 
     override var isFlipped: Bool {
@@ -3315,9 +3325,10 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         nil
     }
 
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
+    func configure(_ panel: ReviewMonitorLogCommandOutputPanel, textLineRect: NSRect) {
         let previousPanel = self.panel
         self.panel = panel
+        self.textLineRect = textLineRect
         toggleSymbolName = panel.isExpanded ? "chevron.down" : "chevron.forward"
         let accessibilityDescription = panel.isExpanded ? "Collapse command output" : "Expand command output"
         let symbolConfiguration = NSImage.SymbolConfiguration(
@@ -3343,9 +3354,10 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     override func layout() {
         super.layout()
         let symbolSize = chevronSize
-        let symbolY = floor((Self.headerHeight - symbolSize) / 2)
+        let symbolY = floor(textLineRect.midY - symbolSize / 2)
+        let slotWidth = Self.chevronSlotWidth(for: titleFont)
         chevronImageView.frame = NSRect(
-            x: 0,
+            x: floor((slotWidth - symbolSize) / 2),
             y: symbolY,
             width: symbolSize,
             height: symbolSize
@@ -3436,6 +3448,10 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
 
     var titleFontPointSizeForTesting: CGFloat {
         titleFont.pointSize
+    }
+
+    var chevronVerticalCenterForTesting: CGFloat {
+        chevronImageView.frame.midY
     }
 
     var visibleLineCapacityForTesting: Int {
@@ -4018,6 +4034,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelChevronSizeDeltaForTesting
     }
 
+    var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+        logDocumentView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
+    }
+
     func hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(_ text: String) -> Bool {
         logDocumentView.hitTestTargetsDocumentViewForFirstOccurrenceForTesting(text)
     }
@@ -4224,6 +4244,17 @@ private extension ReviewMonitorLogDocumentView {
             return nil
         }
         return panelView.chevronSizeForTesting - panelView.titleFontPointSizeForTesting
+    }
+
+    var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+        layoutTextViewport(force: true)
+        guard let panel = currentCommandOutputPanels.first,
+              let panelView = firstVisibleCommandOutputPanelViewForTesting(),
+              let firstTextLineMidY = rects(forCharacterRange: panel.range).first?.rectValue.midY
+        else {
+            return nil
+        }
+        return panelView.frame.minY + panelView.chevronVerticalCenterForTesting - firstTextLineMidY
     }
 
     func hitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {

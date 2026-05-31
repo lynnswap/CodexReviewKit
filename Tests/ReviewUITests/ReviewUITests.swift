@@ -2376,6 +2376,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
         #expect(abs(transport.logCommandOutputPanelLeadingAlignmentDeltaForTesting ?? .infinity) <= 0.5)
         #expect(abs(transport.logCommandOutputPanelChevronSizeDeltaForTesting ?? .infinity) <= 1)
+        #expect(abs(transport.logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting ?? .infinity) <= 0.5)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
 
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())

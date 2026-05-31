@@ -663,6 +663,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelChevronSizeDeltaForTesting
     }
 
+    var logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
+    }
+
     func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
         logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
     }
