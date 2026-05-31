@@ -655,8 +655,36 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
     }
 
+    var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+        logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
+    }
+
     var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
         logScrollView.commandOutputPanelVisibleLineCapacityForTesting
+    }
+
+    var logCommandOutputPanelResultTextForTesting: String? {
+        logScrollView.commandOutputPanelResultTextForTesting
+    }
+
+    var logCommandOutputPanelTerminalTextForTesting: String? {
+        logScrollView.commandOutputPanelTerminalTextForTesting
+    }
+
+    var logCommandOutputPanelCommandLineTextForTesting: String? {
+        logScrollView.commandOutputPanelCommandLineTextForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollTextForTesting: String? {
+        logScrollView.commandOutputPanelOutputScrollTextForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+        logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
+    }
+
+    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+        logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
     }
 
     var logCommandOutputPanelToggleSymbolNameForTesting: String? {

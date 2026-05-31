@@ -5,7 +5,7 @@ import CodexReview
 private enum ReviewMonitorCommandOutputDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
 
-    private static let expandedPlaceholderLineCount = 7
+    private static let expandedPlaceholderLineCount = 13
 
     static func make(
         from source: ReviewMonitorLogDocument,
@@ -31,18 +31,50 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
             return range
         }
 
-        for block in source.blocks.sorted(by: { $0.range.location < $1.range.location }) {
+        let sourceBlocks = source.blocks.sorted(by: { $0.range.location < $1.range.location })
+        let commandOutputGroupIDs = Set(sourceBlocks.compactMap { block in
+            block.kind == .commandOutput ? block.groupID : nil
+        })
+        let commandTextByGroupID = commandOutputCommandTextByGroupID(
+            in: sourceBlocks,
+            sourceString: sourceString,
+            commandOutputGroupIDs: commandOutputGroupIDs
+        )
+
+        var skippedCommandGroupID: String?
+        for block in sourceBlocks {
             if cursor < block.range.location {
-                let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
-                _ = appendText(sourceString.substring(with: gapRange))
+                if block.kind == .commandOutput,
+                   block.groupID == skippedCommandGroupID {
+                    cursor = block.range.location
+                } else {
+                    let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
+                    _ = appendText(sourceString.substring(with: gapRange))
+                }
             }
+
+            if block.kind == .command,
+               let groupID = block.groupID,
+               commandOutputGroupIDs.contains(groupID) {
+                skippedCommandGroupID = groupID
+                cursor = NSMaxRange(block.range)
+                continue
+            }
+            skippedCommandGroupID = nil
 
             if block.kind == .commandOutput {
                 let outputText = sourceString.substring(with: block.range)
                 let isExpanded = expandedBlockIDs.contains(block.id)
+                let title = commandOutputTitle(
+                    for: block,
+                    commandTextByGroupID: commandTextByGroupID
+                )
+                let commandText = commandOutputCommandText(
+                    for: block,
+                    commandTextByGroupID: commandTextByGroupID
+                )
                 let placeholder = commandOutputPlaceholder(
-                    title: commandOutputTitle(for: block),
-                    outputText: outputText,
+                    title: title,
                     isExpanded: isExpanded
                 )
                 let displayRange = appendText(placeholder)
@@ -54,7 +86,7 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
                     sourceRange: block.sourceRange,
                     metadata: block.metadata
                 ))
-                styleRuns.append(.init(range: displayRange, style: .commandOutputControl))
+                styleRuns.append(.init(range: displayRange, style: .commandOutputControl(isExpanded: isExpanded)))
                 decorations.append(.init(
                     blockID: block.id,
                     range: displayRange,
@@ -63,11 +95,12 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
                 panels.append(.init(
                     blockID: block.id,
                     range: displayRange,
+                    commandText: commandText,
                     outputText: outputText,
                     lineCount: commandOutputLineCount(outputText),
                     isExpanded: isExpanded,
-                    title: commandOutputTitle(for: block),
-                    statusText: commandOutputStatusText(for: block)
+                    title: title,
+                    exitText: commandOutputResultText(for: block)
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -154,12 +187,9 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputPlaceholder(
         title: String,
-        outputText: String,
         isExpanded: Bool
     ) -> String {
-        let lineCount = commandOutputLineCount(outputText)
-        let lineLabel = lineCount == 1 ? "1 line" : "\(lineCount) lines"
-        let label = "\(toggleAttachmentCharacter)\(title) - \(lineLabel)"
+        let label = "\(toggleAttachmentCharacter)\(title)"
         guard isExpanded else {
             return label
         }
@@ -174,19 +204,94 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
         return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
     }
 
-    private static func commandOutputTitle(for block: ReviewMonitorLogBlock) -> String {
+    private static func commandOutputTitle(
+        for block: ReviewMonitorLogBlock,
+        commandTextByGroupID: [String: String]
+    ) -> String {
         let trimmedTitle = block.metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let trimmedTitle, trimmedTitle.isEmpty == false else {
-            return "Command output"
+        if let trimmedTitle, trimmedTitle.isEmpty == false {
+            return trimmedTitle
         }
-        return trimmedTitle
+
+        let commandText = commandOutputCommandText(
+            for: block,
+            commandTextByGroupID: commandTextByGroupID
+        )
+        if commandText.isEmpty == false {
+            return "Ran \(commandSummaryName(commandText))"
+        }
+
+        return "Command output"
     }
 
-    private static func commandOutputStatusText(for block: ReviewMonitorLogBlock) -> String? {
+    private static func commandOutputCommandText(
+        for block: ReviewMonitorLogBlock,
+        commandTextByGroupID: [String: String]
+    ) -> String {
+        if let groupID = block.groupID,
+           let commandText = commandTextByGroupID[groupID] {
+            return commandText
+        }
+
+        let trimmedCommand = block.metadata?.command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmedCommand, trimmedCommand.isEmpty == false else {
+            return ""
+        }
+        return commandTextWithoutPrompt(trimmedCommand)
+    }
+
+    private static func commandOutputResultText(for block: ReviewMonitorLogBlock) -> String? {
+        let normalizedStatus = block.metadata?.status?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalizedStatus == "succeeded" || normalizedStatus == "success" || normalizedStatus == "completed" {
+            return "Success"
+        }
+        if normalizedStatus == "failed" || normalizedStatus == "failure" || normalizedStatus == "errored" {
+            if let exitCode = block.metadata?.exitCode {
+                return "exit \(exitCode)"
+            }
+            return "Failed"
+        }
         if let exitCode = block.metadata?.exitCode {
             return "exit \(exitCode)"
         }
-        return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    private static func commandSummaryName(_ commandText: String) -> String {
+        let components = commandText.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        return components.prefix(2).joined(separator: " ")
+    }
+
+    private static func commandOutputCommandTextByGroupID(
+        in blocks: [ReviewMonitorLogBlock],
+        sourceString: NSString,
+        commandOutputGroupIDs: Set<String>
+    ) -> [String: String] {
+        var commandTextByGroupID: [String: String] = [:]
+        for block in blocks where block.kind == .command {
+            guard let groupID = block.groupID,
+                  commandOutputGroupIDs.contains(groupID),
+                  commandTextByGroupID[groupID] == nil
+            else {
+                continue
+            }
+            let text = commandTextWithoutPrompt(sourceString.substring(with: block.range))
+            guard text.isEmpty == false else {
+                continue
+            }
+            commandTextByGroupID[groupID] = text
+        }
+        return commandTextByGroupID
+    }
+
+    private static func commandTextWithoutPrompt(_ text: String) -> String {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedText.hasPrefix("$") else {
+            return trimmedText
+        }
+        return String(trimmedText.dropFirst()).trimmingCharacters(in: .whitespaces)
     }
 
     private static func terminalDecorationStyle(
@@ -1334,11 +1439,13 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private let textStorage = NSTextStorage()
     private let textContentView = ReviewMonitorLogContentView()
     private let decorationView = ReviewMonitorLogDecorationView()
+    private let commandOutputPanelBackgroundContainerView = ReviewMonitorCommandOutputPanelBackgroundContainerView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
     private let selectionView = ReviewMonitorLogSelectionView()
     private let commandOutputPanelContainerView = ReviewMonitorCommandOutputPanelContainerView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
     private var commandOutputPanelViews: [ReviewMonitorLogBlockID: ReviewMonitorCommandOutputPanelView] = [:]
+    private var commandOutputPanelBackgroundViews: [ReviewMonitorLogBlockID: NSVisualEffectView] = [:]
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var lastUsedFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var wordFadeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
@@ -1440,15 +1547,18 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         textLayoutManager.textViewportLayoutController.delegate = self
         addSubview(textContentView)
         textContentView.addSubview(decorationView)
+        textContentView.addSubview(commandOutputPanelBackgroundContainerView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
         addSubview(commandOutputPanelContainerView)
         estimatedDocumentHeight = measuredDocumentHeight()
         setAccessibilityElement(true)
+        observeAccessibilityDisplayOptions()
     }
 
     isolated deinit {
         glowTimer?.invalidate()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     @available(*, unavailable)
@@ -1659,6 +1769,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             currentCommandOutputPanels = []
             decorationView.decorations = []
             updateCommandOutputPanelViews()
+            updateCommandOutputPanelBackgroundViews()
             return
         }
 
@@ -1674,6 +1785,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels)
         }
         updateDecorationRects()
+        updateCommandOutputPanelBackgroundViews()
         updateCommandOutputPanelViews()
     }
 
@@ -1819,12 +1931,15 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         case .terminalOutput:
             attributes[.font] = monoFont
             attributes[.foregroundColor] = secondaryTextColor
-        case .commandOutputControl:
+        case .commandOutputControl(let isExpanded):
             attributes[.font] = commandOutputControlFont
             attributes[.foregroundColor] = secondaryTextColor
             let paragraphStyle = NSMutableParagraphStyle()
             paragraphStyle.firstLineHeadIndent = 0
             paragraphStyle.headIndent = commandOutputControlTextIndent
+            if isExpanded == false {
+                paragraphStyle.lineBreakMode = .byTruncatingTail
+            }
             attributes[.paragraphStyle] = paragraphStyle
         case .plan(let status):
             attributes[.foregroundColor] = planTextColor(for: status)
@@ -2186,6 +2301,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             isLayingOutViewport = false
             updateSelectionRects()
             updateDecorationRects()
+            updateCommandOutputPanelBackgroundViews()
             updateCommandOutputPanelViews()
         }
 
@@ -2670,42 +2786,53 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     private func commandOutputPanelPlacement(
         for panel: ReviewMonitorLogCommandOutputPanel
     ) -> NSRect? {
-        let segmentRects = rects(forCharacterRange: panel.range).map(\.rectValue)
-        guard let firstTextRect = segmentRects.first else {
+        guard panel.isExpanded else {
             return nil
         }
-        var rect = firstTextRect
-        for segmentRect in segmentRects.dropFirst() {
-            rect = rect.union(segmentRect)
+
+        let toggleRange = NSRange(location: panel.range.location, length: min(panel.range.length, 1))
+        guard let toggleRect = rects(forCharacterRange: toggleRange).first?.rectValue else {
+            return nil
         }
-        let textLeadingX = firstTextRect.minX
-        let panelX = textLeadingX
-        let trailingInset: CGFloat = 8
+
+        let titleRange = NSRange(
+            location: panel.range.location + min(panel.range.length, 1),
+            length: max(0, panel.range.length - 1)
+        )
+        let titleRect = titleRange.length > 0
+            ? rects(forCharacterRange: titleRange).first?.rectValue
+            : nil
+        let anchorRect = titleRect ?? toggleRect
+        var headerRect = toggleRect.union(anchorRect)
+        if let titleRect {
+            headerRect = headerRect.union(titleRect)
+        }
+
+        let panelX = max(0, toggleRect.minX)
+        let trailingInset: CGFloat = 4
         let panelRightEdge = min(
             max(panelX, textContentView.bounds.width - trailingInset),
-            textLeadingX + textContainer.size.width
+            toggleRect.minX + textContainer.size.width
         )
         let panelWidth = max(0, panelRightEdge - panelX)
-        let verticalInset: CGFloat = 2
-        let expandedHeight = Self.commandOutputPanelCollapsedHeight +
-            commandOutputPanelLineHeight * CGFloat(Self.commandOutputPanelVisibleLineCount) +
-            8
         return NSRect(
             x: panelX,
-            y: max(0, rect.minY - verticalInset),
+            y: headerRect.maxY + ReviewMonitorCommandOutputPanelView.headerToCardGap,
             width: panelWidth,
-            height: max(
-                panel.isExpanded ? expandedHeight : Self.commandOutputPanelCollapsedHeight,
-                rect.height + verticalInset * 2
-            )
+            height: commandOutputPanelCardHeight(for: panel, width: panelWidth)
         )
     }
 
-    private static let commandOutputPanelCollapsedHeight: CGFloat = 28
-    private static let commandOutputPanelVisibleLineCount = 5
-
     private var commandOutputPanelLineHeight: CGFloat {
         ceil(monoFont.ascender - monoFont.descender + monoFont.leading)
+    }
+
+    private func commandOutputPanelCardHeight(for panel: ReviewMonitorLogCommandOutputPanel, width: CGFloat) -> CGFloat {
+        ReviewMonitorCommandOutputPanelView.cardHeight(
+            for: panel,
+            width: width,
+            outputLineHeight: commandOutputPanelLineHeight
+        )
     }
 
     private func commandOutputPanelView(
@@ -2726,6 +2853,99 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         commandOutputPanelViews.removeAll(keepingCapacity: false)
     }
 
+    private func updateCommandOutputPanelBackgroundViews() {
+        guard currentCommandOutputPanels.isEmpty == false,
+              bounds.width > 0
+        else {
+            removeAllCommandOutputPanelBackgroundViews()
+            return
+        }
+
+        let viewportRange = visibleCommandOutputPanelRange()
+        var visibleBlockIDs = Set<ReviewMonitorLogBlockID>()
+        for panel in currentCommandOutputPanels {
+            guard NSIntersectionRange(panel.range, viewportRange).length > 0,
+                  let placement = commandOutputPanelPlacement(for: panel)
+            else {
+                continue
+            }
+            visibleBlockIDs.insert(panel.blockID)
+            let backgroundView = commandOutputPanelBackgroundView(for: panel.blockID)
+            if rectsAreNearlyEqual(backgroundView.frame, placement) == false {
+                backgroundView.frame = placement
+            }
+            if backgroundView.superview !== commandOutputPanelBackgroundContainerView {
+                commandOutputPanelBackgroundContainerView.addSubview(backgroundView)
+            }
+        }
+
+        let invisibleBlockIDs = commandOutputPanelBackgroundViews.keys.filter {
+            visibleBlockIDs.contains($0) == false
+        }
+        for blockID in invisibleBlockIDs {
+            guard let backgroundView = commandOutputPanelBackgroundViews.removeValue(forKey: blockID) else {
+                continue
+            }
+            backgroundView.removeFromSuperview()
+        }
+        syncCommandOutputPanelBackgroundAppearance()
+    }
+
+    private func commandOutputPanelBackgroundView(
+        for blockID: ReviewMonitorLogBlockID
+    ) -> NSVisualEffectView {
+        if let view = commandOutputPanelBackgroundViews[blockID] {
+            return view
+        }
+
+        let backgroundView = NSVisualEffectView()
+        backgroundView.material = .contentBackground
+        backgroundView.blendingMode = .withinWindow
+        backgroundView.alphaValue = commandOutputPanelBackgroundAlpha
+        backgroundView.state = .active
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = 8
+        backgroundView.layer?.masksToBounds = true
+        commandOutputPanelBackgroundViews[blockID] = backgroundView
+        return backgroundView
+    }
+
+    private func removeAllCommandOutputPanelBackgroundViews() {
+        for view in commandOutputPanelBackgroundViews.values {
+            view.removeFromSuperview()
+        }
+        commandOutputPanelBackgroundViews.removeAll(keepingCapacity: false)
+    }
+
+    private var commandOutputPanelBackgroundAlpha: CGFloat {
+        let workspace = NSWorkspace.shared
+        if workspace.accessibilityDisplayShouldReduceTransparency ||
+            workspace.accessibilityDisplayShouldIncreaseContrast {
+            return 1
+        }
+        return 0.3
+    }
+
+    private func observeAccessibilityDisplayOptions() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange(_:)),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange(_ notification: Notification) {
+        syncCommandOutputPanelBackgroundAppearance()
+    }
+
+    private func syncCommandOutputPanelBackgroundAppearance() {
+        let alpha = commandOutputPanelBackgroundAlpha
+        for backgroundView in commandOutputPanelBackgroundViews.values {
+            backgroundView.alphaValue = alpha
+        }
+    }
+
     private func decorationNeedsResolvedRect(_ style: ReviewMonitorLogDecorationStyle) -> Bool {
         switch style {
         case .transcript, .command, .terminal, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
@@ -2737,6 +2957,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         textContentView.frame = bounds
         commandOutputPanelContainerView.frame = bounds
         decorationView.frame = textContentView.bounds
+        commandOutputPanelBackgroundContainerView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
     }
@@ -3333,6 +3554,17 @@ private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledCo
 }
 
 @MainActor
+private final class ReviewMonitorCommandOutputPanelBackgroundContainerView: NSView {
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+@MainActor
 private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
     override var isFlipped: Bool {
         true
@@ -3349,6 +3581,54 @@ private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
             }
         }
         return nil
+    }
+}
+
+@MainActor
+private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        let previousNextResponder = nextResponder
+        nextResponder = nil
+        defer {
+            nextResponder = previousNextResponder
+        }
+        super.scrollWheel(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseDown(with: event) }) else {
+            super.mouseDown(with: event)
+            return
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseDragged(with: event) }) else {
+            super.mouseDragged(with: event)
+            return
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard forwardMouseEventToDocumentView(event, perform: { $0.mouseUp(with: event) }) else {
+            super.mouseUp(with: event)
+            return
+        }
+    }
+
+    private func forwardMouseEventToDocumentView(
+        _ event: NSEvent,
+        perform: (NSView) -> Void
+    ) -> Bool {
+        guard let documentView else {
+            return false
+        }
+        let documentPoint = documentView.convert(event.locationInWindow, from: nil)
+        guard documentView.bounds.contains(documentPoint) else {
+            return false
+        }
+        perform(documentView)
+        return true
     }
 }
 
@@ -3571,11 +3851,28 @@ private extension NSView {
 @MainActor
 private final class ReviewMonitorCommandOutputPanelView: NSView {
     static let visibleOutputLineCount = 5
+    static let headerToCardGap: CGFloat = 6
+
+    private static let topInset: CGFloat = 8
+    private static let bottomInset: CGFloat = 8
+    private static let horizontalInset: CGFloat = 8
+    private static let shellToCommandGap: CGFloat = 2
+    private static let commandToOutputGap: CGFloat = 2
+    private static let outputToFooterGap: CGFloat = 8
+    private static let commandLeadingInset: CGFloat = 12
+    private static let commandTrailingInset: CGFloat = 2
 
     private let blockID: ReviewMonitorLogBlockID
-    private let outputScrollView = NSScrollView()
+    private let shellLabel = NSTextField(labelWithString: "Shell")
+    private let commandTextView = NSTextView(usingTextLayoutManager: true)
+    private let outputScrollView = ReviewMonitorCommandOutputScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
+    private let resultLabel = NSTextField(labelWithString: "")
     private var panel: ReviewMonitorLogCommandOutputPanel?
+    private var terminalText = ""
+    private var commandLineText = ""
+    private var outputText = ""
+    private var outputLineCount = 0
 
     override var isFlipped: Bool {
         true
@@ -3589,28 +3886,33 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         self.blockID = blockID
         super.init(frame: .zero)
 
+        configureLabel(shellLabel)
+        shellLabel.font = Self.labelFont(weight: .medium)
+        addSubview(shellLabel)
+
+        configureTerminalTextView(commandTextView, textColor: .labelColor, textContainerInset: .zero)
+        commandTextView.isHidden = true
+        addSubview(commandTextView)
+
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
         outputScrollView.hasVerticalScroller = true
+        outputScrollView.hasHorizontalScroller = false
         outputScrollView.autohidesScrollers = true
         outputScrollView.scrollerStyle = .overlay
         outputScrollView.documentView = outputTextView
         outputScrollView.isHidden = true
         addSubview(outputScrollView)
 
-        outputTextView.isEditable = false
-        outputTextView.isSelectable = true
-        outputTextView.drawsBackground = false
-        outputTextView.textContainerInset = NSSize(width: 8, height: 7)
-        outputTextView.font = NSFont.monospacedSystemFont(
-            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
-            weight: .regular
+        configureTerminalTextView(
+            outputTextView,
+            textColor: .secondaryLabelColor,
+            textContainerInset: NSSize(width: 0, height: 2)
         )
-        outputTextView.textColor = .secondaryLabelColor
-        outputTextView.isHorizontallyResizable = false
-        outputTextView.isVerticallyResizable = true
-        outputTextView.autoresizingMask = [.width]
-        outputTextView.textContainer?.widthTracksTextView = true
+
+        configureLabel(resultLabel)
+        resultLabel.alignment = .right
+        addSubview(resultLabel)
     }
 
     @available(*, unavailable)
@@ -3621,28 +3923,128 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
         let previousPanel = self.panel
         self.panel = panel
-        outputScrollView.isHidden = panel.isExpanded == false
-        if previousPanel?.outputText != panel.outputText {
-            outputTextView.string = panel.outputText
+        let isExpanded = panel.isExpanded
+        shellLabel.isHidden = isExpanded == false
+        let nextCommandLineText = Self.commandLineText(for: panel.commandText)
+        commandTextView.isHidden = isExpanded == false || nextCommandLineText.isEmpty
+        outputScrollView.isHidden = isExpanded == false
+        resultLabel.isHidden = isExpanded == false || (panel.exitText?.isEmpty ?? true)
+
+        let nextTerminalText = Self.terminalText(commandLineText: nextCommandLineText, outputText: panel.outputText)
+        if previousPanel?.commandText != panel.commandText ||
+            commandLineText != nextCommandLineText {
+            commandLineText = nextCommandLineText
+            commandTextView.textStorage?.setAttributedString(
+                Self.terminalAttributedString(
+                    text: nextCommandLineText,
+                    foregroundColor: .labelColor
+                )
+            )
         }
+
+        if previousPanel?.outputText != panel.outputText ||
+            outputText != panel.outputText {
+            outputText = panel.outputText
+            outputLineCount = Self.lineCount(panel.outputText)
+            outputTextView.textStorage?.setAttributedString(
+                Self.terminalAttributedString(
+                    text: panel.outputText,
+                    foregroundColor: .secondaryLabelColor
+                )
+            )
+        }
+
+        if previousPanel?.commandText != panel.commandText ||
+            previousPanel?.outputText != panel.outputText ||
+            terminalText != nextTerminalText {
+            terminalText = nextTerminalText
+        }
+        resultLabel.stringValue = panel.exitText ?? ""
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
         guard panel?.isExpanded == true else {
+            shellLabel.frame = .zero
+            commandTextView.frame = .zero
             outputScrollView.frame = .zero
+            resultLabel.frame = .zero
             return
         }
-        outputScrollView.frame = NSRect(
-            x: 0,
-            y: Self.headerHeight,
-            width: bounds.width,
-            height: max(0, bounds.height - Self.headerHeight - 8)
+
+        let shellHeight = Self.labelLineHeight(for: shellLabel.font ?? Self.labelFont(weight: .medium))
+        let footerHeight = Self.labelLineHeight(for: resultLabel.font ?? Self.labelFont())
+        let contentWidth = max(0, bounds.width - Self.horizontalInset * 2)
+        let commandWidth = max(0, bounds.width - Self.commandLeadingInset - Self.commandTrailingInset)
+
+        shellLabel.frame = NSRect(
+            x: Self.horizontalInset,
+            y: Self.topInset,
+            width: contentWidth,
+            height: shellHeight
         )
-        outputTextView.minSize = NSSize(width: outputScrollView.contentSize.width, height: 0)
-        outputTextView.maxSize = NSSize(width: outputScrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
-        outputTextView.frame.size.width = outputScrollView.contentSize.width
+
+        let commandY = Self.topInset + shellHeight + Self.shellToCommandGap
+        let commandHeight = Self.commandTextHeight(for: commandLineText, width: commandWidth)
+        if commandTextView.isHidden {
+            commandTextView.frame = .zero
+        } else {
+            commandTextView.textContainer?.containerSize = NSSize(
+                width: commandWidth,
+                height: CGFloat.greatestFiniteMagnitude
+            )
+            commandTextView.frame = NSRect(
+                x: Self.commandLeadingInset,
+                y: commandY,
+                width: commandWidth,
+                height: commandHeight
+            )
+            commandTextView.minSize = NSSize(width: commandWidth, height: 0)
+            commandTextView.maxSize = NSSize(width: commandWidth, height: CGFloat.greatestFiniteMagnitude)
+            commandTextView.frame.size.height = commandHeight
+            commandTextView.frame.size.width = commandWidth
+        }
+
+        let outputY = commandLineText.isEmpty
+            ? commandY
+            : commandY + commandHeight + Self.commandToOutputGap
+        let footerY = max(commandY, bounds.height - Self.bottomInset - footerHeight)
+        outputScrollView.frame = NSRect(
+            x: Self.commandLeadingInset,
+            y: outputY,
+            width: commandWidth,
+            height: max(0, footerY - outputY - Self.outputToFooterGap)
+        )
+        let outputWidth = outputScrollView.contentSize.width
+        outputTextView.minSize = NSSize(width: outputWidth, height: 0)
+        outputTextView.maxSize = NSSize(width: outputWidth, height: CGFloat.greatestFiniteMagnitude)
+        outputTextView.textContainer?.containerSize = NSSize(
+            width: outputWidth,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let outputHeight = Self.outputTextHeight(
+            for: outputText,
+            width: outputWidth,
+            minimumLineCount: outputLineCount,
+            textContainerInset: outputTextView.textContainerInset,
+            lineHeight: outputLineHeight
+        )
+        outputTextView.frame.size = NSSize(
+            width: outputWidth,
+            height: max(
+                outputScrollView.contentSize.height,
+                outputHeight
+            )
+        )
+
+        let resultWidth = min(max(70, ceil(resultLabel.intrinsicContentSize.width)), contentWidth)
+        resultLabel.frame = NSRect(
+            x: Self.horizontalInset + contentWidth - resultWidth,
+            y: footerY,
+            width: resultWidth,
+            height: footerHeight
+        )
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -3654,20 +4056,175 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         }
         if outputScrollView.isHidden == false,
            outputScrollView.frame.contains(point) {
-            return outputScrollView.hitTest(convert(point, to: outputScrollView))
+            return outputScrollView
+        }
+        if commandTextView.isHidden == false,
+           commandTextView.frame.contains(point) {
+            return commandTextView.hitTest(convert(point, to: commandTextView))
         }
         return nil
     }
 
-    private static let headerHeight: CGFloat = 28
+    private var outputLineHeight: CGFloat {
+        let font = outputTextView.font ?? Self.outputFont
+        return max(1, ceil(font.ascender - font.descender + font.leading))
+    }
+
+    private static func labelFont(weight: NSFont.Weight = .regular) -> NSFont {
+        NSFont.systemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
+            weight: weight
+        )
+    }
+
+    private static func labelLineHeight(for font: NSFont) -> CGFloat {
+        max(1, ceil(font.ascender - font.descender + font.leading))
+    }
+
+    private static var outputFont: NSFont {
+        NSFont.monospacedSystemFont(
+            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
+            weight: .regular
+        )
+    }
+
+    static func cardHeight(
+        for panel: ReviewMonitorLogCommandOutputPanel,
+        width: CGFloat,
+        outputLineHeight: CGFloat
+    ) -> CGFloat {
+        let contentWidth = max(0, width - commandLeadingInset - commandTrailingInset)
+        let commandHeight = commandTextHeight(
+            for: commandLineText(for: panel.commandText),
+            width: contentWidth
+        )
+        let commandSectionHeight = commandHeight > 0
+            ? shellToCommandGap + commandHeight + commandToOutputGap
+            : shellToCommandGap
+        return topInset +
+            labelLineHeight(for: labelFont(weight: .medium)) +
+            commandSectionHeight +
+            outputLineHeight * CGFloat(visibleOutputLineCount) +
+            outputToFooterGap +
+            labelLineHeight(for: labelFont()) +
+            bottomInset
+    }
 
     nonisolated static func chevronSlotWidth(for font: NSFont) -> CGFloat {
         ceil(font.pointSize) + 6
     }
 
+    private static func commandLineText(for commandText: String) -> String {
+        let trimmedCommandText = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedCommandText.isEmpty == false else {
+            return ""
+        }
+        return "$ \(trimmedCommandText)"
+    }
+
+    private static func terminalText(commandLineText: String, outputText: String) -> String {
+        let trimmedOutputText = outputText.trimmingCharacters(in: .newlines)
+        if commandLineText.isEmpty {
+            return outputText
+        }
+        if trimmedOutputText.isEmpty {
+            return commandLineText
+        }
+        return "\(commandLineText)\n\(trimmedOutputText)"
+    }
+
+    private static func terminalAttributedString(text: String, foregroundColor: NSColor) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .font: outputFont,
+                .foregroundColor: foregroundColor
+            ]
+        )
+    }
+
+    private static func commandTextHeight(for text: String, width: CGFloat) -> CGFloat {
+        guard text.isEmpty == false else {
+            return 0
+        }
+        return max(
+            labelLineHeight(for: outputFont),
+            terminalTextBoundingHeight(for: text, width: width, foregroundColor: .labelColor)
+        )
+    }
+
+    private static func outputTextHeight(
+        for text: String,
+        width: CGFloat,
+        minimumLineCount: Int,
+        textContainerInset: NSSize,
+        lineHeight: CGFloat
+    ) -> CGFloat {
+        let minimumHeight = CGFloat(max(1, minimumLineCount)) * lineHeight
+        let measuredHeight = terminalTextBoundingHeight(
+            for: text,
+            width: width,
+            foregroundColor: .secondaryLabelColor
+        )
+        return max(minimumHeight, measuredHeight) + textContainerInset.height * 2
+    }
+
+    private static func terminalTextBoundingHeight(
+        for text: String,
+        width: CGFloat,
+        foregroundColor: NSColor
+    ) -> CGFloat {
+        guard text.isEmpty == false else {
+            return 0
+        }
+        let attributedString = terminalAttributedString(text: text, foregroundColor: foregroundColor)
+        let rect = attributedString.boundingRect(
+            with: NSSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return ceil(rect.height)
+    }
+
+    private static func lineCount(_ text: String) -> Int {
+        guard text.isEmpty == false else {
+            return 0
+        }
+        let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
+    }
+
+    private func configureLabel(_ label: NSTextField) {
+        label.isEditable = false
+        label.isSelectable = false
+        label.drawsBackground = false
+        label.isBordered = false
+        label.textColor = .secondaryLabelColor
+        label.font = Self.labelFont()
+        label.lineBreakMode = .byTruncatingTail
+    }
+
+    private func configureTerminalTextView(
+        _ textView: NSTextView,
+        textColor: NSColor,
+        textContainerInset: NSSize
+    ) {
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = textContainerInset
+        textView.font = Self.outputFont
+        textView.textColor = textColor
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+    }
+
 #if DEBUG
     var usesTextKit2ForTesting: Bool {
-        outputTextView.textLayoutManager != nil
+        commandTextView.textLayoutManager != nil &&
+            outputTextView.textLayoutManager != nil
     }
 
     var visibleLineCapacityForTesting: Int {
@@ -3681,6 +4238,44 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         )
         let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
         return Int(floor(outputScrollView.contentSize.height / lineHeight))
+    }
+
+    var resultTextForTesting: String {
+        resultLabel.stringValue
+    }
+
+    var terminalTextForTesting: String {
+        terminalText
+    }
+
+    var commandLineTextForTesting: String {
+        commandLineText
+    }
+
+    var outputScrollTextForTesting: String {
+        outputTextView.string
+    }
+
+    var outputScrollIsScrollableForTesting: Bool {
+        layoutSubtreeIfNeeded()
+        return outputTextView.frame.height > outputScrollView.contentSize.height + 0.5
+    }
+
+    func scrollOutputForTesting(deltaY: CGFloat) -> Bool {
+        layoutSubtreeIfNeeded()
+        guard outputScrollView.isHidden == false else {
+            return false
+        }
+        let clipView = outputScrollView.contentView
+        let before = clipView.bounds.origin.y
+        let maxY = max(0, outputTextView.frame.height - clipView.bounds.height)
+        let nextY = min(max(0, before + deltaY), maxY)
+        guard abs(nextY - before) > 0.5 else {
+            return false
+        }
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: nextY))
+        outputScrollView.reflectScrolledClipView(clipView)
+        return abs(clipView.bounds.origin.y - before) > 0.5
     }
 #endif
 }
@@ -4304,8 +4899,36 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelUsesButtonAttachmentForTesting
     }
 
+    var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+        logDocumentView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
+    }
+
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         logDocumentView.commandOutputPanelVisibleLineCapacityForTesting
+    }
+
+    var commandOutputPanelResultTextForTesting: String? {
+        logDocumentView.commandOutputPanelResultTextForTesting
+    }
+
+    var commandOutputPanelTerminalTextForTesting: String? {
+        logDocumentView.commandOutputPanelTerminalTextForTesting
+    }
+
+    var commandOutputPanelCommandLineTextForTesting: String? {
+        logDocumentView.commandOutputPanelCommandLineTextForTesting
+    }
+
+    var commandOutputPanelOutputScrollTextForTesting: String? {
+        logDocumentView.commandOutputPanelOutputScrollTextForTesting
+    }
+
+    var commandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+        logDocumentView.commandOutputPanelOutputScrollIsScrollableForTesting
+    }
+
+    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+        logDocumentView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
     }
 
     var commandOutputPanelToggleSymbolNameForTesting: String? {
@@ -4495,10 +5118,11 @@ private extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelUsesTextKit2ForTesting: Bool {
         layoutTextViewport(force: true)
-        guard currentCommandOutputPanels.isEmpty == false else {
+        let visiblePanelViews = commandOutputPanelViews.values.filter { $0.superview != nil }
+        guard visiblePanelViews.isEmpty == false else {
             return false
         }
-        return commandOutputPanelViews.values.allSatisfy(\.usesTextKit2ForTesting)
+        return visiblePanelViews.allSatisfy(\.usesTextKit2ForTesting)
     }
 
     var commandOutputPanelUsesInlineAttachmentForTesting: Bool {
@@ -4511,11 +5135,53 @@ private extension ReviewMonitorLogDocumentView {
         return firstCommandOutputToggleButtonForTesting() != nil
     }
 
+    var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+        layoutTextViewport(force: true)
+        guard commandOutputPanelBackgroundViews.isEmpty == false else {
+            return false
+        }
+        return commandOutputPanelBackgroundViews.values.allSatisfy { backgroundView in
+            backgroundView.material == .contentBackground &&
+                backgroundView.blendingMode == .withinWindow &&
+                backgroundView.state == .active
+        }
+    }
+
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         layoutTextViewport(force: true)
         return commandOutputPanelViews.values
             .map(\.visibleLineCapacityForTesting)
             .max() ?? 0
+    }
+
+    var commandOutputPanelResultTextForTesting: String? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.resultTextForTesting
+    }
+
+    var commandOutputPanelTerminalTextForTesting: String? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.terminalTextForTesting
+    }
+
+    var commandOutputPanelCommandLineTextForTesting: String? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.commandLineTextForTesting
+    }
+
+    var commandOutputPanelOutputScrollTextForTesting: String? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollTextForTesting
+    }
+
+    var commandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollIsScrollableForTesting ?? false
+    }
+
+    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.scrollOutputForTesting(deltaY: deltaY) ?? false
     }
 
     var commandOutputPanelToggleSymbolNameForTesting: String? {

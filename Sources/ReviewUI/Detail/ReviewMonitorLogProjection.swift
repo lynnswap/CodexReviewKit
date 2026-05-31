@@ -63,7 +63,7 @@ enum ReviewMonitorLogTextStyle: Hashable, Sendable {
     case markdownSyntax
     case command
     case terminalOutput
-    case commandOutputControl
+    case commandOutputControl(isExpanded: Bool)
     case plan(status: ReviewMonitorLogPlanStatus?)
     case tool
     case diagnostic
@@ -99,11 +99,12 @@ struct ReviewMonitorLogDecoration: Equatable, Sendable {
 struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
     var blockID: ReviewMonitorLogBlockID
     var range: NSRange
+    var commandText: String
     var outputText: String
     var lineCount: Int
     var isExpanded: Bool
     var title: String
-    var statusText: String?
+    var exitText: String?
 }
 
 struct ReviewMonitorLogAppend: Equatable, Sendable {
