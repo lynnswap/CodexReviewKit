@@ -3,6 +3,8 @@ import ObjectiveC.runtime
 import CodexReview
 
 private enum ReviewMonitorCommandOutputDisplayDocument {
+    static let toggleAttachmentCharacter = "\u{fffc}"
+
     private static let expandedPlaceholderLineCount = 7
 
     static func make(
@@ -157,7 +159,7 @@ private enum ReviewMonitorCommandOutputDisplayDocument {
     ) -> String {
         let lineCount = commandOutputLineCount(outputText)
         let lineLabel = lineCount == 1 ? "1 line" : "\(lineCount) lines"
-        let label = "\(title) - \(lineLabel)"
+        let label = "\(toggleAttachmentCharacter)\(title) - \(lineLabel)"
         guard isExpanded else {
             return label
         }
@@ -1664,18 +1666,21 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         currentCommandOutputPanels = document.commandOutputPanels
         if let append,
            let invalidationRange = styleInvalidationRange(for: append, in: document) {
-            applyStyleRuns(document.styleRuns, in: invalidationRange)
+            applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels, in: invalidationRange)
         } else if let replacement,
                   let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
-            applyStyleRuns(document.styleRuns, in: invalidationRange)
+            applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels, in: invalidationRange)
         } else {
-            applyStyleRuns(document.styleRuns)
+            applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels)
         }
         updateDecorationRects()
         updateCommandOutputPanelViews()
     }
 
-    private func applyStyleRuns(_ styleRuns: [ReviewMonitorLogTextRun]) {
+    private func applyStyleRuns(
+        _ styleRuns: [ReviewMonitorLogTextRun],
+        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel]
+    ) {
         guard textStorage.length > 0 else {
             return
         }
@@ -1690,11 +1695,16 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 }
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
+            applyCommandOutputToggleAttachments(commandOutputPanels, in: fullRange)
         }
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
 
-    private func applyStyleRuns(_ styleRuns: [ReviewMonitorLogTextRun], in invalidationRange: NSRange) {
+    private func applyStyleRuns(
+        _ styleRuns: [ReviewMonitorLogTextRun],
+        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel],
+        in invalidationRange: NSRange
+    ) {
         guard textStorage.length > 0 else {
             return
         }
@@ -1714,8 +1724,33 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 }
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
+            applyCommandOutputToggleAttachments(commandOutputPanels, in: targetRange)
         }
         invalidateTextLayout(in: targetRange, measureEstimatedHeightImmediately: false)
+    }
+
+    private func applyCommandOutputToggleAttachments(
+        _ panels: [ReviewMonitorLogCommandOutputPanel],
+        in targetRange: NSRange
+    ) {
+        for panel in panels {
+            let attachmentRange = NSRange(location: panel.range.location, length: min(1, panel.range.length))
+            guard NSIntersectionRange(attachmentRange, targetRange).length == attachmentRange.length,
+                  attachmentRange.length == 1,
+                  attachmentRange.location < textStorage.length
+            else {
+                continue
+            }
+            textStorage.addAttribute(
+                .attachment,
+                value: ReviewMonitorCommandOutputToggleAttachment(
+                    blockID: panel.blockID,
+                    isExpanded: panel.isExpanded,
+                    font: commandOutputControlFont
+                ),
+                range: attachmentRange
+            )
+        }
     }
 
     private func styleInvalidationRange(
@@ -1788,7 +1823,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             attributes[.font] = commandOutputControlFont
             attributes[.foregroundColor] = secondaryTextColor
             let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.firstLineHeadIndent = commandOutputControlTextIndent
+            paragraphStyle.firstLineHeadIndent = 0
             paragraphStyle.headIndent = commandOutputControlTextIndent
             attributes[.paragraphStyle] = paragraphStyle
         case .plan(let status):
@@ -2280,6 +2315,11 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 1,
+           let blockID = commandOutputToggleBlockID(at: point) {
+            onCommandOutputPanelToggle?(blockID)
+            return
+        }
         let offset = utf16Offset(at: point)
         dragAnchorUTF16Offset = offset
         if event.clickCount > 1 {
@@ -2287,6 +2327,24 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         } else {
             setSelectedRange(NSRange(location: offset, length: 0))
         }
+    }
+
+    private func commandOutputToggleBlockID(at point: NSPoint) -> ReviewMonitorLogBlockID? {
+        let offset = utf16Offset(at: point)
+        let candidateLocations = [offset, offset - 1].filter { $0 >= 0 && $0 < textStorage.length }
+        for location in candidateLocations {
+            guard let attachment = textStorage.attribute(.attachment, at: location, effectiveRange: nil)
+                    as? ReviewMonitorCommandOutputToggleAttachment
+            else {
+                continue
+            }
+            let range = NSRange(location: location, length: 1)
+            guard rects(forCharacterRange: range).contains(where: { $0.rectValue.insetBy(dx: -4, dy: -4).contains(point) }) else {
+                continue
+            }
+            return attachment.blockID
+        }
+        return nil
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -2391,7 +2449,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         }
         let selectedText = (textStorage.string as NSString).substring(with: selectedRange)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(selectedText, forType: .string)
+        NSPasteboard.general.setString(Self.userVisibleString(selectedText), forType: .string)
     }
 
     override func selectAll(_ sender: Any?) {
@@ -2403,14 +2461,21 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     }
 
     override func accessibilityValue() -> Any? {
-        textStorage.string
+        Self.userVisibleString(textStorage.string)
     }
 
     override func accessibilitySelectedText() -> String? {
         guard selectedRange.length > 0 else {
             return nil
         }
-        return (textStorage.string as NSString).substring(with: selectedRange)
+        return Self.userVisibleString((textStorage.string as NSString).substring(with: selectedRange))
+    }
+
+    private static func userVisibleString(_ string: String) -> String {
+        string.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
     }
 
     private func invalidateTextLayout(measureEstimatedHeightImmediately: Bool) {
@@ -2593,8 +2658,8 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             }
             visibleBlockIDs.insert(panel.blockID)
             let panelView = commandOutputPanelView(for: panel.blockID)
-            panelView.configure(panel, textLineRect: placement.textLineRect)
-            panelView.frame = placement.frame
+            panelView.configure(panel)
+            panelView.frame = placement
             if panelView.superview !== commandOutputPanelContainerView {
                 commandOutputPanelContainerView.addSubview(panelView)
             }
@@ -2627,7 +2692,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
 
     private func commandOutputPanelPlacement(
         for panel: ReviewMonitorLogCommandOutputPanel
-    ) -> ReviewMonitorCommandOutputPanelPlacement? {
+    ) -> NSRect? {
         let segmentRects = rects(forCharacterRange: panel.range).map(\.rectValue)
         guard let firstTextRect = segmentRects.first else {
             return nil
@@ -2636,7 +2701,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         for segmentRect in segmentRects.dropFirst() {
             rect = rect.union(segmentRect)
         }
-        let textLeadingX = firstTextRect.minX - commandOutputControlTextIndent
+        let textLeadingX = firstTextRect.minX
         let panelX = textLeadingX
         let trailingInset: CGFloat = 8
         let panelRightEdge = min(
@@ -2648,7 +2713,7 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         let expandedHeight = Self.commandOutputPanelCollapsedHeight +
             commandOutputPanelLineHeight * CGFloat(Self.commandOutputPanelVisibleLineCount) +
             8
-        let frame = NSRect(
+        return NSRect(
             x: panelX,
             y: max(0, rect.minY - verticalInset),
             width: panelWidth,
@@ -2656,10 +2721,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
                 panel.isExpanded ? expandedHeight : Self.commandOutputPanelCollapsedHeight,
                 rect.height + verticalInset * 2
             )
-        )
-        return .init(
-            frame: frame,
-            textLineRect: firstTextRect.offsetBy(dx: -frame.minX, dy: -frame.minY)
         )
     }
 
@@ -2677,9 +2738,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             return view
         }
         let view = ReviewMonitorCommandOutputPanelView(blockID: blockID)
-        view.onToggle = { [weak self] blockID in
-            self?.onCommandOutputPanelToggle?(blockID)
-        }
         commandOutputPanelViews[blockID] = view
         return view
     }
@@ -3262,9 +3320,105 @@ private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
     }
 }
 
-private struct ReviewMonitorCommandOutputPanelPlacement {
-    var frame: NSRect
-    var textLineRect: NSRect
+private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
+    let blockID: ReviewMonitorLogBlockID
+    let symbolName: String
+    let symbolSize: CGFloat
+    let fontPointSize: CGFloat
+    let slotWidth: CGFloat
+    let renderedSymbolSize: NSSize
+    private let symbolImage: NSImage?
+
+    init(blockID: ReviewMonitorLogBlockID, isExpanded: Bool, font: NSFont) {
+        self.blockID = blockID
+        self.symbolName = isExpanded ? "chevron.down" : "chevron.forward"
+        self.symbolSize = ceil(font.pointSize + 1)
+        self.fontPointSize = font.pointSize
+        self.slotWidth = ReviewMonitorCommandOutputPanelView.chevronSlotWidth(for: font)
+        let renderedSymbol = Self.makeSymbolImage(
+            name: symbolName,
+            symbolSize: symbolSize,
+            canvasSize: NSSize(width: slotWidth, height: symbolSize),
+            pointSize: symbolSize
+        )
+        self.renderedSymbolSize = renderedSymbol.drawSize
+        self.symbolImage = renderedSymbol.image
+        super.init(data: nil, ofType: nil)
+
+        allowsTextAttachmentView = false
+        lineLayoutPadding = 0
+        bounds = CGRect(
+            x: 0,
+            y: floor(font.descender + ((font.ascender - font.descender) - symbolSize) / 2),
+            width: slotWidth,
+            height: symbolSize
+        )
+        image = symbolImage
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func attachmentBounds(
+        for attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?,
+        proposedLineFragment lineFrag: CGRect,
+        position: CGPoint
+    ) -> CGRect {
+        bounds
+    }
+
+    override func image(
+        for bounds: CGRect,
+        attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSImage? {
+        symbolImage
+    }
+
+    private static func makeSymbolImage(
+        name: String,
+        symbolSize: CGFloat,
+        canvasSize: NSSize,
+        pointSize: CGFloat
+    ) -> (image: NSImage?, drawSize: NSSize) {
+        let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+            .applying(.init(hierarchicalColor: .secondaryLabelColor))
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfiguration)
+        else {
+            return (nil, .zero)
+        }
+
+        let naturalSize = symbol.size
+        let scale = min(
+            symbolSize / max(1, naturalSize.width),
+            symbolSize / max(1, naturalSize.height)
+        )
+        let drawSize = NSSize(
+            width: max(1, floor(naturalSize.width * scale)),
+            height: max(1, floor(naturalSize.height * scale))
+        )
+        let image = NSImage(size: canvasSize)
+        image.lockFocus()
+        symbol.draw(
+            in: NSRect(
+                x: floor((canvasSize.width - drawSize.width) / 2),
+                y: floor((canvasSize.height - drawSize.height) / 2),
+                width: drawSize.width,
+                height: drawSize.height
+            ),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1
+        )
+        image.unlockFocus()
+        return (image, drawSize)
+    }
 }
 
 @MainActor
@@ -3272,13 +3426,9 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     static let visibleOutputLineCount = 5
 
     private let blockID: ReviewMonitorLogBlockID
-    private let chevronImageView = NSImageView()
     private let outputScrollView = NSScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
     private var panel: ReviewMonitorLogCommandOutputPanel?
-    private var toggleSymbolName = "chevron.forward"
-    private var textLineRect = NSRect(x: 0, y: 0, width: 0, height: 28)
-    var onToggle: ((ReviewMonitorLogBlockID) -> Void)?
 
     override var isFlipped: Bool {
         true
@@ -3291,10 +3441,6 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
     init(blockID: ReviewMonitorLogBlockID) {
         self.blockID = blockID
         super.init(frame: .zero)
-
-        chevronImageView.imageScaling = .scaleProportionallyDown
-        chevronImageView.contentTintColor = .secondaryLabelColor
-        addSubview(chevronImageView)
 
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
@@ -3325,25 +3471,9 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
         nil
     }
 
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel, textLineRect: NSRect) {
+    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
         let previousPanel = self.panel
         self.panel = panel
-        self.textLineRect = textLineRect
-        toggleSymbolName = panel.isExpanded ? "chevron.down" : "chevron.forward"
-        let accessibilityDescription = panel.isExpanded ? "Collapse command output" : "Expand command output"
-        let symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: titleFont.pointSize,
-            weight: .regular
-        )
-        let image = NSImage(
-            systemSymbolName: toggleSymbolName,
-            accessibilityDescription: accessibilityDescription
-        )?.withSymbolConfiguration(symbolConfiguration)
-        image?.isTemplate = true
-        chevronImageView.image = image
-        chevronImageView.toolTip = accessibilityDescription
-        toolTip = accessibilityDescription
-        setAccessibilityLabel(accessibilityDescription)
         outputScrollView.isHidden = panel.isExpanded == false
         if previousPanel?.outputText != panel.outputText {
             outputTextView.string = panel.outputText
@@ -3353,15 +3483,6 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
 
     override func layout() {
         super.layout()
-        let symbolSize = chevronSize
-        let symbolY = floor(textLineRect.midY - symbolSize / 2)
-        let slotWidth = Self.chevronSlotWidth(for: titleFont)
-        chevronImageView.frame = NSRect(
-            x: floor((slotWidth - symbolSize) / 2),
-            y: symbolY,
-            width: symbolSize,
-            height: symbolSize
-        )
         guard panel?.isExpanded == true else {
             outputScrollView.frame = .zero
             return
@@ -3388,70 +3509,18 @@ private final class ReviewMonitorCommandOutputPanelView: NSView {
            outputScrollView.frame.contains(point) {
             return outputScrollView.hitTest(convert(point, to: outputScrollView))
         }
-        if Self.headerRect(in: bounds).contains(point),
-           chevronHitRect.contains(point) {
-            return self
-        }
         return nil
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        if Self.headerRect(in: bounds).contains(point),
-           chevronHitRect.contains(point) {
-            toggle()
-            return
-        }
-        super.mouseDown(with: event)
-    }
-
-    @objc private func toggle() {
-        onToggle?(blockID)
     }
 
     private static let headerHeight: CGFloat = 28
 
-    private static func headerRect(in bounds: NSRect) -> NSRect {
-        NSRect(x: 0, y: 0, width: bounds.width, height: headerHeight)
-    }
-
-    static func chevronSlotWidth(for font: NSFont) -> CGFloat {
+    nonisolated static func chevronSlotWidth(for font: NSFont) -> CGFloat {
         ceil(font.pointSize) + 6
-    }
-
-    private var titleFont: NSFont {
-        NSFont.systemFont(
-            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize
-        )
-    }
-
-    private var chevronSize: CGFloat {
-        ceil(titleFont.pointSize)
-    }
-
-    private var chevronHitRect: NSRect {
-        chevronImageView.frame.insetBy(dx: -4, dy: -4)
     }
 
 #if DEBUG
     var usesTextKit2ForTesting: Bool {
         outputTextView.textLayoutManager != nil
-    }
-
-    var toggleSymbolNameForTesting: String {
-        toggleSymbolName
-    }
-
-    var chevronSizeForTesting: CGFloat {
-        chevronImageView.frame.width
-    }
-
-    var titleFontPointSizeForTesting: CGFloat {
-        titleFont.pointSize
-    }
-
-    var chevronVerticalCenterForTesting: CGFloat {
-        chevronImageView.frame.midY
     }
 
     var visibleLineCapacityForTesting: Int {
@@ -3836,11 +3905,17 @@ private final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency 
 @MainActor
 extension ReviewMonitorLogScrollView {
     var displayedTextForTesting: String {
-        displayedText
+        displayedText.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
     }
 
     func displayTextForTesting(sourceDocument: ReviewMonitorLogDocument) -> String {
-        displayDocument(for: sourceDocument).text
+        displayDocument(for: sourceDocument).text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
     }
 
     var usesCustomTextKit2SurfaceForTesting: Bool {
@@ -4016,6 +4091,10 @@ extension ReviewMonitorLogScrollView {
 
     var commandOutputPanelUsesTextKit2ForTesting: Bool {
         logDocumentView.commandOutputPanelUsesTextKit2ForTesting
+    }
+
+    var commandOutputPanelUsesInlineAttachmentForTesting: Bool {
+        logDocumentView.commandOutputPanelUsesInlineAttachmentForTesting
     }
 
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
@@ -4215,6 +4294,11 @@ private extension ReviewMonitorLogDocumentView {
         return commandOutputPanelViews.values.allSatisfy(\.usesTextKit2ForTesting)
     }
 
+    var commandOutputPanelUsesInlineAttachmentForTesting: Bool {
+        layoutTextViewport(force: true)
+        return firstCommandOutputToggleAttachmentForTesting() != nil
+    }
+
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         layoutTextViewport(force: true)
         return commandOutputPanelViews.values
@@ -4224,37 +4308,41 @@ private extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelToggleSymbolNameForTesting: String? {
         layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.toggleSymbolNameForTesting
+        return firstCommandOutputToggleAttachmentForTesting()?.symbolName
     }
 
     var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
         guard let panel = currentCommandOutputPanels.first,
               let panelView = firstVisibleCommandOutputPanelViewForTesting(),
-              let firstTextLeadingX = rects(forCharacterRange: panel.range).first?.rectValue.minX
+              let attachmentLeadingX = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
+                .first?.rectValue.minX
         else {
             return nil
         }
-        return panelView.frame.minX - (firstTextLeadingX - commandOutputControlTextIndent)
+        return panelView.frame.minX - attachmentLeadingX
     }
 
     var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
-        guard let panelView = firstVisibleCommandOutputPanelViewForTesting() else {
+        guard let attachment = firstCommandOutputToggleAttachmentForTesting() else {
             return nil
         }
-        return panelView.chevronSizeForTesting - panelView.titleFontPointSizeForTesting
+        return attachment.symbolSize - attachment.fontPointSize
     }
 
     var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
         guard let panel = currentCommandOutputPanels.first,
-              let panelView = firstVisibleCommandOutputPanelViewForTesting(),
-              let firstTextLineMidY = rects(forCharacterRange: panel.range).first?.rectValue.midY
+              panel.range.length > 1,
+              let attachmentMidY = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
+                .first?.rectValue.midY,
+              let labelMidY = rects(forCharacterRange: NSRange(location: panel.range.location + 1, length: panel.range.length - 1))
+                .first?.rectValue.midY
         else {
             return nil
         }
-        return panelView.frame.minY + panelView.chevronVerticalCenterForTesting - firstTextLineMidY
+        return attachmentMidY - labelMidY
     }
 
     func hitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
@@ -4279,10 +4367,11 @@ private extension ReviewMonitorLogDocumentView {
     @discardableResult
     func clickFirstCommandOutputPanelHeaderForTesting() -> Bool {
         layoutTextViewport(force: true)
-        guard let panelView = firstVisibleCommandOutputPanelViewForTesting(),
+        guard let panel = currentCommandOutputPanels.first,
+              let rect = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1)).first?.rectValue,
               let event = NSEvent.mouseEvent(
                   with: .leftMouseDown,
-                  location: panelView.convert(NSPoint(x: 6, y: 14), to: nil),
+                  location: convert(NSPoint(x: rect.midX, y: rect.midY), to: nil),
                   modifierFlags: [],
                   timestamp: 0,
                   windowNumber: window?.windowNumber ?? 0,
@@ -4301,6 +4390,16 @@ private extension ReviewMonitorLogDocumentView {
         }
         target.mouseDown(with: event)
         return true
+    }
+
+    private func firstCommandOutputToggleAttachmentForTesting() -> ReviewMonitorCommandOutputToggleAttachment? {
+        guard let panel = currentCommandOutputPanels.first,
+              panel.range.location < textStorage.length
+        else {
+            return nil
+        }
+        return textStorage.attribute(.attachment, at: panel.range.location, effectiveRange: nil)
+            as? ReviewMonitorCommandOutputToggleAttachment
     }
 
     private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelView? {
