@@ -1,4 +1,5 @@
 import Foundation
+import CodexReview
 
 enum ReviewMonitorCommandOutputDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
@@ -7,7 +8,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         from source: ReviewMonitorLogDocument,
         expandedBlockIDs: Set<ReviewMonitorLogBlockID>
     ) -> ReviewMonitorLogDocument {
-        guard source.blocks.contains(where: { $0.kind == .commandOutput }) else {
+        guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
             return source
         }
 
@@ -28,49 +29,51 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
 
         let sourceBlocks = source.blocks.sorted(by: { $0.range.location < $1.range.location })
-        let commandOutputGroupIDs = Set(sourceBlocks.compactMap { block in
-            block.kind == .commandOutput ? block.groupID : nil
-        })
+        let commandBlocksByGroupID = firstBlocksByGroupID(in: sourceBlocks, kind: .command)
+        let commandOutputBlocksByGroupID = firstBlocksByGroupID(in: sourceBlocks, kind: .commandOutput)
         let commandTextByGroupID = commandOutputCommandTextByGroupID(
             in: sourceBlocks,
-            sourceString: sourceString,
-            commandOutputGroupIDs: commandOutputGroupIDs
+            sourceString: sourceString
         )
 
-        var shouldSuppressGapAfterSkippedCommand = false
         for block in sourceBlocks {
-            if cursor < block.range.location {
-                if shouldSuppressGapAfterSkippedCommand {
-                    cursor = block.range.location
-                    shouldSuppressGapAfterSkippedCommand = false
-                } else {
-                    let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
-                    _ = appendText(sourceString.substring(with: gapRange))
-                }
-            } else if shouldSuppressGapAfterSkippedCommand {
-                shouldSuppressGapAfterSkippedCommand = false
-            }
-
-            if block.kind == .command,
-               let groupID = block.groupID,
-               commandOutputGroupIDs.contains(groupID) {
-                shouldSuppressGapAfterSkippedCommand = true
+            if shouldSkipBlockAndLeadingGap(
+                block,
+                commandBlocksByGroupID: commandBlocksByGroupID,
+                commandOutputBlocksByGroupID: commandOutputBlocksByGroupID
+            ) {
                 cursor = NSMaxRange(block.range)
                 continue
             }
 
-            if block.kind == .commandOutput {
-                let isExpanded = expandedBlockIDs.contains(block.id)
+            if cursor < block.range.location {
+                let gapRange = NSRange(location: cursor, length: block.range.location - cursor)
+                _ = appendText(sourceString.substring(with: gapRange))
+            }
+
+            if let panelSource = commandPanelSource(
+                for: block,
+                commandBlocksByGroupID: commandBlocksByGroupID,
+                commandOutputBlocksByGroupID: commandOutputBlocksByGroupID
+            ) {
+                let blockID = commandPanelBlockID(for: panelSource.anchor)
+                let metadata = panelSource.output?.metadata ?? panelSource.command?.metadata ?? panelSource.anchor.metadata
+                let isExpanded = expandedBlockIDs.contains(blockID)
                 let title = commandOutputTitle(
-                    for: block,
-                    commandTextByGroupID: commandTextByGroupID
+                    metadata: metadata,
+                    commandText: commandOutputCommandText(
+                        for: panelSource,
+                        sourceString: sourceString,
+                        commandTextByGroupID: commandTextByGroupID
+                    )
                 )
                 let commandText = commandOutputCommandText(
-                    for: block,
+                    for: panelSource,
+                    sourceString: sourceString,
                     commandTextByGroupID: commandTextByGroupID
                 )
                 let outputText = commandOutputText(
-                    for: block,
+                    for: panelSource,
                     sourceString: sourceString,
                     isExpanded: isExpanded
                 )
@@ -81,28 +84,28 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 let displayRange = appendText(placeholder)
                 let controlRange = commandOutputControlRange(in: displayRange, title: title)
                 blocks.append(.init(
-                    id: block.id,
-                    kind: block.kind,
-                    groupID: block.groupID,
+                    id: blockID,
+                    kind: .commandOutput,
+                    groupID: panelSource.anchor.groupID,
                     range: displayRange,
-                    sourceRange: block.sourceRange,
-                    metadata: block.metadata
+                    sourceRange: commandPanelSourceRange(panelSource),
+                    metadata: metadata
                 ))
                 styleRuns.append(.init(range: controlRange, style: .commandOutputControl(isExpanded: isExpanded)))
                 decorations.append(.init(
-                    blockID: block.id,
+                    blockID: blockID,
                     range: displayRange,
-                    style: terminalDecorationStyle(for: block, in: source)
+                    style: terminalDecorationStyle(for: panelSource.output ?? panelSource.anchor, in: source)
                 ))
                 panels.append(.init(
-                    blockID: block.id,
+                    blockID: blockID,
                     range: displayRange,
                     commandText: commandText,
                     outputText: outputText,
                     lineCount: commandOutputLineCount(outputText),
                     isExpanded: isExpanded,
                     title: title,
-                    exitText: commandOutputResultText(for: block)
+                    exitText: commandOutputResultText(for: panelSource.output ?? panelSource.anchor)
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -147,6 +150,90 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 displayBlocks: blocks
             )
         )
+    }
+
+    private struct CommandPanelSource {
+        var anchor: ReviewMonitorLogBlock
+        var command: ReviewMonitorLogBlock?
+        var output: ReviewMonitorLogBlock?
+    }
+
+    private static func firstBlocksByGroupID(
+        in blocks: [ReviewMonitorLogBlock],
+        kind: ReviewLogEntry.Kind
+    ) -> [String: ReviewMonitorLogBlock] {
+        var result: [String: ReviewMonitorLogBlock] = [:]
+        for block in blocks where block.kind == kind {
+            guard let groupID = block.groupID,
+                  result[groupID] == nil
+            else {
+                continue
+            }
+            result[groupID] = block
+        }
+        return result
+    }
+
+    private static func commandPanelSource(
+        for block: ReviewMonitorLogBlock,
+        commandBlocksByGroupID: [String: ReviewMonitorLogBlock],
+        commandOutputBlocksByGroupID: [String: ReviewMonitorLogBlock]
+    ) -> CommandPanelSource? {
+        switch block.kind {
+        case .command:
+            let output = block.groupID.flatMap { commandOutputBlocksByGroupID[$0] }
+            return .init(anchor: block, command: block, output: output)
+        case .commandOutput:
+            guard let groupID = block.groupID,
+                  let command = commandBlocksByGroupID[groupID]
+            else {
+                return .init(anchor: block, command: nil, output: block)
+            }
+            let anchor = command.range.location <= block.range.location ? command : block
+            guard anchor.id == block.id else {
+                return nil
+            }
+            return .init(anchor: anchor, command: command, output: block)
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
+             .toolCall, .diagnostic, .error, .progress, .event:
+            return nil
+        }
+    }
+
+    private static func shouldSkipBlockAndLeadingGap(
+        _ block: ReviewMonitorLogBlock,
+        commandBlocksByGroupID: [String: ReviewMonitorLogBlock],
+        commandOutputBlocksByGroupID: [String: ReviewMonitorLogBlock]
+    ) -> Bool {
+        guard let groupID = block.groupID,
+              let command = commandBlocksByGroupID[groupID],
+              let output = commandOutputBlocksByGroupID[groupID]
+        else {
+            return false
+        }
+
+        let anchor = command.range.location <= output.range.location ? command : output
+        return block.id != anchor.id && (block.kind == .command || block.kind == .commandOutput)
+    }
+
+    private static func commandPanelBlockID(for block: ReviewMonitorLogBlock) -> ReviewMonitorLogBlockID {
+        if let groupID = block.groupID {
+            return ReviewMonitorLogBlockID("commandOutput:\(groupID)")
+        }
+        return block.id
+    }
+
+    private static func commandPanelSourceRange(_ source: CommandPanelSource) -> NSRange {
+        let ranges = [source.command?.sourceRange, source.output?.sourceRange]
+            .compactMap { $0 }
+            .filter { $0.length > 0 }
+        guard var union = ranges.first else {
+            return source.anchor.sourceRange
+        }
+        for range in ranges.dropFirst() {
+            union = NSUnionRange(union, range)
+        }
+        return union
     }
 
     private static func appendPresentationRuns(
@@ -217,29 +304,29 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputText(
-        for block: ReviewMonitorLogBlock,
+        for panelSource: CommandPanelSource,
         sourceString: NSString,
         isExpanded: Bool
     ) -> String {
-        guard isExpanded else {
+        guard isExpanded,
+              let output = panelSource.output
+        else {
             return ""
         }
-        return sourceString.substring(with: block.range)
+        return sourceString.substring(with: output.range)
     }
 
     private static func commandOutputTitle(
-        for block: ReviewMonitorLogBlock,
-        commandTextByGroupID: [String: String]
+        metadata: ReviewLogEntry.Metadata?,
+        commandText: String
     ) -> String {
-        let trimmedTitle = block.metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedTitle, trimmedTitle.isEmpty == false {
+        let trimmedTitle = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedTitle,
+           trimmedTitle.isEmpty == false,
+           isGenericCommandTitle(trimmedTitle) == false {
             return trimmedTitle
         }
 
-        let commandText = commandOutputCommandText(
-            for: block,
-            commandTextByGroupID: commandTextByGroupID
-        )
         if commandText.isEmpty == false {
             return "Ran \(commandSummaryName(commandText))"
         }
@@ -248,19 +335,33 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputCommandText(
-        for block: ReviewMonitorLogBlock,
+        for panelSource: CommandPanelSource,
+        sourceString: NSString,
         commandTextByGroupID: [String: String]
     ) -> String {
-        if let groupID = block.groupID,
+        if let groupID = panelSource.anchor.groupID,
            let commandText = commandTextByGroupID[groupID] {
             return commandText
         }
 
-        let trimmedCommand = block.metadata?.command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let command = panelSource.command {
+            let text = commandTextWithoutPrompt(sourceString.substring(with: command.range))
+            if text.isEmpty == false {
+                return text
+            }
+        }
+
+        let metadata = panelSource.output?.metadata ?? panelSource.command?.metadata ?? panelSource.anchor.metadata
+        let trimmedCommand = metadata?.command?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmedCommand, trimmedCommand.isEmpty == false else {
             return ""
         }
         return commandTextWithoutPrompt(trimmedCommand)
+    }
+
+    private static func isGenericCommandTitle(_ title: String) -> Bool {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "command" || normalized == "command output"
     }
 
     private static func commandOutputResultText(for block: ReviewMonitorLogBlock) -> String? {
@@ -290,13 +391,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputCommandTextByGroupID(
         in blocks: [ReviewMonitorLogBlock],
-        sourceString: NSString,
-        commandOutputGroupIDs: Set<String>
+        sourceString: NSString
     ) -> [String: String] {
         var commandTextByGroupID: [String: String] = [:]
         for block in blocks where block.kind == .command {
             guard let groupID = block.groupID,
-                  commandOutputGroupIDs.contains(groupID),
                   commandTextByGroupID[groupID] == nil
             else {
                 continue
@@ -378,6 +477,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         displayBlocks: [ReviewMonitorLogBlock]
     ) -> NSRange? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
+              sourceBlock.kind != .command,
               sourceBlock.kind != .commandOutput,
               let displayBlock = displayBlocks.first(where: { $0.id == blockID }),
               NSMaxRange(range) <= NSMaxRange(sourceBlock.range)

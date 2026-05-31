@@ -80,7 +80,35 @@ struct ReviewMonitorLogProjectionTests {
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
-    @Test func commandOutputDisplaySuppressesSkippedCommandGapBeforeInterleavedBlocks() {
+    @Test func commandDisplayUsesPanelBeforeOutputArrives() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-started",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test")
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+
+        #expect(displayText == "Ran swift test")
+        #expect(displayDocument.text.contains("$ swift test") == false)
+        #expect(displayDocument.commandOutputPanels.count == 1)
+        #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
+    }
+
+    @Test func commandOutputDisplayKeepsCommandPanelBeforeInterleavedBlocks() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output-interleaved",
             cwd: "/tmp/workspace",
@@ -104,9 +132,12 @@ struct ReviewMonitorLogProjectionTests {
             expandedBlockIDs: []
         )
 
-        #expect(displayDocument.text.hasPrefix("MCP codex_review.review_read started."))
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+        #expect(displayText.hasPrefix("Ran command for 3s\n\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
-        #expect(displayDocument.text.contains("Ran command for 3s"))
     }
 
     @Test func commandOutputDisplayLetsExitCodeOverrideCompletedStatus() {

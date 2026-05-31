@@ -204,8 +204,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         allowIncrementalUpdate: Bool
     ) -> Bool {
         sourceDocument = document
-        pruneExpandedCommandOutputState(for: document)
         let document = displayDocument(for: document)
+        pruneExpandedCommandOutputState(for: document)
         if allowIncrementalUpdate, displayedRevision == document.revision {
             return false
         }
@@ -288,9 +288,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func pruneExpandedCommandOutputState(for document: ReviewMonitorLogDocument) {
-        let commandOutputBlockIDs = Set(document.blocks.lazy
-            .filter { $0.kind == .commandOutput }
-            .map(\.id))
+        let commandOutputBlockIDs = Set(document.commandOutputPanels.map(\.blockID))
         expandedCommandOutputBlockIDs.formIntersection(commandOutputBlockIDs)
     }
 

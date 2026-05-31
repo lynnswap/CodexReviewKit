@@ -2436,6 +2436,53 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("output line 9"))
     }
 
+    @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-start-panel",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
+
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "output line 1",
+            metadata: .init(sourceType: "commandExecution", title: "Command output", status: "succeeded", exitCode: 0)
+        ))
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("output line 1") == false)
+    }
+
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
         let activeJob = makeJob(
             id: "job-active",
