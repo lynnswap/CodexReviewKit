@@ -1848,7 +1848,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func decorationNeedsResolvedRect(_ style: ReviewMonitorLogDecorationStyle) -> Bool {
         switch style {
-        case .transcript, .command, .terminal, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
+        case .terminal:
+            return true
+        case .transcript, .command, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
             return false
         }
     }
@@ -2446,6 +2448,16 @@ extension ReviewMonitorLogDocumentView {
     var commandOutputPanelCountForTesting: Int {
         layoutTextViewport(force: true)
         return currentCommandOutputPanels.count
+    }
+
+    var terminalDecorationRectCountForTesting: Int {
+        layoutTextViewport(force: true)
+        return decorationView.decorations.filter { decoration in
+            if case .terminal = decoration.style {
+                return true
+            }
+            return false
+        }.count
     }
 
     var expandedCommandOutputPanelCountForTesting: Int {

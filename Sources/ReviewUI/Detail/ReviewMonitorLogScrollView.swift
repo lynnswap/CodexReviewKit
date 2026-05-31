@@ -1324,6 +1324,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelCountForTesting
     }
 
+    var terminalDecorationRectCountForTesting: Int {
+        logDocumentView.terminalDecorationRectCountForTesting
+    }
+
     var expandedCommandOutputPanelCountForTesting: Int {
         logDocumentView.expandedCommandOutputPanelCountForTesting
     }

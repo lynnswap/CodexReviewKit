@@ -2315,6 +2315,7 @@ struct ReviewUITests {
         #expect(displayedLog.contains("README.md | 1 +") == false)
         #expect(displayedLog.contains("No correctness issues found."))
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logTerminalDecorationRectCountForTesting > 0)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }

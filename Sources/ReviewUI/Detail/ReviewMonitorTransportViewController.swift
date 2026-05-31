@@ -639,6 +639,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelCountForTesting
     }
 
+    var logTerminalDecorationRectCountForTesting: Int {
+        logScrollView.terminalDecorationRectCountForTesting
+    }
+
     var logExpandedCommandOutputPanelCountForTesting: Int {
         logScrollView.expandedCommandOutputPanelCountForTesting
     }
