@@ -59,15 +59,6 @@ final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentVie
 
 @MainActor
 private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
-    override func scrollWheel(with event: NSEvent) {
-        let previousNextResponder = nextResponder
-        nextResponder = nil
-        defer {
-            nextResponder = previousNextResponder
-        }
-        super.scrollWheel(with: event)
-    }
-
     override func mouseDown(with event: NSEvent) {
         guard forwardMouseEventToDocumentView(event, perform: { $0.mouseDown(with: event) }) else {
             super.mouseDown(with: event)
