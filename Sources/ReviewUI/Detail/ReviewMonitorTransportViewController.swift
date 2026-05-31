@@ -651,6 +651,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelUsesInlineAttachmentForTesting
     }
 
+    var logCommandOutputPanelUsesButtonAttachmentForTesting: Bool {
+        logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
+    }
+
     var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
         logScrollView.commandOutputPanelVisibleLineCapacityForTesting
     }

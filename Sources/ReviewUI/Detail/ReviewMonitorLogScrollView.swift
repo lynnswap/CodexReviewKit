@@ -2315,11 +2315,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
-        if event.clickCount == 1,
-           let blockID = commandOutputToggleBlockID(at: point) {
-            onCommandOutputPanelToggle?(blockID)
-            return
-        }
         let offset = utf16Offset(at: point)
         dragAnchorUTF16Offset = offset
         if event.clickCount > 1 {
@@ -2327,24 +2322,6 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         } else {
             setSelectedRange(NSRange(location: offset, length: 0))
         }
-    }
-
-    private func commandOutputToggleBlockID(at point: NSPoint) -> ReviewMonitorLogBlockID? {
-        let offset = utf16Offset(at: point)
-        let candidateLocations = [offset, offset - 1].filter { $0 >= 0 && $0 < textStorage.length }
-        for location in candidateLocations {
-            guard let attachment = textStorage.attribute(.attachment, at: location, effectiveRange: nil)
-                    as? ReviewMonitorCommandOutputToggleAttachment
-            else {
-                continue
-            }
-            let range = NSRange(location: location, length: 1)
-            guard rects(forCharacterRange: range).contains(where: { $0.rectValue.insetBy(dx: -4, dy: -4).contains(point) }) else {
-                continue
-            }
-            return attachment.blockID
-        }
-        return nil
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -3093,6 +3070,13 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
         return NSTextRange(location: startLocation, end: endLocation)
     }
 
+    private func textLocation(forUTF16Offset offset: Int) -> (any NSTextLocation)? {
+        textContentStorage.location(
+            textContentStorage.documentRange.location,
+            offsetBy: clampUTF16Offset(offset)
+        )
+    }
+
     private func nsRange(for textRange: NSTextRange) -> NSRange {
         let location = textContentStorage.offset(
             from: textContentStorage.documentRange.location,
@@ -3223,10 +3207,33 @@ private final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidat
             fragmentViewportView.addSubview(fragmentView)
             fragmentNeedsImmediateDisplay = true
         }
+        fragmentView.syncTextAttachmentViews(
+            commandOutputToggleAttachmentPlacements(in: textLayoutFragment)
+        )
         if fragmentNeedsImmediateDisplay {
             fragmentView.needsDisplay = true
         }
         visibleFragmentViews.insert(fragmentView)
+    }
+
+    private func commandOutputToggleAttachmentPlacements(
+        in layoutFragment: NSTextLayoutFragment
+    ) -> [ReviewMonitorCommandOutputToggleAttachmentPlacement] {
+        let fragmentRange = clamp(nsRange(for: layoutFragment.rangeInElement))
+        guard fragmentRange.length > 0 else {
+            return []
+        }
+
+        var placements: [ReviewMonitorCommandOutputToggleAttachmentPlacement] = []
+        textStorage.enumerateAttribute(.attachment, in: fragmentRange) { value, range, _ in
+            guard let attachment = value as? ReviewMonitorCommandOutputToggleAttachment,
+                  let location = textLocation(forUTF16Offset: range.location)
+            else {
+                return
+            }
+            placements.append(.init(attachment: attachment, location: location))
+        }
+        return placements
     }
 
     func textViewportLayoutControllerDidLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
@@ -3278,6 +3285,23 @@ private class ReviewMonitorLogTiledContentView: NSView {
         nil
     }
 
+    fileprivate func hitTestInteractiveSubviews(at point: NSPoint) -> NSView? {
+        guard isHidden == false,
+              alphaValue > 0,
+              bounds.contains(point)
+        else {
+            return nil
+        }
+
+        for subview in subviews.reversed() {
+            let subviewPoint = convert(point, to: subview)
+            if let hitView = subview.hitTest(subviewPoint) {
+                return hitView
+            }
+        }
+        return nil
+    }
+
     override func makeBackingLayer() -> CALayer {
         CATiledLayer()
     }
@@ -3295,10 +3319,18 @@ private class ReviewMonitorLogTiledContentView: NSView {
 }
 
 @MainActor
-private final class ReviewMonitorLogContentView: ReviewMonitorLogTiledContentView {}
+private final class ReviewMonitorLogContentView: ReviewMonitorLogTiledContentView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        hitTestInteractiveSubviews(at: point)
+    }
+}
 
 @MainActor
-private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentView {}
+private final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        hitTestInteractiveSubviews(at: point)
+    }
+}
 
 @MainActor
 private final class ReviewMonitorCommandOutputPanelContainerView: NSView {
@@ -3327,7 +3359,6 @@ private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment
     let fontPointSize: CGFloat
     let slotWidth: CGFloat
     let renderedSymbolSize: NSSize
-    private let symbolImage: NSImage?
 
     init(blockID: ReviewMonitorLogBlockID, isExpanded: Bool, font: NSFont) {
         self.blockID = blockID
@@ -3335,17 +3366,14 @@ private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment
         self.symbolSize = ceil(font.pointSize + 1)
         self.fontPointSize = font.pointSize
         self.slotWidth = ReviewMonitorCommandOutputPanelView.chevronSlotWidth(for: font)
-        let renderedSymbol = Self.makeSymbolImage(
+        self.renderedSymbolSize = Self.renderedSymbolSize(
             name: symbolName,
             symbolSize: symbolSize,
-            canvasSize: NSSize(width: slotWidth, height: symbolSize),
             pointSize: symbolSize
         )
-        self.renderedSymbolSize = renderedSymbol.drawSize
-        self.symbolImage = renderedSymbol.image
         super.init(data: nil, ofType: nil)
 
-        allowsTextAttachmentView = false
+        allowsTextAttachmentView = true
         lineLayoutPadding = 0
         bounds = CGRect(
             x: 0,
@@ -3353,7 +3381,6 @@ private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment
             width: slotWidth,
             height: symbolSize
         )
-        image = symbolImage
     }
 
     @available(*, unavailable)
@@ -3371,27 +3398,39 @@ private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment
         bounds
     }
 
+    override func viewProvider(
+        for parentView: NSView?,
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSTextAttachmentViewProvider? {
+        NSTextAttachmentViewProvider(
+            textAttachment: self,
+            parentView: parentView,
+            textLayoutManager: nil,
+            location: location
+        )
+    }
+
     override func image(
         for bounds: CGRect,
         attributes: [NSAttributedString.Key: Any],
         location: any NSTextLocation,
         textContainer: NSTextContainer?
     ) -> NSImage? {
-        symbolImage
+        Self.transparentImage
     }
 
-    private static func makeSymbolImage(
+    private static func renderedSymbolSize(
         name: String,
         symbolSize: CGFloat,
-        canvasSize: NSSize,
         pointSize: CGFloat
-    ) -> (image: NSImage?, drawSize: NSSize) {
+    ) -> NSSize {
         let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
             .applying(.init(hierarchicalColor: .secondaryLabelColor))
         guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
             .withSymbolConfiguration(symbolConfiguration)
         else {
-            return (nil, .zero)
+            return .zero
         }
 
         let naturalSize = symbol.size
@@ -3403,21 +3442,129 @@ private final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment
             width: max(1, floor(naturalSize.width * scale)),
             height: max(1, floor(naturalSize.height * scale))
         )
-        let image = NSImage(size: canvasSize)
+        return drawSize
+    }
+
+    private static let transparentImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 1, height: 1))
         image.lockFocus()
-        symbol.draw(
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+        image.unlockFocus()
+        return image
+    }()
+}
+
+@MainActor
+private final class ReviewMonitorCommandOutputToggleButton: NSButton {
+    private(set) var blockID: ReviewMonitorLogBlockID
+    private(set) var symbolName: String
+    private var buttonSize: NSSize
+    private var symbolImage: NSImage?
+    private var symbolDrawSize = NSSize(width: 0, height: 0)
+
+    init(attachment: ReviewMonitorCommandOutputToggleAttachment) {
+        self.blockID = attachment.blockID
+        self.symbolName = attachment.symbolName
+        self.buttonSize = NSSize(width: attachment.slotWidth, height: attachment.symbolSize)
+        super.init(frame: NSRect(origin: .zero, size: buttonSize))
+
+        title = ""
+        isBordered = false
+        setButtonType(.momentaryChange)
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        focusRingType = .none
+        bezelStyle = .regularSquare
+        target = self
+        action = #selector(toggleCommandOutputPanel(_:))
+        configure(attachment: attachment)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func configure(attachment: ReviewMonitorCommandOutputToggleAttachment) {
+        blockID = attachment.blockID
+        symbolName = attachment.symbolName
+        buttonSize = NSSize(width: attachment.slotWidth, height: attachment.symbolSize)
+        frame.size = buttonSize
+        invalidateIntrinsicContentSize()
+        symbolDrawSize = attachment.renderedSymbolSize
+
+        let accessibilityLabel = symbolName == "chevron.down"
+            ? "Collapse command output"
+            : "Expand command output"
+        toolTip = accessibilityLabel
+        setAccessibilityLabel(accessibilityLabel)
+
+        let symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: attachment.symbolSize,
+            weight: .medium
+        )
+            .applying(.init(hierarchicalColor: isHighlighted ? .labelColor : .secondaryLabelColor))
+        symbolImage = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(symbolConfiguration)
+        needsDisplay = true
+    }
+
+    override var intrinsicContentSize: NSSize {
+        buttonSize
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let symbolImage else {
+            return
+        }
+
+        let drawSize = NSSize(
+            width: min(bounds.width, max(1, symbolDrawSize.width)),
+            height: min(bounds.height, max(1, symbolDrawSize.height))
+        )
+        symbolImage.draw(
             in: NSRect(
-                x: floor((canvasSize.width - drawSize.width) / 2),
-                y: floor((canvasSize.height - drawSize.height) / 2),
+                x: floor((bounds.width - drawSize.width) / 2),
+                y: floor((bounds.height - drawSize.height) / 2),
                 width: drawSize.width,
                 height: drawSize.height
             ),
             from: .zero,
             operation: .sourceOver,
-            fraction: 1
+            fraction: isEnabled ? 1 : 0.45,
+            respectFlipped: true,
+            hints: nil
         )
-        image.unlockFocus()
-        return (image, drawSize)
+    }
+
+    @objc private func toggleCommandOutputPanel(_ sender: ReviewMonitorCommandOutputToggleButton) {
+        guard let documentView = sender.nearestSuperview(of: ReviewMonitorLogDocumentView.self) else {
+            return
+        }
+        documentView.onCommandOutputPanelToggle?(sender.blockID)
+    }
+}
+
+private extension NSView {
+    func nearestSuperview<View: NSView>(of type: View.Type) -> View? {
+        var view: NSView? = self
+        while let currentView = view {
+            if let typedView = currentView as? View {
+                return typedView
+            }
+            view = currentView.superview
+        }
+        return nil
     }
 }
 
@@ -3543,6 +3690,11 @@ private struct ReviewMonitorLogResolvedDecoration: Equatable {
     var rect: NSRect
 }
 
+private struct ReviewMonitorCommandOutputToggleAttachmentPlacement {
+    var attachment: ReviewMonitorCommandOutputToggleAttachment
+    var location: any NSTextLocation
+}
+
 @MainActor
 private final class ReviewMonitorLogDecorationView: NSView {
     var decorations: [ReviewMonitorLogResolvedDecoration] = [] {
@@ -3615,7 +3767,19 @@ private final class ReviewMonitorLogFragmentView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+        guard isHidden == false,
+              alphaValue > 0,
+              bounds.contains(point)
+        else {
+            return nil
+        }
+        for subview in subviews.reversed() {
+            let subviewPoint = convert(point, to: subview)
+            if let hitView = subview.hitTest(subviewPoint) {
+                return hitView
+            }
+        }
+        return nil
     }
 
     init(layoutFragment: NSTextLayoutFragment, frame: NSRect) {
@@ -3639,6 +3803,45 @@ private final class ReviewMonitorLogFragmentView: NSView {
         layoutFragment.draw(at: .zero, in: context)
         context.restoreGState()
     }
+
+    func syncTextAttachmentViews(_ placements: [ReviewMonitorCommandOutputToggleAttachmentPlacement]) {
+        var visibleAttachmentViews = Set<ObjectIdentifier>()
+        for placement in placements {
+            let attachment = placement.attachment
+            let button = commandOutputToggleButton(for: attachment)
+            button.configure(attachment: attachment)
+            button.frame = layoutFragment
+                .frameForTextAttachment(at: placement.location)
+                .integral
+            if button.superview !== self {
+                addSubview(button)
+            }
+            visibleAttachmentViews.insert(ObjectIdentifier(button))
+        }
+
+        for subview in subviews where subview is ReviewMonitorCommandOutputToggleButton {
+            guard visibleAttachmentViews.contains(ObjectIdentifier(subview)) == false else {
+                continue
+            }
+            subview.removeFromSuperview()
+        }
+    }
+
+    private func commandOutputToggleButton(
+        for attachment: ReviewMonitorCommandOutputToggleAttachment
+    ) -> ReviewMonitorCommandOutputToggleButton {
+        if let existingButton = subviews.compactMap({ $0 as? ReviewMonitorCommandOutputToggleButton })
+            .first(where: { $0.blockID == attachment.blockID }) {
+            return existingButton
+        }
+        return ReviewMonitorCommandOutputToggleButton(attachment: attachment)
+    }
+
+#if DEBUG
+    var firstCommandOutputToggleButtonForTesting: ReviewMonitorCommandOutputToggleButton? {
+        subviews.compactMap { $0 as? ReviewMonitorCommandOutputToggleButton }.first
+    }
+#endif
 }
 
 private struct ReviewMonitorLogWordFadeAnimation {
@@ -4097,6 +4300,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelUsesInlineAttachmentForTesting
     }
 
+    var commandOutputPanelUsesButtonAttachmentForTesting: Bool {
+        logDocumentView.commandOutputPanelUsesButtonAttachmentForTesting
+    }
+
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         logDocumentView.commandOutputPanelVisibleLineCapacityForTesting
     }
@@ -4299,6 +4506,11 @@ private extension ReviewMonitorLogDocumentView {
         return firstCommandOutputToggleAttachmentForTesting() != nil
     }
 
+    var commandOutputPanelUsesButtonAttachmentForTesting: Bool {
+        layoutTextViewport(force: true)
+        return firstCommandOutputToggleButtonForTesting() != nil
+    }
+
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         layoutTextViewport(force: true)
         return commandOutputPanelViews.values
@@ -4388,6 +4600,10 @@ private extension ReviewMonitorLogDocumentView {
         guard let target = hitTest(documentPoint) else {
             return false
         }
+        if let button = target as? ReviewMonitorCommandOutputToggleButton {
+            button.performClick(nil)
+            return true
+        }
         target.mouseDown(with: event)
         return true
     }
@@ -4400,6 +4616,13 @@ private extension ReviewMonitorLogDocumentView {
         }
         return textStorage.attribute(.attachment, at: panel.range.location, effectiveRange: nil)
             as? ReviewMonitorCommandOutputToggleAttachment
+    }
+
+    private func firstCommandOutputToggleButtonForTesting() -> ReviewMonitorCommandOutputToggleButton? {
+        visibleFragmentViews
+            .sorted { $0.frame.minY < $1.frame.minY }
+            .compactMap(\.firstCommandOutputToggleButtonForTesting)
+            .first
     }
 
     private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelView? {
