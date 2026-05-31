@@ -417,15 +417,27 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             return
         }
 
+        let changedPanelRanges = changedCommandOutputPanelRanges(
+            from: currentCommandOutputPanels,
+            to: document.commandOutputPanels
+        )
         currentDecorations = document.decorations
         currentCommandOutputPanels = document.commandOutputPanels
         invalidateFinderStringMapping()
         if let append,
            let invalidationRange = styleInvalidationRange(for: append, in: document) {
-            applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels, in: invalidationRange)
+            applyStyleRuns(
+                document.styleRuns,
+                commandOutputPanels: document.commandOutputPanels,
+                in: [invalidationRange] + changedPanelRanges
+            )
         } else if let replacement,
                   let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
-            applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels, in: invalidationRange)
+            applyStyleRuns(
+                document.styleRuns,
+                commandOutputPanels: document.commandOutputPanels,
+                in: [invalidationRange] + changedPanelRanges
+            )
         } else {
             applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels)
         }
@@ -460,28 +472,79 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         commandOutputPanels: [ReviewMonitorLogCommandOutputPanel],
         in invalidationRange: NSRange
     ) {
+        applyStyleRuns(styleRuns, commandOutputPanels: commandOutputPanels, in: [invalidationRange])
+    }
+
+    private func applyStyleRuns(
+        _ styleRuns: [ReviewMonitorLogTextRun],
+        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel],
+        in invalidationRanges: [NSRange]
+    ) {
         guard textStorage.length > 0 else {
             return
         }
 
         let fullRange = NSRange(location: 0, length: textStorage.length)
-        let targetRange = NSIntersectionRange(invalidationRange, fullRange)
-        guard targetRange.length > 0 else {
+        let targetRanges = normalizedRanges(invalidationRanges, in: fullRange)
+        guard targetRanges.isEmpty == false else {
             return
         }
 
         textContentStorage.performEditingTransaction {
-            textStorage.setAttributes(baseAttributes, range: targetRange)
-            for styleRun in styleRuns {
-                let range = NSIntersectionRange(styleRun.range, targetRange)
-                guard range.length > 0 else {
-                    continue
+            for targetRange in targetRanges {
+                textStorage.setAttributes(baseAttributes, range: targetRange)
+                for styleRun in styleRuns {
+                    let range = NSIntersectionRange(styleRun.range, targetRange)
+                    guard range.length > 0 else {
+                        continue
+                    }
+                    textStorage.addAttributes(attributes(for: styleRun.style), range: range)
                 }
-                textStorage.addAttributes(attributes(for: styleRun.style), range: range)
+                applyCommandOutputAttachments(commandOutputPanels, in: targetRange)
             }
-            applyCommandOutputAttachments(commandOutputPanels, in: targetRange)
         }
-        invalidateTextLayout(in: targetRange, measureEstimatedHeightImmediately: false)
+        for targetRange in targetRanges {
+            invalidateTextLayout(in: targetRange, measureEstimatedHeightImmediately: false)
+        }
+    }
+
+    private func changedCommandOutputPanelRanges(
+        from previousPanels: [ReviewMonitorLogCommandOutputPanel],
+        to nextPanels: [ReviewMonitorLogCommandOutputPanel]
+    ) -> [NSRange] {
+        let previousPanelsByID = Dictionary(uniqueKeysWithValues: previousPanels.map { ($0.blockID, $0) })
+        let nextPanelsByID = Dictionary(uniqueKeysWithValues: nextPanels.map { ($0.blockID, $0) })
+        var ranges: [NSRange] = []
+        for panel in nextPanels where previousPanelsByID[panel.blockID] != panel {
+            ranges.append(panel.range)
+        }
+        for panel in previousPanels where nextPanelsByID[panel.blockID] == nil {
+            ranges.append(panel.range)
+        }
+        return ranges
+    }
+
+    private func normalizedRanges(_ ranges: [NSRange], in fullRange: NSRange) -> [NSRange] {
+        let clippedRanges = ranges
+            .map { NSIntersectionRange($0, fullRange) }
+            .filter { $0.length > 0 }
+            .sorted { $0.location < $1.location }
+
+        var normalized: [NSRange] = []
+        for range in clippedRanges {
+            guard var last = normalized.popLast() else {
+                normalized.append(range)
+                continue
+            }
+            if NSMaxRange(last) >= range.location {
+                last = NSUnionRange(last, range)
+                normalized.append(last)
+            } else {
+                normalized.append(last)
+                normalized.append(range)
+            }
+        }
+        return normalized
     }
 
     private func applyCommandOutputAttachments(
@@ -606,8 +669,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             attributes[.font] = commandOutputControlFont
             attributes[.foregroundColor] = secondaryTextColor
             let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.firstLineHeadIndent = 0
-            paragraphStyle.headIndent = commandOutputControlTextIndent
             if isExpanded == false {
                 paragraphStyle.lineBreakMode = .byTruncatingTail
             }
@@ -639,10 +700,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private var commandOutputControlFont: NSFont {
         baseFont
-    }
-
-    private var commandOutputControlTextIndent: CGFloat {
-        ReviewMonitorCommandOutputPanelView.chevronSlotWidth(for: commandOutputControlFont)
     }
 
     private func boldFont(size: CGFloat) -> NSFont {

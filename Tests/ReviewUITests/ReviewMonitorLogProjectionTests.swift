@@ -103,6 +103,7 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(displayText == "Ran swift test")
         #expect(displayDocument.text.contains("$ swift test") == false)
+        #expect(displayDocument.decorations.isEmpty)
         #expect(displayDocument.commandOutputPanels.count == 1)
         #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
         #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")

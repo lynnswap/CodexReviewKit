@@ -2315,7 +2315,7 @@ struct ReviewUITests {
         #expect(displayedLog.contains("README.md | 1 +") == false)
         #expect(displayedLog.contains("No correctness issues found."))
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
-        #expect(transport.logTerminalDecorationRectCountForTesting > 0)
+        #expect(transport.logTerminalDecorationRectCountForTesting == 0)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
@@ -2442,6 +2442,18 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9"))
+
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "\noutput line 11",
+            metadata: commandMetadata
+        ))
+        job.appendLogEntry(.init(kind: .agentMessage, text: "Visible text after command output."))
+        _ = try await awaitTransportRender(transport)
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
+        #expect(transport.displayedLogForTesting.contains("Visible text after command output."))
     }
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {

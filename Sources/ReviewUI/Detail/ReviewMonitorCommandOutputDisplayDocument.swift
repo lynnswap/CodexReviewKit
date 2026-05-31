@@ -92,11 +92,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     metadata: metadata
                 ))
                 styleRuns.append(.init(range: controlRange, style: .commandOutputControl(isExpanded: isExpanded)))
-                decorations.append(.init(
-                    blockID: blockID,
-                    range: displayRange,
-                    style: terminalDecorationStyle(for: panelSource.output ?? panelSource.anchor, in: source)
-                ))
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
@@ -415,16 +410,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return trimmedText
         }
         return String(trimmedText.dropFirst()).trimmingCharacters(in: .whitespaces)
-    }
-
-    private static func terminalDecorationStyle(
-        for block: ReviewMonitorLogBlock,
-        in source: ReviewMonitorLogDocument
-    ) -> ReviewMonitorLogDecorationStyle {
-        source.decorations.first { decoration in
-            decoration.blockID == block.id &&
-                NSIntersectionRange(decoration.range, block.range).length > 0
-        }?.style ?? .terminal(tone: .neutral)
     }
 
     private static func mappedLastChange(
