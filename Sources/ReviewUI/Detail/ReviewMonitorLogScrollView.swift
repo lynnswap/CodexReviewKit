@@ -675,7 +675,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(block.kind)
             hasher.combine(block.groupID)
             combine(range, into: &hasher)
-            combine(block.sourceRange, into: &hasher)
+            combine(sourceSignatureRange(for: block, clippedDisplayRange: range), into: &hasher)
             hasher.combine(block.metadata)
         }
 
@@ -716,6 +716,19 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         return hasher.finalize()
+    }
+
+    private func sourceSignatureRange(
+        for block: ReviewMonitorLogBlock,
+        clippedDisplayRange: NSRange
+    ) -> NSRange {
+        guard block.kind != .commandOutput else {
+            return block.sourceRange
+        }
+        return NSRange(
+            location: block.sourceRange.location,
+            length: min(block.sourceRange.length, clippedDisplayRange.length)
+        )
     }
 
     private func clippedRange(_ range: NSRange, upperBound: Int) -> NSRange? {
