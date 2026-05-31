@@ -2178,6 +2178,16 @@ extension ReviewMonitorLogDocumentView {
         return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollIsScrollableForTesting ?? false
     }
 
+    var commandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollVerticalOffsetForTesting
+    }
+
+    var commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
+        layoutTextViewport(force: true)
+        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollMaximumVerticalOffsetForTesting
+    }
+
     func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
         layoutTextViewport(force: true)
         return firstVisibleCommandOutputPanelViewForTesting()?.scrollOutputForTesting(deltaY: deltaY) ?? false

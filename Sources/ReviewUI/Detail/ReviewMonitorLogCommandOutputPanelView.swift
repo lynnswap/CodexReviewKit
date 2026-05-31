@@ -377,6 +377,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private var commandLineText = ""
     private var outputText = ""
     private var outputLineCount = 0
+    private var shouldScrollOutputToBottomOnNextLayout = false
 
     override var isFlipped: Bool {
         true
@@ -426,6 +427,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
 
     func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
         let previousPanel = self.panel
+        let wasExpanded = previousPanel?.isExpanded == true
         self.panel = panel
         let isExpanded = panel.isExpanded
         shellLabel.isHidden = isExpanded == false
@@ -433,6 +435,11 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         commandTextView.isHidden = isExpanded == false || nextCommandLineText.isEmpty
         outputScrollView.isHidden = isExpanded == false
         resultLabel.isHidden = isExpanded == false || (panel.exitText?.isEmpty ?? true)
+        let outputChanged = previousPanel?.outputText != panel.outputText ||
+            outputText != panel.outputText
+        if isExpanded, wasExpanded == false || outputChanged {
+            shouldScrollOutputToBottomOnNextLayout = true
+        }
 
         let nextTerminalText = Self.terminalText(commandLineText: nextCommandLineText, outputText: panel.outputText)
         if previousPanel?.commandText != panel.commandText ||
@@ -446,8 +453,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             )
         }
 
-        if previousPanel?.outputText != panel.outputText ||
-            outputText != panel.outputText {
+        if outputChanged {
             outputText = panel.outputText
             outputLineCount = Self.lineCount(panel.outputText)
             outputTextView.textStorage?.setAttributedString(
@@ -549,6 +555,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             width: resultWidth,
             height: footerHeight
         )
+        scrollOutputToBottomIfNeeded()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -572,6 +579,21 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private var outputLineHeight: CGFloat {
         let font = outputTextView.font ?? Self.outputFont
         return max(1, ceil(font.ascender - font.descender + font.leading))
+    }
+
+    private func scrollOutputToBottomIfNeeded() {
+        guard shouldScrollOutputToBottomOnNextLayout,
+              outputScrollView.isHidden == false,
+              outputScrollView.contentSize.height > 0
+        else {
+            return
+        }
+
+        let clipView = outputScrollView.contentView
+        let maxY = max(0, outputTextView.frame.height - clipView.bounds.height)
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: maxY))
+        outputScrollView.reflectScrolledClipView(clipView)
+        shouldScrollOutputToBottomOnNextLayout = false
     }
 
     private static func labelFont(weight: NSFont.Weight = .regular) -> NSFont {
@@ -765,6 +787,16 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return outputTextView.frame.height > outputScrollView.contentSize.height + 0.5
     }
 
+    var outputScrollVerticalOffsetForTesting: CGFloat {
+        layoutSubtreeIfNeeded()
+        return outputScrollView.contentView.bounds.origin.y
+    }
+
+    var outputScrollMaximumVerticalOffsetForTesting: CGFloat {
+        layoutSubtreeIfNeeded()
+        return max(0, outputTextView.frame.height - outputScrollView.contentView.bounds.height)
+    }
+
     func scrollOutputForTesting(deltaY: CGFloat) -> Bool {
         layoutSubtreeIfNeeded()
         guard outputScrollView.isHidden == false else {
@@ -783,4 +815,3 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 #endif
 }
-

@@ -1281,6 +1281,14 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelOutputScrollIsScrollableForTesting
     }
 
+    var commandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
+        logDocumentView.commandOutputPanelOutputScrollVerticalOffsetForTesting
+    }
+
+    var commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
+        logDocumentView.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
+    }
+
     func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
         logDocumentView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
     }
