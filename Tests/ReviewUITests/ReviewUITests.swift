@@ -2284,7 +2284,7 @@ struct ReviewUITests {
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
             logEntries: [
-                .init(kind: .command, text: "$ git diff --stat"),
+                .init(kind: .command, groupID: "cmd_1", text: "$ git diff --stat"),
                 .init(kind: .commandOutput, groupID: "cmd_1", text: "README.md | 1 +"),
                 .init(kind: .agentMessage, text: "No correctness issues found.")
             ]
@@ -2309,8 +2309,8 @@ struct ReviewUITests {
 
         let displayedLog = transport.displayedLogForTesting
         #expect(selectedSnapshot.log == displayedLog)
-        #expect(displayedLog.contains("$ git diff --stat"))
-        #expect(displayedLog.contains("Command output"))
+        #expect(displayedLog.contains("Ran git diff"))
+        #expect(displayedLog.contains("$ git diff --stat") == false)
         #expect(displayedLog.contains("Command output - 1 line") == false)
         #expect(displayedLog.contains("README.md | 1 +") == false)
         #expect(displayedLog.contains("No correctness issues found."))
