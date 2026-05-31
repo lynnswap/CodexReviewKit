@@ -96,6 +96,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private struct CommandOutputPanelLayoutAnimation {
+        var toggledBlockID: ReviewMonitorLogBlockID
         var fragmentFramesByRange: [FragmentRangeKey: NSRect]
         var orderedFragmentFrames: [NSRect]
         var collapsingPanelSnapshots: [NSImageView]
@@ -656,9 +657,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
 
         pendingCommandOutputPanelLayoutAnimation = CommandOutputPanelLayoutAnimation(
+            toggledBlockID: toggledBlockID,
             fragmentFramesByRange: fragmentFramesByRange,
             orderedFragmentFrames: orderedFragmentFrames,
-            collapsingPanelSnapshots: commandOutputPanelSnapshotViewsForAnimation(),
+            collapsingPanelSnapshots: commandOutputPanelSnapshotViewsForAnimation(
+                toggledBlockID: toggledBlockID
+            ),
             rangeShift: commandOutputPanelRangeShift(
                 toggledBlockID: toggledBlockID,
                 willExpand: willExpand
@@ -678,6 +682,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         layoutTextViewport(force: true)
         let orderedFragmentViews = visibleFragmentViews.sorted { $0.frame.minY < $1.frame.minY }
         let panelViews = visibleCommandOutputPanelAttachmentViews()
+            .filter { $0.blockID == animation.toggledBlockID }
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Self.commandOutputPanelExpansionDuration
@@ -742,8 +747,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
     }
 
-    private func commandOutputPanelSnapshotViewsForAnimation() -> [NSImageView] {
+    private func commandOutputPanelSnapshotViewsForAnimation(
+        toggledBlockID: ReviewMonitorLogBlockID
+    ) -> [NSImageView] {
         let panelViews = visibleCommandOutputPanelAttachmentViews()
+            .filter { $0.blockID == toggledBlockID }
         guard panelViews.isEmpty == false else {
             return []
         }
