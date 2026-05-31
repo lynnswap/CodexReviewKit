@@ -599,7 +599,8 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         resultLabel.isHidden = isExpanded == false || (panel.exitText?.isEmpty ?? true)
         let outputChanged = previousPanel?.outputText != panel.outputText ||
             outputText != panel.outputText
-        if isExpanded, wasExpanded == false || outputChanged {
+        let shouldFollowOutput = wasExpanded == false || outputScrollIsPinnedToBottom()
+        if isExpanded, wasExpanded == false || (outputChanged && shouldFollowOutput) {
             shouldScrollOutputToBottomOnNextLayout = true
         }
 
@@ -741,6 +742,15 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private var outputLineHeight: CGFloat {
         let font = outputTextView.font ?? Self.outputFont
         return max(1, ceil(font.ascender - font.descender + font.leading))
+    }
+
+    private func outputScrollIsPinnedToBottom() -> Bool {
+        let clipView = outputScrollView.contentView
+        let maxY = max(0, outputTextView.frame.height - clipView.bounds.height)
+        guard maxY > 0 else {
+            return true
+        }
+        return abs(maxY - clipView.bounds.origin.y) <= 0.5
     }
 
     private func scrollOutputToBottomIfNeeded() {

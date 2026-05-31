@@ -2323,6 +2323,12 @@ struct ReviewUITests {
         let outputText = (1...9)
             .map { "output line \($0)" }
             .joined(separator: "\n")
+        let commandMetadata = ReviewLogEntry.Metadata(
+            sourceType: "command",
+            title: "Ran command for 17s",
+            status: "succeeded",
+            exitCode: 0
+        )
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output-panel",
             cwd: "/tmp/workspace-alpha",
@@ -2338,12 +2344,7 @@ struct ReviewUITests {
                     kind: .commandOutput,
                     groupID: "cmd_1",
                     text: outputText,
-                    metadata: .init(
-                        sourceType: "command",
-                        title: "Ran command for 17s",
-                        status: "succeeded",
-                        exitCode: 0
-                    )
+                    metadata: commandMetadata
                 ),
                 .init(kind: .agentMessage, text: "Continuing after the command.")
             ]
@@ -2405,6 +2406,16 @@ struct ReviewUITests {
         #expect(transport.scrollCommandOutputPanelOutputForTesting(deltaY: -24))
         let scrolledOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "\noutput line 10",
+            metadata: commandMetadata
+        ))
+        _ = try await awaitTransportRender(transport)
+        await awaitNativeLayoutTurn()
+        let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        #expect(abs(offsetAfterOutputAppend - scrolledOutputScrollOffset) <= 0.5)
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
         await awaitNativeLayoutTurn()
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
