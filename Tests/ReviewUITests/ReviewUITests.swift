@@ -2522,7 +2522,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        await withFindPasteboardString(nil) {
+        try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("output line 3"))
@@ -2535,6 +2535,14 @@ struct ReviewUITests {
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindStringForTesting.contains("$ swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 3"))
+
+            job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
+            try await waitForCondition {
+                transport.logFindStringForTesting.contains("output line 6")
+            }
+
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("output line 6"))
         }
     }
 

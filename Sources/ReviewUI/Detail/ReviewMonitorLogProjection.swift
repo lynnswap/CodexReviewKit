@@ -232,6 +232,22 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         }
         ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
     }
+
+    var finderSupplementSignature: Int {
+        var hasher = Hasher()
+        for panel in commandOutputPanels where panel.isExpanded {
+            hasher.combine(panel.blockID)
+            combine(panel.range, into: &hasher)
+            hasher.combine(panel.commandText)
+            hasher.combine(panel.outputText)
+        }
+        return hasher.finalize()
+    }
+
+    private func combine(_ range: NSRange, into hasher: inout Hasher) {
+        hasher.combine(range.location)
+        hasher.combine(range.length)
+    }
 }
 
 private enum ReviewMonitorLogStyler {

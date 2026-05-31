@@ -38,6 +38,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedUTF16Length = 0
     private var displayedRevision: UInt64?
     private var displayedPresentationSignature: Int?
+    private var displayedFinderSupplementSignature: Int?
     private var sourceDocument: ReviewMonitorLogDocument?
     private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLogBlockID>()
     private var logProjection = ReviewMonitorLogProjection()
@@ -131,6 +132,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     func resetFindStateForContentReuse() {
         endFindSession()
         expandedCommandOutputBlockIDs.removeAll()
+        displayedFinderSupplementSignature = nil
         sourceDocument = nil
     }
 
@@ -173,6 +175,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         logProjection = ReviewMonitorLogProjection()
         displayedRevision = nil
         displayedPresentationSignature = nil
+        displayedFinderSupplementSignature = nil
         sourceDocument = nil
         expandedCommandOutputBlockIDs.removeAll()
         return applyReload(
@@ -361,6 +364,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
+        displayedFinderSupplementSignature = document.finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -392,6 +396,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
+        displayedFinderSupplementSignature = document.finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -411,15 +416,23 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         restoring restorationTarget: ScrollRestorationTarget,
         countBottomRestoreAsAutoFollow: Bool
     ) -> Bool {
+        let finderSupplementSignature = document.finderSupplementSignature
         if displayedText == text {
             let previousOrigin = contentView.bounds.origin
+            let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+                to: finderSupplementSignature
+            )
             logDocumentView.applyPresentation(document)
             displayedPresentationSignature = presentationSignature(
                 forPrefixUTF16Length: displayedUTF16Length,
                 in: document
             )
+            displayedFinderSupplementSignature = finderSupplementSignature
             invalidateDocumentLayout()
             restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
+            if shouldRefreshFindSession {
+                refreshFindSessionAfterUserVisibleLogChange()
+            }
             return contentView.bounds.origin != previousOrigin
         }
 
@@ -433,6 +446,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
+        displayedFinderSupplementSignature = finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
         layoutSubtreeIfNeeded()
@@ -488,6 +502,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if clearSelection {
             logDocumentView.setSelectedRangeFromTextFinder(NSRange(location: 0, length: 0))
         }
+    }
+
+    private func shouldRefreshFindSessionForFinderSupplementChange(to nextSignature: Int) -> Bool {
+        guard isFindBarVisible,
+              isFindQueryActive,
+              textFinderClient.usesSnapshot,
+              let displayedFinderSupplementSignature,
+              displayedFinderSupplementSignature != nextSignature
+        else {
+            return false
+        }
+        return true
     }
 
     private func resetDeferredFindStateAfterFindBarHidden() {
