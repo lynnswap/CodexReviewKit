@@ -19,6 +19,7 @@ public enum ReviewMonitorPreviewContent {
         let kind: ReviewLogEntry.Kind
         let groupName: String?
         let text: String
+        let metadata: ReviewLogEntry.Metadata?
         let chunkByWord: Bool
         let delayAfterPreviousTicks: Int
         let chunkIntervalTicks: Int
@@ -27,6 +28,7 @@ public enum ReviewMonitorPreviewContent {
             kind: ReviewLogEntry.Kind,
             groupName: String? = nil,
             text: String,
+            metadata: ReviewLogEntry.Metadata? = nil,
             chunkByWord: Bool = false,
             delayAfterPreviousTicks: Int,
             chunkIntervalTicks: Int = 1
@@ -34,6 +36,7 @@ public enum ReviewMonitorPreviewContent {
             self.kind = kind
             self.groupName = groupName
             self.text = text
+            self.metadata = metadata
             self.chunkByWord = chunkByWord
             self.delayAfterPreviousTicks = delayAfterPreviousTicks
             self.chunkIntervalTicks = chunkIntervalTicks
@@ -44,6 +47,7 @@ public enum ReviewMonitorPreviewContent {
         let kind: ReviewLogEntry.Kind
         let groupName: String?
         let text: String
+        let metadata: ReviewLogEntry.Metadata?
     }
 
     private struct PreviewStreamFrame {
@@ -204,7 +208,8 @@ public enum ReviewMonitorPreviewContent {
         return .init(
             kind: step.kind,
             groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
-            text: step.text
+            text: step.text,
+            metadata: step.metadata
         )
     }
 
@@ -233,7 +238,8 @@ public enum ReviewMonitorPreviewContent {
                 timeline.append(PreviewStreamStep(
                     kind: template.kind,
                     groupName: template.groupName,
-                    text: chunk
+                    text: chunk,
+                    metadata: template.metadata
                 ))
             }
         }
@@ -274,8 +280,25 @@ public enum ReviewMonitorPreviewContent {
         ),
         .init(
             kind: .command,
+            groupName: "command-search-test",
             text: "$ /bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
             delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .commandOutput,
+            groupName: "command-search-test",
+            text: """
+            Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+            Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
+            Test Suite 'ReviewUITests' passed.
+            """,
+            metadata: .init(
+                sourceType: "command",
+                title: "Ran command for 5s",
+                status: "succeeded",
+                exitCode: 0
+            ),
+            delayAfterPreviousTicks: 2
         ),
         .init(
             kind: .toolCall,
@@ -291,8 +314,29 @@ public enum ReviewMonitorPreviewContent {
         ),
         .init(
             kind: .command,
+            groupName: "command-open-log-scroll",
             text: "$ /bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
             delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .commandOutput,
+            groupName: "command-open-log-scroll",
+            text: """
+            import AppKit
+            import ObjectiveC.runtime
+            import CodexReview
+
+            @MainActor
+            final class ReviewMonitorLogScrollView: NSScrollView {
+                private let logDocumentView = ReviewMonitorLogDocumentView()
+            """,
+            metadata: .init(
+                sourceType: "command",
+                title: "Ran command for 2s",
+                status: "succeeded",
+                exitCode: 0
+            ),
+            delayAfterPreviousTicks: 2
         ),
         .init(
             kind: .toolCall,
@@ -599,7 +643,26 @@ public enum ReviewMonitorPreviewContent {
                 ),
                 .init(
                     kind: .command,
+                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
                     text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
+                    Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
+                    Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
+
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                    Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 6s",
+                        status: "succeeded",
+                        exitCode: 0
+                    )
                 ),
                 .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
                 .init(
@@ -621,7 +684,26 @@ public enum ReviewMonitorPreviewContent {
         case .failed:
             [
                 .init(kind: .event, text: "Turn started: preview-failed-\(workspaceName.lowercased())"),
-                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""),
+                .init(
+                    kind: .command,
+                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Building for debugging...
+                    Test Suite 'ReviewUITests' started.
+                    ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 10s",
+                        status: "failed",
+                        exitCode: 1
+                    )
+                ),
                 .init(kind: .error, text: definition.summary),
                 .init(kind: .agentMessage, text: definition.lastAgentMessage),
             ]
@@ -634,7 +716,26 @@ public enum ReviewMonitorPreviewContent {
         case .succeeded:
             [
                 .init(kind: .event, text: "Turn started: preview-complete-\(workspaceName.lowercased())"),
-                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""),
+                .init(
+                    kind: .command,
+                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Test Suite 'ReviewUITests' started.
+                    Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
+                    Test Suite 'ReviewUITests' passed.
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 4s",
+                        status: "succeeded",
+                        exitCode: 0
+                    )
+                ),
                 .init(
                     kind: .reasoningSummary,
                     groupID: "preview-complete-summary-\(workspaceName)-\(definition.targetSummary)",
