@@ -130,6 +130,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     func resetFindStateForContentReuse() {
         endFindSession()
+        expandedCommandOutputBlockIDs.removeAll()
+        sourceDocument = nil
     }
 
     override func tile() {
