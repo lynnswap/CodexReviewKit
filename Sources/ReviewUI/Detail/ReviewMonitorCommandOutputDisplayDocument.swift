@@ -3,8 +3,6 @@ import Foundation
 enum ReviewMonitorCommandOutputDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
 
-    private static let expandedPlaceholderLineCount = 13
-
     static func make(
         from source: ReviewMonitorLogDocument,
         expandedBlockIDs: Set<ReviewMonitorLogBlockID>
@@ -191,7 +189,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard isExpanded else {
             return label
         }
-        return ([label] + Array(repeating: "", count: expandedPlaceholderLineCount - 1)).joined(separator: "\n")
+        return "\(label)\n\(toggleAttachmentCharacter)"
     }
 
     private static func commandOutputLineCount(_ text: String) -> Int {
@@ -365,4 +363,3 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return mappedRange
     }
 }
-

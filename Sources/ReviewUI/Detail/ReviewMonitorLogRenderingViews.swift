@@ -5,11 +5,6 @@ struct ReviewMonitorLogResolvedDecoration: Equatable {
     var rect: NSRect
 }
 
-struct ReviewMonitorCommandOutputToggleAttachmentPlacement {
-    var attachment: ReviewMonitorCommandOutputToggleAttachment
-    var location: any NSTextLocation
-}
-
 @MainActor
 final class ReviewMonitorLogDecorationView: NSView {
     var decorations: [ReviewMonitorLogResolvedDecoration] = [] {
@@ -119,22 +114,42 @@ final class ReviewMonitorLogFragmentView: NSView {
         context.restoreGState()
     }
 
-    func syncTextAttachmentViews(_ placements: [ReviewMonitorCommandOutputToggleAttachmentPlacement]) {
+    func syncTextAttachmentViews(
+        _ providers: [NSTextAttachmentViewProvider],
+        commandOutputPanelBackgroundAlpha: CGFloat
+    ) {
         var visibleAttachmentViews = Set<ObjectIdentifier>()
-        for placement in placements {
-            let attachment = placement.attachment
-            let button = commandOutputToggleButton(for: attachment)
-            button.configure(attachment: attachment)
-            button.frame = layoutFragment
-                .frameForTextAttachment(at: placement.location)
-                .integral
-            if button.superview !== self {
-                addSubview(button)
+        for provider in providers {
+            let attachmentView: NSView?
+            switch provider {
+            case let provider as ReviewMonitorCommandOutputToggleAttachmentViewProvider:
+                attachmentView = commandOutputToggleButton(for: provider)
+            case let provider as ReviewMonitorCommandOutputPanelAttachmentViewProvider:
+                attachmentView = commandOutputPanelAttachmentView(
+                    for: provider,
+                    backgroundAlpha: commandOutputPanelBackgroundAlpha
+                )
+            default:
+                attachmentView = nil
             }
-            visibleAttachmentViews.insert(ObjectIdentifier(button))
+            guard let attachmentView else {
+                continue
+            }
+            attachmentView.frame = layoutFragment
+                .frameForTextAttachment(at: provider.location)
+                .integral
+            guard attachmentView.frame.isEmpty == false else {
+                continue
+            }
+            attachmentView.needsLayout = true
+            if attachmentView.superview !== self {
+                addSubview(attachmentView)
+            }
+            visibleAttachmentViews.insert(ObjectIdentifier(attachmentView))
         }
 
-        for subview in subviews where subview is ReviewMonitorCommandOutputToggleButton {
+        for subview in subviews where subview is ReviewMonitorCommandOutputToggleButton ||
+            subview is ReviewMonitorCommandOutputPanelAttachmentView {
             guard visibleAttachmentViews.contains(ObjectIdentifier(subview)) == false else {
                 continue
             }
@@ -143,18 +158,47 @@ final class ReviewMonitorLogFragmentView: NSView {
     }
 
     private func commandOutputToggleButton(
-        for attachment: ReviewMonitorCommandOutputToggleAttachment
-    ) -> ReviewMonitorCommandOutputToggleButton {
+        for provider: ReviewMonitorCommandOutputToggleAttachmentViewProvider
+    ) -> ReviewMonitorCommandOutputToggleButton? {
+        guard let attachment = provider.textAttachment as? ReviewMonitorCommandOutputToggleAttachment else {
+            return nil
+        }
         if let existingButton = subviews.compactMap({ $0 as? ReviewMonitorCommandOutputToggleButton })
             .first(where: { $0.blockID == attachment.blockID }) {
+            existingButton.configure(attachment: attachment)
             return existingButton
         }
-        return ReviewMonitorCommandOutputToggleButton(attachment: attachment)
+        return provider.configureView()
+    }
+
+    private func commandOutputPanelAttachmentView(
+        for provider: ReviewMonitorCommandOutputPanelAttachmentViewProvider,
+        backgroundAlpha: CGFloat
+    ) -> ReviewMonitorCommandOutputPanelAttachmentView? {
+        guard let attachment = provider.textAttachment as? ReviewMonitorCommandOutputPanelAttachment else {
+            return nil
+        }
+        if let existingPanelView = subviews.compactMap({ $0 as? ReviewMonitorCommandOutputPanelAttachmentView })
+            .first(where: { $0.blockID == attachment.blockID }) {
+            existingPanelView.configure(attachment: attachment, backgroundAlpha: backgroundAlpha)
+            return existingPanelView
+        }
+        return provider.configureView(backgroundAlpha: backgroundAlpha)
+    }
+
+    func setCommandOutputPanelBackgroundAlpha(_ alpha: CGFloat) {
+        for panelView in subviews.compactMap({ $0 as? ReviewMonitorCommandOutputPanelAttachmentView }) {
+            panelView.setBackgroundAlpha(alpha)
+        }
     }
 
 #if DEBUG
     var firstCommandOutputToggleButtonForTesting: ReviewMonitorCommandOutputToggleButton? {
         subviews.compactMap { $0 as? ReviewMonitorCommandOutputToggleButton }.first
+    }
+
+    var firstCommandOutputPanelAttachmentViewForTesting: ReviewMonitorCommandOutputPanelAttachmentView? {
+        subviews.compactMap { $0 as? ReviewMonitorCommandOutputPanelAttachmentView }.first
     }
 #endif
 }
@@ -192,4 +236,3 @@ final class ReviewMonitorLogSelectionView: NSView {
         }
     }
 }
-

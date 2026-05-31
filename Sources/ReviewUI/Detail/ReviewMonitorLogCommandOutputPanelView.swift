@@ -58,37 +58,6 @@ final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentVie
 }
 
 @MainActor
-final class ReviewMonitorCommandOutputPanelBackgroundContainerView: NSView {
-    override var isFlipped: Bool {
-        true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-}
-
-@MainActor
-final class ReviewMonitorCommandOutputPanelContainerView: NSView {
-    override var isFlipped: Bool {
-        true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard isHidden == false, alphaValue > 0 else {
-            return nil
-        }
-        for subview in subviews.reversed() {
-            let subviewPoint = convert(point, to: subview)
-            if let hitView = subview.hitTest(subviewPoint) {
-                return hitView
-            }
-        }
-        return nil
-    }
-}
-
-@MainActor
 private final class ReviewMonitorCommandOutputScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         let previousNextResponder = nextResponder
@@ -187,7 +156,7 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
         location: any NSTextLocation,
         textContainer: NSTextContainer?
     ) -> NSTextAttachmentViewProvider? {
-        NSTextAttachmentViewProvider(
+        ReviewMonitorCommandOutputToggleAttachmentViewProvider(
             textAttachment: self,
             parentView: parentView,
             textLayoutManager: nil,
@@ -237,6 +206,125 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
         image.unlockFocus()
         return image
     }()
+}
+
+@MainActor
+final class ReviewMonitorCommandOutputToggleAttachmentViewProvider: NSTextAttachmentViewProvider {
+    private var button: ReviewMonitorCommandOutputToggleButton?
+
+    func configureView() -> ReviewMonitorCommandOutputToggleButton? {
+        guard let attachment = textAttachment as? ReviewMonitorCommandOutputToggleAttachment else {
+            return nil
+        }
+        if let button {
+            button.configure(attachment: attachment)
+            return button
+        }
+        let button = ReviewMonitorCommandOutputToggleButton(attachment: attachment)
+        button.configure(attachment: attachment)
+        self.button = button
+        return button
+    }
+}
+
+final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
+    let blockID: ReviewMonitorLogBlockID
+    let panel: ReviewMonitorLogCommandOutputPanel
+    let outputLineHeight: CGFloat
+
+    init(
+        panel: ReviewMonitorLogCommandOutputPanel,
+        outputLineHeight: CGFloat
+    ) {
+        self.blockID = panel.blockID
+        self.panel = panel
+        self.outputLineHeight = outputLineHeight
+        super.init(data: nil, ofType: nil)
+
+        allowsTextAttachmentView = true
+        lineLayoutPadding = 0
+        bounds = .zero
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func attachmentBounds(
+        for attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?,
+        proposedLineFragment lineFrag: CGRect,
+        position: CGPoint
+    ) -> CGRect {
+        let availableWidth = max(0, lineFrag.maxX - position.x)
+        let cardHeight = ReviewMonitorCommandOutputPanelView.cardHeight(
+            for: panel,
+            width: availableWidth,
+            outputLineHeight: outputLineHeight
+        )
+        return CGRect(
+            x: 0,
+            y: 0,
+            width: availableWidth,
+            height: ReviewMonitorCommandOutputPanelAttachmentView.outerHeight(cardHeight: cardHeight)
+        )
+    }
+
+    override func viewProvider(
+        for parentView: NSView?,
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSTextAttachmentViewProvider? {
+        let provider = ReviewMonitorCommandOutputPanelAttachmentViewProvider(
+            textAttachment: self,
+            parentView: parentView,
+            textLayoutManager: nil,
+            location: location
+        )
+        provider.tracksTextAttachmentViewBounds = true
+        return provider
+    }
+
+    override func image(
+        for bounds: CGRect,
+        attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSImage? {
+        Self.transparentImage
+    }
+
+    private static let transparentImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        image.lockFocus()
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+        image.unlockFocus()
+        return image
+    }()
+}
+
+@MainActor
+final class ReviewMonitorCommandOutputPanelAttachmentViewProvider: NSTextAttachmentViewProvider {
+    private var panelView: ReviewMonitorCommandOutputPanelAttachmentView?
+
+    func configureView(
+        backgroundAlpha: CGFloat
+    ) -> ReviewMonitorCommandOutputPanelAttachmentView? {
+        guard let attachment = textAttachment as? ReviewMonitorCommandOutputPanelAttachment else {
+            return nil
+        }
+        if let panelView {
+            panelView.configure(attachment: attachment, backgroundAlpha: backgroundAlpha)
+            return panelView
+        }
+        let panelView = ReviewMonitorCommandOutputPanelAttachmentView(attachment: attachment)
+        panelView.configure(attachment: attachment, backgroundAlpha: backgroundAlpha)
+        self.panelView = panelView
+        return panelView
+    }
 }
 
 @MainActor
@@ -353,18 +441,158 @@ private extension NSView {
 }
 
 @MainActor
-final class ReviewMonitorCommandOutputPanelView: NSView {
-    static let visibleOutputLineCount = 5
-    static let headerToCardGap: CGFloat = 6
+final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
+    private nonisolated static let topGap = ReviewMonitorCommandOutputPanelView.headerToCardGap
 
-    private static let topInset: CGFloat = 8
-    private static let bottomInset: CGFloat = 8
-    private static let horizontalInset: CGFloat = 8
-    private static let shellToCommandGap: CGFloat = 2
-    private static let commandToOutputGap: CGFloat = 2
-    private static let outputToFooterGap: CGFloat = 8
-    private static let commandLeadingInset: CGFloat = 12
-    private static let commandTrailingInset: CGFloat = 2
+    private let backgroundView = NSVisualEffectView()
+    private let panelView: ReviewMonitorCommandOutputPanelView
+    private var backgroundAlpha: CGFloat = 0
+    private(set) var blockID: ReviewMonitorLogBlockID
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    init(attachment: ReviewMonitorCommandOutputPanelAttachment) {
+        self.blockID = attachment.blockID
+        self.panelView = ReviewMonitorCommandOutputPanelView(blockID: attachment.blockID)
+        super.init(frame: .zero)
+
+        backgroundView.material = .contentBackground
+        backgroundView.blendingMode = .withinWindow
+        backgroundView.state = .active
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.cornerRadius = 8
+        backgroundView.layer?.masksToBounds = true
+        addSubview(backgroundView)
+        addSubview(panelView)
+        configure(attachment: attachment, backgroundAlpha: 0)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    nonisolated static func outerHeight(cardHeight: CGFloat) -> CGFloat {
+        topGap + cardHeight
+    }
+
+    func configure(
+        attachment: ReviewMonitorCommandOutputPanelAttachment,
+        backgroundAlpha: CGFloat
+    ) {
+        blockID = attachment.blockID
+        panelView.configure(attachment.panel)
+        setBackgroundAlpha(backgroundAlpha)
+        needsLayout = true
+    }
+
+    func setBackgroundAlpha(_ alpha: CGFloat) {
+        backgroundAlpha = alpha
+        backgroundView.alphaValue = alpha
+    }
+
+    override func layout() {
+        super.layout()
+        let contentFrame = NSRect(
+            x: 0,
+            y: Self.topGap,
+            width: bounds.width,
+            height: max(0, bounds.height - Self.topGap)
+        )
+        backgroundView.frame = contentFrame
+        panelView.frame = contentFrame
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isHidden == false,
+              alphaValue > 0,
+              bounds.contains(point),
+              panelView.frame.contains(point)
+        else {
+            return nil
+        }
+        return panelView.hitTest(convert(point, to: panelView))
+    }
+
+#if DEBUG
+    private func prepareForTesting() {
+        layoutSubtreeIfNeeded()
+    }
+
+    var usesTextKit2ForTesting: Bool {
+        prepareForTesting()
+        return panelView.usesTextKit2ForTesting
+    }
+
+    var usesSystemMaterialBackgroundForTesting: Bool {
+        prepareForTesting()
+        return backgroundView.material == .contentBackground &&
+            backgroundView.blendingMode == .withinWindow &&
+            backgroundView.state == .active
+    }
+
+    var visibleLineCapacityForTesting: Int {
+        prepareForTesting()
+        return panelView.visibleLineCapacityForTesting
+    }
+
+    var resultTextForTesting: String {
+        prepareForTesting()
+        return panelView.resultTextForTesting
+    }
+
+    var terminalTextForTesting: String {
+        prepareForTesting()
+        return panelView.terminalTextForTesting
+    }
+
+    var commandLineTextForTesting: String {
+        prepareForTesting()
+        return panelView.commandLineTextForTesting
+    }
+
+    var outputScrollTextForTesting: String {
+        prepareForTesting()
+        return panelView.outputScrollTextForTesting
+    }
+
+    var outputScrollIsScrollableForTesting: Bool {
+        prepareForTesting()
+        return panelView.outputScrollIsScrollableForTesting
+    }
+
+    var outputScrollVerticalOffsetForTesting: CGFloat {
+        prepareForTesting()
+        return panelView.outputScrollVerticalOffsetForTesting
+    }
+
+    var outputScrollMaximumVerticalOffsetForTesting: CGFloat {
+        prepareForTesting()
+        return panelView.outputScrollMaximumVerticalOffsetForTesting
+    }
+
+    func scrollOutputForTesting(deltaY: CGFloat) -> Bool {
+        prepareForTesting()
+        return panelView.scrollOutputForTesting(deltaY: deltaY)
+    }
+#endif
+}
+
+@MainActor
+final class ReviewMonitorCommandOutputPanelView: NSView {
+    nonisolated static let visibleOutputLineCount = 5
+    nonisolated static let headerToCardGap: CGFloat = 6
+
+    private nonisolated static let topInset: CGFloat = 8
+    private nonisolated static let bottomInset: CGFloat = 8
+    private nonisolated static let horizontalInset: CGFloat = 8
+    private nonisolated static let shellToCommandGap: CGFloat = 2
+    private nonisolated static let commandToOutputGap: CGFloat = 2
+    private nonisolated static let outputToFooterGap: CGFloat = 8
+    private nonisolated static let commandLeadingInset: CGFloat = 12
+    private nonisolated static let commandTrailingInset: CGFloat = 2
 
     private let blockID: ReviewMonitorLogBlockID
     private let shellLabel = NSTextField(labelWithString: "Shell")
@@ -390,6 +618,8 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     init(blockID: ReviewMonitorLogBlockID) {
         self.blockID = blockID
         super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
 
         configureLabel(shellLabel)
         shellLabel.font = Self.labelFont(weight: .medium)
@@ -596,25 +826,25 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         shouldScrollOutputToBottomOnNextLayout = false
     }
 
-    private static func labelFont(weight: NSFont.Weight = .regular) -> NSFont {
+    private nonisolated static func labelFont(weight: NSFont.Weight = .regular) -> NSFont {
         NSFont.systemFont(
             ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
             weight: weight
         )
     }
 
-    private static func labelLineHeight(for font: NSFont) -> CGFloat {
+    private nonisolated static func labelLineHeight(for font: NSFont) -> CGFloat {
         max(1, ceil(font.ascender - font.descender + font.leading))
     }
 
-    private static var outputFont: NSFont {
+    private nonisolated static var outputFont: NSFont {
         NSFont.monospacedSystemFont(
             ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize,
             weight: .regular
         )
     }
 
-    static func cardHeight(
+    nonisolated static func cardHeight(
         for panel: ReviewMonitorLogCommandOutputPanel,
         width: CGFloat,
         outputLineHeight: CGFloat
@@ -640,7 +870,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         ceil(font.pointSize) + 6
     }
 
-    private static func commandLineText(for commandText: String) -> String {
+    private nonisolated static func commandLineText(for commandText: String) -> String {
         let trimmedCommandText = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedCommandText.isEmpty == false else {
             return ""
@@ -648,7 +878,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return "$ \(trimmedCommandText)"
     }
 
-    private static func terminalText(commandLineText: String, outputText: String) -> String {
+    private nonisolated static func terminalText(commandLineText: String, outputText: String) -> String {
         let trimmedOutputText = outputText.trimmingCharacters(in: .newlines)
         if commandLineText.isEmpty {
             return outputText
@@ -659,7 +889,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return "\(commandLineText)\n\(trimmedOutputText)"
     }
 
-    private static func terminalAttributedString(text: String, foregroundColor: NSColor) -> NSAttributedString {
+    private nonisolated static func terminalAttributedString(text: String, foregroundColor: NSColor) -> NSAttributedString {
         NSAttributedString(
             string: text,
             attributes: [
@@ -669,7 +899,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         )
     }
 
-    private static func commandTextHeight(for text: String, width: CGFloat) -> CGFloat {
+    private nonisolated static func commandTextHeight(for text: String, width: CGFloat) -> CGFloat {
         guard text.isEmpty == false else {
             return 0
         }
@@ -679,7 +909,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         )
     }
 
-    private static func outputTextHeight(
+    private nonisolated static func outputTextHeight(
         for text: String,
         width: CGFloat,
         minimumLineCount: Int,
@@ -695,7 +925,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return max(minimumHeight, measuredHeight) + textContainerInset.height * 2
     }
 
-    private static func terminalTextBoundingHeight(
+    private nonisolated static func terminalTextBoundingHeight(
         for text: String,
         width: CGFloat,
         foregroundColor: NSColor
@@ -711,7 +941,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return ceil(rect.height)
     }
 
-    private static func lineCount(_ text: String) -> Int {
+    private nonisolated static func lineCount(_ text: String) -> Int {
         guard text.isEmpty == false else {
             return 0
         }

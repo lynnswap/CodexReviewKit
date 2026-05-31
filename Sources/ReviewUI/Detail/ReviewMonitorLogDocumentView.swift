@@ -22,13 +22,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private let textStorage = NSTextStorage()
     private let textContentView = ReviewMonitorLogContentView()
     private let decorationView = ReviewMonitorLogDecorationView()
-    private let commandOutputPanelBackgroundContainerView = ReviewMonitorCommandOutputPanelBackgroundContainerView()
     private let fragmentViewportView = ReviewMonitorLogContentViewportView()
     private let selectionView = ReviewMonitorLogSelectionView()
-    private let commandOutputPanelContainerView = ReviewMonitorCommandOutputPanelContainerView()
     private let fragmentViewMap = NSMapTable<NSTextLayoutFragment, ReviewMonitorLogFragmentView>.weakToWeakObjects()
-    private var commandOutputPanelViews: [ReviewMonitorLogBlockID: ReviewMonitorCommandOutputPanelView] = [:]
-    private var commandOutputPanelBackgroundViews: [ReviewMonitorLogBlockID: NSVisualEffectView] = [:]
     private var visibleFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var lastUsedFragmentViews = Set<ReviewMonitorLogFragmentView>()
     private var wordFadeAnimations: [ReviewMonitorLogWordFadeAnimation] = []
@@ -130,10 +126,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         textLayoutManager.textViewportLayoutController.delegate = self
         addSubview(textContentView)
         textContentView.addSubview(decorationView)
-        textContentView.addSubview(commandOutputPanelBackgroundContainerView)
         textContentView.addSubview(selectionView)
         textContentView.addSubview(fragmentViewportView)
-        addSubview(commandOutputPanelContainerView)
         estimatedDocumentHeight = measuredDocumentHeight()
         setAccessibilityElement(true)
         observeAccessibilityDisplayOptions()
@@ -351,8 +345,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             currentDecorations = []
             currentCommandOutputPanels = []
             decorationView.decorations = []
-            updateCommandOutputPanelViews()
-            updateCommandOutputPanelBackgroundViews()
             return
         }
 
@@ -368,8 +360,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             applyStyleRuns(document.styleRuns, commandOutputPanels: document.commandOutputPanels)
         }
         updateDecorationRects()
-        updateCommandOutputPanelBackgroundViews()
-        updateCommandOutputPanelViews()
     }
 
     private func applyStyleRuns(
@@ -390,7 +380,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 }
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
-            applyCommandOutputToggleAttachments(commandOutputPanels, in: fullRange)
+            applyCommandOutputAttachments(commandOutputPanels, in: fullRange)
         }
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
@@ -419,12 +409,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 }
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
-            applyCommandOutputToggleAttachments(commandOutputPanels, in: targetRange)
+            applyCommandOutputAttachments(commandOutputPanels, in: targetRange)
         }
         invalidateTextLayout(in: targetRange, measureEstimatedHeightImmediately: false)
     }
 
-    private func applyCommandOutputToggleAttachments(
+    private func applyCommandOutputAttachments(
         _ panels: [ReviewMonitorLogCommandOutputPanel],
         in targetRange: NSRange
     ) {
@@ -444,6 +434,28 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                     font: commandOutputControlFont
                 ),
                 range: attachmentRange
+            )
+
+            guard panel.isExpanded else {
+                continue
+            }
+            let panelAttachmentRange = NSRange(
+                location: NSMaxRange(panel.range) - 1,
+                length: 1
+            )
+            guard panelAttachmentRange.location >= panel.range.location,
+                  NSIntersectionRange(panelAttachmentRange, targetRange).length == panelAttachmentRange.length,
+                  panelAttachmentRange.location < textStorage.length
+            else {
+                continue
+            }
+            textStorage.addAttribute(
+                .attachment,
+                value: ReviewMonitorCommandOutputPanelAttachment(
+                    panel: panel,
+                    outputLineHeight: commandOutputPanelLineHeight
+                ),
+                range: panelAttachmentRange
             )
         }
     }
@@ -550,9 +562,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private var commandOutputControlFont: NSFont {
-        NSFont.systemFont(
-            ofSize: NSFont.preferredFont(forTextStyle: .footnote).pointSize
-        )
+        baseFont
     }
 
     private var commandOutputControlTextIndent: CGFloat {
@@ -884,8 +894,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             isLayingOutViewport = false
             updateSelectionRects()
             updateDecorationRects()
-            updateCommandOutputPanelBackgroundViews()
-            updateCommandOutputPanelViews()
         }
 
         var iterations = 5
@@ -1316,188 +1324,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         decorationView.decorations = resolved
     }
 
-    private func updateCommandOutputPanelViews() {
-        guard currentCommandOutputPanels.isEmpty == false,
-              bounds.width > 0
-        else {
-            removeAllCommandOutputPanelViews()
-            return
-        }
-
-        let viewportRange = visibleCommandOutputPanelRange()
-        var visibleBlockIDs = Set<ReviewMonitorLogBlockID>()
-        for panel in currentCommandOutputPanels {
-            guard NSIntersectionRange(panel.range, viewportRange).length > 0,
-                  let placement = commandOutputPanelPlacement(for: panel)
-            else {
-                continue
-            }
-            visibleBlockIDs.insert(panel.blockID)
-            let panelView = commandOutputPanelView(for: panel.blockID)
-            panelView.configure(panel)
-            panelView.frame = placement
-            if panelView.superview !== commandOutputPanelContainerView {
-                commandOutputPanelContainerView.addSubview(panelView)
-            }
-        }
-
-        let invisibleBlockIDs = commandOutputPanelViews.keys.filter {
-            visibleBlockIDs.contains($0) == false
-        }
-        for blockID in invisibleBlockIDs {
-            guard let panelView = commandOutputPanelViews.removeValue(forKey: blockID) else {
-                continue
-            }
-            panelView.removeFromSuperview()
-        }
-    }
-
-    private func visibleCommandOutputPanelRange() -> NSRange {
-        if let viewportRange = textLayoutManager.textViewportLayoutController.viewportRange {
-            let range = nsRange(for: viewportRange)
-            let margin = max(200, Int(ceil(visibleBoundsForViewportLayout().height)))
-            let location = max(0, range.location - margin)
-            let end = min(textStorage.length, NSMaxRange(range) + margin)
-            return NSRange(
-                location: location,
-                length: max(0, end - location)
-            )
-        }
-        return NSRange(location: 0, length: textStorage.length)
-    }
-
-    private func commandOutputPanelPlacement(
-        for panel: ReviewMonitorLogCommandOutputPanel
-    ) -> NSRect? {
-        guard panel.isExpanded else {
-            return nil
-        }
-
-        let toggleRange = NSRange(location: panel.range.location, length: min(panel.range.length, 1))
-        guard let toggleRect = rects(forCharacterRange: toggleRange).first?.rectValue else {
-            return nil
-        }
-
-        let titleRange = NSRange(
-            location: panel.range.location + min(panel.range.length, 1),
-            length: max(0, panel.range.length - 1)
-        )
-        let titleRect = titleRange.length > 0
-            ? rects(forCharacterRange: titleRange).first?.rectValue
-            : nil
-        let anchorRect = titleRect ?? toggleRect
-        var headerRect = toggleRect.union(anchorRect)
-        if let titleRect {
-            headerRect = headerRect.union(titleRect)
-        }
-
-        let panelX = max(0, toggleRect.minX)
-        let trailingInset: CGFloat = 4
-        let panelRightEdge = min(
-            max(panelX, textContentView.bounds.width - trailingInset),
-            toggleRect.minX + textContainer.size.width
-        )
-        let panelWidth = max(0, panelRightEdge - panelX)
-        return NSRect(
-            x: panelX,
-            y: headerRect.maxY + ReviewMonitorCommandOutputPanelView.headerToCardGap,
-            width: panelWidth,
-            height: commandOutputPanelCardHeight(for: panel, width: panelWidth)
-        )
-    }
-
     private var commandOutputPanelLineHeight: CGFloat {
         ceil(monoFont.ascender - monoFont.descender + monoFont.leading)
-    }
-
-    private func commandOutputPanelCardHeight(for panel: ReviewMonitorLogCommandOutputPanel, width: CGFloat) -> CGFloat {
-        ReviewMonitorCommandOutputPanelView.cardHeight(
-            for: panel,
-            width: width,
-            outputLineHeight: commandOutputPanelLineHeight
-        )
-    }
-
-    private func commandOutputPanelView(
-        for blockID: ReviewMonitorLogBlockID
-    ) -> ReviewMonitorCommandOutputPanelView {
-        if let view = commandOutputPanelViews[blockID] {
-            return view
-        }
-        let view = ReviewMonitorCommandOutputPanelView(blockID: blockID)
-        commandOutputPanelViews[blockID] = view
-        return view
-    }
-
-    private func removeAllCommandOutputPanelViews() {
-        for view in commandOutputPanelViews.values {
-            view.removeFromSuperview()
-        }
-        commandOutputPanelViews.removeAll(keepingCapacity: false)
-    }
-
-    private func updateCommandOutputPanelBackgroundViews() {
-        guard currentCommandOutputPanels.isEmpty == false,
-              bounds.width > 0
-        else {
-            removeAllCommandOutputPanelBackgroundViews()
-            return
-        }
-
-        let viewportRange = visibleCommandOutputPanelRange()
-        var visibleBlockIDs = Set<ReviewMonitorLogBlockID>()
-        for panel in currentCommandOutputPanels {
-            guard NSIntersectionRange(panel.range, viewportRange).length > 0,
-                  let placement = commandOutputPanelPlacement(for: panel)
-            else {
-                continue
-            }
-            visibleBlockIDs.insert(panel.blockID)
-            let backgroundView = commandOutputPanelBackgroundView(for: panel.blockID)
-            if rectsAreNearlyEqual(backgroundView.frame, placement) == false {
-                backgroundView.frame = placement
-            }
-            if backgroundView.superview !== commandOutputPanelBackgroundContainerView {
-                commandOutputPanelBackgroundContainerView.addSubview(backgroundView)
-            }
-        }
-
-        let invisibleBlockIDs = commandOutputPanelBackgroundViews.keys.filter {
-            visibleBlockIDs.contains($0) == false
-        }
-        for blockID in invisibleBlockIDs {
-            guard let backgroundView = commandOutputPanelBackgroundViews.removeValue(forKey: blockID) else {
-                continue
-            }
-            backgroundView.removeFromSuperview()
-        }
-        syncCommandOutputPanelBackgroundAppearance()
-    }
-
-    private func commandOutputPanelBackgroundView(
-        for blockID: ReviewMonitorLogBlockID
-    ) -> NSVisualEffectView {
-        if let view = commandOutputPanelBackgroundViews[blockID] {
-            return view
-        }
-
-        let backgroundView = NSVisualEffectView()
-        backgroundView.material = .contentBackground
-        backgroundView.blendingMode = .withinWindow
-        backgroundView.alphaValue = commandOutputPanelBackgroundAlpha
-        backgroundView.state = .active
-        backgroundView.wantsLayer = true
-        backgroundView.layer?.cornerRadius = 8
-        backgroundView.layer?.masksToBounds = true
-        commandOutputPanelBackgroundViews[blockID] = backgroundView
-        return backgroundView
-    }
-
-    private func removeAllCommandOutputPanelBackgroundViews() {
-        for view in commandOutputPanelBackgroundViews.values {
-            view.removeFromSuperview()
-        }
-        commandOutputPanelBackgroundViews.removeAll(keepingCapacity: false)
     }
 
     private var commandOutputPanelBackgroundAlpha: CGFloat {
@@ -1524,8 +1352,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func syncCommandOutputPanelBackgroundAppearance() {
         let alpha = commandOutputPanelBackgroundAlpha
-        for backgroundView in commandOutputPanelBackgroundViews.values {
-            backgroundView.alphaValue = alpha
+        for fragmentView in visibleFragmentViews {
+            fragmentView.setCommandOutputPanelBackgroundAlpha(alpha)
         }
     }
 
@@ -1538,9 +1366,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func syncContentSubviewFrames() {
         textContentView.frame = bounds
-        commandOutputPanelContainerView.frame = bounds
         decorationView.frame = textContentView.bounds
-        commandOutputPanelBackgroundContainerView.frame = textContentView.bounds
         selectionView.frame = textContentView.bounds
         fragmentViewportView.frame = textContentView.bounds
     }
@@ -1986,6 +1812,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             dx: textContainerInset.width,
             dy: textContainerInset.height
         )
+        let alignedFrame = backingAlignedRect(layoutFragmentFrame, options: .alignAllEdgesOutward)
         let fragmentView: ReviewMonitorLogFragmentView
         var fragmentNeedsImmediateDisplay = false
         if let cachedFragmentView = fragmentViewMap.object(forKey: textLayoutFragment) {
@@ -1994,16 +1821,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         } else {
             fragmentView = ReviewMonitorLogFragmentView(
                 layoutFragment: textLayoutFragment,
-                frame: backingAlignedRect(layoutFragmentFrame, options: .alignAllEdgesOutward)
+                frame: alignedFrame
             )
             fragmentViewMap.setObject(fragmentView, forKey: textLayoutFragment)
-            fragmentNeedsImmediateDisplay = true
-        }
-
-        let alignedFrame = backingAlignedRect(layoutFragmentFrame, options: .alignAllEdgesOutward)
-        if rectsAreNearlyEqual(fragmentView.frame, alignedFrame) == false {
-            fragmentView.frame = alignedFrame
-            fragmentView.needsDisplay = true
             fragmentNeedsImmediateDisplay = true
         }
 
@@ -2011,8 +1831,19 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             fragmentViewportView.addSubview(fragmentView)
             fragmentNeedsImmediateDisplay = true
         }
+
+        if rectsAreNearlyEqual(fragmentView.frame, alignedFrame) == false {
+            fragmentView.frame = alignedFrame
+            fragmentView.needsDisplay = true
+            fragmentNeedsImmediateDisplay = true
+        }
+
+        let attachmentViewProviders = textLayoutFragment.textAttachmentViewProviders.isEmpty
+            ? commandOutputAttachmentViewProviders(in: textLayoutFragment, parentView: fragmentView)
+            : textLayoutFragment.textAttachmentViewProviders
         fragmentView.syncTextAttachmentViews(
-            commandOutputToggleAttachmentPlacements(in: textLayoutFragment)
+            attachmentViewProviders,
+            commandOutputPanelBackgroundAlpha: commandOutputPanelBackgroundAlpha
         )
         if fragmentNeedsImmediateDisplay {
             fragmentView.needsDisplay = true
@@ -2020,24 +1851,32 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         visibleFragmentViews.insert(fragmentView)
     }
 
-    private func commandOutputToggleAttachmentPlacements(
-        in layoutFragment: NSTextLayoutFragment
-    ) -> [ReviewMonitorCommandOutputToggleAttachmentPlacement] {
+    private func commandOutputAttachmentViewProviders(
+        in layoutFragment: NSTextLayoutFragment,
+        parentView: NSView
+    ) -> [NSTextAttachmentViewProvider] {
         let fragmentRange = clamp(nsRange(for: layoutFragment.rangeInElement))
         guard fragmentRange.length > 0 else {
             return []
         }
 
-        var placements: [ReviewMonitorCommandOutputToggleAttachmentPlacement] = []
+        var providers: [NSTextAttachmentViewProvider] = []
         textStorage.enumerateAttribute(.attachment, in: fragmentRange) { value, range, _ in
-            guard let attachment = value as? ReviewMonitorCommandOutputToggleAttachment,
-                  let location = textLocation(forUTF16Offset: range.location)
+            guard let attachment = value as? NSTextAttachment,
+                  (attachment is ReviewMonitorCommandOutputToggleAttachment ||
+                    attachment is ReviewMonitorCommandOutputPanelAttachment),
+                  let location = textLocation(forUTF16Offset: range.location),
+                  let provider = attachment.viewProvider(
+                      for: parentView,
+                      location: location,
+                      textContainer: textContainer
+                  )
             else {
                 return
             }
-            placements.append(.init(attachment: attachment, location: location))
+            providers.append(provider)
         }
-        return placements
+        return providers
     }
 
     func textViewportLayoutControllerDidLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
@@ -2056,7 +1895,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
         updateSelectionRects()
         updateDecorationRects()
-        updateCommandOutputPanelViews()
     }
 
     private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
@@ -2117,7 +1955,7 @@ extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelUsesTextKit2ForTesting: Bool {
         layoutTextViewport(force: true)
-        let visiblePanelViews = commandOutputPanelViews.values.filter { $0.superview != nil }
+        let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
         guard visiblePanelViews.isEmpty == false else {
             return false
         }
@@ -2136,19 +1974,16 @@ extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
         layoutTextViewport(force: true)
-        guard commandOutputPanelBackgroundViews.isEmpty == false else {
+        let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
+        guard visiblePanelViews.isEmpty == false else {
             return false
         }
-        return commandOutputPanelBackgroundViews.values.allSatisfy { backgroundView in
-            backgroundView.material == .contentBackground &&
-                backgroundView.blendingMode == .withinWindow &&
-                backgroundView.state == .active
-        }
+        return visiblePanelViews.allSatisfy(\.usesSystemMaterialBackgroundForTesting)
     }
 
     var commandOutputPanelVisibleLineCapacityForTesting: Int {
         layoutTextViewport(force: true)
-        return commandOutputPanelViews.values
+        return visibleCommandOutputPanelAttachmentViewsForTesting()
             .map(\.visibleLineCapacityForTesting)
             .max() ?? 0
     }
@@ -2207,7 +2042,8 @@ extension ReviewMonitorLogDocumentView {
         else {
             return nil
         }
-        return panelView.frame.minX - attachmentLeadingX
+        let panelLeadingX = panelView.convert(panelView.bounds.origin, to: self).x
+        return panelLeadingX - attachmentLeadingX
     }
 
     var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
@@ -2300,11 +2136,18 @@ extension ReviewMonitorLogDocumentView {
             .first
     }
 
-    private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelView? {
-        commandOutputPanelViews.values
-            .filter { $0.superview != nil }
-            .sorted { $0.frame.minY < $1.frame.minY }
+    private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {
+        visibleCommandOutputPanelAttachmentViewsForTesting()
+            .sorted { lhs, rhs in
+                lhs.convert(lhs.bounds.origin, to: self).y < rhs.convert(rhs.bounds.origin, to: self).y
+            }
             .first
+    }
+
+    private func visibleCommandOutputPanelAttachmentViewsForTesting() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
+        visibleFragmentViews.flatMap { fragmentView in
+            fragmentView.subviews.compactMap { $0 as? ReviewMonitorCommandOutputPanelAttachmentView }
+        }
     }
 
     var wordGlowCountForTesting: Int {
