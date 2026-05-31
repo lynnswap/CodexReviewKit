@@ -99,6 +99,21 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         var fragmentFramesByRange: [FragmentRangeKey: NSRect]
         var orderedFragmentFrames: [NSRect]
         var collapsingPanelSnapshots: [NSImageView]
+        var rangeShift: CommandOutputPanelRangeShift?
+    }
+
+    private struct CommandOutputPanelRangeShift {
+        var finalLowerBound: Int
+        var delta: Int
+
+        func previousRange(for finalRange: NSRange) -> NSRange? {
+            guard delta != 0,
+                  finalRange.location >= finalLowerBound
+            else {
+                return nil
+            }
+            return NSRange(location: finalRange.location - delta, length: finalRange.length)
+        }
     }
 
     override var isFlipped: Bool {
@@ -619,7 +634,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
     }
 
-    func prepareCommandOutputPanelLayoutAnimation() {
+    func prepareCommandOutputPanelLayoutAnimation(
+        toggledBlockID: ReviewMonitorLogBlockID,
+        willExpand: Bool
+    ) {
         guard shouldAnimateCommandOutputPanelTransitions else {
             pendingCommandOutputPanelLayoutAnimation = nil
             return
@@ -640,7 +658,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         pendingCommandOutputPanelLayoutAnimation = CommandOutputPanelLayoutAnimation(
             fragmentFramesByRange: fragmentFramesByRange,
             orderedFragmentFrames: orderedFragmentFrames,
-            collapsingPanelSnapshots: commandOutputPanelSnapshotViewsForAnimation()
+            collapsingPanelSnapshots: commandOutputPanelSnapshotViewsForAnimation(),
+            rangeShift: commandOutputPanelRangeShift(
+                toggledBlockID: toggledBlockID,
+                willExpand: willExpand
+            )
         )
     }
 
@@ -668,7 +690,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 let fallbackFrame = index < animation.orderedFragmentFrames.count
                     ? animation.orderedFragmentFrames[index]
                     : nil
-                guard let initialFrame = animation.fragmentFramesByRange[FragmentRangeKey(range)] ?? fallbackFrame,
+                let shiftedInitialFrame = animation.rangeShift
+                    .flatMap { $0.previousRange(for: range) }
+                    .flatMap { animation.fragmentFramesByRange[FragmentRangeKey($0)] }
+                guard let initialFrame = animation.fragmentFramesByRange[FragmentRangeKey(range)] ??
+                    shiftedInitialFrame ??
+                    fallbackFrame,
                       verticalFrameComponentsAreNearlyEqual(initialFrame, finalFrame) == false
                 else {
                     continue
@@ -744,6 +771,26 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             snapshots.append(snapshot)
         }
         return snapshots
+    }
+
+    private func commandOutputPanelRangeShift(
+        toggledBlockID: ReviewMonitorLogBlockID,
+        willExpand: Bool
+    ) -> CommandOutputPanelRangeShift? {
+        guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == toggledBlockID }) else {
+            return nil
+        }
+        let collapsedLength = 1 + (panel.title as NSString).length
+        let expandedLength = collapsedLength + 2
+        let finalLength = willExpand ? expandedLength : collapsedLength
+        let delta = finalLength - panel.range.length
+        guard delta != 0 else {
+            return nil
+        }
+        return CommandOutputPanelRangeShift(
+            finalLowerBound: NSMaxRange(panel.range) + delta,
+            delta: delta
+        )
     }
 
     private func enqueueWordFadeAnimations(ranges: [NSRange], startedAt: TimeInterval) {

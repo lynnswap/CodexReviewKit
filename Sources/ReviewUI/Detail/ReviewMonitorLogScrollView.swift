@@ -265,13 +265,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard let sourceDocument else {
             return
         }
+        let willExpand = expandedCommandOutputBlockIDs.contains(blockID) == false
         if logDocumentView.shouldAnimateCommandOutputPanelTransitions {
-            logDocumentView.prepareCommandOutputPanelLayoutAnimation()
+            logDocumentView.prepareCommandOutputPanelLayoutAnimation(
+                toggledBlockID: blockID,
+                willExpand: willExpand
+            )
         }
-        if expandedCommandOutputBlockIDs.contains(blockID) {
-            expandedCommandOutputBlockIDs.remove(blockID)
-        } else {
+        if willExpand {
             expandedCommandOutputBlockIDs.insert(blockID)
+        } else {
+            expandedCommandOutputBlockIDs.remove(blockID)
         }
         _ = render(
             document: sourceDocument,
