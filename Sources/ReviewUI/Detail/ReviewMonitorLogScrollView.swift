@@ -606,7 +606,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard textFinderClient.usesSnapshot == false else {
             return
         }
-        textFinderClient.captureSnapshotIfNeeded(mapsToDocument: true) { logDocumentView.string }
+        textFinderClient.captureSnapshotIfNeeded(mapsToDocument: true) { logDocumentView.finderString }
     }
 
     private func endFindSession() {
@@ -1153,6 +1153,13 @@ extension ReviewMonitorLogScrollView {
 
     var findStringLengthForTesting: Int {
         textFinderClient.stringLength()
+    }
+
+    var findStringForTesting: String {
+        textFinderClient.string.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
     }
 
     var findClientUsesSnapshotForTesting: Bool {

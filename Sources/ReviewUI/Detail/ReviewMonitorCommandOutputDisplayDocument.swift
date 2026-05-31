@@ -69,11 +69,17 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     for: block,
                     commandTextByGroupID: commandTextByGroupID
                 )
+                let outputText = commandOutputText(
+                    for: block,
+                    sourceString: sourceString,
+                    isExpanded: isExpanded
+                )
                 let placeholder = commandOutputPlaceholder(
                     title: title,
                     isExpanded: isExpanded
                 )
                 let displayRange = appendText(placeholder)
+                let controlRange = commandOutputControlRange(in: displayRange, title: title)
                 blocks.append(.init(
                     id: block.id,
                     kind: block.kind,
@@ -82,17 +88,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     sourceRange: block.sourceRange,
                     metadata: block.metadata
                 ))
-                styleRuns.append(.init(range: displayRange, style: .commandOutputControl(isExpanded: isExpanded)))
+                styleRuns.append(.init(range: controlRange, style: .commandOutputControl(isExpanded: isExpanded)))
                 decorations.append(.init(
                     blockID: block.id,
                     range: displayRange,
                     style: terminalDecorationStyle(for: block, in: source)
                 ))
-                let outputText = commandOutputText(
-                    for: block,
-                    sourceString: sourceString,
-                    isExpanded: isExpanded
-                )
                 panels.append(.init(
                     blockID: block.id,
                     range: displayRange,
@@ -195,6 +196,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return label
         }
         return "\(label)\n\(toggleAttachmentCharacter)"
+    }
+
+    private static func commandOutputControlRange(
+        in displayRange: NSRange,
+        title: String
+    ) -> NSRange {
+        NSRange(
+            location: displayRange.location,
+            length: (toggleAttachmentCharacter + title).utf16.count
+        )
     }
 
     private static func commandOutputLineCount(_ text: String) -> Int {

@@ -2399,6 +2399,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelCommandLineTextForTesting == "$ swift test")
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("$ swift test") == false)
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("output line 1") == true)
+        #expect(transport.logFindStringForTesting.contains("output line 3"))
         #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
         let initialOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         let initialOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
@@ -2428,6 +2429,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
+        #expect(transport.logFindStringForTesting.contains("output line 9"))
     }
 
     @Test func switchingSelectedJobRebindsDetailPane() async throws {

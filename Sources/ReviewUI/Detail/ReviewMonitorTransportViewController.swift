@@ -1110,6 +1110,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.selectedRangeForTesting
     }
 
+    var logFindStringForTesting: String {
+        logScrollView.findStringForTesting
+    }
+
     func selectAllLogForTesting() {
         logScrollView.selectAllForTesting()
     }

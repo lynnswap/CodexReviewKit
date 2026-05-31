@@ -41,11 +41,11 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
     var onSelectedRangeChangedByFinder: ((NSRange) -> Void)?
 
     var string: String {
-        snapshot?.string ?? documentView?.string ?? ""
+        snapshot?.string ?? documentView?.finderString ?? ""
     }
 
     func stringLength() -> Int {
-        snapshot.map { ($0.string as NSString).length } ?? documentView?.stringLength ?? 0
+        snapshot.map { ($0.string as NSString).length } ?? documentView?.finderStringLength ?? 0
     }
 
     private struct Snapshot {
@@ -114,7 +114,8 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
             guard snapshot?.mapsToDocument != false else {
                 return [NSValue(range: NSRange(location: 0, length: 0))]
             }
-            return [NSValue(range: rangeClampedToActiveString(documentView.selectedRangeForFinding))]
+            let finderRange = documentView.finderRangeForDocumentRange(documentView.selectedRangeForFinding)
+            return [NSValue(range: rangeClampedToActiveString(finderRange))]
         }
         set {
             guard snapshot?.mapsToDocument != false else {
@@ -130,26 +131,26 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
                 return
             }
             let range = rangeClampedToActiveString(rawRange)
-            documentView?.setSelectedRangeFromTextFinder(range)
-            onSelectedRangeChangedByFinder?(range)
+            let documentRange = documentView?.documentRangeForFinderRange(range) ?? NSRange(location: 0, length: 0)
+            documentView?.setSelectedRangeFromTextFinder(documentRange)
+            onSelectedRangeChangedByFinder?(documentRange)
         }
     }
 
     func scrollRangeToVisible(_ range: NSRange) {
         guard let documentView,
-              snapshot?.mapsToDocument != false,
-              let range = rangeClampedToCurrentDocument(range, documentView: documentView)
+              snapshot?.mapsToDocument != false
         else {
             return
         }
-        documentView.scrollRangeToVisible(range)
+        documentView.scrollFinderRangeToVisible(range)
     }
 
     var visibleCharacterRanges: [NSValue] {
         guard let documentView else {
             return []
         }
-        let ranges = documentView.visibleCharacterRanges().map(\.rangeValue)
+        let ranges = documentView.finderVisibleCharacterRanges().map(\.rangeValue)
         guard let snapshot else {
             return ranges.map(NSValue.init(range:))
         }
@@ -165,12 +166,11 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
 
     func rects(forCharacterRange range: NSRange) -> [NSValue]? {
         guard let documentView,
-              snapshot?.mapsToDocument != false,
-              let range = rangeClampedToCurrentDocument(range, documentView: documentView)
+              snapshot?.mapsToDocument != false
         else {
             return []
         }
-        return documentView.rects(forCharacterRange: range)
+        return documentView.rects(forFinderCharacterRange: range)
     }
 
     func contentView(at index: Int, effectiveCharacterRange outRange: NSRangePointer) -> NSView {
@@ -184,26 +184,11 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
 
     func drawCharacters(in range: NSRange, forContentView view: NSView) {
         guard let documentView,
-              snapshot?.mapsToDocument != false,
-              let range = rangeClampedToCurrentDocument(range, documentView: documentView)
+              snapshot?.mapsToDocument != false
         else {
             return
         }
-        documentView.drawCharacters(in: range, forContentView: view)
-    }
-
-    private func rangeClampedToCurrentDocument(
-        _ range: NSRange,
-        documentView: ReviewMonitorLogDocumentView
-    ) -> NSRange? {
-        let clampedRange = NSIntersectionRange(
-            range,
-            NSRange(location: 0, length: documentView.stringLength)
-        )
-        guard clampedRange.length > 0 else {
-            return nil
-        }
-        return clampedRange
+        documentView.drawCharacters(inFinderRange: range, forContentView: view)
     }
 
     private func rangeClampedToActiveString(_ range: NSRange) -> NSRange {
@@ -225,4 +210,3 @@ final class ReviewMonitorLogTextFinderClient: NSObject, @preconcurrency NSTextFi
         snapshot.map { NSRange(location: 0, length: ($0.string as NSString).length) }
     }
 }
-
