@@ -284,6 +284,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             restoring: currentScrollRestorationTarget,
             allowIncrementalUpdate: false
         )
+        refreshFindSessionAfterUserVisibleLogChange()
         logDocumentView.performPreparedCommandOutputPanelLayoutAnimation()
     }
 
@@ -599,6 +600,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             textFinderClient.clearSnapshot()
         }
         return beginFindSessionIfPossible()
+    }
+
+    private func refreshFindSessionAfterUserVisibleLogChange() {
+        guard isFindBarVisible else {
+            return
+        }
+
+        textFinderClient.clearSnapshot()
+        if hasFindQuerySignal {
+            _ = beginFindSessionIfPossible()
+        }
+        invalidateFindIndicator()
     }
 
     private func captureFindSessionSnapshotIfNeeded() {

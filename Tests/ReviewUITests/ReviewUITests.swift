@@ -2488,6 +2488,56 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 1") == false)
     }
 
+    @Test func expandingCommandOutputRefreshesActiveFindSnapshot() async throws {
+        let outputText = (1...5)
+            .map { "output line \($0)" }
+            .joined(separator: "\n")
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-find-refresh",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
+                .init(kind: .commandOutput, groupID: "cmd_1", text: outputText)
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        await withFindPasteboardString(nil) {
+            viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+            #expect(transport.logFindBarVisibleForTesting)
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("output line 3"))
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("output line 3") == false)
+
+            #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+            await awaitNativeLayoutTurn()
+
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("$ swift test"))
+            #expect(transport.logFindStringForTesting.contains("output line 3"))
+        }
+    }
+
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
         let activeJob = makeJob(
             id: "job-active",
