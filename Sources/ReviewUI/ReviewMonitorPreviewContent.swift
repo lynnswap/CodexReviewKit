@@ -19,6 +19,7 @@ public enum ReviewMonitorPreviewContent {
         let kind: ReviewLogEntry.Kind
         let groupName: String?
         let text: String
+        let metadata: ReviewLogEntry.Metadata?
         let chunkByWord: Bool
         let delayAfterPreviousTicks: Int
         let chunkIntervalTicks: Int
@@ -27,6 +28,7 @@ public enum ReviewMonitorPreviewContent {
             kind: ReviewLogEntry.Kind,
             groupName: String? = nil,
             text: String,
+            metadata: ReviewLogEntry.Metadata? = nil,
             chunkByWord: Bool = false,
             delayAfterPreviousTicks: Int,
             chunkIntervalTicks: Int = 1
@@ -34,6 +36,7 @@ public enum ReviewMonitorPreviewContent {
             self.kind = kind
             self.groupName = groupName
             self.text = text
+            self.metadata = metadata
             self.chunkByWord = chunkByWord
             self.delayAfterPreviousTicks = delayAfterPreviousTicks
             self.chunkIntervalTicks = chunkIntervalTicks
@@ -44,6 +47,7 @@ public enum ReviewMonitorPreviewContent {
         let kind: ReviewLogEntry.Kind
         let groupName: String?
         let text: String
+        let metadata: ReviewLogEntry.Metadata?
     }
 
     private struct PreviewStreamFrame {
@@ -116,6 +120,39 @@ public enum ReviewMonitorPreviewContent {
     }
 
     @_spi(PreviewSupport)
+    public static func makeCommandOutputStore() -> CodexReviewStore {
+        let store = CodexReviewStore.makePreviewStore(
+            seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
+        )
+        let accounts = makePreviewAccounts()
+        let cwd = "/path/to/workspace-alpha"
+        let now = Date()
+        let job = makeJob(
+            id: "preview-command-output-panel",
+            cwd: cwd,
+            model: "gpt-5.4",
+            status: .running,
+            targetSummary: "Command output panel",
+            startedAt: now.addingTimeInterval(-135),
+            endedAt: nil,
+            summary: "A command output block is collapsed by default.",
+            hasFinalReview: false,
+            reviewResult: nil,
+            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
+            logEntries: makeCommandOutputPreviewLogEntries()
+        )
+        store.loadForTesting(
+            serverState: .running,
+            account: accounts.first,
+            persistedAccounts: accounts,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: [CodexReviewWorkspace(cwd: cwd)],
+            jobs: [job]
+        )
+        return store
+    }
+
+    @_spi(PreviewSupport)
     public static func appendPreviewStreamTick(to store: CodexReviewStore) {
         _ = appendPreviewStreamTick(to: store, after: 0)
     }
@@ -171,7 +208,8 @@ public enum ReviewMonitorPreviewContent {
         return .init(
             kind: step.kind,
             groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
-            text: step.text
+            text: step.text,
+            metadata: step.metadata
         )
     }
 
@@ -200,7 +238,8 @@ public enum ReviewMonitorPreviewContent {
                 timeline.append(PreviewStreamStep(
                     kind: template.kind,
                     groupName: template.groupName,
-                    text: chunk
+                    text: chunk,
+                    metadata: template.metadata
                 ))
             }
         }
@@ -241,8 +280,25 @@ public enum ReviewMonitorPreviewContent {
         ),
         .init(
             kind: .command,
+            groupName: "command-search-test",
             text: "$ /bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
             delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .commandOutput,
+            groupName: "command-search-test",
+            text: """
+            Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+            Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
+            Test Suite 'ReviewUITests' passed.
+            """,
+            metadata: .init(
+                sourceType: "command",
+                title: "Ran command for 5s",
+                status: "succeeded",
+                exitCode: 0
+            ),
+            delayAfterPreviousTicks: 2
         ),
         .init(
             kind: .toolCall,
@@ -258,8 +314,29 @@ public enum ReviewMonitorPreviewContent {
         ),
         .init(
             kind: .command,
+            groupName: "command-open-log-scroll",
             text: "$ /bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
             delayAfterPreviousTicks: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .commandOutput,
+            groupName: "command-open-log-scroll",
+            text: """
+            import AppKit
+            import ObjectiveC.runtime
+            import CodexReview
+
+            @MainActor
+            final class ReviewMonitorLogScrollView: NSScrollView {
+                private let logDocumentView = ReviewMonitorLogDocumentView()
+            """,
+            metadata: .init(
+                sourceType: "command",
+                title: "Ran command for 2s",
+                status: "succeeded",
+                exitCode: 0
+            ),
+            delayAfterPreviousTicks: 2
         ),
         .init(
             kind: .toolCall,
@@ -290,6 +367,56 @@ public enum ReviewMonitorPreviewContent {
     ]
 
     private static let previewStreamTimeline = streamTimeline(from: previewStreamTemplates)
+
+    private static func makeCommandOutputPreviewLogEntries() -> [ReviewLogEntry] {
+        let output = """
+        Command line invocation:
+            /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
+
+        Resolve Package Graph
+
+        Resolved source packages:
+            ObservationBridge: /Users/kn/Dev/ObservationBridge
+            CodexReviewKit: /Users/kn/Dev/CodexReviewKit
+
+        Test Suite 'Selected tests' started.
+        Test Case '-[ReviewUITests commandOutputRendersCollapsedTextKitPanel]' passed (0.142 seconds).
+        Test Suite 'Selected tests' passed.
+        """
+        return [
+            .init(kind: .event, text: "Turn started: preview-command-output-panel"),
+            .init(
+                kind: .agentMessage,
+                text: """
+                Checking the command output rendering path.
+
+                - Keep the transcript readable.
+                - Collapse terminal output by default.
+                - Expand into a bounded TextKit 2 scroll view.
+                """
+            ),
+            .init(
+                kind: .command,
+                groupID: "preview-command-output",
+                text: "$ xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
+            ),
+            .init(
+                kind: .commandOutput,
+                groupID: "preview-command-output",
+                text: output,
+                metadata: .init(
+                    sourceType: "command",
+                    title: "Ran command for 17s",
+                    status: "succeeded",
+                    exitCode: 0
+                )
+            ),
+            .init(
+                kind: .agentMessage,
+                text: "The output remains available without taking over the whole log."
+            ),
+        ]
+    }
 
     @_spi(PreviewSupport)
     public static func makePreviewAccounts() -> [CodexAccount] {
@@ -516,7 +643,26 @@ public enum ReviewMonitorPreviewContent {
                 ),
                 .init(
                     kind: .command,
+                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
                     text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
+                    Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
+                    Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
+
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                    Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 6s",
+                        status: "succeeded",
+                        exitCode: 0
+                    )
                 ),
                 .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
                 .init(
@@ -538,7 +684,26 @@ public enum ReviewMonitorPreviewContent {
         case .failed:
             [
                 .init(kind: .event, text: "Turn started: preview-failed-\(workspaceName.lowercased())"),
-                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""),
+                .init(
+                    kind: .command,
+                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Building for debugging...
+                    Test Suite 'ReviewUITests' started.
+                    ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 10s",
+                        status: "failed",
+                        exitCode: 1
+                    )
+                ),
                 .init(kind: .error, text: definition.summary),
                 .init(kind: .agentMessage, text: definition.lastAgentMessage),
             ]
@@ -551,7 +716,26 @@ public enum ReviewMonitorPreviewContent {
         case .succeeded:
             [
                 .init(kind: .event, text: "Turn started: preview-complete-\(workspaceName.lowercased())"),
-                .init(kind: .command, text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""),
+                .init(
+                    kind: .command,
+                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
+                    text: """
+                    Test Suite 'ReviewUITests' started.
+                    Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
+                    Test Suite 'ReviewUITests' passed.
+                    """,
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 4s",
+                        status: "succeeded",
+                        exitCode: 0
+                    )
+                ),
                 .init(
                     kind: .reasoningSummary,
                     groupID: "preview-complete-summary-\(workspaceName)-\(definition.targetSummary)",

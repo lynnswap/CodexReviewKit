@@ -13,8 +13,18 @@ import SwiftUI
     )
 }
 
+#Preview("Command Output") {
+    ReviewMonitorContentPreviewHost(previewScenario: .commandOutput)
+}
+
 @MainActor
 private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
+    enum PreviewScenario {
+        case normal
+        case commandOutput
+    }
+
+    var previewScenario: PreviewScenario = .normal
     var authPhase: CodexReviewAuthModel.Phase = .signedOut
     var account: CodexAccount?
     var serverState: CodexReviewServerState = .running
@@ -23,7 +33,8 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
         makeReviewMonitorPreviewContentViewControllerForPreview(
             authPhase: authPhase,
             account: account,
-            serverState: serverState
+            serverState: serverState,
+            previewStore: previewStore()
         )
     }
 
@@ -47,6 +58,18 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
             return nil
         }
         return CGSize(width: width, height: height)
+    }
+
+    private func previewStore() -> CodexReviewStore? {
+        guard case .running = serverState else {
+            return nil
+        }
+        switch previewScenario {
+        case .normal:
+            return nil
+        case .commandOutput:
+            return ReviewMonitorPreviewContent.makeCommandOutputStore()
+        }
     }
 }
 #endif

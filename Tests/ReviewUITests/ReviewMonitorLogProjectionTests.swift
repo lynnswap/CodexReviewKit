@@ -80,6 +80,122 @@ struct ReviewMonitorLogProjectionTests {
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
+    @Test func commandDisplayUsesPanelBeforeOutputArrives() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-started",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test")
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+
+        #expect(displayText == "Ran swift test")
+        #expect(displayDocument.text.contains("$ swift test") == false)
+        #expect(displayDocument.decorations.isEmpty)
+        #expect(displayDocument.commandOutputPanels.count == 1)
+        #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
+    }
+
+    @Test func duplicateStartedCommandsKeepUniquePanelIDs() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-duplicate-command-started",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test --filter ReviewUI"),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+        let blockIDs = displayDocument.commandOutputPanels.map(\.blockID)
+
+        #expect(displayDocument.commandOutputPanels.count == 2)
+        #expect(Set(blockIDs).count == blockIDs.count)
+        #expect(blockIDs.first == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+    }
+
+    @Test func commandOutputDisplayKeepsCommandPanelBeforeInterleavedBlocks() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-interleaved",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(kind: .toolCall, text: "MCP codex_review.review_read started."),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests passed",
+                    metadata: .init(sourceType: "command", title: "Ran command for 3s")
+                ),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+        #expect(displayText.hasPrefix("Ran command for 3s\n\nMCP codex_review.review_read started."))
+        #expect(displayDocument.text.contains("$ swift test") == false)
+    }
+
+    @Test func commandOutputDisplayLetsExitCodeOverrideCompletedStatus() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-exit-code",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests failed",
+                    metadata: .init(
+                        sourceType: "command",
+                        title: "Ran command for 10s",
+                        status: "completed",
+                        exitCode: 1
+                    )
+                ),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+        )
+
+        #expect(displayDocument.commandOutputPanels.first?.exitText == "exit 1")
+    }
+
     @Test func metadataIsPreservedOnBlocks() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",

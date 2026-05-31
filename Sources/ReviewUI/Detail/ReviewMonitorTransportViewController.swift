@@ -635,6 +635,111 @@ extension ReviewMonitorTransportViewController {
         logScrollView.wordFadeDisplayInvalidationCountForTesting
     }
 
+    var logCommandOutputPanelCountForTesting: Int {
+        logScrollView.commandOutputPanelCountForTesting
+    }
+
+    var logTerminalDecorationRectCountForTesting: Int {
+        logScrollView.terminalDecorationRectCountForTesting
+    }
+
+    var logExpandedCommandOutputPanelCountForTesting: Int {
+        logScrollView.expandedCommandOutputPanelCountForTesting
+    }
+
+    var logCommandOutputPanelUsesTextKit2ForTesting: Bool {
+        logScrollView.commandOutputPanelUsesTextKit2ForTesting
+    }
+
+    var logCommandOutputPanelUsesInlineAttachmentForTesting: Bool {
+        logScrollView.commandOutputPanelUsesInlineAttachmentForTesting
+    }
+
+    var logCommandOutputPanelUsesButtonAttachmentForTesting: Bool {
+        logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
+    }
+
+    var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+        logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
+    }
+
+    var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
+        logScrollView.commandOutputPanelVisibleLineCapacityForTesting
+    }
+
+    var logCommandOutputPanelResultTextForTesting: String? {
+        logScrollView.commandOutputPanelResultTextForTesting
+    }
+
+    var logCommandOutputPanelTerminalTextForTesting: String? {
+        logScrollView.commandOutputPanelTerminalTextForTesting
+    }
+
+    var logCommandOutputPanelCommandLineTextForTesting: String? {
+        logScrollView.commandOutputPanelCommandLineTextForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollTextForTesting: String? {
+        logScrollView.commandOutputPanelOutputScrollTextForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+        logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
+        logScrollView.commandOutputPanelOutputScrollVerticalOffsetForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
+        logScrollView.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
+    }
+
+    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+        logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
+    }
+
+    var logCommandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+        logScrollView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
+    }
+
+    func logFinderRectsForTesting(_ range: NSRange) -> [NSRect] {
+        logScrollView.finderRectsForTesting(range)
+    }
+
+    var logFirstCommandOutputPanelRectForTesting: NSRect? {
+        logScrollView.firstCommandOutputPanelRectForTesting
+    }
+
+    var logCommandOutputPanelToggleSymbolNameForTesting: String? {
+        logScrollView.commandOutputPanelToggleSymbolNameForTesting
+    }
+
+    var logCommandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelLeadingAlignmentDeltaForTesting
+    }
+
+    var logCommandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelChevronSizeDeltaForTesting
+    }
+
+    var logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+        logScrollView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
+    }
+
+    func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
+        logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
+    }
+
+    func toggleFirstLogCommandOutputPanelForTesting() {
+        logScrollView.toggleFirstCommandOutputPanelForTesting()
+    }
+
+    @discardableResult
+    func clickFirstLogCommandOutputPanelHeaderForTesting() -> Bool {
+        logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
+    }
+
     func completeLogWordGlowAnimationsForTesting() {
         logScrollView.completeWordGlowAnimationsForTesting()
     }
@@ -800,7 +905,8 @@ extension ReviewMonitorTransportViewController {
                 summary: nil,
                 log: {
                     var projection = ReviewMonitorLogProjection()
-                    return projection.render(entries: job.logEntries).text
+                    let document = projection.render(entries: job.logEntries)
+                    return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),
                 isShowingEmptyState: false
             )
@@ -1020,6 +1126,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.selectedRangeForTesting
     }
 
+    var logFindStringForTesting: String {
+        logScrollView.findStringForTesting
+    }
+
     func selectAllLogForTesting() {
         logScrollView.selectAllForTesting()
     }
@@ -1042,6 +1152,10 @@ extension ReviewMonitorTransportViewController {
 
     func clearLogFinderSelectedRangesForTesting() {
         logScrollView.clearFinderSelectedRangesForTesting()
+    }
+
+    func setLogFinderSelectedRangeForTesting(_ range: NSRange) {
+        logScrollView.setFinderSelectedRangeForTesting(range)
     }
 
     func simulateLogFinderEmptySelectedRangesForTesting() {

@@ -2284,7 +2284,7 @@ struct ReviewUITests {
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
             logEntries: [
-                .init(kind: .command, text: "$ git diff --stat"),
+                .init(kind: .command, groupID: "cmd_1", text: "$ git diff --stat"),
                 .init(kind: .commandOutput, groupID: "cmd_1", text: "README.md | 1 +"),
                 .init(kind: .agentMessage, text: "No correctness issues found.")
             ]
@@ -2308,7 +2308,265 @@ struct ReviewUITests {
         #expect(window.subtitle == job.cwd)
 
         let displayedLog = transport.displayedLogForTesting
-        #expect(displayedLog == reviewMonitorLogText(for: job))
+        #expect(selectedSnapshot.log == displayedLog)
+        #expect(displayedLog.contains("Ran git diff"))
+        #expect(displayedLog.contains("$ git diff --stat") == false)
+        #expect(displayedLog.contains("Command output - 1 line") == false)
+        #expect(displayedLog.contains("README.md | 1 +") == false)
+        #expect(displayedLog.contains("No correctness issues found."))
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logTerminalDecorationRectCountForTesting == 0)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
+    }
+
+    @Test func commandOutputRendersCollapsedTextKitPanelAndExpandsInline() async throws {
+        let outputText = (1...9)
+            .map { "output line \($0)" }
+            .joined(separator: "\n")
+        let commandMetadata = ReviewLogEntry.Metadata(
+            sourceType: "command",
+            title: "Ran command for 17s",
+            status: "succeeded",
+            exitCode: 0
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-panel",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_1",
+                    text: outputText,
+                    metadata: commandMetadata
+                ),
+                .init(kind: .agentMessage, text: "Continuing after the command.")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.displayedLogForTesting.contains("Ran command for 17s"))
+        #expect(transport.displayedLogForTesting.contains("Ran command for 17s - 9 lines") == false)
+        #expect(transport.displayedLogForTesting.contains("swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("output line 1") == false)
+        let titleRange = (transport.displayedLogForTesting as NSString).range(of: "Ran command for 17s")
+        try #require(titleRange.location != NSNotFound)
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        transport.setSelectedLogRangeForTesting(titleRange)
+        #expect(transport.logSelectedTextForTesting?.hasPrefix("Ran command for 17") == true)
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
+        #expect(abs(transport.logCommandOutputPanelChevronSizeDeltaForTesting ?? .infinity) <= 1)
+        #expect(abs(transport.logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting ?? .infinity) <= 0.5)
+        #expect(transport.logCommandOutputPanelUsesInlineAttachmentForTesting)
+        #expect(transport.logCommandOutputPanelUsesButtonAttachmentForTesting)
+        #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
+        #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
+
+        #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        await awaitNativeLayoutTurn()
+
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.down")
+        #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting)
+        #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
+        #expect((5...6).contains(transport.logCommandOutputPanelVisibleLineCapacityForTesting))
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
+        #expect(transport.logCommandOutputPanelCommandLineTextForTesting == "$ swift test")
+        #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("$ swift test") == false)
+        #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("output line 1") == true)
+        #expect(transport.logCommandOutputPanelOutputHitTestTargetsTextViewForTesting)
+        #expect(transport.logFindStringForTesting.contains("$ swift test"))
+        #expect(transport.logFindStringForTesting.contains("output line 3"))
+        let visibleOutputFinderRange = (transport.logFindStringForTesting as NSString).range(of: "output line 9")
+        try #require(visibleOutputFinderRange.location != NSNotFound)
+        let visibleOutputRects = transport.logFinderRectsForTesting(visibleOutputFinderRange)
+        let visibleOutputRect = try #require(visibleOutputRects.first)
+        let panelRect = try #require(transport.logFirstCommandOutputPanelRectForTesting)
+        #expect(visibleOutputRect.width < panelRect.width - 16)
+        #expect(visibleOutputRect.height < panelRect.height / 2)
+        let commandFinderRange = (transport.logFindStringForTesting as NSString).range(of: "$ swift test")
+        try #require(commandFinderRange.location != NSNotFound)
+        transport.setLogFinderSelectedRangeForTesting(commandFinderRange)
+        #expect(transport.logFindClientFirstSelectedRangeForTesting == commandFinderRange)
+        #expect(transport.logSelectedTextForTesting == "$ swift test")
+        let outputFinderRange = (transport.logFindStringForTesting as NSString).range(of: "output line 3")
+        try #require(outputFinderRange.location != NSNotFound)
+        transport.setLogFinderSelectedRangeForTesting(outputFinderRange)
+        #expect(transport.logFindClientFirstSelectedRangeForTesting == outputFinderRange)
+        #expect(transport.logSelectedTextForTesting == "output line 3")
+        #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
+        let initialOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        let initialOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
+        #expect(abs(initialOutputScrollOffset - initialOutputScrollMaximumOffset) <= 0.5)
+        #expect(transport.scrollCommandOutputPanelOutputForTesting(deltaY: -24))
+        let scrolledOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "\noutput line 10",
+            metadata: commandMetadata
+        ))
+        _ = try await awaitTransportRender(transport)
+        await awaitNativeLayoutTurn()
+        let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        #expect(abs(offsetAfterOutputAppend - scrolledOutputScrollOffset) <= 0.5)
+        #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        await awaitNativeLayoutTurn()
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        await awaitNativeLayoutTurn()
+        let reopenedOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        let reopenedOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
+        #expect(abs(reopenedOutputScrollOffset - reopenedOutputScrollMaximumOffset) <= 0.5)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("$ swift test") == true)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
+        #expect(transport.displayedLogForTesting.contains("output line 9") == false)
+        #expect(transport.logFindStringForTesting.contains("output line 9"))
+
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "\noutput line 11",
+            metadata: commandMetadata
+        ))
+        job.appendLogEntry(.init(kind: .agentMessage, text: "Visible text after command output."))
+        _ = try await awaitTransportRender(transport)
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
+        #expect(transport.displayedLogForTesting.contains("Visible text after command output."))
+    }
+
+    @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-start-panel",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test")
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
+
+        job.appendLogEntry(.init(
+            kind: .commandOutput,
+            groupID: "cmd_1",
+            text: "output line 1",
+            metadata: .init(sourceType: "commandExecution", title: "Command output", status: "succeeded", exitCode: 0)
+        ))
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("output line 1") == false)
+    }
+
+    @Test func expandingCommandOutputRefreshesActiveFindSnapshot() async throws {
+        let outputText = (1...5)
+            .map { "output line \($0)" }
+            .joined(separator: "\n")
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-find-refresh",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
+                .init(kind: .commandOutput, groupID: "cmd_1", text: outputText)
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        try await withFindPasteboardString(nil) {
+            viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
+            #expect(transport.logFindBarVisibleForTesting)
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("output line 3"))
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("output line 3") == false)
+
+            #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+            await awaitNativeLayoutTurn()
+
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("$ swift test"))
+            #expect(transport.logFindStringForTesting.contains("output line 3"))
+
+            job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
+            try await waitForCondition {
+                transport.logFindStringForTesting.contains("output line 6")
+            }
+
+            #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindStringForTesting.contains("output line 6"))
+        }
     }
 
     @Test func switchingSelectedJobRebindsDetailPane() async throws {
@@ -3153,10 +3411,18 @@ struct ReviewUITests {
         ))
         _ = try await awaitTransportRender(transport)
         let replaceCount = transport.logReplaceCountForTesting
+        let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
+        _ = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.contains("Command output")
+        }
 
-        #expect(transport.displayedLogForTesting == "- updated with longer replacement text")
+        #expect(transport.displayedLogForTesting.contains("- updated with longer replacement text"))
+        #expect(transport.displayedLogForTesting.contains("Command output"))
+        #expect(transport.displayedLogForTesting.contains("Command output - 1 line") == false)
+        #expect(transport.displayedLogForTesting.contains("hidden output") == false)
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReplaceCountForTesting == replaceCount)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }

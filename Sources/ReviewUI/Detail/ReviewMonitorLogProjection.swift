@@ -63,6 +63,7 @@ enum ReviewMonitorLogTextStyle: Hashable, Sendable {
     case markdownSyntax
     case command
     case terminalOutput
+    case commandOutputControl(isExpanded: Bool)
     case plan(status: ReviewMonitorLogPlanStatus?)
     case tool
     case diagnostic
@@ -93,6 +94,17 @@ struct ReviewMonitorLogDecoration: Equatable, Sendable {
     var blockID: ReviewMonitorLogBlockID
     var range: NSRange
     var style: ReviewMonitorLogDecorationStyle
+}
+
+struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
+    var blockID: ReviewMonitorLogBlockID
+    var range: NSRange
+    var commandText: String
+    var outputText: String
+    var lineCount: Int
+    var isExpanded: Bool
+    var title: String
+    var exitText: String?
 }
 
 struct ReviewMonitorLogAppend: Equatable, Sendable {
@@ -161,6 +173,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     var blocks: [ReviewMonitorLogBlock]
     var styleRuns: [ReviewMonitorLogTextRun]
     var decorations: [ReviewMonitorLogDecoration]
+    var commandOutputPanels: [ReviewMonitorLogCommandOutputPanel]
     var revision: UInt64
     var lastChange: ReviewMonitorLogChange
 
@@ -172,6 +185,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         blocks: [ReviewMonitorLogBlock] = [],
         styleRuns: [ReviewMonitorLogTextRun] = [],
         decorations: [ReviewMonitorLogDecoration] = [],
+        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = [],
         revision: UInt64 = 0,
         lastChange: ReviewMonitorLogChange = .reload
     ) {
@@ -182,6 +196,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         self.blocks = blocks
         self.styleRuns = styleRuns
         self.decorations = decorations
+        self.commandOutputPanels = commandOutputPanels
         self.revision = revision
         self.lastChange = lastChange
     }
@@ -193,6 +208,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     mutating func rebuildPresentation() {
         styleRuns.removeAll(keepingCapacity: true)
         decorations.removeAll(keepingCapacity: true)
+        commandOutputPanels.removeAll(keepingCapacity: true)
         for block in blocks {
             ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
         }
@@ -211,7 +227,26 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         decorations.removeAll {
             $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
         }
+        commandOutputPanels.removeAll {
+            $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
+        }
         ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
+    }
+
+    var finderSupplementSignature: Int {
+        var hasher = Hasher()
+        for panel in commandOutputPanels where panel.isExpanded {
+            hasher.combine(panel.blockID)
+            combine(panel.range, into: &hasher)
+            hasher.combine(panel.commandText)
+            hasher.combine(panel.outputText)
+        }
+        return hasher.finalize()
+    }
+
+    private func combine(_ range: NSRange, into hasher: inout Hasher) {
+        hasher.combine(range.location)
+        hasher.combine(range.length)
     }
 }
 

@@ -258,12 +258,13 @@ func makeReviewMonitorPreviewContentViewController() -> NSViewController {
 func makeReviewMonitorPreviewContentViewControllerForPreview(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
     account: CodexAccount? = nil,
-    serverState: CodexReviewServerState = .running
+    serverState: CodexReviewServerState = .running,
+    previewStore: CodexReviewStore? = nil
 ) -> ReviewMonitorRootViewController {
     let store: CodexReviewStore
     switch serverState {
     case .running:
-        store = ReviewMonitorPreviewContent.makeStore()
+        store = previewStore ?? ReviewMonitorPreviewContent.makeStore()
     case .failed, .starting, .stopped:
         store = CodexReviewStore.makePreviewStore()
         store.serverState = serverState
