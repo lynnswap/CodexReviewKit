@@ -2745,7 +2745,7 @@ struct ReviewUITests {
 
         _ = try await awaitTransportRender(transport)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
-        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
         job.appendLogEntry(.init(

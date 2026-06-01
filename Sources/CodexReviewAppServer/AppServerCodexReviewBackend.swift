@@ -281,6 +281,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 }
                 var trackedTurnIDs = Set(run.turnID.map { [$0] } ?? [])
                 var emittedStartedTurnIDs: Set<String> = []
+                var commandLifecycleByItemID: [String: AppServerCommandLifecycle] = [:]
                 var awaitingReviewExit = false
                 let completionCoordinator = ReviewCompletionCoordinator()
                 let recordEvent: @Sendable (BackendReviewEvent) async -> Void = { [weak self] event in
@@ -294,7 +295,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                         guard let decoded = try decodeReviewNotification(
                             notification,
                             threadID: run.threadID,
-                            fallbackReviewThreadID: run.reviewThreadID ?? run.threadID
+                            fallbackReviewThreadID: run.reviewThreadID ?? run.threadID,
+                            commandLifecycleByItemID: &commandLifecycleByItemID
                         ) else {
                             continue
                         }
@@ -650,6 +652,8 @@ private struct TurnNotificationPayload: Decodable {
     var turnID: String?
     var itemID: String?
     var item: AppServerThreadItem?
+    var startedAtMs: Int64?
+    var completedAtMs: Int64?
     var reviewThreadID: String?
     var model: String?
     var fromModel: String?
@@ -676,6 +680,8 @@ private struct TurnNotificationPayload: Decodable {
         case turnID = "turnId"
         case itemID = "itemId"
         case item
+        case startedAtMs
+        case completedAtMs
         case reviewThreadID = "reviewThreadId"
         case model
         case fromModel
@@ -704,6 +710,8 @@ private struct TurnNotificationPayload: Decodable {
         self.turnID = try container.decodeStringIfPresent(forKey: .turnID)
         self.itemID = try container.decodeStringIfPresent(forKey: .itemID)
         self.item = try? container.decodeIfPresent(AppServerThreadItem.self, forKey: .item)
+        self.startedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .startedAtMs)
+        self.completedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
         self.reviewThreadID = try container.decodeStringIfPresent(forKey: .reviewThreadID)
         self.model = try container.decodeStringIfPresent(forKey: .model)
         self.fromModel = try container.decodeStringIfPresent(forKey: .fromModel)
@@ -727,6 +735,18 @@ private struct TurnNotificationPayload: Decodable {
 
     var resolvedTurnID: String? {
         turn?.id ?? turnID
+    }
+
+    var startedAt: Date? {
+        startedAtMs.map(Self.date(millisecondsSince1970:))
+    }
+
+    var completedAt: Date? {
+        completedAtMs.map(Self.date(millisecondsSince1970:))
+    }
+
+    private static func date(millisecondsSince1970 milliseconds: Int64) -> Date {
+        Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
     }
 }
 
@@ -769,7 +789,8 @@ private struct AppServerThreadStatus: Decodable, Sendable {
 private func decodeReviewNotification(
     _ notification: JSONRPCNotification,
     threadID: String,
-    fallbackReviewThreadID: String
+    fallbackReviewThreadID: String,
+    commandLifecycleByItemID: inout [String: AppServerCommandLifecycle]
 ) throws -> DecodedReviewNotification? {
     guard isReviewNotificationMethod(notification.method) else {
         return nil
@@ -790,9 +811,33 @@ private func decodeReviewNotification(
             model: payload.model
         )]
     case "item/started":
-        events = payload.item?.startedEvents ?? []
+        if let item = payload.item,
+           item.type == "commandExecution" {
+            let lifecycle = AppServerCommandLifecycle(
+                item: item,
+                startedAt: payload.startedAt,
+                completedAt: nil
+            )
+            commandLifecycleByItemID[item.id] = lifecycle
+            events = item.startedEvents(startedAt: payload.startedAt, lifecycle: lifecycle)
+        } else {
+            events = payload.item?.startedEvents(startedAt: payload.startedAt, lifecycle: nil) ?? []
+        }
     case "item/completed":
-        events = payload.item?.completedEvents ?? []
+        if let item = payload.item,
+           item.type == "commandExecution" {
+            let previous = commandLifecycleByItemID[item.id]
+            let lifecycle = AppServerCommandLifecycle(
+                item: item,
+                startedAt: previous?.startedAt,
+                completedAt: payload.completedAt,
+                fallback: previous
+            )
+            events = item.completedEvents(completedAt: payload.completedAt, lifecycle: lifecycle)
+            commandLifecycleByItemID.removeValue(forKey: item.id)
+        } else {
+            events = payload.item?.completedEvents(completedAt: payload.completedAt, lifecycle: nil) ?? []
+        }
     case "item/agentMessage/delta":
         guard let delta = payload.delta,
               delta.isEmpty == false
@@ -817,7 +862,7 @@ private func decodeReviewNotification(
     case "item/commandExecution/outputDelta":
         events = payload.deltaLog(
             kind: .commandOutput,
-            metadata: .init(sourceType: "commandExecution", title: "Command output")
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: payload.itemID)
         ).map { [$0] } ?? []
     case "item/fileChange/outputDelta":
         events = payload.deltaLog(
@@ -828,7 +873,7 @@ private func decodeReviewNotification(
         "process/outputDelta":
         events = payload.base64OutputLog(
             kind: .commandOutput,
-            metadata: .init(sourceType: "commandExecution", title: "Command output")
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: payload.itemID)
         ).map { [$0] } ?? []
     case "item/mcpToolCall/progress":
         events = payload.messageLog(
@@ -1105,14 +1150,94 @@ private extension TurnNotificationPayload {
     }
 }
 
+private struct AppServerCommandAction: Decodable, Sendable {
+    var type: String
+    var command: String?
+    var name: String?
+    var path: String?
+    var query: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case command
+        case name
+        case path
+        case query
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeStringIfPresent(forKey: .type) ?? "unknown"
+        self.command = try container.decodeStringIfPresent(forKey: .command)
+        self.name = try container.decodeStringIfPresent(forKey: .name)
+        self.path = try container.decodeStringIfPresent(forKey: .path)
+        self.query = try container.decodeStringIfPresent(forKey: .query)
+    }
+
+    var metadataAction: ReviewLogEntry.Metadata.CommandAction {
+        .init(
+            kind: metadataKind,
+            command: command,
+            name: name,
+            path: path,
+            query: query
+        )
+    }
+
+    private var metadataKind: ReviewLogEntry.Metadata.CommandAction.Kind {
+        switch type {
+        case "read":
+            .read
+        case "listFiles":
+            .listFiles
+        case "search":
+            .search
+        default:
+            .unknown
+        }
+    }
+}
+
+private struct AppServerCommandLifecycle: Sendable {
+    var itemID: String
+    var command: String?
+    var cwd: String?
+    var startedAt: Date?
+    var completedAt: Date?
+    var durationMs: Int?
+    var commandActions: [ReviewLogEntry.Metadata.CommandAction]?
+    var commandStatus: String?
+
+    init(
+        item: AppServerThreadItem,
+        startedAt: Date?,
+        completedAt: Date?,
+        fallback: AppServerCommandLifecycle? = nil
+    ) {
+        self.itemID = item.id
+        self.command = item.command ?? fallback?.command
+        self.cwd = item.cwd ?? fallback?.cwd
+        self.startedAt = startedAt ?? fallback?.startedAt
+        self.completedAt = completedAt ?? fallback?.completedAt
+        self.durationMs = item.durationMs ?? fallback?.durationMs
+        let actions = item.metadataCommandActions
+        self.commandActions = actions?.isEmpty == false ? actions : fallback?.commandActions
+        self.commandStatus = item.status?.nilIfEmpty ?? fallback?.commandStatus
+    }
+}
+
 private struct AppServerThreadItem: Decodable, Sendable {
     var type: String
     var id: String
     var text: String?
     var command: String?
     var cwd: String?
+    var processID: String?
+    var source: String?
     var aggregatedOutput: String?
     var exitCode: Int?
+    var durationMs: Int?
+    var commandActions: [AppServerCommandAction]
     var status: String?
     var server: String?
     var tool: String?
@@ -1133,8 +1258,12 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case text
         case command
         case cwd
+        case processID = "processId"
+        case source
         case aggregatedOutput
         case exitCode
+        case durationMs
+        case commandActions
         case status
         case server
         case tool
@@ -1157,8 +1286,12 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.text = try container.decodeStringIfPresent(forKey: .text)
         self.command = try container.decodeStringIfPresent(forKey: .command)
         self.cwd = try container.decodeStringIfPresent(forKey: .cwd)
+        self.processID = try container.decodeStringIfPresent(forKey: .processID)
+        self.source = try container.decodeStringIfPresent(forKey: .source)
         self.aggregatedOutput = try container.decodeStringIfPresent(forKey: .aggregatedOutput)
         self.exitCode = try? container.decodeIfPresent(Int.self, forKey: .exitCode)
+        self.durationMs = try? container.decodeIfPresent(Int.self, forKey: .durationMs)
+        self.commandActions = (try? container.decodeIfPresent([AppServerCommandAction].self, forKey: .commandActions)) ?? []
         self.status = try container.decodeStringIfPresent(forKey: .status)
         self.server = try container.decodeStringIfPresent(forKey: .server)
         self.tool = try container.decodeStringIfPresent(forKey: .tool)
@@ -1174,13 +1307,25 @@ private struct AppServerThreadItem: Decodable, Sendable {
         self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
     }
 
-    var startedEvents: [BackendReviewEvent] {
+    func startedEvents(
+        startedAt: Date?,
+        lifecycle: AppServerCommandLifecycle?
+    ) -> [BackendReviewEvent] {
         switch type {
         case "enteredReviewMode":
             return review.map { [.logEntry(kind: .progress, text: "Reviewing \($0)", groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
-            return command.map {
-                [logEntry(kind: .command, text: "$ \($0)", replacesGroup: true, title: "Command", status: "started")]
+            return (command ?? lifecycle?.command).map {
+                [logEntry(
+                    kind: .command,
+                    text: "$ \($0)",
+                    replacesGroup: true,
+                    title: nil,
+                    status: "inProgress",
+                    startedAt: startedAt,
+                    completedAt: nil,
+                    lifecycle: lifecycle
+                )]
             } ?? []
         case "mcpToolCall":
             return [logEntry(kind: .toolCall, text: "MCP \(toolLabel) started.", replacesGroup: true, title: toolLabel, status: "started")]
@@ -1211,7 +1356,10 @@ private struct AppServerThreadItem: Decodable, Sendable {
         }
     }
 
-    var completedEvents: [BackendReviewEvent] {
+    func completedEvents(
+        completedAt: Date?,
+        lifecycle: AppServerCommandLifecycle?
+    ) -> [BackendReviewEvent] {
         switch type {
         case "agentMessage":
             return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
@@ -1223,8 +1371,23 @@ private struct AppServerThreadItem: Decodable, Sendable {
                     kind: .commandOutput,
                     text: output,
                     replacesGroup: true,
-                    title: "Command output",
-                    status: completedStatus
+                    title: nil,
+                    status: completedStatus,
+                    startedAt: lifecycle?.startedAt,
+                    completedAt: completedAt,
+                    lifecycle: lifecycle
+                )]
+            }
+            if let command = command ?? lifecycle?.command {
+                return [logEntry(
+                    kind: .command,
+                    text: "$ \(command)",
+                    replacesGroup: true,
+                    title: nil,
+                    status: completedStatus,
+                    startedAt: lifecycle?.startedAt,
+                    completedAt: completedAt,
+                    lifecycle: lifecycle
                 )]
             }
             return []
@@ -1263,30 +1426,62 @@ private struct AppServerThreadItem: Decodable, Sendable {
         replacesGroup: Bool,
         title: String?,
         status explicitStatus: String? = nil,
-        detail: String? = nil
+        detail: String? = nil,
+        startedAt: Date? = nil,
+        completedAt: Date? = nil,
+        lifecycle: AppServerCommandLifecycle? = nil
     ) -> BackendReviewEvent {
         .logEntry(
             kind: kind,
             text: text,
             groupID: id,
             replacesGroup: replacesGroup,
-            metadata: metadata(title: title, status: explicitStatus, detail: detail)
+            metadata: metadata(
+                title: title,
+                status: explicitStatus,
+                detail: detail,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                lifecycle: lifecycle
+            )
         )
     }
 
     private func metadata(
         title: String?,
         status explicitStatus: String?,
-        detail: String?
+        detail: String?,
+        startedAt explicitStartedAt: Date? = nil,
+        completedAt explicitCompletedAt: Date? = nil,
+        lifecycle: AppServerCommandLifecycle? = nil
     ) -> ReviewLogEntry.Metadata {
-        .init(
+        let resolvedStartedAt = explicitStartedAt ?? lifecycle?.startedAt
+        let resolvedCompletedAt = explicitCompletedAt ?? lifecycle?.completedAt
+        let resolvedDurationMs = durationMs ?? lifecycle?.durationMs ?? Self.durationMs(
+            startedAt: resolvedStartedAt,
+            completedAt: resolvedCompletedAt
+        )
+        let actions = metadataCommandActions
+        let resolvedCommandActions = actions?.isEmpty == false ? actions : lifecycle?.commandActions
+        let explicitStatusValue = explicitStatus?.nilIfEmpty
+        let itemStatus = self.status?.nilIfEmpty
+        let resolvedStatus: String? = explicitStatusValue ?? itemStatus
+        let resolvedCommandStatus: String? = itemStatus ?? explicitStatusValue ?? lifecycle?.commandStatus
+        let isCommandExecution = type == "commandExecution"
+        return .init(
             sourceType: type,
             title: title?.nilIfEmpty,
-            status: explicitStatus?.nilIfEmpty ?? status?.nilIfEmpty,
+            status: resolvedStatus,
             detail: detail?.nilIfEmpty,
-            command: command,
-            cwd: cwd,
+            itemID: isCommandExecution ? id : nil,
+            command: command ?? lifecycle?.command,
+            cwd: cwd ?? lifecycle?.cwd,
             exitCode: exitCode,
+            startedAt: isCommandExecution ? resolvedStartedAt : nil,
+            completedAt: isCommandExecution ? resolvedCompletedAt : nil,
+            durationMs: isCommandExecution ? resolvedDurationMs : nil,
+            commandActions: isCommandExecution ? resolvedCommandActions : nil,
+            commandStatus: isCommandExecution ? resolvedCommandStatus : nil,
             namespace: namespace,
             server: server,
             tool: tool,
@@ -1295,6 +1490,24 @@ private struct AppServerThreadItem: Decodable, Sendable {
             resultText: result?.nonNullDebugText?.nilIfEmpty,
             errorText: error?.nonNullDebugText?.nilIfEmpty
         )
+    }
+
+    var metadataCommandActions: [ReviewLogEntry.Metadata.CommandAction]? {
+        guard commandActions.isEmpty == false else {
+            return nil
+        }
+        return commandActions.map(\.metadataAction)
+    }
+
+    private static func durationMs(startedAt: Date?, completedAt: Date?) -> Int? {
+        guard let startedAt, let completedAt else {
+            return nil
+        }
+        let milliseconds = completedAt.timeIntervalSince(startedAt) * 1000
+        guard milliseconds.isFinite else {
+            return nil
+        }
+        return max(0, Int(milliseconds.rounded()))
     }
 
     private var completedStatus: String? {

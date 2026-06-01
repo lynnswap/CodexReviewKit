@@ -751,9 +751,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
 
         switch entry.kind {
-        case .agentMessage, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
             return GroupKey(kind: entry.kind, groupID: groupID)
-        case .command, .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
     }

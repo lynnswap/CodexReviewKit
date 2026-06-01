@@ -136,6 +136,86 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
     }()
 }
 
+final class ReviewMonitorCommandOutputTimerAttachment: NSTextAttachment {
+    let blockID: ReviewMonitorLogBlockID
+    let startedAt: Date
+    let fontPointSize: CGFloat
+
+    init(
+        blockID: ReviewMonitorLogBlockID,
+        startedAt: Date,
+        font: NSFont
+    ) {
+        self.blockID = blockID
+        self.startedAt = startedAt
+        self.fontPointSize = font.pointSize
+        super.init(data: nil, ofType: nil)
+
+        allowsTextAttachmentView = true
+        lineLayoutPadding = 0
+        let size = Self.attachmentSize(font: font)
+        bounds = CGRect(
+            x: 0,
+            y: floor(font.descender),
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func attachmentBounds(
+        for attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?,
+        proposedLineFragment lineFrag: CGRect,
+        position: CGPoint
+    ) -> CGRect {
+        bounds
+    }
+
+    override func viewProvider(
+        for parentView: NSView?,
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSTextAttachmentViewProvider? {
+        ReviewMonitorCommandOutputTimerAttachmentViewProvider(
+            textAttachment: self,
+            parentView: parentView,
+            textLayoutManager: nil,
+            location: location
+        )
+    }
+
+    override func image(
+        for bounds: CGRect,
+        attributes: [NSAttributedString.Key: Any],
+        location: any NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSImage? {
+        Self.transparentImage
+    }
+
+    private static func attachmentSize(font: NSFont) -> NSSize {
+        let sample = " for 00:00:00" as NSString
+        let width = ceil(sample.size(withAttributes: [.font: font]).width)
+        let height = ceil(font.ascender - font.descender)
+        return NSSize(width: width, height: height)
+    }
+
+    private static let transparentImage: NSImage = {
+        let image = NSImage(size: NSSize(width: 1, height: 1))
+        image.lockFocus()
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: 1, height: 1).fill()
+        image.unlockFocus()
+        return image
+    }()
+}
+
 @MainActor
 final class ReviewMonitorCommandOutputToggleAttachmentViewProvider: NSTextAttachmentViewProvider {
     private var button: ReviewMonitorCommandOutputToggleButton?
@@ -152,6 +232,110 @@ final class ReviewMonitorCommandOutputToggleAttachmentViewProvider: NSTextAttach
         button.configure(attachment: attachment)
         self.button = button
         return button
+    }
+}
+
+@MainActor
+final class ReviewMonitorCommandOutputTimerAttachmentViewProvider: NSTextAttachmentViewProvider {
+    private var timerView: ReviewMonitorCommandOutputTimerAttachmentView?
+
+    func configureView() -> ReviewMonitorCommandOutputTimerAttachmentView? {
+        guard let attachment = textAttachment as? ReviewMonitorCommandOutputTimerAttachment else {
+            return nil
+        }
+        if let timerView {
+            timerView.configure(attachment: attachment)
+            return timerView
+        }
+        let timerView = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        timerView.configure(attachment: attachment)
+        self.timerView = timerView
+        return timerView
+    }
+}
+
+@MainActor
+final class ReviewMonitorCommandOutputTimerAttachmentView: NSTextField {
+    private(set) var blockID: ReviewMonitorLogBlockID
+    private var startedAt: Date
+    private var updateTimer: Timer?
+
+    init(attachment: ReviewMonitorCommandOutputTimerAttachment) {
+        self.blockID = attachment.blockID
+        self.startedAt = attachment.startedAt
+        super.init(frame: .zero)
+
+        isEditable = false
+        isSelectable = false
+        isBordered = false
+        drawsBackground = false
+        lineBreakMode = .byClipping
+        usesSingleLineMode = true
+        textColor = .secondaryLabelColor
+        configure(attachment: attachment)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    isolated deinit {
+        stopTimer()
+    }
+
+    func configure(attachment: ReviewMonitorCommandOutputTimerAttachment) {
+        blockID = attachment.blockID
+        startedAt = attachment.startedAt
+        font = .systemFont(ofSize: attachment.fontPointSize)
+        updateText()
+        if superview != nil {
+            startTimerIfNeeded()
+        }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        if superview == nil {
+            stopTimer()
+        } else {
+            startTimerIfNeeded()
+        }
+    }
+
+    private func startTimerIfNeeded() {
+        guard updateTimer == nil else {
+            return
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateText()
+            }
+        }
+    }
+
+    private func stopTimer() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+
+    func updateText(referenceDate: Date = Date()) {
+        let elapsedSeconds = max(0, Int(referenceDate.timeIntervalSince(startedAt).rounded(.down)))
+        stringValue = " for \(Self.durationText(seconds: elapsedSeconds))"
+    }
+
+    private static func durationText(seconds: Int) -> String {
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        let minutes = seconds / 60
+        let remainingSeconds = seconds % 60
+        if minutes < 60 {
+            return remainingSeconds == 0 ? "\(minutes)m" : "\(minutes)m \(remainingSeconds)s"
+        }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
     }
 }
 
