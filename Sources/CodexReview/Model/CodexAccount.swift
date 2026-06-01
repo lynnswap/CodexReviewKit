@@ -63,6 +63,17 @@ public final class CodexAccount: Identifiable, Hashable {
     public package(set) var lastRateLimitFetchAt: Date?
     public package(set) var lastRateLimitError: String?
 
+    public var requiresReauthentication: Bool {
+        lastRateLimitError.map(Self.requiresReauthentication(errorMessage:)) ?? false
+    }
+
+    public var rateLimitStatusMessage: String? {
+        if requiresReauthentication {
+            return "Sign in again"
+        }
+        return lastRateLimitError
+    }
+
     nonisolated public var accountKey: String {
         id
     }
@@ -198,6 +209,29 @@ public final class CodexAccount: Identifiable, Hashable {
         lastRateLimitError = error?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
+    package func markRateLimitReauthenticationRequired(
+        fetchedAt: Date?,
+        error: String
+    ) {
+        clearRateLimits()
+        updateRateLimitFetchMetadata(
+            fetchedAt: fetchedAt,
+            error: Self.reauthenticationRequiredMessage(from: error)
+        )
+    }
+
+    package static func requiresReauthentication(errorMessage: String) -> Bool {
+        let normalizedMessage = errorMessage
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalizedMessage.contains("token_expired")
+            || normalizedMessage.contains("refresh_token_reused")
+            || normalizedMessage.contains("refresh_token_expired")
+            || normalizedMessage.contains("provided authentication token is expired")
+            || normalizedMessage.contains("saved authentication is for")
+            || normalizedMessage.contains("sign in again")
+    }
+
     package func clearRateLimits() {
         rateLimits.removeAll()
     }
@@ -209,6 +243,16 @@ public final class CodexAccount: Identifiable, Hashable {
         clearRateLimits()
         lastRateLimitFetchAt = nil
         lastRateLimitError = nil
+    }
+}
+
+private extension CodexAccount {
+    static func reauthenticationRequiredMessage(from error: String) -> String {
+        let trimmedError = error.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedError.isEmpty == false else {
+            return "Authentication expired. Sign in again."
+        }
+        return "Authentication expired. Sign in again. \(trimmedError)"
     }
 }
 

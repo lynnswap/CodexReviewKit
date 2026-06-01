@@ -1,8 +1,5 @@
 import Foundation
-import OSLog
 import CodexReview
-
-private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-backend")
 
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
@@ -367,7 +364,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                                 await completionCoordinator.deferCompletion(event)
                                 continue
                             }
-
                             if await completionCoordinator.emit(
                                 event,
                                 continuation: continuation,
@@ -660,6 +656,7 @@ private struct TurnNotificationPayload: Decodable {
     var toModel: String?
     var reason: String?
     var message: String?
+    var stdin: String?
     var summary: String?
     var details: String?
     var delta: String?
@@ -688,6 +685,7 @@ private struct TurnNotificationPayload: Decodable {
         case toModel
         case reason
         case message
+        case stdin
         case summary
         case details
         case delta
@@ -718,6 +716,7 @@ private struct TurnNotificationPayload: Decodable {
         self.toModel = try container.decodeStringIfPresent(forKey: .toModel)
         self.reason = try container.decodeStringIfPresent(forKey: .reason)
         self.message = try container.decodeStringIfPresent(forKey: .message)
+        self.stdin = try container.decodeStringIfPresent(forKey: .stdin)
         self.summary = try container.decodeStringIfPresent(forKey: .summary)
         self.details = try container.decodeStringIfPresent(forKey: .details)
         self.delta = try container.decodeStringIfPresent(forKey: .delta)
@@ -801,7 +800,6 @@ private func decodeReviewNotification(
         return nil
     }
     guard let payload = try? JSONDecoder().decode(TurnNotificationPayload.self, from: notification.params) else {
-        logger.debug("Ignoring undecodable \(notification.method, privacy: .public) notification")
         return nil
     }
     guard payload.threadID == threadID || (payload.threadID == nil && isGlobalDiagnosticMethod(notification.method)) else {
@@ -896,15 +894,17 @@ private func decodeReviewNotification(
             )]
         } ?? []
     case "item/commandExecution/terminalInteraction":
-        events = payload.itemID.map {
-            [.logEntry(
-                kind: .commandOutput,
-                text: payload.message ?? "Terminal interaction.",
-                groupID: $0,
-                replacesGroup: false,
-                metadata: .init(sourceType: "commandExecution", title: "Terminal interaction")
-            )]
-        } ?? []
+        events = payload.stdin?.nilIfEmpty.flatMap { stdin in
+            payload.itemID.map {
+                .logEntry(
+                    kind: .commandOutput,
+                    text: stdin,
+                    groupID: $0,
+                    replacesGroup: false,
+                    metadata: .init(sourceType: "commandExecution", title: "Terminal input")
+                )
+            }
+        }.map { [$0] } ?? []
     case "item/autoApprovalReview/started":
         events = payload.itemID.map {
             [.logEntry(kind: .diagnostic, text: "Approval review started.", groupID: $0, replacesGroup: false)]
@@ -1391,7 +1391,20 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty {
-                return [logEntry(
+                var events: [BackendReviewEvent] = []
+                if let command = command ?? lifecycle?.command {
+                    events.append(logEntry(
+                        kind: .command,
+                        text: "$ \(command)",
+                        replacesGroup: true,
+                        title: nil,
+                        status: completedStatus,
+                        startedAt: lifecycle?.startedAt,
+                        completedAt: completedAt,
+                        lifecycle: lifecycle
+                    ))
+                }
+                events.append(logEntry(
                     kind: .commandOutput,
                     text: output,
                     replacesGroup: true,
@@ -1400,7 +1413,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
                     startedAt: lifecycle?.startedAt,
                     completedAt: completedAt,
                     lifecycle: lifecycle
-                )]
+                ))
+                return events
             }
             if let command = command ?? lifecycle?.command {
                 return [logEntry(
@@ -1489,9 +1503,13 @@ private struct AppServerThreadItem: Decodable, Sendable {
     ) -> ReviewLogEntry.Metadata {
         let resolvedStartedAt = explicitStartedAt ?? lifecycle?.startedAt
         let resolvedCompletedAt = explicitCompletedAt ?? lifecycle?.completedAt
-        let resolvedDurationMs = durationMs ?? lifecycle?.durationMs ?? Self.durationMs(
+        let computedDurationMs = Self.durationMs(
             startedAt: resolvedStartedAt,
             completedAt: resolvedCompletedAt
+        )
+        let resolvedDurationMs = Self.resolvedDurationMs(
+            reported: durationMs ?? lifecycle?.durationMs,
+            computed: computedDurationMs
         )
         let actions = metadataCommandActions
         let resolvedCommandActions = actions?.isEmpty == false ? actions : lifecycle?.commandActions
@@ -1541,6 +1559,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return nil
         }
         return max(0, Int(milliseconds.rounded()))
+    }
+
+    private static func resolvedDurationMs(reported: Int?, computed: Int?) -> Int? {
+        guard let reported else {
+            return computed
+        }
+        guard reported <= 0,
+              let computed,
+              computed > 0
+        else {
+            return max(0, reported)
+        }
+        return computed
     }
 
     private var completedStatus: String? {
