@@ -110,6 +110,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private let sidebarKindObservationScope = ObservationScope()
     private let sidebarTopologyObservationScope = ObservationScope()
+    private let sidebarFilterObservationScope = ObservationScope()
     private var sidebarSelectionDelivery: ObservationDelivery?
     private var sidebarStoreKindDelivery: ObservationDelivery?
     private var sidebarTopologyDelivery: ObservationDelivery?
@@ -237,6 +238,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func bindObservation() {
         sidebarKindObservationScope.cancelAll()
         sidebarTopologyObservationScope.cancelAll()
+        sidebarFilterObservationScope.cancelAll()
 
         sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState, tracking: { uiState in
             _ = uiState.sidebarSelection
@@ -278,39 +280,57 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             ))
         }
 
-        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
-            Self.trackSidebarStoreTopology(store)
-        }) { [weak self] event, _ in
-            guard let self else {
-                return
-            }
-            self.applySidebarTopology(
-                self.sidebarWorkspaceTopologies,
-                animated: event.kind != .initial
-            )
-        }
-
-        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState, tracking: { uiState in
+        sidebarFilterDelivery = sidebarFilterObservationScope.observe(uiState, tracking: { uiState in
             _ = uiState.sidebarJobFilter
-        }) { [weak self] event, _ in
+        }) { [weak self] event, uiState in
+            let filter = uiState.sidebarJobFilter
             guard let self else {
                 return
             }
-            self.applySidebarTopology(
-                self.sidebarWorkspaceTopologies,
-                animated: event.kind != .initial
+            self.bindSidebarStoreTopologyObservation(
+                filter: filter,
+                animatedInitialDelivery: event.kind != .initial
             )
         }
     }
 
-    private static func trackSidebarStoreTopology(_ store: CodexReviewStore) {
+    private func bindSidebarStoreTopologyObservation(
+        filter: SidebarJobFilter,
+        animatedInitialDelivery: Bool
+    ) {
+        sidebarTopologyObservationScope.cancelAll()
+        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
+            Self.trackSidebarStoreTopology(store, filter: filter)
+        }) { [weak self] event, _ in
+            guard let self else {
+                return
+            }
+            let animated = event.kind == .initial ? animatedInitialDelivery : true
+            self.applySidebarTopology(
+                self.sidebarWorkspaceTopologies,
+                animated: animated
+            )
+        }
+    }
+
+    private static func trackSidebarStoreTopology(_ store: CodexReviewStore, filter: SidebarJobFilter) {
+        let tracksRunningMembership = filter.contains(.running)
+        let tracksLatestFinishedMembership = filter.contains(.latestFinished)
+        let tracksTerminalMembership = tracksRunningMembership || tracksLatestFinishedMembership
+
         for workspace in store.orderedWorkspaces {
             _ = workspace.sortOrder
             _ = workspace.isExpanded
 
             for job in store.orderedJobs(in: workspace) {
                 _ = job.sortOrder
-                _ = job.isTerminal
+                if tracksTerminalMembership {
+                    _ = job.core.lifecycle.status
+                }
+                if tracksLatestFinishedMembership {
+                    _ = job.core.lifecycle.endedAt
+                    _ = job.core.lifecycle.startedAt
+                }
             }
         }
     }
@@ -344,7 +364,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         store.orderedWorkspaces.map { workspace in
             SidebarWorkspaceTopology(
                 workspace: workspace,
-                jobs: filteredJobs(in: workspace)
+                jobs: visibleJobs(in: workspace)
             )
         }
     }
@@ -832,9 +852,42 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func filteredJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+    private func visibleJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+        let orderedJobs = store.orderedJobs(in: workspace)
         let filter = uiState.sidebarJobFilter
-        return store.orderedJobs(in: workspace).filter { filter.includes($0) }
+        guard filter.isActive else {
+            return orderedJobs
+        }
+
+        let latestFinishedJob = filter.contains(.latestFinished)
+            ? Self.latestFinishedJob(in: orderedJobs)
+            : nil
+        return orderedJobs.filter { job in
+            if filter.contains(.running),
+               job.core.lifecycle.status.isTerminal == false
+            {
+                return true
+            }
+            return latestFinishedJob.map { $0 === job } ?? false
+        }
+    }
+
+    private static func latestFinishedJob(in orderedJobs: [CodexReviewJob]) -> CodexReviewJob? {
+        var latestJob: CodexReviewJob?
+        var latestDate = Date.distantPast
+        for job in orderedJobs {
+            guard job.core.lifecycle.status.isTerminal else {
+                continue
+            }
+            let finishedAt = job.core.lifecycle.endedAt
+                ?? job.core.lifecycle.startedAt
+                ?? .distantPast
+            if latestJob == nil || finishedAt > latestDate {
+                latestJob = job
+                latestDate = finishedAt
+            }
+        }
+        return latestJob
     }
 
     private func workspace(from item: Any?) -> CodexReviewWorkspace? {
@@ -854,7 +907,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func filteredJobCount(in workspace: CodexReviewWorkspace) -> Int {
-        filteredJobs(in: workspace).count
+        visibleJobs(in: workspace).count
     }
 
     private func job(atRow row: Int) -> CodexReviewJob? {
@@ -1104,7 +1157,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         var sectionRect = outlineView.rect(ofRow: workspaceRow)
         guard workspace.isExpanded,
-              let lastJob = filteredJobs(in: workspace).last,
+              let lastJob = visibleJobs(in: workspace).last,
               let lastJobRow = row(forJobID: lastJob.id)
         else {
             return sectionRect
@@ -1120,6 +1173,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
+        guard uiState.sidebarJobFilter.allowsJobReordering else {
+            return nil
+        }
         guard let destination = resolvedJobDropDestination(
             proposedItem: proposedItem,
             proposedChildIndex: index
@@ -1130,18 +1186,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let orderedJobs = store.orderedJobs(in: destination.workspace)
-        let visibleJobs = filteredJobs(in: destination.workspace)
+        let destinationVisibleJobs = visibleJobs(in: destination.workspace)
         guard let sourceIndex = orderedJobs.firstIndex(where: { $0.id == id }) else {
             return nil
         }
-        guard let visibleSourceIndex = visibleJobs.firstIndex(where: { $0.id == id }) else {
+        guard let visibleSourceIndex = destinationVisibleJobs.firstIndex(where: { $0.id == id }) else {
             return nil
         }
 
-        let visibleInsertionIndex = max(0, min(destination.childIndex, visibleJobs.count))
+        let visibleInsertionIndex = max(0, min(destination.childIndex, destinationVisibleJobs.count))
         let storeInsertionIndex = storeJobInsertionIndex(
             visibleInsertionIndex: visibleInsertionIndex,
-            visibleJobs: visibleJobs,
+            visibleJobs: destinationVisibleJobs,
             orderedJobs: orderedJobs
         )
         let storeDestinationIndex = storeInsertionIndex > sourceIndex
@@ -1151,7 +1207,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let displayDestinationIndex = visibleInsertionIndex > visibleSourceIndex
             ? visibleInsertionIndex - 1
             : visibleInsertionIndex
-        let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, visibleJobs.count - 1))
+        let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, destinationVisibleJobs.count - 1))
         let operation: SidebarResolvedDrop.Operation = clampedDisplayDestinationIndex == visibleSourceIndex
             || clampedStoreDestinationIndex == sourceIndex
             ? .none
@@ -1198,7 +1254,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let job = job(from: proposedItem),
               index == NSOutlineViewDropOnItemIndex,
               let workspace = workspace(containing: job),
-              let jobIndex = filteredJobs(in: workspace).firstIndex(where: { $0.id == job.id })
+              let jobIndex = visibleJobs(in: workspace).firstIndex(where: { $0.id == job.id })
         else {
             return nil
         }
@@ -1241,7 +1297,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let workspace = workspace(from: item) else {
             fatalError("Unsupported sidebar item.")
         }
-        return filteredJobs(in: workspace)[index]
+        return visibleJobs(in: workspace)[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {

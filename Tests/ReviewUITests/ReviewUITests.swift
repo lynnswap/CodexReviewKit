@@ -526,6 +526,203 @@ struct ReviewUITests {
         #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
     }
 
+    @Test func sidebarLatestFinishedFilterKeepsWorkspacesAndShowsLatestTerminalJob() async throws {
+        let alphaRunningJob = makeJob(
+            id: "job-alpha-running",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 400),
+            status: .running,
+            targetSummary: "Running alpha"
+        )
+        let alphaQueuedJob = makeJob(
+            id: "job-alpha-queued",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 500),
+            status: .queued,
+            targetSummary: "Queued alpha"
+        )
+        let alphaSucceededJob = makeJob(
+            id: "job-alpha-succeeded",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "Succeeded alpha"
+        )
+        let alphaCancelledJob = makeJob(
+            id: "job-alpha-cancelled",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .cancelled,
+            targetSummary: "Cancelled alpha"
+        )
+        let alphaFailedJob = makeJob(
+            id: "job-alpha-failed",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .failed,
+            targetSummary: "Failed alpha"
+        )
+        alphaFailedJob.core.lifecycle.endedAt = nil
+        let betaCancelledJob = makeJob(
+            id: "job-beta-cancelled",
+            cwd: "/tmp/workspace-beta",
+            startedAt: Date(timeIntervalSince1970: 250),
+            status: .cancelled,
+            targetSummary: "Cancelled beta"
+        )
+        let gammaRunningJob = makeJob(
+            id: "job-gamma-running",
+            cwd: "/tmp/workspace-gamma",
+            startedAt: Date(timeIntervalSince1970: 600),
+            status: .running,
+            targetSummary: "Running gamma"
+        )
+        let alphaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let betaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-beta")
+        let gammaWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-gamma")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [alphaWorkspace, betaWorkspace, gammaWorkspace],
+            jobs: [
+                alphaRunningJob,
+                alphaQueuedJob,
+                alphaSucceededJob,
+                alphaCancelledJob,
+                alphaFailedJob,
+                betaCancelledJob,
+                gammaRunningJob,
+            ]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.selectJobForTesting(alphaRunningJob)
+        uiState.sidebarJobFilter = .latestFinished
+
+        try await waitForObservedValue(
+            from: sidebar.sidebarFilterDeliveryForTesting,
+            ["job-alpha-failed"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
+        }
+        #expect(sidebar.displayedSectionTitlesForTesting == [
+            "workspace-alpha",
+            "workspace-beta",
+            "workspace-gamma",
+        ])
+        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
+        #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
+        #expect(sidebar.displayedJobIDsForTesting(in: gammaWorkspace) == [])
+        #expect(sidebar.selectedJobForTesting?.id == "job-alpha-running")
+    }
+
+    @Test func sidebarLatestFinishedFilterFollowsTerminalDateChanges() async throws {
+        let firstJob = makeJob(
+            id: "job-finished-first",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "First finished"
+        )
+        let secondJob = makeJob(
+            id: "job-finished-second",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .failed,
+            targetSummary: "Second finished"
+        )
+        let runningJob = makeJob(
+            id: "job-running",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .running,
+            targetSummary: "Running"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [firstJob, secondJob, runningJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = .latestFinished
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-second"])
+
+        firstJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 400)
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyDeliveryForTesting,
+            ["job-finished-first"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+
+        runningJob.core.lifecycle.status = .cancelled
+        runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 500)
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyDeliveryForTesting,
+            ["job-running"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+    }
+
+    @Test func sidebarRunningAndLatestFinishedFiltersCombineVisibleJobs() async throws {
+        let runningJob = makeJob(
+            id: "job-running",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 400),
+            status: .running,
+            targetSummary: "Running"
+        )
+        let queuedJob = makeJob(
+            id: "job-queued",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 500),
+            status: .queued,
+            targetSummary: "Queued"
+        )
+        let olderFinishedJob = makeJob(
+            id: "job-finished-older",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "Older finished"
+        )
+        let latestFinishedJob = makeJob(
+            id: "job-finished-latest",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .failed,
+            targetSummary: "Latest finished"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [runningJob, olderFinishedJob, queuedJob, latestFinishedJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = [.running, .latestFinished]
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == [
+            "job-running",
+            "job-queued",
+            "job-finished-latest",
+        ])
+    }
+
     @Test func jobDropWhileFilteredMapsVisibleIndexToStoreOrder() async throws {
         let hiddenPrefix = makeJob(
             id: "job-hidden-prefix",
@@ -594,6 +791,59 @@ struct ReviewUITests {
             "job-running-b",
             "job-running-a",
             "job-hidden-suffix",
+        ])
+    }
+
+    @Test func jobDropIsRejectedForLatestFinishedFilter() async throws {
+        let runningJob = makeJob(
+            id: "job-running",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .running,
+            targetSummary: "Running"
+        )
+        let olderJob = makeJob(
+            id: "job-finished-older",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "Older finished"
+        )
+        let latestJob = makeJob(
+            id: "job-finished-latest",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .failed,
+            targetSummary: "Latest finished"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [runningJob, olderJob, latestJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = .latestFinished
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-latest"])
+        #expect(sidebar.performJobDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
+
+        uiState.sidebarJobFilter = [.running, .latestFinished]
+        try await waitForObservedValue(
+            from: sidebar.sidebarFilterDeliveryForTesting,
+            ["job-running", "job-finished-latest"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: workspace)
+        }
+        #expect(sidebar.performJobDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 1) == false)
+        #expect(store.orderedJobs(in: workspace).map(\.id) == [
+            "job-running",
+            "job-finished-older",
+            "job-finished-latest",
         ])
     }
 

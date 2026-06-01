@@ -274,6 +274,7 @@ struct ReviewUIShellTests {
             "All Items",
             "-",
             "Running",
+            "Latest Finished",
         ])
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
@@ -284,6 +285,23 @@ struct ReviewUIShellTests {
         }
         #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running)
         #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
+        #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
+
+        viewController.selectSidebarJobFilterForTesting(.latestFinished)
+        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+        }
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
+        #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
+
+        viewController.selectSidebarJobFilterForTesting(.running)
+        try await waitForCondition {
+            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .latestFinished
+        }
+        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
         viewController.setSidebarJobFilterForTesting(.all)
@@ -301,6 +319,7 @@ struct ReviewUIShellTests {
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
+        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
 
         do {
             let store = CodexReviewStore.makePreviewStore()
@@ -319,9 +338,13 @@ struct ReviewUIShellTests {
             try await waitForCondition {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
             }
+            viewController.selectSidebarJobFilterForTesting(.latestFinished)
+            try await waitForCondition {
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+            }
             #expect(
                 defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
-                    == SidebarJobFilter.running.rawValue
+                    == combinedFilter.persistedValue
             )
             harness.window.close()
         }
@@ -337,7 +360,7 @@ struct ReviewUIShellTests {
             sidebarItem.isCollapsed = false
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
+                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
             }
             viewController.selectSidebarJobFilterForTesting(.all)
             try await waitForCondition {
@@ -345,7 +368,7 @@ struct ReviewUIShellTests {
             }
             #expect(
                 defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
-                    == SidebarJobFilter.all.rawValue
+                    == SidebarJobFilter.all.persistedValue
             )
             harness.window.close()
         }
