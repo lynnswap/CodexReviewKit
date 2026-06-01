@@ -110,6 +110,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private let sidebarKindObservationScope = ObservationScope()
     private let sidebarTopologyObservationScope = ObservationScope()
+    private let sidebarFilterObservationScope = ObservationScope()
     private var sidebarSelectionDelivery: ObservationDelivery?
     private var sidebarStoreKindDelivery: ObservationDelivery?
     private var sidebarTopologyDelivery: ObservationDelivery?
@@ -237,6 +238,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func bindObservation() {
         sidebarKindObservationScope.cancelAll()
         sidebarTopologyObservationScope.cancelAll()
+        sidebarFilterObservationScope.cancelAll()
 
         sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState, tracking: { uiState in
             _ = uiState.sidebarSelection
@@ -278,41 +280,57 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             ))
         }
 
-        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
-            Self.trackSidebarStoreTopology(store)
-        }) { [weak self] event, _ in
-            guard let self else {
-                return
-            }
-            self.applySidebarTopology(
-                self.sidebarWorkspaceTopologies,
-                animated: event.kind != .initial
-            )
-        }
-
-        sidebarFilterDelivery = sidebarTopologyObservationScope.observe(uiState, tracking: { uiState in
+        sidebarFilterDelivery = sidebarFilterObservationScope.observe(uiState, tracking: { uiState in
             _ = uiState.sidebarJobFilter
-        }) { [weak self] event, _ in
+        }) { [weak self] event, uiState in
+            let filter = uiState.sidebarJobFilter
             guard let self else {
                 return
             }
-            self.applySidebarTopology(
-                self.sidebarWorkspaceTopologies,
-                animated: event.kind != .initial
+            self.bindSidebarStoreTopologyObservation(
+                filter: filter,
+                animatedInitialDelivery: event.kind != .initial
             )
         }
     }
 
-    private static func trackSidebarStoreTopology(_ store: CodexReviewStore) {
+    private func bindSidebarStoreTopologyObservation(
+        filter: SidebarJobFilter,
+        animatedInitialDelivery: Bool
+    ) {
+        sidebarTopologyObservationScope.cancelAll()
+        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
+            Self.trackSidebarStoreTopology(store, filter: filter)
+        }) { [weak self] event, _ in
+            guard let self else {
+                return
+            }
+            let animated = event.kind == .initial ? animatedInitialDelivery : true
+            self.applySidebarTopology(
+                self.sidebarWorkspaceTopologies,
+                animated: animated
+            )
+        }
+    }
+
+    private static func trackSidebarStoreTopology(_ store: CodexReviewStore, filter: SidebarJobFilter) {
+        let tracksRunningMembership = filter.contains(.running)
+        let tracksLatestFinishedMembership = filter.contains(.latestFinished)
+        let tracksTerminalMembership = tracksRunningMembership || tracksLatestFinishedMembership
+
         for workspace in store.orderedWorkspaces {
             _ = workspace.sortOrder
             _ = workspace.isExpanded
 
             for job in store.orderedJobs(in: workspace) {
                 _ = job.sortOrder
-                _ = job.core.lifecycle.status
-                _ = job.core.lifecycle.endedAt
-                _ = job.core.lifecycle.startedAt
+                if tracksTerminalMembership {
+                    _ = job.core.lifecycle.status
+                }
+                if tracksLatestFinishedMembership {
+                    _ = job.core.lifecycle.endedAt
+                    _ = job.core.lifecycle.startedAt
+                }
             }
         }
     }
