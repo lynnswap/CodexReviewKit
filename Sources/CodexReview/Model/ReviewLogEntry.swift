@@ -111,6 +111,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         case error
         case progress
         case event
+        case contextCompaction
     }
 
     public let id: UUID

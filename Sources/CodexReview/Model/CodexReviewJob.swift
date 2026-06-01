@@ -751,7 +751,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
 
         switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
             return GroupKey(kind: entry.kind, groupID: groupID)
         case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
@@ -813,6 +813,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         .error,
         .progress,
         .event,
+        .contextCompaction,
     ]
 
     private nonisolated static let reviewOutputKinds: Set<ReviewLogEntry.Kind> = [
@@ -829,6 +830,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         .toolCall,
         .progress,
         .event,
+        .contextCompaction,
     ]
 
     private nonisolated static let cappedLogKinds: Set<ReviewLogEntry.Kind> = [

@@ -43,6 +43,128 @@ struct ReviewMonitorLogProjectionTests {
         ))
     }
 
+    @Test func contextCompactionMarkerUsesDedicatedProjectionStyle() {
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "contextCompaction",
+            status: "inProgress",
+            itemID: "compact-1"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-context-compaction",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact-1",
+                    replacesGroup: true,
+                    text: "Automatically compacting context",
+                    metadata: metadata
+                ),
+            ]
+        )
+        let document = document(for: job)
+
+        #expect(document.text == "Automatically compacting context")
+        #expect(document.blocks.map(\.kind) == [.contextCompaction])
+        #expect(document.styleRuns.first?.style == .contextCompaction)
+        #expect(document.decorations.first?.style == .contextCompaction(
+            label: "Automatically compacting context",
+            isCompleted: false
+        ))
+    }
+
+    @Test func contextCompactionCompletionReplacesStartedMarker() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-context-compaction-replacement",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact-1",
+                    replacesGroup: true,
+                    text: "Automatically compacting context",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "inProgress",
+                        itemID: "compact-1"
+                    )
+                ),
+            ]
+        )
+        var projection = ReviewMonitorLogProjection()
+        let initialDocument = projection.render(entries: job.logEntries)
+
+        job.appendLogEntry(.init(
+            kind: .contextCompaction,
+            groupID: "compact-1",
+            replacesGroup: true,
+            text: "Context automatically compacted",
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed",
+                itemID: "compact-1"
+            )
+        ))
+        let updatedDocument = projection.render(entries: job.logEntries)
+
+        #expect(updatedDocument.text == "Context automatically compacted")
+        #expect(updatedDocument.blocks.count == 1)
+        #expect(updatedDocument.blocks.first?.kind == .contextCompaction)
+        #expect(updatedDocument.revision == initialDocument.revision &+ 1)
+        #expect(updatedDocument.lastChange == .replace(.init(
+            kind: .contextCompaction,
+            blockID: ReviewMonitorLogBlockID("contextCompaction:compact-1"),
+            range: NSRange(
+                location: 0,
+                length: ("Automatically compacting context" as NSString).length
+            ),
+            text: "Context automatically compacted"
+        )))
+        #expect(updatedDocument.decorations.first?.style == .contextCompaction(
+            label: "Context automatically compacted",
+            isCompleted: true
+        ))
+    }
+
+    @Test func failedContextCompactionMarkerDoesNotUseCompletedDecoration() {
+        let completedAt = Date(timeIntervalSince1970: 1_700_000_002)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-context-compaction-failed",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact-1",
+                    replacesGroup: true,
+                    text: "Context compaction failed",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "failed",
+                        itemID: "compact-1",
+                        completedAt: completedAt
+                    )
+                ),
+            ]
+        )
+
+        let document = document(for: job)
+
+        #expect(document.text == "Context compaction failed")
+        #expect(document.decorations.first?.style == .contextCompaction(
+            label: "Context compaction failed",
+            isCompleted: false
+        ))
+    }
+
     @Test func commandOutputAppendUsesAppendChange() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",

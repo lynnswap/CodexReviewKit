@@ -1994,18 +1994,18 @@ struct AppServerClientTests {
             replacesGroup: true
         ))
         #expect(try await iterator.next() == .logEntry(
-            kind: .event,
-            text: "Context compaction started.",
+            kind: .contextCompaction,
+            text: "Automatically compacting context",
             groupID: "compact-1",
             replacesGroup: true,
-            metadata: .init(sourceType: "contextCompaction", title: "Context compaction", status: "started")
+            metadata: .init(sourceType: "contextCompaction", status: "inProgress", itemID: "compact-1")
         ))
         #expect(try await iterator.next() == .logEntry(
-            kind: .event,
-            text: "Context compacted.",
+            kind: .contextCompaction,
+            text: "Context automatically compacted",
             groupID: "compact-1",
             replacesGroup: true,
-            metadata: .init(sourceType: "contextCompaction", title: "Context compaction", status: "completed")
+            metadata: .init(sourceType: "contextCompaction", status: "completed", itemID: "compact-1")
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
@@ -2131,6 +2131,125 @@ struct AppServerClientTests {
                 commandActions: [action],
                 commandStatus: "succeeded"
             )
+        ))
+    }
+
+    @Test func backendPreservesContextCompactionLifecycleMetadata() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+        let startedAtMs: Int64 = 1_700_000_000_000
+        let completedAtMs: Int64 = startedAtMs + 2_000
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "contextCompaction", id: "compact-1"),
+                startedAtMs: startedAtMs
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "contextCompaction", id: "compact-1"),
+                completedAtMs: completedAtMs
+            )
+        )
+
+        let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
+        let completedAt = Date(timeIntervalSince1970: TimeInterval(completedAtMs) / 1_000)
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .contextCompaction,
+            text: "Automatically compacting context",
+            groupID: "compact-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "inProgress",
+                itemID: "compact-1",
+                startedAt: startedAt
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .contextCompaction,
+            text: "Context automatically compacted",
+            groupID: "compact-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed",
+                itemID: "compact-1",
+                completedAt: completedAt
+            )
+        ))
+    }
+
+    @Test func backendPreservesFailedContextCompactionCompletionStatus() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+        let completedAtMs: Int64 = 1_700_000_002_000
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "contextCompaction",
+                    id: "compact-1",
+                    status: "failed",
+                    error: "compaction failed"
+                ),
+                completedAtMs: completedAtMs
+            )
+        )
+
+        let completedAt = Date(timeIntervalSince1970: TimeInterval(completedAtMs) / 1_000)
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .contextCompaction,
+            text: "Context compaction failed",
+            groupID: "compact-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "failed",
+                itemID: "compact-1",
+                completedAt: completedAt,
+                errorText: "compaction failed"
+            )
+        ))
+    }
+
+    @Test func backendMapsDeprecatedThreadCompactedToCompletedContextCompactionMarker() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "thread/compacted",
+            params: TestContextCompactedNotification(threadID: "thread-1", turnID: "turn-1")
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .contextCompaction,
+            text: "Context automatically compacted",
+            groupID: "contextCompaction:turn-1",
+            replacesGroup: true,
+            metadata: .init(sourceType: "contextCompaction", status: "completed")
         ))
     }
 
@@ -2685,6 +2804,16 @@ private struct TestThreadClosedNotification: Encodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
+    }
+}
+
+private struct TestContextCompactedNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
     }
 }
 
