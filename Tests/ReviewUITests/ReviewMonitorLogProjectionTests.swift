@@ -431,6 +431,63 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.commandOutputPanels.first?.exitText == "exit 1")
     }
 
+    @Test func commandOutputPanelResultUsesMergedCompletionMetadata() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-merged-result",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    text: "$ swift test",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "inProgress",
+                        itemID: "cmd-1",
+                        command: "swift test",
+                        commandStatus: "inProgress"
+                    )
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests passed",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        title: "Command output",
+                        itemID: "cmd-1"
+                    )
+                ),
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    text: "$ swift test",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "succeeded",
+                        itemID: "cmd-1",
+                        command: "swift test",
+                        exitCode: 0,
+                        commandStatus: "succeeded"
+                    )
+                ),
+            ]
+        )
+
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: job),
+            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+        )
+
+        #expect(displayDocument.commandOutputPanels.first?.outputText == "Tests passed")
+        #expect(displayDocument.commandOutputPanels.first?.exitText == "Success")
+    }
+
     @Test func metadataIsPreservedOnBlocks() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",

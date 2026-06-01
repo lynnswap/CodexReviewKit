@@ -108,7 +108,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     isActive: isActive,
                     startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: commandOutputResultText(for: panelSource.output ?? panelSource.anchor)
+                    exitText: commandOutputResultText(for: metadata)
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -586,24 +586,25 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return normalized == "command" || normalized == "command output"
     }
 
-    private static func commandOutputResultText(for block: ReviewMonitorLogBlock) -> String? {
-        if let exitCode = block.metadata?.exitCode {
+    private static func commandOutputResultText(for metadata: ReviewLogEntry.Metadata?) -> String? {
+        if let exitCode = metadata?.exitCode {
             return exitCode == 0 ? "Success" : "exit \(exitCode)"
         }
 
-        let normalizedStatus = block.metadata?.status?
+        let rawStatus = metadata?.commandStatus ?? metadata?.status
+        let normalizedStatus = rawStatus?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if normalizedStatus == "succeeded" || normalizedStatus == "success" || normalizedStatus == "completed" {
             return "Success"
         }
         if normalizedStatus == "failed" || normalizedStatus == "failure" || normalizedStatus == "errored" {
-            if let exitCode = block.metadata?.exitCode {
+            if let exitCode = metadata?.exitCode {
                 return "exit \(exitCode)"
             }
             return "Failed"
         }
-        return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     private static func commandSummaryName(_ commandText: String) -> String {
