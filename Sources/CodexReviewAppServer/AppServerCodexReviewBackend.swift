@@ -786,6 +786,11 @@ private struct AppServerThreadStatus: Decodable, Sendable {
     var type: String
 }
 
+private let appServerContextCompactionStartedText = "Automatically compacting context"
+private let appServerContextCompactionCompletedText = "Context automatically compacted"
+private let appServerContextCompactionFailedText = "Context compaction failed"
+private let appServerContextCompactionCancelledText = "Context compaction cancelled"
+
 private func decodeReviewNotification(
     _ notification: JSONRPCNotification,
     threadID: String,
@@ -965,6 +970,17 @@ private func decodeReviewNotification(
         events = [.logEntry(kind: .event, text: payload.modelReroutedText, groupID: payload.turnID, replacesGroup: false)]
     case "model/verification":
         events = [.logEntry(kind: .diagnostic, text: payload.modelVerificationText, groupID: payload.turnID, replacesGroup: false)]
+    case "thread/compacted":
+        events = [.logEntry(
+            kind: .contextCompaction,
+            text: appServerContextCompactionCompletedText,
+            groupID: payload.turnID.map { "contextCompaction:\($0)" },
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed"
+            )
+        )]
     case "warning", "guardianWarning", "deprecationNotice", "configWarning":
         guard let message = payload.diagnosticText?.nilIfEmpty else {
             return nil
@@ -1012,6 +1028,7 @@ private func isReviewNotificationMethod(_ method: String) -> Bool {
         "error",
         "model/rerouted",
         "model/verification",
+        "thread/compacted",
         "warning",
         "guardianWarning",
         "deprecationNotice",
@@ -1346,7 +1363,14 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
         case "contextCompaction":
-            return [logEntry(kind: .event, text: "Context compaction started.", replacesGroup: true, title: "Context compaction", status: "started")]
+            return [logEntry(
+                kind: .contextCompaction,
+                text: appServerContextCompactionStartedText,
+                replacesGroup: true,
+                title: nil,
+                status: "inProgress",
+                startedAt: startedAt
+            )]
         case "hookPrompt":
             return [logEntry(kind: .event, text: "Hook prompt started.", replacesGroup: true, title: "Hook prompt", status: "started", detail: prompt)]
         case "agentMessage":
@@ -1410,7 +1434,15 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "fileChange":
             return [logEntry(kind: .toolCall, text: "File changes \(status ?? "completed").", replacesGroup: true, title: "File changes", status: completedStatus)]
         case "contextCompaction":
-            return [logEntry(kind: .event, text: "Context compacted.", replacesGroup: true, title: "Context compaction", status: completedStatus)]
+            let resolvedStatus = completedStatus
+            return [logEntry(
+                kind: .contextCompaction,
+                text: Self.contextCompactionCompletionText(for: resolvedStatus),
+                replacesGroup: true,
+                title: nil,
+                status: resolvedStatus,
+                completedAt: completedAt
+            )]
         case "hookPrompt":
             return [logEntry(kind: .event, text: "Hook prompt completed.", replacesGroup: true, title: "Hook prompt", status: completedStatus, detail: prompt)]
         case "enteredReviewMode":
@@ -1468,17 +1500,18 @@ private struct AppServerThreadItem: Decodable, Sendable {
         let resolvedStatus: String? = explicitStatusValue ?? itemStatus
         let resolvedCommandStatus: String? = itemStatus ?? explicitStatusValue ?? lifecycle?.commandStatus
         let isCommandExecution = type == "commandExecution"
+        let isLifecycleItem = isCommandExecution || type == "contextCompaction"
         return .init(
             sourceType: type,
             title: title?.nilIfEmpty,
             status: resolvedStatus,
             detail: detail?.nilIfEmpty,
-            itemID: isCommandExecution ? id : nil,
+            itemID: isLifecycleItem ? id : nil,
             command: command ?? lifecycle?.command,
             cwd: cwd ?? lifecycle?.cwd,
             exitCode: exitCode,
-            startedAt: isCommandExecution ? resolvedStartedAt : nil,
-            completedAt: isCommandExecution ? resolvedCompletedAt : nil,
+            startedAt: isLifecycleItem ? resolvedStartedAt : nil,
+            completedAt: isLifecycleItem ? resolvedCompletedAt : nil,
             durationMs: isCommandExecution ? resolvedDurationMs : nil,
             commandActions: isCommandExecution ? resolvedCommandActions : nil,
             commandStatus: isCommandExecution ? resolvedCommandStatus : nil,
@@ -1524,6 +1557,21 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return success ? "succeeded" : "failed"
         }
         return "completed"
+    }
+
+    private static func contextCompactionCompletionText(for status: String?) -> String {
+        let normalized = status?
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch normalized {
+        case "failed", "failure", "errored", "error":
+            return appServerContextCompactionFailedText
+        case "cancelled", "canceled":
+            return appServerContextCompactionCancelledText
+        default:
+            return appServerContextCompactionCompletedText
+        }
     }
 
     private var toolLabel: String {

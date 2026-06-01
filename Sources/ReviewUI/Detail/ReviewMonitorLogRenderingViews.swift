@@ -32,6 +32,11 @@ final class ReviewMonitorLogDecorationView: NSView {
     }
 
     private func draw(_ decoration: ReviewMonitorLogResolvedDecoration) {
+        if case .contextCompaction(let label, _) = decoration.style {
+            drawContextCompactionMarker(in: decoration.rect, label: label)
+            return
+        }
+
         let palette = palette(for: decoration.style)
         guard palette.background.alphaComponent > 0 else {
             return
@@ -56,7 +61,40 @@ final class ReviewMonitorLogDecorationView: NSView {
             return .init(
                 background: NSColor.clear
             )
+        case .contextCompaction(_, _):
+            return .init(
+                background: NSColor.clear
+            )
         }
+    }
+
+    private func drawContextCompactionMarker(
+        in rect: NSRect,
+        label: String
+    ) {
+        let lineColor = NSColor.secondaryLabelColor.withAlphaComponent(0.28)
+        let labelFont = NSFont.systemFont(ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize)
+        let labelWidth = ceil((label as NSString).size(withAttributes: [.font: labelFont]).width)
+        let centerWidth = labelWidth + 28
+        let centerMinX = rect.midX - centerWidth / 2
+        let centerMaxX = rect.midX + centerWidth / 2
+        let lineY = floor(rect.midY) + 0.5
+        let leftLine = NSRect(
+            x: rect.minX,
+            y: lineY,
+            width: max(0, centerMinX - rect.minX),
+            height: 1
+        )
+        let rightLine = NSRect(
+            x: centerMaxX,
+            y: lineY,
+            width: max(0, rect.maxX - centerMaxX),
+            height: 1
+        )
+
+        lineColor.setFill()
+        leftLine.fill()
+        rightLine.fill()
     }
 
     private struct Palette {

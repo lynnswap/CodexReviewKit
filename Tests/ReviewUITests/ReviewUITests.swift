@@ -2570,6 +2570,69 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
 
+    @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-context-compaction-marker",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "compact_1",
+                    replacesGroup: true,
+                    text: "Automatically compacting context",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "inProgress",
+                        itemID: "compact_1"
+                    )
+                ),
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.displayedLogForTesting == "Automatically compacting context")
+        #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
+        #expect(transport.logCommandOutputPanelCountForTesting == 0)
+
+        job.appendLogEntry(.init(
+            kind: .contextCompaction,
+            groupID: "compact_1",
+            replacesGroup: true,
+            text: "Context automatically compacted",
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed",
+                itemID: "compact_1"
+            )
+        ))
+        _ = try await awaitTransportRender(transport)
+
+        #expect(transport.displayedLogForTesting == "Context automatically compacted")
+        #expect(transport.displayedLogForTesting.contains("Automatically compacting context") == false)
+        #expect(transport.logFindStringForTesting.contains("Context automatically compacted"))
+        #expect(transport.logCommandOutputPanelCountForTesting == 0)
+    }
+
     @Test func commandOutputRendersCollapsedTextKitPanelAndExpandsInline() async throws {
         let outputText = (1...9)
             .map { "output line \($0)" }

@@ -263,7 +263,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             }
             return .init(anchor: anchor, command: command, output: block)
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
-             .toolCall, .diagnostic, .error, .progress, .event:
+             .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return nil
         }
     }

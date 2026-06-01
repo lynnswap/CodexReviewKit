@@ -7,7 +7,7 @@ private extension ReviewLogEntry.Kind {
         switch self {
         case .agentMessage, .plan, .reasoning, .reasoningSummary, .rawReasoning:
             return true
-        case .command, .commandOutput, .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+        case .command, .commandOutput, .todoList, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
     }
@@ -727,6 +727,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             attributes[.foregroundColor] = normalTextColor
         case .event:
             attributes[.foregroundColor] = normalTextColor
+        case .contextCompaction:
+            attributes[.foregroundColor] = secondaryTextColor
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            paragraphStyle.lineBreakMode = .byTruncatingTail
+            attributes[.paragraphStyle] = paragraphStyle
         case .muted:
             attributes[.foregroundColor] = normalTextColor
         }
@@ -2063,7 +2069,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func decorationNeedsResolvedRect(_ style: ReviewMonitorLogDecorationStyle) -> Bool {
         switch style {
-        case .terminal:
+        case .terminal, .contextCompaction(_, _):
             return true
         case .transcript, .command, .codeBlock, .plan, .reasoning, .tool, .diagnostic, .error, .event:
             return false

@@ -1450,7 +1450,7 @@ struct ReviewUIShellTests {
         let initialEntryCount = runningJob.logEntries.count
         var tick = 0
 
-        for _ in 0..<240 {
+        for _ in 0..<720 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
 
@@ -1459,9 +1459,20 @@ struct ReviewUIShellTests {
         #expect(appendedKinds.contains(.command))
         #expect(appendedKinds.contains(.toolCall))
         #expect(appendedKinds.contains(.plan))
+        #expect(appendedKinds.contains(.contextCompaction))
         #expect(appendedKinds.contains(.reasoningSummary))
         #expect(appendedKinds.contains(.agentMessage))
-        #expect(Set(appendedKinds).count >= 5)
+        #expect(Set(appendedKinds).count >= 6)
+
+        let compactionEntries = runningJob.logEntries
+            .dropFirst(initialEntryCount)
+            .filter { $0.kind == .contextCompaction }
+        #expect(compactionEntries.count >= 2)
+        #expect(compactionEntries.last?.text == "Context automatically compacted")
+        #expect(compactionEntries.last?.metadata?.status == "completed")
+        let renderedLog = reviewMonitorLogText(for: runningJob)
+        #expect(renderedLog.contains("Context automatically compacted"))
+        #expect(renderedLog.contains("Automatically compacting context") == false)
     }
 
     @Test func previewStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
@@ -1478,7 +1489,7 @@ struct ReviewUIShellTests {
         #expect(runningJob.logEntries.count == initialEntryCount + 1)
         #expect(runningJob.logEntries.last?.kind == .event)
 
-        for _ in 0..<12 {
+        for _ in 0..<38 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
         #expect(runningJob.logEntries.count == initialEntryCount + 1)
@@ -1488,7 +1499,7 @@ struct ReviewUIShellTests {
         #expect(runningJob.logEntries.last?.kind == .plan)
 
         var observedEntryCount = runningJob.logEntries.count
-        for _ in 0..<80 where runningJob.logEntries.last?.kind != .reasoningSummary {
+        for _ in 0..<180 where runningJob.logEntries.last?.kind != .reasoningSummary {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
             observedEntryCount = runningJob.logEntries.count
         }
@@ -1513,7 +1524,7 @@ struct ReviewUIShellTests {
 
         #expect(reasoningChunkCount > 1)
         let countAfterReasoning = runningJob.logEntries.count
-        for _ in 0..<11 {
+        for _ in 0..<37 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
         #expect(runningJob.logEntries.count == countAfterReasoning)

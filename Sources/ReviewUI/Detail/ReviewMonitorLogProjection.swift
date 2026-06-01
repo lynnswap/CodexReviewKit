@@ -69,6 +69,7 @@ enum ReviewMonitorLogTextStyle: Hashable, Sendable {
     case diagnostic
     case error
     case event
+    case contextCompaction
     case muted
 }
 
@@ -88,6 +89,7 @@ enum ReviewMonitorLogDecorationStyle: Hashable, Sendable {
     case diagnostic(tone: ReviewMonitorLogStatusTone)
     case error
     case event
+    case contextCompaction(label: String, isCompleted: Bool)
 }
 
 struct ReviewMonitorLogDecoration: Equatable, Sendable {
@@ -285,7 +287,11 @@ private enum ReviewMonitorLogStyler {
             document.decorations.append(.init(
                 blockID: block.id,
                 range: block.range,
-                style: decorationStyle(for: block.kind, metadata: block.metadata)
+                style: decorationStyle(
+                    for: block.kind,
+                    source: source,
+                    metadata: block.metadata
+                )
             ))
         }
 
@@ -319,7 +325,7 @@ private enum ReviewMonitorLogStyler {
             return renderMarkdown(source, blockID: blockID)
         case .plan, .todoList:
             return renderPlan(source)
-        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event:
+        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return .init(text: source)
         }
     }
@@ -342,11 +348,14 @@ private enum ReviewMonitorLogStyler {
             .body
         case .progress, .event:
             .event
+        case .contextCompaction:
+            .contextCompaction
         }
     }
 
     private static func decorationStyle(
         for kind: ReviewLogEntry.Kind,
+        source: String,
         metadata: ReviewLogEntry.Metadata?
     ) -> ReviewMonitorLogDecorationStyle {
         let tone = statusTone(for: metadata)
@@ -369,6 +378,26 @@ private enum ReviewMonitorLogStyler {
             return .error
         case .progress, .event:
             return .event
+        case .contextCompaction:
+            return .contextCompaction(
+                label: source,
+                isCompleted: contextCompactionIsCompleted(metadata)
+            )
+        }
+    }
+
+    private static func contextCompactionIsCompleted(_ metadata: ReviewLogEntry.Metadata?) -> Bool {
+        let normalized = metadata?.status?
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        switch normalized {
+        case "completed", "complete", "succeeded", "success":
+            return true
+        case "failed", "failure", "errored", "error", "cancelled", "canceled":
+            return false
+        default:
+            return metadata?.completedAt != nil
         }
     }
 
@@ -1477,7 +1506,7 @@ struct ReviewMonitorLogProjection: Sendable {
         switch kind {
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
             return true
-        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event:
+        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
     }
@@ -1504,7 +1533,7 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
             return GroupKey(kind: entry.kind, groupID: groupID)
         case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
@@ -1539,5 +1568,6 @@ struct ReviewMonitorLogProjection: Sendable {
         .error,
         .progress,
         .event,
+        .contextCompaction,
     ]
 }

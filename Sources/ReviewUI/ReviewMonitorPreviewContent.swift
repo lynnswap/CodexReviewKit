@@ -20,26 +20,29 @@ public enum ReviewMonitorPreviewContent {
         let groupName: String?
         let text: String
         let metadata: ReviewLogEntry.Metadata?
+        let replacesGroup: Bool
         let chunkByWord: Bool
-        let delayAfterPreviousTicks: Int
-        let chunkIntervalTicks: Int
+        let delayBeforeFrameCount: Int
+        let chunkIntervalFrameCount: Int
 
         init(
             kind: ReviewLogEntry.Kind,
             groupName: String? = nil,
             text: String,
             metadata: ReviewLogEntry.Metadata? = nil,
+            replacesGroup: Bool = false,
             chunkByWord: Bool = false,
-            delayAfterPreviousTicks: Int,
-            chunkIntervalTicks: Int = 1
+            delayBeforeFrameCount: Int,
+            chunkIntervalFrameCount: Int = 1
         ) {
             self.kind = kind
             self.groupName = groupName
             self.text = text
             self.metadata = metadata
+            self.replacesGroup = replacesGroup
             self.chunkByWord = chunkByWord
-            self.delayAfterPreviousTicks = delayAfterPreviousTicks
-            self.chunkIntervalTicks = chunkIntervalTicks
+            self.delayBeforeFrameCount = delayBeforeFrameCount
+            self.chunkIntervalFrameCount = chunkIntervalFrameCount
         }
     }
 
@@ -48,6 +51,7 @@ public enum ReviewMonitorPreviewContent {
         let groupName: String?
         let text: String
         let metadata: ReviewLogEntry.Metadata?
+        let replacesGroup: Bool
     }
 
     private struct PreviewStreamFrame {
@@ -208,6 +212,7 @@ public enum ReviewMonitorPreviewContent {
         return .init(
             kind: step.kind,
             groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
+            replacesGroup: step.replacesGroup,
             text: step.text,
             metadata: step.metadata
         )
@@ -226,20 +231,21 @@ public enum ReviewMonitorPreviewContent {
     private static func streamTimeline(from templates: [PreviewStreamTemplate]) -> [PreviewStreamStep?] {
         var timeline: [PreviewStreamStep?] = []
         for template in templates {
-            let delay = timeline.isEmpty ? 1 : max(1, template.delayAfterPreviousTicks)
+            let delay = timeline.isEmpty ? 1 : max(1, template.delayBeforeFrameCount)
             if delay > 1 {
                 timeline.append(contentsOf: Array(repeating: nil, count: delay - 1))
             }
             let chunks = template.chunkByWord ? wordChunks(in: template.text) : [template.text]
             for (index, chunk) in chunks.enumerated() {
-                if index > 0 && template.chunkIntervalTicks > 1 {
-                    timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalTicks - 1))
+                if index > 0 && template.chunkIntervalFrameCount > 1 {
+                    timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
                 }
                 timeline.append(PreviewStreamStep(
                     kind: template.kind,
                     groupName: template.groupName,
                     text: chunk,
-                    metadata: template.metadata
+                    metadata: template.metadata,
+                    replacesGroup: template.replacesGroup
                 ))
             }
         }
@@ -259,14 +265,16 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private static let interItemDelayFrameCount = 13
-    private static let previewJobTickOffset = 7
+    private static let interItemDelayFrameCount = 39
+    private static let quickResultDelayFrameCount = 6
+    private static let compactionCompletionDelayFrameCount = 15
+    private static let previewJobTickOffset = 21
 
     private static let previewStreamTemplates: [PreviewStreamTemplate] = [
         .init(
             kind: .event,
             text: "Turn started: \(previewTurnID(1))",
-            delayAfterPreviousTicks: 1
+            delayBeforeFrameCount: 1
         ),
         .init(
             kind: .plan,
@@ -276,13 +284,13 @@ public enum ReviewMonitorPreviewContent {
             [in_progress] Preserve active find UI while streaming
             [pending] Run focused UI tests
             """,
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .command,
             groupName: "command-search-test",
             text: "$ /bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .commandOutput,
@@ -298,25 +306,25 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayAfterPreviousTicks: 2
+            delayBeforeFrameCount: quickResultDelayFrameCount
         ),
         .init(
             kind: .toolCall,
             text: "MCP codex_review.review_read started.",
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .reasoningSummary,
             groupName: "reasoning-summary",
             text: "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
             chunkByWord: true,
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .command,
             groupName: "command-open-log-scroll",
             text: "$ /bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .commandOutput,
@@ -336,33 +344,57 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayAfterPreviousTicks: 2
+            delayBeforeFrameCount: quickResultDelayFrameCount
+        ),
+        .init(
+            kind: .contextCompaction,
+            groupName: "context-compaction",
+            text: "Automatically compacting context",
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "inProgress",
+                itemID: "preview-context-compaction"
+            ),
+            replacesGroup: true,
+            delayBeforeFrameCount: interItemDelayFrameCount
+        ),
+        .init(
+            kind: .contextCompaction,
+            groupName: "context-compaction",
+            text: "Context automatically compacted",
+            metadata: .init(
+                sourceType: "contextCompaction",
+                status: "completed",
+                itemID: "preview-context-compaction"
+            ),
+            replacesGroup: true,
+            delayBeforeFrameCount: compactionCompletionDelayFrameCount
         ),
         .init(
             kind: .toolCall,
             text: "File changes updated.",
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .rawReasoning,
             groupName: "raw-reasoning",
             text: "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
             chunkByWord: true,
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .agentMessage,
             groupName: "agent-message-main",
             text: "I found the log update path and am keeping the current find session stable while new output streams in.\n",
             chunkByWord: true,
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .agentMessage,
             groupName: "agent-message-summary",
             text: "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
             chunkByWord: true,
-            delayAfterPreviousTicks: interItemDelayFrameCount
+            delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]
 
@@ -631,6 +663,17 @@ public enum ReviewMonitorPreviewContent {
             [
                 .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
                 .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
+                .init(
+                    kind: .contextCompaction,
+                    groupID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
+                    replacesGroup: true,
+                    text: "Context automatically compacted",
+                    metadata: .init(
+                        sourceType: "contextCompaction",
+                        status: "completed",
+                        itemID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)"
+                    )
+                ),
                 .init(
                     kind: .plan,
                     groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
