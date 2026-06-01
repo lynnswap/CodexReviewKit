@@ -114,7 +114,7 @@ enum ReviewMonitorSidebarJobFilterPersistence {
 
     static func load(from defaults: UserDefaults) -> SidebarJobFilter {
         guard let rawValue = defaults.string(forKey: defaultsKey),
-              let filter = SidebarJobFilter(rawValue: rawValue)
+              let filter = SidebarJobFilter(persistedValue: rawValue)
         else {
             return .all
         }
@@ -122,6 +122,6 @@ enum ReviewMonitorSidebarJobFilterPersistence {
     }
 
     static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
-        defaults.set(filter.rawValue, forKey: defaultsKey)
+        defaults.set(filter.persistedValue, forKey: defaultsKey)
     }
 }

@@ -57,6 +57,7 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         addMenuItem(for: .all)
         filterMenu.addItem(.separator())
         addMenuItem(for: .running)
+        addMenuItem(for: .latestFinished)
     }
 
     private func addMenuItem(for filter: SidebarJobFilter) {
@@ -81,7 +82,11 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         toolbarButton.state = filter.isActive ? .on : .off
         menuFormItem.state = filter.isActive ? .on : .off
         for (candidate, item) in filterMenuItems {
-            item.state = candidate == filter ? .on : .off
+            if candidate == .all {
+                item.state = filter.isActive ? .off : .on
+            } else {
+                item.state = filter.contains(candidate) ? .on : .off
+            }
         }
     }
 
@@ -90,7 +95,7 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         applySelection(uiState.sidebarJobFilter)
         sender.state = .on
         filterMenu.popUp(
-            positioning: filterMenuItems[uiState.sidebarJobFilter],
+            positioning: positioningMenuItem(for: uiState.sidebarJobFilter),
             at: NSPoint(x: 0, y: sender.bounds.maxY),
             in: sender
         )
@@ -102,8 +107,32 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         guard let filter = sender.representedObject as? SidebarJobFilter else {
             return
         }
-        uiState.sidebarJobFilter = filter
-        applySelection(filter)
+        let updatedFilter = toggledFilter(filter)
+        uiState.sidebarJobFilter = updatedFilter
+        applySelection(updatedFilter)
+    }
+
+    private func toggledFilter(_ filter: SidebarJobFilter) -> SidebarJobFilter {
+        guard filter != .all else {
+            return .all
+        }
+        var currentFilter = uiState.sidebarJobFilter
+        if currentFilter.contains(filter) {
+            currentFilter.remove(filter)
+        } else {
+            currentFilter.insert(filter)
+        }
+        return currentFilter
+    }
+
+    private func positioningMenuItem(for filter: SidebarJobFilter) -> NSMenuItem? {
+        if filter.isActive == false {
+            return filterMenuItems[.all]
+        }
+        for candidate in SidebarJobFilter.menuFilters where filter.contains(candidate) {
+            return filterMenuItems[candidate]
+        }
+        return filterMenuItems[.all]
     }
 }
 
