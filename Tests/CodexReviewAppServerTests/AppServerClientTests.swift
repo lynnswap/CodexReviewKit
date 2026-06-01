@@ -1841,9 +1841,10 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                title: "Command",
-                status: "started",
-                command: "swift test"
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                commandStatus: "inProgress"
             )
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -1851,14 +1852,20 @@ struct AppServerClientTests {
             text: "Tests",
             groupID: "cmd-1",
             replacesGroup: false,
-            metadata: .init(sourceType: "commandExecution", title: "Command output")
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
             text: "Tests passed",
             groupID: "cmd-1",
             replacesGroup: true,
-            metadata: .init(sourceType: "commandExecution", title: "Command output", status: "completed")
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                commandStatus: "completed"
+            )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .command,
@@ -1867,9 +1874,23 @@ struct AppServerClientTests {
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
-                title: "Command",
-                status: "started",
-                command: "pwd"
+                status: "inProgress",
+                itemID: "cmd-2",
+                command: "pwd",
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ pwd",
+            groupID: "cmd-2",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-2",
+                command: "pwd",
+                commandStatus: "completed"
             )
         ))
         #expect(try await iterator.next() == .logEntry(
@@ -2025,6 +2046,151 @@ struct AppServerClientTests {
             replacesGroup: true
         ))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+    }
+
+    @Test func backendPreservesCommandLifecycleMetadata() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+        let startedAtMs: Int64 = 1_700_000_000_000
+        let completedAtMs: Int64 = startedAtMs + 3_456
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "commandExecution",
+                    id: "cmd-1",
+                    command: "cat Sources/ThreadItem.ts",
+                    commandActions: [
+                        .read(command: "cat Sources/ThreadItem.ts", name: "ThreadItem.ts", path: "Sources/ThreadItem.ts")
+                    ],
+                    status: "inProgress"
+                ),
+                startedAtMs: startedAtMs
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "commandExecution",
+                    id: "cmd-1",
+                    aggregatedOutput: "file contents",
+                    exitCode: 0,
+                    durationMs: 3_000
+                ),
+                completedAtMs: completedAtMs
+            )
+        )
+
+        let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
+        let completedAt = Date(timeIntervalSince1970: TimeInterval(completedAtMs) / 1_000)
+        let action = ReviewLogEntry.Metadata.CommandAction(
+            kind: .read,
+            command: "cat Sources/ThreadItem.ts",
+            name: "ThreadItem.ts",
+            path: "Sources/ThreadItem.ts"
+        )
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ cat Sources/ThreadItem.ts",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "cat Sources/ThreadItem.ts",
+                startedAt: startedAt,
+                commandActions: [action],
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: "file contents",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "succeeded",
+                itemID: "cmd-1",
+                command: "cat Sources/ThreadItem.ts",
+                exitCode: 0,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: 3_000,
+                commandActions: [action],
+                commandStatus: "succeeded"
+            )
+        ))
+    }
+
+    @Test func backendFallsBackCommandDurationToLifecycleDates() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
+                startedAtMs: 2_000
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
+                completedAtMs: 5_250
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                completedAt: Date(timeIntervalSince1970: 5.25),
+                durationMs: 3_250,
+                commandStatus: "completed"
+            )
+        ))
     }
 
     @Test func backendCarriesRichToolAndFileMetadata() async throws {
@@ -2561,11 +2727,29 @@ private struct TestItemNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
     var item: TestItem
+    var startedAtMs: Int64?
+    var completedAtMs: Int64?
+
+    init(
+        threadID: String,
+        turnID: String,
+        item: TestItem,
+        startedAtMs: Int64? = nil,
+        completedAtMs: Int64? = nil
+    ) {
+        self.threadID = threadID
+        self.turnID = turnID
+        self.item = item
+        self.startedAtMs = startedAtMs
+        self.completedAtMs = completedAtMs
+    }
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case item
+        case startedAtMs
+        case completedAtMs
     }
 }
 
@@ -2575,8 +2759,12 @@ private struct TestItem: Encodable, Sendable {
     var review: String?
     var command: String?
     var cwd: String?
+    var processID: String?
+    var source: String?
     var aggregatedOutput: String?
     var exitCode: Int?
+    var durationMs: Int?
+    var commandActions: [TestCommandAction]?
     var status: String?
     var namespace: String?
     var server: String?
@@ -2596,8 +2784,12 @@ private struct TestItem: Encodable, Sendable {
         review: String? = nil,
         command: String? = nil,
         cwd: String? = nil,
+        processID: String? = nil,
+        source: String? = nil,
         aggregatedOutput: String? = nil,
         exitCode: Int? = nil,
+        durationMs: Int? = nil,
+        commandActions: [TestCommandAction]? = nil,
         status: String? = nil,
         namespace: String? = nil,
         server: String? = nil,
@@ -2616,8 +2808,12 @@ private struct TestItem: Encodable, Sendable {
         self.review = review
         self.command = command
         self.cwd = cwd
+        self.processID = processID
+        self.source = source
         self.aggregatedOutput = aggregatedOutput
         self.exitCode = exitCode
+        self.durationMs = durationMs
+        self.commandActions = commandActions
         self.status = status
         self.namespace = namespace
         self.server = server
@@ -2630,6 +2826,36 @@ private struct TestItem: Encodable, Sendable {
         self.prompt = prompt
         self.summary = summary
         self.content = content
+    }
+}
+
+private struct TestCommandAction: Encodable, Sendable {
+    var type: String
+    var command: String
+    var name: String?
+    var path: String?
+    var query: String?
+
+    init(
+        type: String,
+        command: String,
+        name: String? = nil,
+        path: String? = nil,
+        query: String? = nil
+    ) {
+        self.type = type
+        self.command = command
+        self.name = name
+        self.path = path
+        self.query = query
+    }
+
+    static func read(command: String, name: String, path: String) -> Self {
+        .init(type: "read", command: command, name: name, path: path)
+    }
+
+    static func search(command: String, query: String?, path: String?) -> Self {
+        .init(type: "search", command: command, path: path, query: query)
     }
 }
 

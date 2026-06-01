@@ -2,13 +2,48 @@ import Foundation
 
 public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public struct Metadata: Codable, Sendable, Hashable {
+        public struct CommandAction: Codable, Sendable, Hashable {
+            public enum Kind: String, Codable, Sendable, Hashable {
+                case read
+                case listFiles
+                case search
+                case unknown
+            }
+
+            public let kind: Kind
+            public let command: String?
+            public let name: String?
+            public let path: String?
+            public let query: String?
+
+            public init(
+                kind: Kind,
+                command: String? = nil,
+                name: String? = nil,
+                path: String? = nil,
+                query: String? = nil
+            ) {
+                self.kind = kind
+                self.command = command
+                self.name = name
+                self.path = path
+                self.query = query
+            }
+        }
+
         public let sourceType: String
         public let title: String?
         public let status: String?
         public let detail: String?
+        public let itemID: String?
         public let command: String?
         public let cwd: String?
         public let exitCode: Int?
+        public let startedAt: Date?
+        public let completedAt: Date?
+        public let durationMs: Int?
+        public let commandActions: [CommandAction]?
+        public let commandStatus: String?
         public let namespace: String?
         public let server: String?
         public let tool: String?
@@ -22,9 +57,15 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
             title: String? = nil,
             status: String? = nil,
             detail: String? = nil,
+            itemID: String? = nil,
             command: String? = nil,
             cwd: String? = nil,
             exitCode: Int? = nil,
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil,
+            commandActions: [CommandAction]? = nil,
+            commandStatus: String? = nil,
             namespace: String? = nil,
             server: String? = nil,
             tool: String? = nil,
@@ -37,9 +78,15 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
             self.title = title
             self.status = status
             self.detail = detail
+            self.itemID = itemID
             self.command = command
             self.cwd = cwd
             self.exitCode = exitCode
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMs = durationMs
+            self.commandActions = commandActions
+            self.commandStatus = commandStatus
             self.namespace = namespace
             self.server = server
             self.tool = tool

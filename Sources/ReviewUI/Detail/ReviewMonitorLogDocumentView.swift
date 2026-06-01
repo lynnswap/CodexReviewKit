@@ -579,6 +579,22 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 range: attachmentRange
             )
 
+            if panel.isActive,
+               let startedAt = panel.startedAt,
+               let timerAttachmentRange = commandOutputTimerAttachmentRange(for: panel),
+               NSIntersectionRange(timerAttachmentRange, targetRange).length == timerAttachmentRange.length,
+               timerAttachmentRange.location < textStorage.length {
+                textStorage.addAttribute(
+                    .attachment,
+                    value: ReviewMonitorCommandOutputTimerAttachment(
+                        blockID: panel.blockID,
+                        startedAt: startedAt,
+                        font: commandOutputControlFont
+                    ),
+                    range: timerAttachmentRange
+                )
+            }
+
             guard panel.isExpanded else {
                 continue
             }
@@ -603,10 +619,27 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func commandOutputPanelAttachmentRange(
         for panel: ReviewMonitorLogCommandOutputPanel
     ) -> NSRange {
-        let labelLength = (
-            ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter + panel.title
-        ).utf16.count
+        let labelLength = commandOutputHeaderUTF16Length(for: panel)
         return NSRange(location: panel.range.location + labelLength + 1, length: 1)
+    }
+
+    private func commandOutputTimerAttachmentRange(
+        for panel: ReviewMonitorLogCommandOutputPanel
+    ) -> NSRange? {
+        guard panel.startedAt != nil else {
+            return nil
+        }
+        let location = panel.range.location
+            + (ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter + panel.title).utf16.count
+        return NSRange(location: location, length: 1)
+    }
+
+    private func commandOutputHeaderUTF16Length(for panel: ReviewMonitorLogCommandOutputPanel) -> Int {
+        (
+            ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+                + panel.title
+                + (panel.isActive && panel.startedAt != nil ? ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter : "")
+        ).utf16.count
     }
 
     private func styleInvalidationRange(
@@ -2537,6 +2570,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         textStorage.enumerateAttribute(.attachment, in: fragmentRange) { value, range, _ in
             guard let attachment = value as? NSTextAttachment,
                   (attachment is ReviewMonitorCommandOutputToggleAttachment ||
+                    attachment is ReviewMonitorCommandOutputTimerAttachment ||
                     attachment is ReviewMonitorCommandOutputPanelAttachment),
                   let location = textLocation(forUTF16Offset: range.location),
                   let provider = attachment.viewProvider(

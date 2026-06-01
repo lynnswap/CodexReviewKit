@@ -103,6 +103,8 @@ struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
     var outputText: String
     var lineCount: Int
     var isExpanded: Bool
+    var isActive: Bool
+    var startedAt: Date?
     var title: String
     var exitText: String?
 }
@@ -1502,9 +1504,9 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         switch entry.kind {
-        case .agentMessage, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning:
             return GroupKey(kind: entry.kind, groupID: groupID)
-        case .command, .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
     }

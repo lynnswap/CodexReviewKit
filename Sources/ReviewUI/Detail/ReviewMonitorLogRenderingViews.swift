@@ -124,6 +124,8 @@ final class ReviewMonitorLogFragmentView: NSView {
             switch provider {
             case let provider as ReviewMonitorCommandOutputToggleAttachmentViewProvider:
                 attachmentView = commandOutputToggleButton(for: provider)
+            case let provider as ReviewMonitorCommandOutputTimerAttachmentViewProvider:
+                attachmentView = commandOutputTimerView(for: provider)
             case let provider as ReviewMonitorCommandOutputPanelAttachmentViewProvider:
                 attachmentView = commandOutputPanelAttachmentView(
                     for: provider,
@@ -152,6 +154,7 @@ final class ReviewMonitorLogFragmentView: NSView {
         }
 
         for subview in subviews where subview is ReviewMonitorCommandOutputToggleButton ||
+            subview is ReviewMonitorCommandOutputTimerAttachmentView ||
             subview is ReviewMonitorCommandOutputPanelAttachmentView {
             guard visibleAttachmentViews.contains(ObjectIdentifier(subview)) == false else {
                 continue
@@ -170,6 +173,20 @@ final class ReviewMonitorLogFragmentView: NSView {
             .first(where: { $0.blockID == attachment.blockID }) {
             existingButton.configure(attachment: attachment)
             return existingButton
+        }
+        return provider.configureView()
+    }
+
+    private func commandOutputTimerView(
+        for provider: ReviewMonitorCommandOutputTimerAttachmentViewProvider
+    ) -> ReviewMonitorCommandOutputTimerAttachmentView? {
+        guard let attachment = provider.textAttachment as? ReviewMonitorCommandOutputTimerAttachment else {
+            return nil
+        }
+        if let existingTimerView = subviews.compactMap({ $0 as? ReviewMonitorCommandOutputTimerAttachmentView })
+            .first(where: { $0.blockID == attachment.blockID }) {
+            existingTimerView.configure(attachment: attachment)
+            return existingTimerView
         }
         return provider.configureView()
     }

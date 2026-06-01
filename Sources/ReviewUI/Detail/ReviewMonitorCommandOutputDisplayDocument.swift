@@ -6,7 +6,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     static func make(
         from source: ReviewMonitorLogDocument,
-        expandedBlockIDs: Set<ReviewMonitorLogBlockID>
+        expandedBlockIDs: Set<ReviewMonitorLogBlockID>,
+        currentDate: Date = Date()
     ) -> ReviewMonitorLogDocument {
         guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
             return source
@@ -61,20 +62,20 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     for: panelSource.anchor,
                     usedBlockIDs: &usedPanelBlockIDs
                 )
-                let metadata = panelSource.output?.metadata ?? panelSource.command?.metadata ?? panelSource.anchor.metadata
+                let metadata = commandPanelMetadata(for: panelSource)
                 let isExpanded = expandedBlockIDs.contains(blockID)
-                let title = commandOutputTitle(
-                    metadata: metadata,
-                    commandText: commandOutputCommandText(
-                        for: panelSource,
-                        sourceString: sourceString,
-                        commandTextByGroupID: commandTextByGroupID
-                    )
-                )
                 let commandText = commandOutputCommandText(
                     for: panelSource,
                     sourceString: sourceString,
                     commandTextByGroupID: commandTextByGroupID
+                )
+                let hasOutput = panelSource.output != nil
+                let isActive = commandOutputIsActive(metadata, hasOutput: hasOutput)
+                let title = commandOutputTitle(
+                    metadata: metadata,
+                    commandText: commandText,
+                    isActive: isActive,
+                    currentDate: currentDate
                 )
                 let outputText = commandOutputText(
                     for: panelSource,
@@ -83,7 +84,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 )
                 let placeholder = commandOutputPlaceholder(
                     title: title,
-                    isExpanded: isExpanded
+                    isExpanded: isExpanded,
+                    includesActiveTimer: isActive && metadata?.startedAt != nil
                 )
                 let displayRange = appendText(placeholder)
                 let controlRange = commandOutputControlRange(in: displayRange, title: title)
@@ -103,8 +105,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     outputText: outputText,
                     lineCount: commandOutputLineCount(outputText),
                     isExpanded: isExpanded,
+                    isActive: isActive,
+                    startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: commandOutputResultText(for: panelSource.output ?? panelSource.anchor)
+                    exitText: commandOutputResultText(for: metadata)
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -155,6 +159,71 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         var anchor: ReviewMonitorLogBlock
         var command: ReviewMonitorLogBlock?
         var output: ReviewMonitorLogBlock?
+    }
+
+    private static func commandPanelMetadata(for source: CommandPanelSource) -> ReviewLogEntry.Metadata? {
+        mergeCommandMetadata(
+            primary: source.output?.metadata,
+            fallback: source.command?.metadata ?? source.anchor.metadata
+        )
+    }
+
+    private static func mergeCommandMetadata(
+        primary: ReviewLogEntry.Metadata?,
+        fallback: ReviewLogEntry.Metadata?
+    ) -> ReviewLogEntry.Metadata? {
+        guard let primary else {
+            return fallback
+        }
+        guard let fallback else {
+            return primary
+        }
+
+        let durationMs = primary.durationMs ?? fallback.durationMs ?? commandDurationMs(
+            startedAt: primary.startedAt ?? fallback.startedAt,
+            completedAt: primary.completedAt ?? fallback.completedAt
+        )
+        let title = primary.title ?? fallback.title
+        let status = primary.status ?? fallback.status
+        let detail = primary.detail ?? fallback.detail
+        let itemID = primary.itemID ?? fallback.itemID
+        let command = primary.command ?? fallback.command
+        let cwd = primary.cwd ?? fallback.cwd
+        let exitCode = primary.exitCode ?? fallback.exitCode
+        let startedAt = primary.startedAt ?? fallback.startedAt
+        let completedAt = primary.completedAt ?? fallback.completedAt
+        let commandActions = primary.commandActions ?? fallback.commandActions
+        let commandStatus = primary.commandStatus ?? fallback.commandStatus
+        let namespace = primary.namespace ?? fallback.namespace
+        let server = primary.server ?? fallback.server
+        let tool = primary.tool ?? fallback.tool
+        let query = primary.query ?? fallback.query
+        let path = primary.path ?? fallback.path
+        let resultText = primary.resultText ?? fallback.resultText
+        let errorText = primary.errorText ?? fallback.errorText
+
+        return ReviewLogEntry.Metadata(
+            sourceType: primary.sourceType,
+            title: title,
+            status: status,
+            detail: detail,
+            itemID: itemID,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs,
+            commandActions: commandActions,
+            commandStatus: commandStatus,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: resultText,
+            errorText: errorText
+        )
     }
 
     private static func firstBlocksByGroupID(
@@ -298,9 +367,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputPlaceholder(
         title: String,
-        isExpanded: Bool
+        isExpanded: Bool,
+        includesActiveTimer: Bool
     ) -> String {
-        let label = "\(toggleAttachmentCharacter)\(title)"
+        let label = "\(toggleAttachmentCharacter)\(title)\(includesActiveTimer ? toggleAttachmentCharacter : "")"
         guard isExpanded else {
             return label
         }
@@ -340,20 +410,150 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputTitle(
         metadata: ReviewLogEntry.Metadata?,
-        commandText: String
+        commandText: String,
+        isActive: Bool,
+        currentDate: Date
     ) -> String {
+        if hasStructuredCommandMetadata(metadata) {
+            let title = commandActionTitle(
+                metadata: metadata,
+                commandText: commandText,
+                isActive: isActive
+            )
+            ?? commandRunTitle(
+                commandText: commandText,
+                metadata: metadata,
+                isActive: isActive
+            )
+            if isActive == false,
+               let durationText = commandDurationText(
+                metadata: metadata,
+                isActive: isActive,
+                currentDate: currentDate
+            ) {
+                return "\(title) for \(durationText)"
+            }
+            return title
+        }
+
         let trimmedTitle = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedTitle,
            trimmedTitle.isEmpty == false,
            isGenericCommandTitle(trimmedTitle) == false {
             return trimmedTitle
         }
-
         if commandText.isEmpty == false {
-            return "Ran \(commandSummaryName(commandText))"
+            return "\(isActive ? "Running" : "Ran") \(commandSummaryName(commandText))"
         }
 
         return "Command output"
+    }
+
+    private static func hasStructuredCommandMetadata(_ metadata: ReviewLogEntry.Metadata?) -> Bool {
+        guard let metadata else {
+            return false
+        }
+        return metadata.itemID != nil
+            || metadata.commandStatus != nil
+            || metadata.startedAt != nil
+            || metadata.completedAt != nil
+            || metadata.durationMs != nil
+            || metadata.commandActions?.isEmpty == false
+    }
+
+    private static func commandRunTitle(
+        commandText: String,
+        metadata: ReviewLogEntry.Metadata?,
+        isActive: Bool
+    ) -> String {
+        let command = commandText.nilIfEmpty ?? metadata?.command?.nilIfEmpty ?? "command"
+        return "\(isActive ? "Running" : "Ran") \(commandSummaryName(command))"
+    }
+
+    private static func commandActionTitle(
+        metadata: ReviewLogEntry.Metadata?,
+        commandText: String,
+        isActive: Bool
+    ) -> String? {
+        guard let actions = metadata?.commandActions,
+              actions.isEmpty == false
+        else {
+            return nil
+        }
+        guard actions.allSatisfy({ $0.kind != .unknown }) else {
+            return nil
+        }
+
+        if actions.allSatisfy({ $0.kind == .read }) {
+            let names = uniqueActionLabels(actions.compactMap(readActionLabel))
+            guard names.isEmpty == false else {
+                return nil
+            }
+            return "\(isActive ? "Reading" : "Read") \(names.joined(separator: ", "))"
+        }
+        if actions.allSatisfy({ $0.kind == .search }) {
+            let names = uniqueActionLabels(actions.compactMap(searchActionLabel))
+            guard names.isEmpty == false else {
+                return nil
+            }
+            return "\(isActive ? "Searching" : "Searched") \(names.joined(separator: ", "))"
+        }
+        if actions.allSatisfy({ $0.kind == .listFiles }) {
+            let names = uniqueActionLabels(actions.compactMap(listActionLabel))
+            guard names.isEmpty == false else {
+                return nil
+            }
+            return "\(isActive ? "Listing" : "Listed") \(names.joined(separator: ", "))"
+        }
+
+        if commandText.isEmpty == false || metadata?.command?.nilIfEmpty != nil {
+            return isActive ? "Exploring" : "Explored"
+        }
+        return nil
+    }
+
+    private static func commandOutputIsActive(
+        _ metadata: ReviewLogEntry.Metadata?,
+        hasOutput: Bool
+    ) -> Bool {
+        guard let metadata else {
+            return hasOutput == false
+        }
+        let status = (metadata.commandStatus ?? metadata.status)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch status {
+        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "canceled", "cancelled":
+            return false
+        case "inprogress", "in_progress", "started", "running":
+            return true
+        default:
+            break
+        }
+        if metadata.completedAt != nil || metadata.durationMs != nil || metadata.exitCode != nil {
+            return false
+        }
+        return true
+    }
+
+    private static func commandDurationText(
+        metadata: ReviewLogEntry.Metadata?,
+        isActive: Bool,
+        currentDate: Date
+    ) -> String? {
+        let durationMs: Int?
+        if isActive, let startedAt = metadata?.startedAt {
+            durationMs = commandDurationMs(startedAt: startedAt, completedAt: currentDate)
+        } else {
+            durationMs = metadata?.durationMs ?? commandDurationMs(
+                startedAt: metadata?.startedAt,
+                completedAt: metadata?.completedAt
+            )
+        }
+        guard let durationMs else {
+            return nil
+        }
+        return formattedCommandDuration(milliseconds: durationMs)
     }
 
     private static func commandOutputCommandText(
@@ -386,29 +586,100 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return normalized == "command" || normalized == "command output"
     }
 
-    private static func commandOutputResultText(for block: ReviewMonitorLogBlock) -> String? {
-        if let exitCode = block.metadata?.exitCode {
+    private static func commandOutputResultText(for metadata: ReviewLogEntry.Metadata?) -> String? {
+        if let exitCode = metadata?.exitCode {
             return exitCode == 0 ? "Success" : "exit \(exitCode)"
         }
 
-        let normalizedStatus = block.metadata?.status?
+        let rawStatus = metadata?.commandStatus ?? metadata?.status
+        let normalizedStatus = rawStatus?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if normalizedStatus == "succeeded" || normalizedStatus == "success" || normalizedStatus == "completed" {
             return "Success"
         }
         if normalizedStatus == "failed" || normalizedStatus == "failure" || normalizedStatus == "errored" {
-            if let exitCode = block.metadata?.exitCode {
+            if let exitCode = metadata?.exitCode {
                 return "exit \(exitCode)"
             }
             return "Failed"
         }
-        return block.metadata?.status?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     private static func commandSummaryName(_ commandText: String) -> String {
         let components = commandText.split(whereSeparator: { $0 == " " || $0 == "\t" })
         return components.prefix(2).joined(separator: " ")
+    }
+
+    private static func readActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+        action.name?.nilIfEmpty
+            ?? action.path?.nilIfEmpty.map { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty ?? $0 }
+            ?? action.command?.nilIfEmpty
+    }
+
+    private static func searchActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+        let query = action.query?.nilIfEmpty
+        let path = action.path?.nilIfEmpty.map(actionPathLabel)
+        switch (query, path) {
+        case (let query?, let path?):
+            return "\(query) in \(path)"
+        case (let query?, nil):
+            return query
+        case (nil, let path?):
+            return path
+        case (nil, nil):
+            return action.command?.nilIfEmpty
+        }
+    }
+
+    private static func listActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+        action.path?.nilIfEmpty.map(actionPathLabel) ?? action.command?.nilIfEmpty
+    }
+
+    private static func actionPathLabel(_ path: String) -> String {
+        guard path.hasPrefix("/") else {
+            return path
+        }
+        return URL(fileURLWithPath: path).lastPathComponent.nilIfEmpty ?? path
+    }
+
+    private static func uniqueActionLabels(_ labels: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for label in labels {
+            guard seen.insert(label).inserted else {
+                continue
+            }
+            result.append(label)
+        }
+        return result
+    }
+
+    private static func commandDurationMs(startedAt: Date?, completedAt: Date?) -> Int? {
+        guard let startedAt, let completedAt else {
+            return nil
+        }
+        let milliseconds = completedAt.timeIntervalSince(startedAt) * 1000
+        guard milliseconds.isFinite else {
+            return nil
+        }
+        return max(0, Int(milliseconds.rounded()))
+    }
+
+    private static func formattedCommandDuration(milliseconds: Int) -> String {
+        let totalSeconds = max(0, milliseconds / 1000)
+        if totalSeconds < 60 {
+            return "\(totalSeconds)s"
+        }
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        if minutes < 60 {
+            return seconds == 0 ? "\(minutes)m" : "\(minutes)m \(seconds)s"
+        }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
     }
 
     private static func commandOutputCommandTextByGroupID(
