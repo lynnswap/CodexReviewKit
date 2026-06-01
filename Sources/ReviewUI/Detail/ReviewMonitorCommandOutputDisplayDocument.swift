@@ -74,7 +74,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 let title = commandOutputTitle(
                     metadata: metadata,
                     commandText: commandText,
-                    hasOutput: hasOutput,
                     isActive: isActive,
                     currentDate: currentDate
                 )
@@ -412,7 +411,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     private static func commandOutputTitle(
         metadata: ReviewLogEntry.Metadata?,
         commandText: String,
-        hasOutput: Bool,
         isActive: Bool,
         currentDate: Date
     ) -> String {
@@ -445,7 +443,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return trimmedTitle
         }
         if commandText.isEmpty == false {
-            return "\(hasOutput ? "Ran" : "Running") \(commandSummaryName(commandText))"
+            return "\(isActive ? "Running" : "Ran") \(commandSummaryName(commandText))"
         }
 
         return "Command output"
@@ -525,7 +523,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         switch status {
-        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "cancelled":
+        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "canceled", "cancelled":
             return false
         case "inprogress", "in_progress", "started", "running":
             return true

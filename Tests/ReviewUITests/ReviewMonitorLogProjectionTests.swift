@@ -213,6 +213,76 @@ struct ReviewMonitorLogProjectionTests {
         #expect(firstDisplayDocument.commandOutputPanels.first?.isActive == false)
     }
 
+    @Test func statusOnlyCompletedCommandWithoutOutputDisplaysRanTitle() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-completed-status-only",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    text: "$ swift test",
+                    metadata: .init(sourceType: "commandExecution", status: "completed")
+                ),
+            ]
+        )
+
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: job),
+            expandedBlockIDs: []
+        )
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+
+        #expect(displayText == "Ran swift test")
+        #expect(displayDocument.commandOutputPanels.first?.isActive == false)
+    }
+
+    @Test func canceledCommandStatusIsInactive() {
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-canceled",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    text: "$ swift test",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "canceled",
+                        command: "swift test",
+                        startedAt: startedAt
+                    )
+                ),
+            ]
+        )
+
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: job),
+            expandedBlockIDs: []
+        )
+        let displayText = displayDocument.text.replacingOccurrences(
+            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
+            with: ""
+        )
+        let attachmentCount = displayDocument.text.filter {
+            String($0) == ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+        }.count
+
+        #expect(displayText == "Ran swift test")
+        #expect(displayDocument.commandOutputPanels.first?.isActive == false)
+        #expect(attachmentCount == 1)
+    }
+
     @Test func commandActionsDriveReadSearchAndListTitles() {
         let readJob = CodexReviewJob.makeForTesting(
             id: "job-command-read",
