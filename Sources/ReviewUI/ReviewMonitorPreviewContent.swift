@@ -209,13 +209,82 @@ public enum ReviewMonitorPreviewContent {
         for job: CodexReviewJob,
         cycle: Int
     ) -> ReviewLogEntry {
+        let groupID = step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" }
         return .init(
             kind: step.kind,
-            groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
+            groupID: groupID,
             replacesGroup: step.replacesGroup,
             text: step.text,
-            metadata: step.metadata
+            metadata: streamMetadata(from: step, groupID: groupID)
         )
+    }
+
+    private static func streamMetadata(
+        from step: PreviewStreamStep,
+        groupID: String?
+    ) -> ReviewLogEntry.Metadata? {
+        switch step.kind {
+        case .command:
+            let command = commandText(from: step.text)
+            let startedAt = Date()
+            return .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: groupID,
+                command: command,
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        case .commandOutput:
+            guard let metadata = step.metadata else {
+                return nil
+            }
+            return commandOutputCompletionMetadata(
+                from: metadata,
+                groupID: groupID,
+                completedAt: Date()
+            )
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
+             .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+            return step.metadata
+        }
+    }
+
+    private static func commandOutputCompletionMetadata(
+        from metadata: ReviewLogEntry.Metadata,
+        groupID: String?,
+        completedAt: Date
+    ) -> ReviewLogEntry.Metadata {
+        .init(
+            sourceType: metadata.sourceType,
+            title: metadata.title,
+            status: metadata.status,
+            detail: metadata.detail,
+            itemID: metadata.itemID ?? groupID,
+            command: metadata.command,
+            cwd: metadata.cwd,
+            exitCode: metadata.exitCode,
+            startedAt: metadata.startedAt,
+            completedAt: metadata.completedAt ?? completedAt,
+            durationMs: metadata.durationMs,
+            commandActions: metadata.commandActions,
+            commandStatus: metadata.commandStatus ?? metadata.status ?? "completed",
+            namespace: metadata.namespace,
+            server: metadata.server,
+            tool: metadata.tool,
+            query: metadata.query,
+            path: metadata.path,
+            resultText: metadata.resultText,
+            errorText: metadata.errorText
+        )
+    }
+
+    private static func commandText(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("$ ") else {
+            return trimmed.nilIfEmpty
+        }
+        return String(trimmed.dropFirst(2)).nilIfEmpty
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -266,7 +335,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static let interItemDelayFrameCount = 39
-    private static let quickResultDelayFrameCount = 6
+    private static let commandCompletionDelayFrameCount = 60
     private static let compactionCompletionDelayFrameCount = 15
     private static let previewJobTickOffset = 21
 
@@ -306,7 +375,7 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayBeforeFrameCount: quickResultDelayFrameCount
+            delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             kind: .toolCall,
@@ -344,7 +413,7 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayBeforeFrameCount: quickResultDelayFrameCount
+            delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             kind: .contextCompaction,
