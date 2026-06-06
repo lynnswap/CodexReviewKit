@@ -40,7 +40,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedPresentationSignature: Int?
     private var displayedFinderSupplementSignature: Int?
     private var sourceDocument: ReviewMonitorLogDocument?
-    private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLogBlockID>()
     private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
@@ -131,7 +130,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     func resetFindStateForContentReuse() {
         endFindSession()
-        expandedCommandOutputBlockIDs.removeAll()
+        logDocumentView.resetCommandOutputPanelState()
         displayedFinderSupplementSignature = nil
         sourceDocument = nil
     }
@@ -177,7 +176,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         displayedPresentationSignature = nil
         displayedFinderSupplementSignature = nil
         sourceDocument = nil
-        expandedCommandOutputBlockIDs.removeAll()
+        logDocumentView.resetCommandOutputPanelState()
         return applyReload(
             "",
             document: .init(),
@@ -208,7 +207,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     ) -> Bool {
         sourceDocument = document
         let document = displayDocument(for: document)
-        pruneExpandedCommandOutputState(for: document)
+        logDocumentView.pruneCommandOutputPanelExpansionState(for: document.commandOutputPanels)
         if allowIncrementalUpdate, displayedRevision == document.revision {
             return false
         }
@@ -267,40 +266,17 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) {
-        guard let sourceDocument else {
+        let restorationTarget = currentScrollRestorationTarget
+        guard logDocumentView.toggleCommandOutputPanel(blockID) else {
             return
         }
-        let willExpand = expandedCommandOutputBlockIDs.contains(blockID) == false
-        if logDocumentView.shouldAnimateCommandOutputPanelTransitions {
-            logDocumentView.prepareCommandOutputPanelLayoutAnimation(
-                toggledBlockID: blockID,
-                willExpand: willExpand
-            )
-        }
-        if willExpand {
-            expandedCommandOutputBlockIDs.insert(blockID)
-        } else {
-            expandedCommandOutputBlockIDs.remove(blockID)
-        }
-        _ = render(
-            document: sourceDocument,
-            restoring: currentScrollRestorationTarget,
-            allowIncrementalUpdate: false
-        )
-        refreshFindSessionAfterUserVisibleLogChange()
-        logDocumentView.performPreparedCommandOutputPanelLayoutAnimation()
-    }
-
-    private func pruneExpandedCommandOutputState(for document: ReviewMonitorLogDocument) {
-        let commandOutputBlockIDs = Set(document.commandOutputPanels.map(\.blockID))
-        expandedCommandOutputBlockIDs.formIntersection(commandOutputBlockIDs)
+        invalidateDocumentLayout()
+        restoreScrollPosition(restorationTarget, countAsAutoFollow: false)
+        invalidateFindIndicator(reason: .viewportChanged)
     }
 
     private func displayDocument(for document: ReviewMonitorLogDocument) -> ReviewMonitorLogDocument {
-        ReviewMonitorCommandOutputDisplayDocument.make(
-            from: document,
-            expandedBlockIDs: expandedCommandOutputBlockIDs
-        )
+        ReviewMonitorCommandOutputDisplayDocument.make(from: document)
     }
 
     private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
@@ -745,12 +721,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             combine(range, into: &hasher)
             hasher.combine(panel.commandText)
             hasher.combine(panel.lineCount)
-            hasher.combine(panel.isExpanded)
+            hasher.combine(panel.isActive)
+            hasher.combine(panel.startedAt)
             hasher.combine(panel.title)
             hasher.combine(panel.exitText)
-            if panel.isExpanded {
-                hasher.combine(panel.outputText)
-            }
         }
 
         return hasher.finalize()
@@ -1136,17 +1110,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 @MainActor
 extension ReviewMonitorLogScrollView {
     var displayedTextForTesting: String {
-        displayedText.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayedText)
     }
 
     func displayTextForTesting(sourceDocument: ReviewMonitorLogDocument) -> String {
-        displayDocument(for: sourceDocument).text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument(for: sourceDocument).text)
     }
 
     var usesCustomTextKit2SurfaceForTesting: Bool {
@@ -1342,6 +1310,14 @@ extension ReviewMonitorLogScrollView {
 
     var commandOutputPanelUsesButtonAttachmentForTesting: Bool {
         logDocumentView.commandOutputPanelUsesButtonAttachmentForTesting
+    }
+
+    var collapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
+        logDocumentView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
+    }
+
+    var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+        logDocumentView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
     }
 
     var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {

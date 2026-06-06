@@ -218,10 +218,7 @@ struct ReviewMonitorLogProjectionTests {
             from: sourceDocument,
             expandedBlockIDs: []
         )
-        let displayText = displayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Running swift test")
         #expect(displayDocument.text.contains("$ swift test") == false)
@@ -230,6 +227,16 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
         #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == true)
+    }
+
+    @Test func commandDisplayVisibleTextPreservesNewlineBeforeToggleAttachment() {
+        let attachment = ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+        let displayText = "Agent line\n\(attachment)Ran swift test\n\(attachment)\nNext line"
+
+        #expect(
+            ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayText) ==
+                "Agent line\nRan swift test\nNext line"
+        )
     }
 
     @Test func duplicateStartedCommandsKeepUniquePanelIDs() {
@@ -282,10 +289,7 @@ struct ReviewMonitorLogProjectionTests {
             expandedBlockIDs: [],
             currentDate: Date(timeIntervalSince1970: 104)
         )
-        let displayText = displayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Running swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == true)
@@ -328,9 +332,8 @@ struct ReviewMonitorLogProjectionTests {
         )
 
         #expect(firstDisplayDocument.text == laterDisplayDocument.text)
-        #expect(firstDisplayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: firstDisplayDocument.text
         ) == "Ran swift test for 3s")
         #expect(firstDisplayDocument.commandOutputPanels.first?.isActive == false)
     }
@@ -356,10 +359,7 @@ struct ReviewMonitorLogProjectionTests {
             from: document(for: job),
             expandedBlockIDs: []
         )
-        let displayText = displayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Ran swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == false)
@@ -392,17 +392,14 @@ struct ReviewMonitorLogProjectionTests {
             from: document(for: job),
             expandedBlockIDs: []
         )
-        let displayText = displayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
         let attachmentCount = displayDocument.text.filter {
             String($0) == ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
         }.count
 
         #expect(displayText == "Ran swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == false)
-        #expect(attachmentCount == 1)
+        #expect(attachmentCount == 2)
     }
 
     @Test func commandActionsDriveReadSearchAndListTitles() {
@@ -460,20 +457,16 @@ struct ReviewMonitorLogProjectionTests {
         let readText = ReviewMonitorCommandOutputDisplayDocument.make(
             from: document(for: readJob),
             expandedBlockIDs: []
-        ).text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        ).text
+        let visibleReadText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: readText)
         let searchText = ReviewMonitorCommandOutputDisplayDocument.make(
             from: document(for: searchJob),
             expandedBlockIDs: []
-        ).text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        ).text
+        let visibleSearchText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: searchText)
 
-        #expect(readText == "Reading ThreadItem.ts")
-        #expect(searchText == "Searched files in workspace for 2s")
+        #expect(visibleReadText == "Reading ThreadItem.ts")
+        #expect(visibleSearchText == "Searched files in workspace for 2s")
     }
 
     @Test func commandTimerAttachmentViewCountsUpFromStartDate() {
@@ -616,10 +609,7 @@ struct ReviewMonitorLogProjectionTests {
             expandedBlockIDs: []
         )
 
-        let displayText = displayDocument.text.replacingOccurrences(
-            of: ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter,
-            with: ""
-        )
+        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
         #expect(displayText.hasPrefix("Ran command for 3s\n\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
     }

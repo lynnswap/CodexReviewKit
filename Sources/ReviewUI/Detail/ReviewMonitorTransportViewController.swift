@@ -659,6 +659,14 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
     }
 
+    var logCollapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
+        logScrollView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
+    }
+
+    var logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+        logScrollView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
+    }
+
     var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
         logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
     }

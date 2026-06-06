@@ -849,6 +849,9 @@ final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
         position: CGPoint
     ) -> CGRect {
         let availableWidth = max(0, lineFrag.maxX - position.x)
+        guard panel.isExpanded else {
+            return CGRect(x: 0, y: 0, width: availableWidth, height: 0)
+        }
         let cardHeight = ReviewMonitorCommandOutputPanelView.cardHeight(
             for: panel,
             width: availableWidth,

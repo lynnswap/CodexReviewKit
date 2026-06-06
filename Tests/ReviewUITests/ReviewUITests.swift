@@ -2705,10 +2705,18 @@ struct ReviewUITests {
         #expect(abs(transport.logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting ?? .infinity) <= 0.5)
         #expect(transport.logCommandOutputPanelUsesInlineAttachmentForTesting)
         #expect(transport.logCommandOutputPanelUsesButtonAttachmentForTesting)
+        #expect((transport.logCollapsedCommandOutputPanelAttachmentLineHeightForTesting ?? .infinity) <= 1)
+        #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
+        #expect(transport.logFindStringForTesting.contains("$ swift test"))
+        #expect(transport.logFindStringForTesting.contains("output line 3"))
 
+        let expandReloadCount = transport.logReloadCountForTesting
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        #expect(transport.logReloadCountForTesting == expandReloadCount)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.down")
         await awaitNativeLayoutTurn()
 
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
@@ -2758,10 +2766,17 @@ struct ReviewUITests {
         await awaitNativeLayoutTurn()
         let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(abs(offsetAfterOutputAppend - scrolledOutputScrollOffset) <= 0.5)
+        let collapseReloadCount = transport.logReloadCountForTesting
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        #expect(transport.logReloadCountForTesting == collapseReloadCount)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
         await awaitNativeLayoutTurn()
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
+        let reopenReloadCount = transport.logReloadCountForTesting
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        #expect(transport.logReloadCountForTesting == reopenReloadCount)
+        #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
         await awaitNativeLayoutTurn()
         let reopenedOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         let reopenedOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
@@ -2871,7 +2886,7 @@ struct ReviewUITests {
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("output line 3"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
-            #expect(transport.logFindStringForTesting.contains("output line 3") == false)
+            #expect(transport.logFindStringForTesting.contains("output line 3"))
 
             #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
             await awaitNativeLayoutTurn()

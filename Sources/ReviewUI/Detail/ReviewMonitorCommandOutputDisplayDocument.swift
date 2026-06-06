@@ -4,11 +4,42 @@ import CodexReview
 enum ReviewMonitorCommandOutputDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
 
+    static func userVisibleText(from displayText: String) -> String {
+        var visibleText = ""
+        var index = displayText.startIndex
+        while index < displayText.endIndex {
+            let character = displayText[index]
+            let nextIndex = displayText.index(after: index)
+
+            if character == "\n",
+               nextIndex < displayText.endIndex,
+               String(displayText[nextIndex]) == toggleAttachmentCharacter {
+                let afterAttachmentIndex = displayText.index(after: nextIndex)
+                if afterAttachmentIndex == displayText.endIndex ||
+                    displayText[afterAttachmentIndex] == "\n" ||
+                    String(displayText[afterAttachmentIndex]) == toggleAttachmentCharacter {
+                    index = afterAttachmentIndex
+                    continue
+                }
+            }
+
+            if String(character) == toggleAttachmentCharacter {
+                index = nextIndex
+                continue
+            }
+
+            visibleText.append(character)
+            index = nextIndex
+        }
+        return visibleText
+    }
+
     static func make(
         from source: ReviewMonitorLogDocument,
-        expandedBlockIDs: Set<ReviewMonitorLogBlockID>,
+        expandedBlockIDs: Set<ReviewMonitorLogBlockID> = [],
         currentDate: Date = Date()
     ) -> ReviewMonitorLogDocument {
+        _ = expandedBlockIDs
         guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
             return source
         }
@@ -63,7 +94,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     usedBlockIDs: &usedPanelBlockIDs
                 )
                 let metadata = commandPanelMetadata(for: panelSource)
-                let isExpanded = expandedBlockIDs.contains(blockID)
                 let commandText = commandOutputCommandText(
                     for: panelSource,
                     sourceString: sourceString,
@@ -79,12 +109,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 )
                 let outputText = commandOutputText(
                     for: panelSource,
-                    sourceString: sourceString,
-                    isExpanded: isExpanded
+                    sourceString: sourceString
                 )
                 let placeholder = commandOutputPlaceholder(
                     title: title,
-                    isExpanded: isExpanded,
                     includesActiveTimer: isActive && metadata?.startedAt != nil
                 )
                 let displayRange = appendText(placeholder)
@@ -111,7 +139,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     commandText: commandText,
                     outputText: outputText,
                     lineCount: commandOutputLineCount(outputText),
-                    isExpanded: isExpanded,
+                    isExpanded: false,
                     isActive: isActive,
                     startedAt: metadata?.startedAt,
                     title: title,
@@ -374,13 +402,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputPlaceholder(
         title: String,
-        isExpanded: Bool,
         includesActiveTimer: Bool
     ) -> String {
         let label = "\(toggleAttachmentCharacter)\(title)\(includesActiveTimer ? toggleAttachmentCharacter : "")"
-        guard isExpanded else {
-            return label
-        }
         return "\(label)\n\(toggleAttachmentCharacter)"
     }
 
@@ -409,12 +433,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputText(
         for panelSource: CommandPanelSource,
-        sourceString: NSString,
-        isExpanded: Bool
+        sourceString: NSString
     ) -> String {
-        guard isExpanded,
-              let output = panelSource.output
-        else {
+        guard let output = panelSource.output else {
             return ""
         }
         return sourceString.substring(with: output.range)
