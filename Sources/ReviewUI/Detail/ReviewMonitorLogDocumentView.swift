@@ -589,8 +589,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                     value: ReviewMonitorCommandOutputTimerAttachment(
                         blockID: panel.blockID,
                         startedAt: startedAt,
-                        font: commandOutputControlFont,
-                        animatesNumericTransition: shouldAnimateCommandOutputPanelTransitions
+                        font: commandOutputControlFont
                     ),
                     range: timerAttachmentRange
                 )

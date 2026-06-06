@@ -580,6 +580,12 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(view.displayedTextForTesting == " for 5s")
         #expect(view.activeNumericTransitionCountForTesting == 0)
+
+        documentView.reduceMotionOverrideForTesting = false
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 106))
+
+        #expect(view.displayedTextForTesting == " for 6s")
+        #expect(view.activeNumericTransitionCountForTesting > 0)
     }
 
     @Test func commandOutputDisplayKeepsCommandPanelBeforeInterleavedBlocks() {
