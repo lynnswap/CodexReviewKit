@@ -290,11 +290,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 }
                 do {
                     for try await notification in notifications {
+                        var decodedCommandLifecycleByItemID = commandLifecycleByItemID
                         guard let decoded = try decodeReviewNotification(
                             notification,
                             threadID: run.threadID,
                             fallbackReviewThreadID: run.reviewThreadID ?? run.threadID,
-                            commandLifecycleByItemID: &commandLifecycleByItemID
+                            commandLifecycleByItemID: &decodedCommandLifecycleByItemID
                         ) else {
                             continue
                         }
@@ -355,6 +356,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                         guard shouldEmitNotification else {
                             continue
                         }
+                        commandLifecycleByItemID = decodedCommandLifecycleByItemID
                         self.updateActiveCommandLifecycles(commandLifecycleByItemID, threadID: run.threadID)
 
                         for event in decoded.events {

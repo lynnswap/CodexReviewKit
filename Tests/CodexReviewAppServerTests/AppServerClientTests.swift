@@ -1318,6 +1318,30 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
+    @Test func backendDoesNotCloseIgnoredTurnCommandLifecycleOnTrackedCompletion() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-current")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-ignored",
+                item: .init(type: "commandExecution", id: "cmd-ignored", command: "git diff")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-current", status: "completed"))
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == nil)
+    }
+
     @Test func backendFailsWhenReviewThreadBecomesNotLoaded() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
