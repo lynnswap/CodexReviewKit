@@ -63,7 +63,7 @@ enum ReviewMonitorLogTextStyle: Hashable, Sendable {
     case markdownSyntax
     case command
     case terminalOutput
-    case commandOutputControl(isExpanded: Bool)
+    case commandOutputControl(keepsTrailingContent: Bool)
     case plan(status: ReviewMonitorLogPlanStatus?)
     case tool
     case diagnostic
