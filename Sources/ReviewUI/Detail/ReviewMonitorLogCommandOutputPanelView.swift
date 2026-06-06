@@ -203,8 +203,14 @@ final class ReviewMonitorCommandOutputTimerAttachment: NSTextAttachment {
     }
 
     private static func attachmentSize(font: NSFont) -> NSSize {
-        let sample = " for 00:00:00" as NSString
-        let width = ceil(sample.size(withAttributes: [.font: font]).width)
+        let timerFont = NSFont.monospacedDigitSystemFont(ofSize: font.pointSize, weight: .regular)
+        let sample = " for 00:00:00"
+        let width = sample.reduce(CGFloat.zero) { partialResult, character in
+            let characterWidth = (String(character) as NSString)
+                .size(withAttributes: [.font: timerFont])
+                .width
+            return partialResult + ceil(characterWidth)
+        }
         let height = ceil(font.ascender - font.descender)
         return NSSize(width: width, height: height)
     }
@@ -395,8 +401,18 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         renderText(
             nextText,
             previousText: previousText,
-            animated: animated && animatesNumericTransition && previousText != nil
+            animated: animated && shouldAnimateNumericTransition && previousText != nil
         )
+    }
+
+    private var shouldAnimateNumericTransition: Bool {
+        guard animatesNumericTransition else {
+            return false
+        }
+        if let documentView = nearestSuperview(of: ReviewMonitorLogDocumentView.self) {
+            return documentView.shouldAnimateCommandOutputPanelTransitions
+        }
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
     }
 
     private static func durationText(seconds: Int) -> String {
@@ -485,7 +501,7 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
     }
 
     private func textWidth(for character: String) -> CGFloat {
-        attributedString(for: character).size().width
+        ceil(attributedString(for: character).size().width)
     }
 
     private func textLayer(for character: String) -> CATextLayer {
