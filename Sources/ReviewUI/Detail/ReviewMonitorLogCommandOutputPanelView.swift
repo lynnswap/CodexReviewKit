@@ -298,6 +298,8 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
 
         wantsLayer = true
         layer?.masksToBounds = true
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
         configure(attachment: attachment)
     }
 
@@ -398,11 +400,18 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         }
         let previousText = displayedText.isEmpty ? nil : displayedText
         displayedText = nextText
+        updateAccessibilityText()
         renderText(
             nextText,
             previousText: previousText,
             animated: animated && shouldAnimateNumericTransition && previousText != nil
         )
+    }
+
+    private func updateAccessibilityText() {
+        let accessibilityText = displayedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        setAccessibilityLabel(accessibilityText)
+        setAccessibilityValue(accessibilityText)
     }
 
     private var shouldAnimateNumericTransition: Bool {

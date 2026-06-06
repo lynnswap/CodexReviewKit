@@ -486,8 +486,13 @@ struct ReviewMonitorLogProjectionTests {
 
         view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
         #expect(view.displayedTextForTesting == " for 3s")
+        #expect(view.accessibilityRole() == .staticText)
+        #expect(view.accessibilityLabel() == "for 3s")
+        #expect(view.accessibilityValue() as? String == "for 3s")
         view.updateText(referenceDate: Date(timeIntervalSince1970: 164), animated: false)
         #expect(view.displayedTextForTesting == " for 1m 4s")
+        #expect(view.accessibilityLabel() == "for 1m 4s")
+        #expect(view.accessibilityValue() as? String == "for 1m 4s")
     }
 
     @Test func commandTimerAttachmentViewAnimatesChangedDigits() {
