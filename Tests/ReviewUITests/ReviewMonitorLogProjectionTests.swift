@@ -523,6 +523,20 @@ struct ReviewMonitorLogProjectionTests {
         #expect(view.intrinsicContentSize.width == initialWidth)
     }
 
+    @Test func commandTimerAttachmentViewLongTextFitsAttachmentWidth() {
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 3_699), animated: false)
+
+        #expect(view.displayedTextForTesting == " for 59m 59s")
+        #expect(view.renderedTextWidthForTesting <= view.intrinsicContentSize.width)
+    }
+
     @Test func commandTimerAttachmentViewDoesNotAnimateWhenDisabled() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
             blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),

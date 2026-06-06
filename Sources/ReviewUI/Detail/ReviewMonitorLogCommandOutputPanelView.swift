@@ -485,7 +485,7 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
     }
 
     private func textWidth(for character: String) -> CGFloat {
-        ceil(attributedString(for: character).size().width)
+        attributedString(for: character).size().width
     }
 
     private func textLayer(for character: String) -> CATextLayer {
@@ -774,6 +774,12 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
 #if DEBUG
     var displayedTextForTesting: String {
         displayedText
+    }
+
+    var renderedTextWidthForTesting: CGFloat {
+        characterLayout(for: Self.characterStrings(in: displayedText)).reduce(0) { partialResult, item in
+            partialResult + item.frame.width
+        }
     }
 
     var activeNumericTransitionCountForTesting: Int {
