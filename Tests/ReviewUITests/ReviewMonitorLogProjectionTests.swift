@@ -496,12 +496,16 @@ struct ReviewMonitorLogProjectionTests {
     }
 
     @Test func commandTimerAttachmentViewAnimatesChangedDigits() {
+        let documentView = ReviewMonitorLogDocumentView()
+        documentView.reduceMotionOverrideForTesting = false
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
             blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
         let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        documentView.addSubview(view)
+        defer { view.removeFromSuperview() }
 
         view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
         view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
