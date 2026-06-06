@@ -2309,6 +2309,10 @@ struct ReviewUITests {
         #expect(transport.workspaceFindingSnapshotForTesting.text.isEmpty == false)
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingFindingsList)
+        try await waitForCondition {
+            window.title == workspace.displayTitle &&
+                window.subtitle == workspace.cwd
+        }
         #expect(window.title == workspace.displayTitle)
         #expect(window.subtitle == workspace.cwd)
 
@@ -2475,6 +2479,10 @@ struct ReviewUITests {
         #expect(abs(noFindingsPlaceholderFrame.minY - viewBounds.minY) < 0.5)
         #expect(abs(noFindingsPlaceholderFrame.maxY - viewBounds.maxY) < 0.5)
         #expect(safeAreaFrame.maxY < viewBounds.maxY)
+        try await waitForCondition {
+            window.title == workspace.displayTitle &&
+                window.subtitle == workspace.cwd
+        }
         #expect(window.title == workspace.displayTitle)
         #expect(window.subtitle == workspace.cwd)
     }
