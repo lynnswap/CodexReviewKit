@@ -239,7 +239,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
 
     var finderSupplementSignature: Int {
         var hasher = Hasher()
-        for panel in commandOutputPanels where panel.isExpanded {
+        for panel in commandOutputPanels {
             hasher.combine(panel.blockID)
             combine(panel.range, into: &hasher)
             hasher.combine(panel.commandText)
