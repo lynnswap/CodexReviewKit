@@ -484,10 +484,112 @@ struct ReviewMonitorLogProjectionTests {
         )
         let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
 
-        view.updateText(referenceDate: Date(timeIntervalSince1970: 103))
-        #expect(view.stringValue == " for 3s")
-        view.updateText(referenceDate: Date(timeIntervalSince1970: 164))
-        #expect(view.stringValue == " for 1m 4s")
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        #expect(view.displayedTextForTesting == " for 3s")
+        #expect(view.accessibilityRole() == .staticText)
+        #expect(view.accessibilityLabel() == "for 3s")
+        #expect(view.accessibilityValue() as? String == "for 3s")
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 164), animated: false)
+        #expect(view.displayedTextForTesting == " for 1m 4s")
+        #expect(view.accessibilityLabel() == "for 1m 4s")
+        #expect(view.accessibilityValue() as? String == "for 1m 4s")
+    }
+
+    @Test func commandTimerAttachmentViewAnimatesChangedDigits() {
+        let documentView = ReviewMonitorLogDocumentView()
+        documentView.reduceMotionOverrideForTesting = false
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        documentView.addSubview(view)
+        defer { view.removeFromSuperview() }
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
+
+        #expect(view.displayedTextForTesting == " for 4s")
+        #expect(view.activeNumericTransitionCountForTesting > 0)
+        view.completeNumericTransitionsForTesting()
+        #expect(view.activeNumericTransitionCountForTesting == 0)
+    }
+
+    @Test func commandTimerAttachmentViewKeepsWidthWhenDigitsGrow() {
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        let initialWidth = view.intrinsicContentSize.width
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 109), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 110))
+
+        #expect(view.displayedTextForTesting == " for 10s")
+        #expect(view.intrinsicContentSize.width == initialWidth)
+    }
+
+    @Test func commandTimerAttachmentViewLongTextFitsAttachmentWidth() {
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 3_699), animated: false)
+
+        #expect(view.displayedTextForTesting == " for 59m 59s")
+        #expect(view.renderedTextWidthForTesting <= view.intrinsicContentSize.width)
+    }
+
+    @Test func commandTimerAttachmentViewDoesNotAnimateWhenDisabled() {
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13),
+            animatesNumericTransition: false
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
+
+        #expect(view.displayedTextForTesting == " for 4s")
+        #expect(view.activeNumericTransitionCountForTesting == 0)
+    }
+
+    @Test func commandTimerAttachmentViewUsesCurrentDocumentReduceMotionState() {
+        let documentView = ReviewMonitorLogDocumentView()
+        documentView.reduceMotionOverrideForTesting = false
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        documentView.addSubview(view)
+        defer { view.removeFromSuperview() }
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
+        #expect(view.activeNumericTransitionCountForTesting > 0)
+        view.completeNumericTransitionsForTesting()
+
+        documentView.reduceMotionOverrideForTesting = true
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 105))
+
+        #expect(view.displayedTextForTesting == " for 5s")
+        #expect(view.activeNumericTransitionCountForTesting == 0)
+
+        documentView.reduceMotionOverrideForTesting = false
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 106))
+
+        #expect(view.displayedTextForTesting == " for 6s")
+        #expect(view.activeNumericTransitionCountForTesting > 0)
     }
 
     @Test func commandOutputDisplayKeepsCommandPanelBeforeInterleavedBlocks() {
