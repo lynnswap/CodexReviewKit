@@ -377,6 +377,67 @@ struct CodexReviewStoreCommandTests {
         )))
     }
 
+    @Test func cancelRunningReviewClosesActiveCommandLog() async throws {
+        let backend = FakeCodexReviewBackend()
+        let completedAt = Date(timeIntervalSince1970: 10)
+        let startedAt = Date(timeIntervalSince1970: 6)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            clock: .init(now: { completedAt })
+        )
+        let running = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            status: .running,
+            startedAt: startedAt,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    text: "$ git diff",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "inProgress",
+                        itemID: "cmd-1",
+                        command: "git diff",
+                        startedAt: startedAt,
+                        commandStatus: "inProgress"
+                    ),
+                    timestamp: startedAt
+                )
+            ]
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [running]
+        )
+
+        let cancel = try await store.cancelReview(
+            jobID: "job-1",
+            cancellation: .mcpClient(message: "Stop")
+        )
+        let read = try store.readReview(jobID: "job-1", logFilter: .all)
+        let commandLogs = read.logs.filter { $0.kind == .command && $0.groupID == "cmd-1" }
+        let closed = try #require(commandLogs.last)
+
+        #expect(cancel.cancelled)
+        #expect(read.core.lifecycle.status == .cancelled)
+        #expect(commandLogs.count == 2)
+        #expect(closed.replacesGroup)
+        #expect(closed.metadata?.status == "canceled")
+        #expect(closed.metadata?.commandStatus == "canceled")
+        #expect(closed.metadata?.command == "git diff")
+        #expect(closed.metadata?.startedAt == startedAt)
+        #expect(closed.metadata?.completedAt == completedAt)
+        #expect(closed.metadata?.durationMs == 4_000)
+    }
+
     @Test func sessionScopedCancelRejectsJobFromDifferentSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

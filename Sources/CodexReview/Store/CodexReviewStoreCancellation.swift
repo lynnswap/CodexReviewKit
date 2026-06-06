@@ -18,6 +18,8 @@ extension CodexReviewStore {
             return
         }
 
+        let endedAt = clock.now()
+        job.closeActiveCommandLogEntries(status: "canceled", completedAt: endedAt)
         job.cancellationRequested = false
         job.core.lifecycle.cancellation = cancellation
         job.core.lifecycle.status = .cancelled
@@ -25,7 +27,7 @@ extension CodexReviewStore {
         job.core.output.hasFinalReview = false
         job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
-        job.core.lifecycle.endedAt = clock.now()
+        job.core.lifecycle.endedAt = endedAt
         noteJobMutation()
     }
 

@@ -516,6 +516,17 @@ public final class CodexReviewJob: Identifiable, Hashable {
         syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
+    package func closeActiveCommandLogEntries(status: String, completedAt: Date) {
+        let replacements = Self.activeCommandClosingEntries(
+            entries: logEntries,
+            status: status,
+            completedAt: completedAt
+        )
+        for replacement in replacements {
+            appendLogEntry(replacement)
+        }
+    }
+
     @discardableResult
     package func applyReviewLogLimit() -> Bool {
         guard logState.cappedBytes > Self.logLimitBytes else {
@@ -758,6 +769,34 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
     }
 
+    private nonisolated static func activeCommandClosingEntries(
+        entries: [ReviewLogEntry],
+        status: String,
+        completedAt: Date
+    ) -> [ReviewLogEntry] {
+        var latestCommandByGroupID: [String: ReviewLogEntry] = [:]
+        var orderedGroupIDs: [String] = []
+
+        for entry in entries where entry.kind == .command {
+            guard let groupID = entry.groupID?.nilIfEmpty else {
+                continue
+            }
+            if latestCommandByGroupID[groupID] == nil {
+                orderedGroupIDs.append(groupID)
+            }
+            latestCommandByGroupID[groupID] = entry
+        }
+
+        return orderedGroupIDs.compactMap { groupID in
+            guard let entry = latestCommandByGroupID[groupID],
+                  entry.isActiveCommandEntry
+            else {
+                return nil
+            }
+            return entry.closingActiveCommandEntry(status: status, completedAt: completedAt)
+        }
+    }
+
     private nonisolated static func isVisibleInRenderedProjection(
         kind: ReviewLogEntry.Kind,
         text: String,
@@ -847,4 +886,68 @@ public final class CodexReviewJob: Identifiable, Hashable {
     private nonisolated static let prefixTrimmableCappedKinds = cappedLogKinds.subtracting([.rawReasoning, .diagnostic, .error])
 
     private nonisolated static let logLimitBytes = 256 * 1024
+}
+
+private extension ReviewLogEntry {
+    var isActiveCommandEntry: Bool {
+        guard kind == .command else {
+            return false
+        }
+        let status = metadata?.commandStatus ?? metadata?.status
+        return status == "inProgress" || status == "running" || status == "started"
+    }
+
+    func closingActiveCommandEntry(status: String, completedAt: Date) -> ReviewLogEntry {
+        let startedAt = metadata?.startedAt
+        let durationMs = Self.durationMs(startedAt: startedAt, completedAt: completedAt)
+            ?? metadata?.durationMs
+        return ReviewLogEntry(
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: true,
+            text: text,
+            metadata: .init(
+                sourceType: metadata?.sourceType ?? "commandExecution",
+                title: metadata?.title,
+                status: status,
+                detail: metadata?.detail,
+                itemID: metadata?.itemID ?? groupID,
+                command: metadata?.command ?? Self.commandText(from: text),
+                cwd: metadata?.cwd,
+                exitCode: metadata?.exitCode,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: durationMs,
+                commandActions: metadata?.commandActions,
+                commandStatus: status,
+                namespace: metadata?.namespace,
+                server: metadata?.server,
+                tool: metadata?.tool,
+                query: metadata?.query,
+                path: metadata?.path,
+                resultText: metadata?.resultText,
+                errorText: metadata?.errorText
+            ),
+            timestamp: completedAt
+        )
+    }
+
+    private static func durationMs(startedAt: Date?, completedAt: Date) -> Int? {
+        guard let startedAt else {
+            return nil
+        }
+        let milliseconds = completedAt.timeIntervalSince(startedAt) * 1000
+        guard milliseconds.isFinite else {
+            return nil
+        }
+        return max(0, Int(milliseconds.rounded()))
+    }
+
+    private static func commandText(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("$ ") else {
+            return trimmed.nilIfEmpty
+        }
+        return String(trimmed.dropFirst(2)).nilIfEmpty
+    }
 }

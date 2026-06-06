@@ -1433,6 +1433,72 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
+    @Test func backendInterruptClosesActiveCommandLifecycle() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+        let startedAtMs: Int64 = 1_700_000_000_000
+        let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
+                startedAtMs: startedAtMs
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ git diff",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "git diff",
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        ))
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
+        else {
+            Issue.record("Expected active command to be closed before cancellation.")
+            return
+        }
+        #expect(kind == .command)
+        #expect(text == "$ git diff")
+        #expect(groupID == "cmd-1")
+        #expect(replacesGroup == true)
+        #expect(metadata?.sourceType == "commandExecution")
+        #expect(metadata?.status == "canceled")
+        #expect(metadata?.itemID == "cmd-1")
+        #expect(metadata?.command == "git diff")
+        #expect(metadata?.startedAt == startedAt)
+        #expect(metadata?.completedAt != nil)
+        #expect(metadata?.durationMs != nil)
+        #expect(metadata?.commandStatus == "canceled")
+        #expect(try await iterator.next() == .cancelled("Stop"))
+        #expect(try await iterator.next() == nil)
+    }
+
     @Test func backendRebindsObservedTurnAndInterruptsLatestTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
