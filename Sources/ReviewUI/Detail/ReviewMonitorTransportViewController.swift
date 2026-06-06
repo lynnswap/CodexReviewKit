@@ -663,6 +663,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
     }
 
+    var logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+        logScrollView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
+    }
+
     var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
         logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
     }

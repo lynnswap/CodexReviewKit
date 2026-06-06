@@ -2706,6 +2706,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesInlineAttachmentForTesting)
         #expect(transport.logCommandOutputPanelUsesButtonAttachmentForTesting)
         #expect((transport.logCollapsedCommandOutputPanelAttachmentLineHeightForTesting ?? .infinity) <= 1)
+        #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
         #expect(transport.logFindStringForTesting.contains("$ swift test"))

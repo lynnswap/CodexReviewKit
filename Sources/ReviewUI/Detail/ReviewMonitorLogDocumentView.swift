@@ -667,12 +667,26 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             textStorage.addAttribute(
                 .attachment,
                 value: ReviewMonitorCommandOutputPanelAttachment(
-                    panel: panel,
+                    panel: commandOutputPanelAttachmentPayload(for: panel),
                     outputLineHeight: commandOutputPanelLineHeight
                 ),
                 range: panelAttachmentRange
             )
         }
+    }
+
+    private func commandOutputPanelAttachmentPayload(
+        for panel: ReviewMonitorLogCommandOutputPanel
+    ) -> ReviewMonitorLogCommandOutputPanel {
+        guard panel.isExpanded == false else {
+            return panel
+        }
+        var payload = panel
+        payload.commandText = ""
+        payload.outputText = ""
+        payload.lineCount = 0
+        payload.exitText = nil
+        return payload
     }
 
     private func commandOutputPanelAttachmentRange(
@@ -2689,6 +2703,26 @@ extension ReviewMonitorLogDocumentView {
         }
         let attachmentRange = commandOutputPanelAttachmentRange(for: panel)
         return rects(forCharacterRange: attachmentRange).first?.rectValue.height ?? 0
+    }
+
+    var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+        layoutTextViewport(force: true)
+        guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
+            return false
+        }
+        let attachmentRange = commandOutputPanelAttachmentRange(for: panel)
+        guard attachmentRange.location < textStorage.length,
+              let attachment = textStorage.attribute(
+                  .attachment,
+                  at: attachmentRange.location,
+                  effectiveRange: nil
+              ) as? ReviewMonitorCommandOutputPanelAttachment
+        else {
+            return false
+        }
+        return attachment.panel.commandText.isEmpty &&
+            attachment.panel.outputText.isEmpty &&
+            attachment.panel.lineCount == 0
     }
 
     var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {

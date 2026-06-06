@@ -1316,6 +1316,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
     }
 
+    var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+        logDocumentView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
+    }
+
     var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
         logDocumentView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
     }
