@@ -209,13 +209,82 @@ public enum ReviewMonitorPreviewContent {
         for job: CodexReviewJob,
         cycle: Int
     ) -> ReviewLogEntry {
+        let groupID = step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" }
         return .init(
             kind: step.kind,
-            groupID: step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" },
+            groupID: groupID,
             replacesGroup: step.replacesGroup,
             text: step.text,
-            metadata: step.metadata
+            metadata: streamMetadata(from: step, groupID: groupID)
         )
+    }
+
+    private static func streamMetadata(
+        from step: PreviewStreamStep,
+        groupID: String?
+    ) -> ReviewLogEntry.Metadata? {
+        switch step.kind {
+        case .command:
+            let command = commandText(from: step.text)
+            let startedAt = Date()
+            return .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: groupID,
+                command: command,
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        case .commandOutput:
+            guard let metadata = step.metadata else {
+                return nil
+            }
+            return commandOutputCompletionMetadata(
+                from: metadata,
+                groupID: groupID,
+                completedAt: Date()
+            )
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
+             .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+            return step.metadata
+        }
+    }
+
+    private static func commandOutputCompletionMetadata(
+        from metadata: ReviewLogEntry.Metadata,
+        groupID: String?,
+        completedAt: Date
+    ) -> ReviewLogEntry.Metadata {
+        .init(
+            sourceType: metadata.sourceType,
+            title: metadata.title,
+            status: metadata.status,
+            detail: metadata.detail,
+            itemID: metadata.itemID ?? groupID,
+            command: metadata.command,
+            cwd: metadata.cwd,
+            exitCode: metadata.exitCode,
+            startedAt: metadata.startedAt,
+            completedAt: metadata.completedAt ?? completedAt,
+            durationMs: metadata.durationMs,
+            commandActions: metadata.commandActions,
+            commandStatus: metadata.commandStatus ?? metadata.status ?? "completed",
+            namespace: metadata.namespace,
+            server: metadata.server,
+            tool: metadata.tool,
+            query: metadata.query,
+            path: metadata.path,
+            resultText: metadata.resultText,
+            errorText: metadata.errorText
+        )
+    }
+
+    private static func commandText(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("$ ") else {
+            return trimmed.nilIfEmpty
+        }
+        return String(trimmed.dropFirst(2)).nilIfEmpty
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -266,7 +335,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static let interItemDelayFrameCount = 39
-    private static let quickResultDelayFrameCount = 6
+    private static let commandCompletionDelayFrameCount = 60
     private static let compactionCompletionDelayFrameCount = 15
     private static let previewJobTickOffset = 21
 
@@ -306,7 +375,7 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayBeforeFrameCount: quickResultDelayFrameCount
+            delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             kind: .toolCall,
@@ -344,7 +413,7 @@ public enum ReviewMonitorPreviewContent {
                 status: "succeeded",
                 exitCode: 0
             ),
-            delayBeforeFrameCount: quickResultDelayFrameCount
+            delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
             kind: .contextCompaction,
@@ -660,65 +729,7 @@ public enum ReviewMonitorPreviewContent {
     ) -> [ReviewLogEntry] {
         switch definition.status {
         case .running:
-            [
-                .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
-                .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
-                .init(
-                    kind: .contextCompaction,
-                    groupID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
-                    replacesGroup: true,
-                    text: "Context automatically compacted",
-                    metadata: .init(
-                        sourceType: "contextCompaction",
-                        status: "completed",
-                        itemID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)"
-                    )
-                ),
-                .init(
-                    kind: .plan,
-                    groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
-                    replacesGroup: true,
-                    text: """
-                    [completed] Inspect changed files
-                    [in_progress] Check ReviewMonitor log behavior
-                    [pending] Run focused tests
-                    """
-                ),
-                .init(
-                    kind: .command,
-                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
-                ),
-                .init(
-                    kind: .commandOutput,
-                    groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: """
-                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
-                    Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
-                    Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
-
-                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
-                    Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
-                    """,
-                    metadata: .init(
-                        sourceType: "command",
-                        title: "Ran command for 6s",
-                        status: "succeeded",
-                        exitCode: 0
-                    )
-                ),
-                .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
-                .init(
-                    kind: .reasoningSummary,
-                    groupID: "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
-                    text: "I am comparing the current UI state with the streaming log updates before changing the finder integration."
-                ),
-                .init(
-                    kind: .agentMessage,
-                    groupID: "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)",
-                    text: definition.lastAgentMessage
-                ),
-            ]
+            makeRunningPreviewLogEntries(for: definition, workspaceName: workspaceName)
         case .queued:
             [
                 .init(kind: .event, text: "Queued review for \(definition.targetSummary)."),
@@ -787,6 +798,94 @@ public enum ReviewMonitorPreviewContent {
                 .init(kind: .agentMessage, text: definition.lastAgentMessage),
             ]
         }
+    }
+
+    private static func makeRunningPreviewLogEntries(
+        for definition: PreviewJobDefinition,
+        workspaceName: String
+    ) -> [ReviewLogEntry] {
+        let sourceReadGroupID = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
+        let sourceReadCommand = "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+        return [
+            .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
+            .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
+            .init(
+                kind: .contextCompaction,
+                groupID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
+                replacesGroup: true,
+                text: "Context automatically compacted",
+                metadata: .init(
+                    sourceType: "contextCompaction",
+                    status: "completed",
+                    itemID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)"
+                )
+            ),
+            .init(
+                kind: .plan,
+                groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
+                replacesGroup: true,
+                text: """
+                [completed] Inspect changed files
+                [in_progress] Check ReviewMonitor log behavior
+                [pending] Run focused tests
+                """
+            ),
+            .init(
+                kind: .command,
+                groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
+                text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+            ),
+            .init(
+                kind: .commandOutput,
+                groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
+                text: """
+                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
+                Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
+                Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
+
+                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
+                """,
+                metadata: .init(
+                    sourceType: "command",
+                    title: "Ran command for 6s",
+                    status: "succeeded",
+                    exitCode: 0
+                )
+            ),
+            .init(
+                kind: .command,
+                groupID: sourceReadGroupID,
+                text: "$ /bin/zsh -lc \"\(sourceReadCommand)\"",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "inProgress",
+                    itemID: sourceReadGroupID,
+                    command: "/bin/zsh -lc \"\(sourceReadCommand)\"",
+                    startedAt: Date().addingTimeInterval(-88),
+                    commandActions: [
+                        .init(
+                            kind: .read,
+                            command: sourceReadCommand,
+                            name: "ReviewMonitorCommandOutputDisplayDocument.swift",
+                            path: "Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+                        )
+                    ],
+                    commandStatus: "inProgress"
+                ),
+            ),
+            .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
+            .init(
+                kind: .reasoningSummary,
+                groupID: "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
+                text: "I am comparing the current UI state with the streaming log updates before changing the finder integration."
+            ),
+            .init(
+                kind: .agentMessage,
+                groupID: "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)",
+                text: definition.lastAgentMessage
+            ),
+        ]
     }
 
     private static func makeJobDefinitions(for workspaceName: String) -> [PreviewJobDefinition] {

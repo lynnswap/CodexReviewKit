@@ -1,8 +1,5 @@
 import Foundation
-import OSLog
 import CodexReview
-
-private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-backend")
 
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
@@ -15,6 +12,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         String: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
     ] = [:]
     private var pendingReviewEventStreamFinishesByThreadID: [String: PendingReviewEventStreamFinish] = [:]
+    private var activeCommandLifecyclesByThreadID: [String: [String: AppServerCommandLifecycle]] = [:]
 
     package init(
         client: AppServerClient,
@@ -292,11 +290,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 }
                 do {
                     for try await notification in notifications {
+                        var decodedCommandLifecycleByItemID = commandLifecycleByItemID
                         guard let decoded = try decodeReviewNotification(
                             notification,
                             threadID: run.threadID,
                             fallbackReviewThreadID: run.reviewThreadID ?? run.threadID,
-                            commandLifecycleByItemID: &commandLifecycleByItemID
+                            commandLifecycleByItemID: &decodedCommandLifecycleByItemID
                         ) else {
                             continue
                         }
@@ -357,8 +356,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                         guard shouldEmitNotification else {
                             continue
                         }
+                        commandLifecycleByItemID = decodedCommandLifecycleByItemID
+                        self.updateActiveCommandLifecycles(commandLifecycleByItemID, threadID: run.threadID)
 
                         for event in decoded.events {
+                            for commandEvent in commandLifecycleByItemID.closeActiveCommands(for: event) {
+                                if await completionCoordinator.emit(
+                                    commandEvent,
+                                    continuation: continuation,
+                                    record: recordEvent
+                                ) {
+                                    return
+                                }
+                            }
+                            if event.activeCommandTerminalStatus != nil {
+                                commandLifecycleByItemID.removeAll(keepingCapacity: true)
+                                self.updateActiveCommandLifecycles(commandLifecycleByItemID, threadID: run.threadID)
+                            }
                             if event.shouldDeferCompletion(awaitingReviewExit: awaitingReviewExit) {
                                 // The app-server review task emits exitedReviewMode before the
                                 // parent turn completes. If a buffered/replayed stream presents
@@ -367,7 +381,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                                 await completionCoordinator.deferCompletion(event)
                                 continue
                             }
-
                             if await completionCoordinator.emit(
                                 event,
                                 continuation: continuation,
@@ -398,11 +411,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                     await completionCoordinator.cancelPendingCompletion()
                     continuation.finish(throwing: error)
                 }
+                self.clearActiveCommandLifecycles(threadID: run.threadID)
                 self.unregisterReviewEventContinuation(threadID: run.threadID)
             }
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
                 Task {
+                    await self.clearActiveCommandLifecycles(threadID: run.threadID)
                     await self.unregisterReviewEventContinuation(threadID: run.threadID)
                 }
             }
@@ -425,20 +440,47 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewEventContinuationsByThreadID.removeValue(forKey: threadID)
     }
 
+    private func updateActiveCommandLifecycles(
+        _ lifecycles: [String: AppServerCommandLifecycle],
+        threadID: String
+    ) {
+        if lifecycles.isEmpty {
+            activeCommandLifecyclesByThreadID.removeValue(forKey: threadID)
+        } else {
+            activeCommandLifecyclesByThreadID[threadID] = lifecycles
+        }
+    }
+
+    private func clearActiveCommandLifecycles(threadID: String) {
+        activeCommandLifecyclesByThreadID.removeValue(forKey: threadID)
+    }
+
     private func finishReviewEventStream(
         threadID: String,
         cancellationMessage: String?,
         buffersMissingContinuation: Bool = false
     ) {
+        let precedingEvents: [BackendReviewEvent]
+        if cancellationMessage == nil {
+            precedingEvents = []
+        } else {
+            precedingEvents = activeCommandLifecyclesByThreadID
+                .removeValue(forKey: threadID)?
+                .closeActiveCommands(status: "canceled") ?? []
+        }
         guard let continuation = reviewEventContinuationsByThreadID.removeValue(forKey: threadID) else {
             if buffersMissingContinuation {
                 pendingReviewEventStreamFinishesByThreadID[threadID] = .init(
+                    precedingEvents: precedingEvents,
                     cancellationMessage: cancellationMessage
                 )
             }
             return
         }
-        PendingReviewEventStreamFinish(cancellationMessage: cancellationMessage).emit(to: continuation)
+        PendingReviewEventStreamFinish(
+            precedingEvents: precedingEvents,
+            cancellationMessage: cancellationMessage
+        ).emit(to: continuation)
     }
 
     private func recordReviewEvent(_ event: BackendReviewEvent, for run: BackendReviewRun) async {
@@ -470,9 +512,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 }
 
 private struct PendingReviewEventStreamFinish {
+    var precedingEvents: [BackendReviewEvent] = []
     var cancellationMessage: String?
 
     func emit(to continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation) {
+        for event in precedingEvents {
+            continuation.yield(event)
+        }
         if let cancellationMessage {
             continuation.yield(.cancelled(cancellationMessage))
         }
@@ -502,6 +548,19 @@ private extension BackendReviewEvent {
             return false
         }
         return awaitingReviewExit && result?.nilIfEmpty == nil
+    }
+
+    var activeCommandTerminalStatus: String? {
+        switch self {
+        case .completed:
+            return "completed"
+        case .failed:
+            return "failed"
+        case .cancelled:
+            return "canceled"
+        case .started, .message, .messageDelta, .log, .logEntry:
+            return nil
+        }
     }
 }
 
@@ -660,6 +719,7 @@ private struct TurnNotificationPayload: Decodable {
     var toModel: String?
     var reason: String?
     var message: String?
+    var stdin: String?
     var summary: String?
     var details: String?
     var delta: String?
@@ -688,6 +748,7 @@ private struct TurnNotificationPayload: Decodable {
         case toModel
         case reason
         case message
+        case stdin
         case summary
         case details
         case delta
@@ -718,6 +779,7 @@ private struct TurnNotificationPayload: Decodable {
         self.toModel = try container.decodeStringIfPresent(forKey: .toModel)
         self.reason = try container.decodeStringIfPresent(forKey: .reason)
         self.message = try container.decodeStringIfPresent(forKey: .message)
+        self.stdin = try container.decodeStringIfPresent(forKey: .stdin)
         self.summary = try container.decodeStringIfPresent(forKey: .summary)
         self.details = try container.decodeStringIfPresent(forKey: .details)
         self.delta = try container.decodeStringIfPresent(forKey: .delta)
@@ -801,7 +863,6 @@ private func decodeReviewNotification(
         return nil
     }
     guard let payload = try? JSONDecoder().decode(TurnNotificationPayload.self, from: notification.params) else {
-        logger.debug("Ignoring undecodable \(notification.method, privacy: .public) notification")
         return nil
     }
     guard payload.threadID == threadID || (payload.threadID == nil && isGlobalDiagnosticMethod(notification.method)) else {
@@ -896,15 +957,17 @@ private func decodeReviewNotification(
             )]
         } ?? []
     case "item/commandExecution/terminalInteraction":
-        events = payload.itemID.map {
-            [.logEntry(
-                kind: .commandOutput,
-                text: payload.message ?? "Terminal interaction.",
-                groupID: $0,
-                replacesGroup: false,
-                metadata: .init(sourceType: "commandExecution", title: "Terminal interaction")
-            )]
-        } ?? []
+        events = payload.stdin?.nilIfEmpty.flatMap { stdin in
+            payload.itemID.map {
+                .logEntry(
+                    kind: .commandOutput,
+                    text: stdin,
+                    groupID: $0,
+                    replacesGroup: false,
+                    metadata: .init(sourceType: "commandExecution", title: "Terminal input")
+                )
+            }
+        }.map { [$0] } ?? []
     case "item/autoApprovalReview/started":
         events = payload.itemID.map {
             [.logEntry(kind: .diagnostic, text: "Approval review started.", groupID: $0, replacesGroup: false)]
@@ -1241,6 +1304,63 @@ private struct AppServerCommandLifecycle: Sendable {
         self.commandActions = actions?.isEmpty == false ? actions : fallback?.commandActions
         self.commandStatus = item.status?.nilIfEmpty ?? fallback?.commandStatus
     }
+
+    func closingEvent(status: String, completedAt: Date) -> BackendReviewEvent? {
+        guard let command = command?.nilIfEmpty else {
+            return nil
+        }
+        return .logEntry(
+            kind: .command,
+            text: "$ \(command)",
+            groupID: itemID,
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: status,
+                itemID: itemID,
+                command: command,
+                cwd: cwd,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: Self.durationMs(startedAt: startedAt, completedAt: completedAt),
+                commandActions: commandActions,
+                commandStatus: status
+            )
+        )
+    }
+
+    private static func durationMs(startedAt: Date?, completedAt: Date) -> Int? {
+        guard let startedAt else {
+            return nil
+        }
+        let milliseconds = completedAt.timeIntervalSince(startedAt) * 1000
+        guard milliseconds.isFinite else {
+            return nil
+        }
+        return max(0, Int(milliseconds.rounded()))
+    }
+}
+
+private extension Dictionary where Key == String, Value == AppServerCommandLifecycle {
+    func closeActiveCommands(for terminalEvent: BackendReviewEvent) -> [BackendReviewEvent] {
+        guard let status = terminalEvent.activeCommandTerminalStatus else {
+            return []
+        }
+        return closeActiveCommands(status: status)
+    }
+
+    func closeActiveCommands(status: String, completedAt: Date = Date()) -> [BackendReviewEvent] {
+        values
+            .sorted {
+                switch ($0.startedAt, $1.startedAt) {
+                case let (lhs?, rhs?) where lhs != rhs:
+                    return lhs < rhs
+                default:
+                    return $0.itemID < $1.itemID
+                }
+            }
+            .compactMap { $0.closingEvent(status: status, completedAt: completedAt) }
+    }
 }
 
 private struct AppServerThreadItem: Decodable, Sendable {
@@ -1391,7 +1511,20 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty {
-                return [logEntry(
+                var events: [BackendReviewEvent] = []
+                if let command = command ?? lifecycle?.command {
+                    events.append(logEntry(
+                        kind: .command,
+                        text: "$ \(command)",
+                        replacesGroup: true,
+                        title: nil,
+                        status: completedStatus,
+                        startedAt: lifecycle?.startedAt,
+                        completedAt: completedAt,
+                        lifecycle: lifecycle
+                    ))
+                }
+                events.append(logEntry(
                     kind: .commandOutput,
                     text: output,
                     replacesGroup: true,
@@ -1400,7 +1533,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
                     startedAt: lifecycle?.startedAt,
                     completedAt: completedAt,
                     lifecycle: lifecycle
-                )]
+                ))
+                return events
             }
             if let command = command ?? lifecycle?.command {
                 return [logEntry(
@@ -1489,9 +1623,13 @@ private struct AppServerThreadItem: Decodable, Sendable {
     ) -> ReviewLogEntry.Metadata {
         let resolvedStartedAt = explicitStartedAt ?? lifecycle?.startedAt
         let resolvedCompletedAt = explicitCompletedAt ?? lifecycle?.completedAt
-        let resolvedDurationMs = durationMs ?? lifecycle?.durationMs ?? Self.durationMs(
+        let computedDurationMs = Self.durationMs(
             startedAt: resolvedStartedAt,
             completedAt: resolvedCompletedAt
+        )
+        let resolvedDurationMs = Self.resolvedDurationMs(
+            reported: durationMs ?? lifecycle?.durationMs,
+            computed: computedDurationMs
         )
         let actions = metadataCommandActions
         let resolvedCommandActions = actions?.isEmpty == false ? actions : lifecycle?.commandActions
@@ -1541,6 +1679,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return nil
         }
         return max(0, Int(milliseconds.rounded()))
+    }
+
+    private static func resolvedDurationMs(reported: Int?, computed: Int?) -> Int? {
+        guard let reported else {
+            return computed
+        }
+        guard reported <= 0,
+              let computed,
+              computed > 0
+        else {
+            return max(0, reported)
+        }
+        return computed
     }
 
     private var completedStatus: String? {

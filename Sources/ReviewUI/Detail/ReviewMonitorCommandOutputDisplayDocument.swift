@@ -88,7 +88,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     includesActiveTimer: isActive && metadata?.startedAt != nil
                 )
                 let displayRange = appendText(placeholder)
-                let controlRange = commandOutputControlRange(in: displayRange, title: title)
+                let controlRange = commandOutputControlRange(
+                    in: displayRange,
+                    title: title,
+                    includesActiveTimer: isActive && metadata?.startedAt != nil
+                )
                 blocks.append(.init(
                     id: blockID,
                     kind: .commandOutput,
@@ -97,7 +101,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     sourceRange: commandPanelSourceRange(panelSource),
                     metadata: metadata
                 ))
-                styleRuns.append(.init(range: controlRange, style: .commandOutputControl(isExpanded: isExpanded)))
+                styleRuns.append(.init(
+                    range: controlRange,
+                    style: .commandOutputControl(keepsTrailingContent: isActive && metadata?.startedAt != nil)
+                ))
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
@@ -379,11 +386,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputControlRange(
         in displayRange: NSRange,
-        title: String
+        title: String,
+        includesActiveTimer: Bool
     ) -> NSRange {
         NSRange(
             location: displayRange.location,
-            length: (toggleAttachmentCharacter + title).utf16.count
+            length: (
+                toggleAttachmentCharacter
+                    + title
+                    + (includesActiveTimer ? toggleAttachmentCharacter : "")
+            ).utf16.count
         )
     }
 

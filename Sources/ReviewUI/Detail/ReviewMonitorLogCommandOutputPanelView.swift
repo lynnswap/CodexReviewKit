@@ -287,7 +287,10 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSTextField {
     func configure(attachment: ReviewMonitorCommandOutputTimerAttachment) {
         blockID = attachment.blockID
         startedAt = attachment.startedAt
-        font = .systemFont(ofSize: attachment.fontPointSize)
+        font = .monospacedDigitSystemFont(
+            ofSize: attachment.fontPointSize,
+            weight: .regular
+        )
         updateText()
         if superview != nil {
             startTimerIfNeeded()

@@ -708,13 +708,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         case .terminalOutput:
             attributes[.font] = monoFont
             attributes[.foregroundColor] = secondaryTextColor
-        case .commandOutputControl(let isExpanded):
+        case .commandOutputControl(let keepsTrailingContent):
             attributes[.font] = commandOutputControlFont
             attributes[.foregroundColor] = secondaryTextColor
             let paragraphStyle = NSMutableParagraphStyle()
-            if isExpanded == false {
-                paragraphStyle.lineBreakMode = .byTruncatingTail
-            }
+            paragraphStyle.lineBreakMode = keepsTrailingContent ? .byTruncatingMiddle : .byTruncatingTail
             attributes[.paragraphStyle] = paragraphStyle
         case .plan(let status):
             attributes[.foregroundColor] = planTextColor(for: status)

@@ -704,6 +704,7 @@ package enum CodexAppServerExecutable {
     }
 
     package static let fileBackedAuthConfiguration = #"cli_auth_credentials_store="file""#
+    package static let disableUnifiedExecConfiguration = "features.unified_exec=false"
 
     package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Command {
         let executable = resolveExecutable(environment: environment)
@@ -746,6 +747,7 @@ package enum CodexAppServerExecutable {
     package static func appServerArguments(supportsSessionSource: Bool = false) -> [String] {
         var arguments = [
             "-c", fileBackedAuthConfiguration,
+            "-c", disableUnifiedExecConfiguration,
             "app-server",
             "--listen", "stdio://",
         ]

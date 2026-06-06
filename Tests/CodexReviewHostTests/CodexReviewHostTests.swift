@@ -500,7 +500,15 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         let refreshTransport = FakeJSONRPCTransport()
+        let refreshGate = AsyncGate()
+        await refreshTransport.hold(method: "account/rateLimits/read", gate: refreshGate)
         try await refreshTransport.enqueue(InitializeResponse(), for: "initialize")
+        try await refreshTransport.enqueue(
+            AccountReadResponse(
+                account: .init(email: "new@example.com", planType: "plus")
+            ),
+            for: "account/read"
+        )
         try await refreshTransport.enqueue(
             AppServerAccountRateLimitsResponse(rateLimits: .init(
                 limitID: "codex",
@@ -509,6 +517,8 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         var nonPrimaryTransports = [authTransport, refreshTransport]
+        var nonPrimaryRuntimeIndex = 0
+        var refreshCodexHomeURL: URL?
         let sessions = FakeWebAuthenticationSessions()
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -524,9 +534,15 @@ struct CodexReviewHostTests {
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
                 }
+                let runtimeIndex = nonPrimaryRuntimeIndex
+                nonPrimaryRuntimeIndex += 1
                 try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
-                try Data("{\"tokens\":{\"id_token\":\"test\"}}".utf8)
-                    .write(to: codexHomeURL.appendingPathComponent("auth.json"))
+                if runtimeIndex == 0 {
+                    try Data("{\"tokens\":{\"id_token\":\"login-token\"}}".utf8)
+                        .write(to: codexHomeURL.appendingPathComponent("auth.json"))
+                } else {
+                    refreshCodexHomeURL = codexHomeURL
+                }
                 return nonPrimaryTransports.removeFirst()
             }
         )
@@ -545,6 +561,10 @@ struct CodexReviewHostTests {
         })
         let loginParams = try JSONDecoder().decode(LoginAccountParams.self, from: loginRequest.params)
         #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
+        try await authTransport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
         try await authTransport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-2", success: true)
@@ -572,14 +592,91 @@ struct CodexReviewHostTests {
             "account/rateLimits/read",
         ])
 
-        await store.refreshAccountRateLimits(accountKey: "new@example.com")
-        await refreshTransport.waitForRequestCount(2)
+        async let refresh: Void = store.refreshAccountRateLimits(accountKey: "new@example.com")
+        await refreshTransport.waitForRequestCount(3)
+        let capturedRefreshCodexHomeURL = try #require(refreshCodexHomeURL)
+        try Data("{\"tokens\":{\"id_token\":\"refreshed-token\"}}".utf8)
+            .write(to: capturedRefreshCodexHomeURL.appendingPathComponent("auth.json"))
+        await refreshGate.open()
+        await refresh
+        await waitUntil {
+            store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44
+        }
 
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
         #expect(store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44)
+        #expect(try savedAccountAuth(homeURL: homeURL, accountKey: "new@example.com") == Data("{\"tokens\":{\"id_token\":\"refreshed-token\"}}".utf8))
         #expect(await refreshTransport.recordedRequests().map(\.method) == [
             "initialize",
+            "account/read",
             "account/rateLimits/read",
+        ])
+    }
+
+    @Test func liveStoreDoesNotApplySavedAccountRateLimitsFromDifferentAuth() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com", "new@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "new@example.com")
+
+        let mainTransport = FakeJSONRPCTransport()
+        try await mainTransport.enqueue(InitializeResponse(), for: "initialize")
+        try await mainTransport.enqueue(
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
+            for: "account/read"
+        )
+        try await mainTransport.enqueue(
+            AppServerAccountRateLimitsResponse(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 10, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        try await mainTransport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await mainTransport.enqueue(ModelListResponse(data: []), for: "model/list")
+
+        let refreshTransport = FakeJSONRPCTransport()
+        try await refreshTransport.enqueue(InitializeResponse(), for: "initialize")
+        try await refreshTransport.enqueue(
+            AccountReadResponse(account: .init(email: "active@example.com", planType: "pro")),
+            for: "account/read"
+        )
+        try await refreshTransport.enqueue(
+            AppServerAccountRateLimitsResponse(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 44, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                return refreshTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await store.refreshAccountRateLimits(accountKey: "new@example.com")
+        let newAccount = store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }
+
+        #expect(newAccount?.rateLimits.isEmpty == true)
+        #expect(newAccount?.requiresReauthentication == true)
+        #expect(newAccount?.lastRateLimitError?.contains("Saved authentication is for") == true)
+        #expect(await refreshTransport.recordedRequests().map(\.method) == [
+            "initialize",
+            "account/read",
         ])
     }
 
@@ -1610,6 +1707,14 @@ private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
         withIntermediateDirectories: true
     )
     try Data("{\"tokens\":{\"id_token\":\"\(accountKey)\"}}".utf8).write(to: authURL)
+}
+
+private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
+    try Data(contentsOf: homeURL
+        .appendingPathComponent(".codex_review", isDirectory: true)
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
+        .appendingPathComponent("auth.json"))
 }
 
 private func activeAccountKey(homeURL: URL) throws -> String? {

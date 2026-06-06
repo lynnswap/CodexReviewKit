@@ -675,7 +675,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             await refreshSelectedAccountRateLimits(auth: auth)
             if case .preserveActiveAccount = activation, let account {
-                await refreshRateLimits(for: account, using: loginBackend)
+                let didRefresh = await refreshRateLimits(for: account, using: loginBackend, source: "login-runtime")
+                if didRefresh {
+                    persistRefreshedSharedAuth(
+                        from: loginCodexHomeURL,
+                        for: account
+                    )
+                }
             }
             await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
         } catch is CancellationError {
@@ -949,12 +955,30 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     where notification.method == "account/login/completed"
                         || notification.method == "account/updated"
                 {
-                    await self.handleLoginCompletedNotification(notification, backend: backend, auth: auth)
+                    await self.handleLoginRuntimeNotification(notification, backend: backend, auth: auth)
                 }
             } catch is CancellationError {
             } catch {
                 logger.error("Login notification stream ended: \(error.localizedDescription, privacy: .public)")
             }
+        }
+    }
+
+    private func handleLoginRuntimeNotification(
+        _ notification: JSONRPCNotification,
+        backend: AppServerCodexReviewBackend,
+        auth: CodexReviewAuthModel
+    ) async {
+        switch notification.method {
+        case "account/login/completed":
+            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
+        case "account/updated":
+            guard loginBackend != nil, isWaitingForLoginAccountUpdate else {
+                return
+            }
+            await finishCompletedLoginAfterAccountUpdate(backend: backend, auth: auth)
+        default:
+            return
         }
     }
 
@@ -1021,7 +1045,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let loginBackend = loginBackend
         let loginClient = loginClient
         let loginCodexHomeURL = loginCodexHomeURL
+        let activeAuthenticationSession = activeAuthenticationSession
         do {
+            loginChallenge = nil
+            self.activeAuthenticationSession = nil
+            authenticationTask?.cancel()
+            authenticationTask = nil
+            await activeAuthenticationSession?.cancel()
             let account = applyAuthSnapshot(
                 try await backend.readAuth(),
                 to: auth,
@@ -1029,7 +1059,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 authSourceCodexHomeURL: loginCodexHomeURL
             )
             if case .preserveActiveAccount = activation, let account, let loginBackend {
-                await refreshRateLimits(for: account, using: loginBackend)
+                let didRefresh = await refreshRateLimits(for: account, using: loginBackend, source: "login-runtime")
+                if didRefresh {
+                    persistRefreshedSharedAuth(
+                        from: loginCodexHomeURL,
+                        for: account
+                    )
+                }
             } else {
                 await refreshSelectedAccountRateLimits(auth: auth)
             }
@@ -1106,7 +1142,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await refreshSavedAccountRateLimits(for: account)
             return
         }
-        await refreshRateLimits(for: account, using: appServerBackend)
+        let didRefresh = await refreshRateLimits(for: account, using: appServerBackend, source: "active-runtime")
+        if didRefresh {
+            persistRefreshedSharedAuth(
+                from: codexHomeURL,
+                for: account
+            )
+        }
     }
 
     private func refreshSavedAccountRateLimits(for account: CodexAccount) async {
@@ -1118,7 +1160,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 from: codexHomeURL,
                 to: temporaryCodexHomeURL
             ) else {
-                account.updateRateLimitFetchMetadata(
+                account.markRateLimitReauthenticationRequired(
                     fetchedAt: Date(),
                     error: "Saved account authentication is not available."
                 )
@@ -1126,11 +1168,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     from: account,
                     codexHomeURL: codexHomeURL
                 )
-                logger.error("Cannot refresh Codex rate limits because saved auth is missing for account \(account.accountKey, privacy: .private)")
                 return
             }
             let runtime = try await appServerRuntimeFactory(temporaryCodexHomeURL)
-            await refreshRateLimits(for: account, using: runtime.backend)
+            let didRefresh = await refreshRateLimits(for: account, using: runtime.backend, source: "saved-auth-isolated-runtime")
+            do {
+                if didRefresh {
+                    try CodexReviewAccountRegistry.saveSharedAuth(
+                        from: temporaryCodexHomeURL,
+                        for: account,
+                        codexHomeURL: codexHomeURL
+                    )
+                }
+            } catch {
+                await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
+                throw error
+            }
             await closeIsolatedLoginRuntime(client: runtime.client, codexHomeURL: temporaryCodexHomeURL)
         } catch {
             try? FileManager.default.removeItem(at: temporaryCodexHomeURL)
@@ -1139,17 +1192,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 from: account,
                 codexHomeURL: codexHomeURL
             )
-            logger.error("Failed to refresh saved account Codex rate limits: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func refreshRateLimits(
         for account: CodexAccount,
-        using backend: AppServerCodexReviewBackend?
-    ) async {
+        using backend: AppServerCodexReviewBackend?,
+        source: String
+    ) async -> Bool {
         do {
             guard let backend else {
-                return
+                return false
+            }
+            if source == "saved-auth-isolated-runtime" {
+                try await validateRateLimitBackendAccount(
+                    account,
+                    using: backend
+                )
             }
             let response = try await backend.readRateLimits()
             applyRateLimits(
@@ -1161,14 +1220,46 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 from: account,
                 codexHomeURL: codexHomeURL
             )
-            logger.info("Updated Codex rate limits for account \(account.accountKey, privacy: .private)")
+            return true
         } catch {
-            account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
+            recordRateLimitRefreshFailure(error, account: account)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
                 codexHomeURL: codexHomeURL
             )
-            logger.error("Failed to refresh Codex rate limits: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    private func validateRateLimitBackendAccount(
+        _ account: CodexAccount,
+        using backend: AppServerCodexReviewBackend
+    ) async throws {
+        let snapshot = try await backend.readAuth()
+        guard let activeAccountID = snapshot.activeAccountID?.rawValue.nilIfEmpty else {
+            throw ReviewError.io("Saved authentication is missing for \(account.maskedEmail). Sign in again.")
+        }
+        let actualAccountKey = normalizedReviewAccountEmail(email: activeAccountID)
+        guard actualAccountKey == account.accountKey else {
+            let actualEmail = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID })?.label
+                ?? activeAccountID
+            let maskedActualEmail = self.maskedReviewAccountEmail(actualEmail)
+            throw ReviewError.io("Saved authentication is for \(maskedActualEmail), not \(account.maskedEmail). Sign in again.")
+        }
+    }
+
+    private func recordRateLimitRefreshFailure(
+        _ error: any Error,
+        account: CodexAccount
+    ) {
+        let message = error.localizedDescription
+        if CodexAccount.requiresReauthentication(errorMessage: message) {
+            account.markRateLimitReauthenticationRequired(
+                fetchedAt: Date(),
+                error: message
+            )
+        } else {
+            account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: message)
         }
     }
 
@@ -1220,6 +1311,45 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             account.updatePlanType(planType)
         }
         account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: nil)
+    }
+
+    private func persistRefreshedSharedAuth(
+        from sourceCodexHomeURL: URL?,
+        for account: CodexAccount
+    ) {
+        guard let sourceCodexHomeURL else {
+            return
+        }
+        try? CodexReviewAccountRegistry.saveSharedAuth(
+            from: sourceCodexHomeURL,
+            for: account,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    private func maskedReviewAccountEmail(_ email: String) -> String {
+        let parts = email.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0].isEmpty == false,
+              parts[1].isEmpty == false
+        else {
+            return maskedReviewAccountEmailSegment(email)
+        }
+        return "\(maskedReviewAccountEmailSegment(String(parts[0])))@\(parts[1])"
+    }
+
+    private func maskedReviewAccountEmailSegment(_ segment: String) -> String {
+        let characters = Array(segment)
+        switch characters.count {
+        case 0:
+            return segment
+        case 1 ... 2:
+            return String(characters.prefix(1)) + "..."
+        case 3 ... 4:
+            return String(characters.prefix(1)) + "..." + String(characters.suffix(1))
+        default:
+            return String(characters.prefix(2)) + "..." + String(characters.suffix(2))
+        }
     }
 
     private static func monitorSettings(
