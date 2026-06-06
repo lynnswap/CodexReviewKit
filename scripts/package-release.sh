@@ -226,8 +226,6 @@ hdiutil attach \
   -mountpoint "$mount_point" \
   "$rw_archive_path"
 
-SetFile -a V "$mount_point/.background" 2>/dev/null || true
-
 if osascript - "$mount_point" "$applications_alias_name" <<'OSA'
 on run argv
   set mountPoint to item 1 of argv
@@ -256,6 +254,7 @@ on run argv
 
     set position of item "CodexReviewMonitor.app" of volumeFolder to {240, 122}
     set position of item applicationsAliasName of volumeFolder to {240, 387}
+    set position of item ".background" of volumeFolder to {900, 900}
     set selection to {}
 
     update volumeFolder without registering applications
@@ -273,6 +272,9 @@ else
   echo "Run the release shell from a logged-in local macOS session and grant Automation permission to the invoking terminal." >&2
   exit 1
 fi
+
+SetFile -a V "$mount_point/.background" 2>/dev/null || true
+chflags hidden "$mount_point/.background" 2>/dev/null || true
 
 bless --folder "$mount_point" --openfolder "$mount_point" 2>/dev/null || true
 sync
