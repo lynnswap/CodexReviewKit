@@ -345,6 +345,45 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.text.contains("started.Reading") == false)
     }
 
+    @Test func replacingToolCallCompletionKeepsProgressBlock() {
+        func blockTexts(in document: ReviewMonitorLogDocument) -> [String] {
+            let nsText = document.text as NSString
+            return document.blocks.map { nsText.substring(with: $0.range) }
+        }
+
+        let started = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            replacesGroup: true,
+            text: "MCP review_start started."
+        )
+        let progress = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            text: "Reviewing current changes."
+        )
+        let completed = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            replacesGroup: true,
+            text: "MCP review_start completed."
+        )
+        let expectedTexts = [
+            "MCP review_start completed.",
+            "Reviewing current changes.",
+        ]
+
+        var fullProjection = ReviewMonitorLogProjection()
+        let fullDocument = fullProjection.render(entries: [started, progress, completed])
+        #expect(blockTexts(in: fullDocument) == expectedTexts)
+
+        var incrementalProjection = ReviewMonitorLogProjection()
+        _ = incrementalProjection.render(entries: [started])
+        _ = incrementalProjection.render(entries: [started, progress])
+        let incrementalDocument = incrementalProjection.render(entries: [started, progress, completed])
+        #expect(blockTexts(in: incrementalDocument) == expectedTexts)
+    }
+
     @Test func commandDisplayVisibleTextPreservesNewlineBeforeToggleAttachment() {
         let attachment = ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
         let displayText = "Agent line\n\(attachment)Ran swift test\n\(attachment)\nNext line"

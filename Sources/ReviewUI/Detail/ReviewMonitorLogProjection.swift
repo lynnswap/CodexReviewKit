@@ -1279,7 +1279,9 @@ struct ReviewMonitorLogProjection: Sendable {
                         state.blocks[index].contentBlocks = entry.contentBlocks
                         continue
                     }
-                    state.indexByGroup[key] = state.blocks.count
+                    if state.indexByGroup[key] == nil {
+                        state.indexByGroup[key] = state.blocks.count
+                    }
                 }
 
                 state.blocks.append(.init(
@@ -1391,7 +1393,9 @@ struct ReviewMonitorLogProjection: Sendable {
                    let blockIndex = indexByGroup[key] {
                     return .needsReload(replacementBlockID: blocks[blockIndex].id)
                 }
-                indexByGroup[key] = blocks.count
+                if indexByGroup[key] == nil {
+                    indexByGroup[key] = blocks.count
+                }
             }
 
             let blockIndex = blocks.count
