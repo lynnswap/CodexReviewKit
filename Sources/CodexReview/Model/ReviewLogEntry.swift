@@ -142,6 +142,17 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public let contentBlocks: [ContentBlock]
     public let timestamp: Date
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case groupID
+        case replacesGroup
+        case text
+        case metadata
+        case contentBlocks
+        case timestamp
+    }
+
     public init(
         id: UUID = UUID(),
         kind: Kind,
@@ -160,6 +171,18 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         self.metadata = metadata
         self.contentBlocks = contentBlocks
         self.timestamp = timestamp
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        kind = try container.decode(Kind.self, forKey: .kind)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID)
+        replacesGroup = try container.decode(Bool.self, forKey: .replacesGroup)
+        text = try container.decode(String.self, forKey: .text)
+        metadata = try container.decodeIfPresent(Metadata.self, forKey: .metadata)
+        contentBlocks = try container.decodeIfPresent([ContentBlock].self, forKey: .contentBlocks) ?? []
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
     }
 
 }

@@ -5,6 +5,30 @@ import Testing
 @Suite("Codex review job rendering")
 @MainActor
 struct CodexReviewJobRenderingTests {
+    @Test func logEntryDecodesLegacyPayloadWithoutContentBlocks() throws {
+        let data = """
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "kind": "agentMessage",
+          "groupID": "message-1",
+          "replacesGroup": false,
+          "text": "Legacy log entry",
+          "metadata": null,
+          "timestamp": "2026-06-08T08:00:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entry = try decoder.decode(ReviewLogEntry.self, from: data)
+
+        #expect(entry.id == UUID(uuidString: "00000000-0000-0000-0000-000000000001"))
+        #expect(entry.kind == .agentMessage)
+        #expect(entry.groupID == "message-1")
+        #expect(entry.text == "Legacy log entry")
+        #expect(entry.contentBlocks.isEmpty)
+    }
+
     @Test func renderedLogTextKeepsCommandOutputInSemanticProjection() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output",
