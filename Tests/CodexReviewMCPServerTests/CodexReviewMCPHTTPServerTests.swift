@@ -304,7 +304,18 @@ struct CodexReviewMCPHTTPServerTests {
                         logEntries: [
                             .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
                             .init(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
-                            .init(kind: .agentMessage, text: "No correctness issues found."),
+                            .init(
+                                kind: .agentMessage,
+                                text: "No correctness issues found.",
+                                contentBlocks: [
+                                    .init(
+                                        role: .result,
+                                        title: "Review details",
+                                        text: #"{"findingCount":0}"#,
+                                        languageHint: "json"
+                                    )
+                                ]
+                            ),
                         ]
                     ),
                     CodexReviewJob.makeForTesting(
@@ -363,8 +374,13 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(allowed.value(for: ["result", "isError"]) as? Bool == false)
             #expect(allowed.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-in-session")
-            let defaultLogs = allowed.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
-            #expect(defaultLogs?.compactMap { $0["kind"] as? String } == ["command", "agentMessage"])
+            let defaultLogs = try #require(allowed.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            #expect(defaultLogs.compactMap { $0["kind"] as? String } == ["command", "agentMessage"])
+            let contentBlocks = try #require(defaultLogs.last?["contentBlocks"] as? [[String: Any]])
+            #expect(contentBlocks.first?["role"] as? String == "result")
+            #expect(contentBlocks.first?["title"] as? String == "Review details")
+            #expect(contentBlocks.first?["text"] as? String == #"{"findingCount":0}"#)
+            #expect(contentBlocks.first?["languageHint"] as? String == "json")
             let unfilteredLogs = allLogs.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
             #expect(unfilteredLogs?.compactMap { $0["kind"] as? String } == [
                 "command",

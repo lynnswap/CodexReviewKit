@@ -254,11 +254,18 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let displayDocument = ReviewMonitorLogDisplayDocument.make(from: document(for: job))
-        let panel = displayDocument.panels.first
 
         #expect(displayDocument.panels.count == 1)
-        #expect(panel?.title == "Result")
-        guard case .syntax(let syntax)? = panel?.payload else {
+        guard let panel = displayDocument.panels.first else {
+            Issue.record("Expected content block to project as a syntax panel.")
+            return
+        }
+        let attachment = ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
+        let nsText = displayDocument.text as NSString
+        #expect(panel.title == "Result")
+        #expect(nsText.substring(with: NSRange(location: panel.range.location, length: 1)) == attachment)
+        #expect(nsText.substring(with: NSRange(location: panel.range.location - 1, length: 1)) == "\n")
+        guard case .syntax(let syntax) = panel.payload else {
             Issue.record("Expected content block to project as a syntax panel.")
             return
         }

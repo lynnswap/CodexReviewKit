@@ -461,8 +461,12 @@ enum ReviewMonitorLogDisplayDocument {
             let title = syntaxPanelTitle(for: contentBlock)
             let placeholder = "\n" + panelPlaceholder(title: title, includesActiveTimer: false)
             let displayRange = appendText(placeholder)
+            let panelRange = NSRange(
+                location: displayRange.location + 1,
+                length: max(0, displayRange.length - 1)
+            )
             let controlRange = panelControlRange(
-                in: NSRange(location: displayRange.location + 1, length: max(0, displayRange.length - 1)),
+                in: panelRange,
                 title: title,
                 includesActiveTimer: false
             )
@@ -478,7 +482,7 @@ enum ReviewMonitorLogDisplayDocument {
             ))
             panels.append(.init(
                 blockID: panelID,
-                range: displayRange,
+                range: panelRange,
                 isExpanded: false,
                 title: title,
                 payload: .syntax(.init(

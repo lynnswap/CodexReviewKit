@@ -471,7 +471,21 @@ private extension ReviewLogEntry {
             "timestamp": .string(timestamp.ISO8601Format()),
         ]
         object["groupId"] = groupID.map(Value.string) ?? .null
+        if contentBlocks.isEmpty == false {
+            object["contentBlocks"] = .array(contentBlocks.map { $0.structuredContent() })
+        }
         return .object(object)
+    }
+}
+
+private extension ReviewLogEntry.ContentBlock {
+    func structuredContent() -> Value {
+        .object([
+            "role": .string(role.rawValue),
+            "title": title.map(Value.string) ?? .null,
+            "text": .string(text),
+            "languageHint": languageHint.map(Value.string) ?? .null,
+        ])
     }
 }
 
