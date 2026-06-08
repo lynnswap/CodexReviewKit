@@ -202,6 +202,55 @@ struct ReviewMonitorLogProjectionTests {
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
     }
 
+    @Test func commandDisplayPreservesReasoningAppendAnimationSpans() throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-display-reasoning-animation",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ git diff --stat"),
+                .init(kind: .commandOutput, groupID: "cmd-1", text: "README.md | 1 +"),
+            ]
+        )
+        var projection = ReviewMonitorLogProjection()
+        _ = projection.render(entries: job.logEntries)
+
+        job.appendLogEntry(.init(kind: .reasoningSummary, groupID: "reasoning-1", text: "Checking"))
+        let firstSourceDocument = projection.render(entries: job.logEntries)
+        let firstDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: firstSourceDocument,
+            expandedBlockIDs: []
+        )
+        guard case .append(let firstAppend) = firstDisplayDocument.lastChange else {
+            Issue.record("Expected first reasoning display update to remain an append.")
+            return
+        }
+        #expect(firstAppend.kind == .reasoningSummary)
+        #expect(firstAppend.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(location: ("\n\n" as NSString).length, length: ("Checking" as NSString).length)
+            )
+        ])
+
+        job.appendLogEntry(.init(kind: .reasoningSummary, groupID: "reasoning-1", text: " whether"))
+        let secondSourceDocument = projection.render(entries: job.logEntries)
+        let secondDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: secondSourceDocument,
+            expandedBlockIDs: []
+        )
+        guard case .append(let secondAppend) = secondDisplayDocument.lastChange else {
+            Issue.record("Expected reasoning delta display update to remain an append.")
+            return
+        }
+        #expect(secondAppend.kind == .reasoningSummary)
+        #expect(secondAppend.animationSpans == [
+            .init(kind: .wordFade, range: NSRange(location: 0, length: (" whether" as NSString).length))
+        ])
+    }
+
     @Test func commandDisplayUsesPanelBeforeOutputArrives() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-started",

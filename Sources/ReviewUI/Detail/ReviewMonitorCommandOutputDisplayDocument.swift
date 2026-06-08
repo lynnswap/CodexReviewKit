@@ -763,7 +763,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 blockID: append.blockID,
                 range: mappedRange,
                 text: append.text,
-                textUTF16Length: append.textUTF16Length
+                textUTF16Length: append.textUTF16Length,
+                animationSpans: mappedAnimationSpans(
+                    append.animationSpans,
+                    textUTF16Length: append.textUTF16Length
+                )
             ))
         case .replace(let replacement):
             guard let mappedRange = mappedChangeRange(
@@ -783,6 +787,24 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             ))
         case .reload:
             return .reload
+        }
+    }
+
+    private static func mappedAnimationSpans(
+        _ spans: [ReviewMonitorLogAnimationSpan],
+        textUTF16Length: Int
+    ) -> [ReviewMonitorLogAnimationSpan] {
+        guard spans.isEmpty == false, textUTF16Length > 0 else {
+            return []
+        }
+
+        let appendRange = NSRange(location: 0, length: textUTF16Length)
+        return spans.compactMap { span in
+            let range = NSIntersectionRange(span.range, appendRange)
+            guard range.length > 0 else {
+                return nil
+            }
+            return ReviewMonitorLogAnimationSpan(kind: span.kind, range: range)
         }
     }
 
