@@ -43,6 +43,161 @@ struct ReviewMonitorLogProjectionTests {
         ))
     }
 
+    @Test func logLineCounterMatchesCommandOutputLineCountingContract() {
+        let cases: [(text: String, expected: Int)] = [
+            ("", 0),
+            ("a", 1),
+            ("a\n", 1),
+            ("\n", 1),
+            ("a\nb", 2),
+            ("a\nb\n", 2),
+            ("a\n\nb", 3),
+        ]
+
+        for testCase in cases {
+            #expect(ReviewMonitorLogLineCounter.lineCount(testCase.text) == testCase.expected)
+            let wrappedText = "prefix\(testCase.text)suffix"
+            let string = wrappedText as NSString
+            let range = NSRange(
+                location: ("prefix" as NSString).length,
+                length: (testCase.text as NSString).length
+            )
+            #expect(ReviewMonitorLogLineCounter.lineCount(in: string, range: range) == testCase.expected)
+        }
+    }
+
+    @Test func commandOutputDisplayPreservesReasoningAppendAnimationSpans() throws {
+        var projection = ReviewMonitorLogProjection()
+        let initialEntries = [
+            ReviewLogEntry(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+            ReviewLogEntry(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
+            ReviewLogEntry(kind: .reasoning, groupID: "reasoning-1", text: "First reasoning"),
+        ]
+        _ = projection.render(entries: initialEntries)
+
+        let appendedDocument = projection.append(
+            entries: [
+                .init(kind: .reasoning, groupID: "reasoning-1", text: " second reasoning"),
+            ],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        )
+        let sourceDocument = try #require(appendedDocument)
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceDocument)
+        guard case .append(let append) = displayDocument.lastChange else {
+            Issue.record("Expected display document append")
+            return
+        }
+
+        #expect(append.text == " second reasoning")
+        #expect(append.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(location: 0, length: (" second reasoning" as NSString).length)
+            ),
+        ])
+    }
+
+    @Test func progressAppendDoesNotProduceAnimationSpans() throws {
+        var projection = ReviewMonitorLogProjection()
+        let initialEntries = [
+            ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
+        ]
+        _ = projection.render(entries: initialEntries)
+
+        let maybeAppendedDocument = projection.append(
+            entries: [
+                .init(kind: .progress, groupID: "progress-1", text: "stream.tick 001"),
+            ],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        )
+        let appendedDocument = try #require(maybeAppendedDocument)
+        guard case .append(let append) = appendedDocument.lastChange else {
+            Issue.record("Expected progress update to append.")
+            return
+        }
+
+        #expect(append.text.hasSuffix("stream.tick 001"))
+        #expect(append.animationSpans.isEmpty)
+    }
+
+    @Test func rendererMapsCommandCompletionThenReasoningAppendWithoutReload() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let completedAt = Date(timeIntervalSince1970: 203)
+        let initialEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .command,
+                groupID: "cmd-1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "inProgress",
+                    itemID: "cmd-1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "inProgress"
+                )
+            ),
+        ]
+        let appendedEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .command,
+                groupID: "cmd-1",
+                replacesGroup: true,
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-1",
+                    command: "git diff",
+                    exitCode: 0,
+                    startedAt: startedAt,
+                    completedAt: completedAt,
+                    durationMs: 3_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning-1",
+                text: "I found the relevant update path."
+            ),
+        ]
+        let renderer = ReviewMonitorLogRenderer()
+        _ = await renderer.render(entries: initialEntries)
+
+        let documents = try #require(await renderer.appendSteps(
+            entries: appendedEntries,
+            sourceRange: initialEntries.count..<(initialEntries.count + appendedEntries.count)
+        ))
+        let commandCompletionDocument = try #require(documents.first)
+        let reasoningAppendDocument = try #require(documents.dropFirst().first)
+        #expect(documents.dropFirst(2).isEmpty)
+
+        guard case .replace(let replacement) = commandCompletionDocument.display.lastChange else {
+            Issue.record("Expected command completion to map to a display replacement.")
+            return
+        }
+        #expect(replacement.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: replacement.text
+        ) == "Ran git diff for 3s")
+
+        guard case .append(let append) = reasoningAppendDocument.display.lastChange else {
+            Issue.record("Expected reasoning to remain a display append.")
+            return
+        }
+        #expect(append.text == "\n\nI found the relevant update path.")
+        #expect(append.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(
+                    location: ("\n\n" as NSString).length,
+                    length: ("I found the relevant update path." as NSString).length
+                )
+            ),
+        ])
+    }
+
     @Test func contextCompactionMarkerUsesDedicatedProjectionStyle() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "contextCompaction",
@@ -200,55 +355,6 @@ struct ReviewMonitorLogProjectionTests {
             text: "\nSources/App.swift | 2 +"
         )))
         #expect(job.logText.contains("Sources/App.swift | 2 +"))
-    }
-
-    @Test func commandDisplayPreservesReasoningAppendAnimationSpans() throws {
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-command-display-reasoning-animation",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: [
-                .init(kind: .command, groupID: "cmd-1", text: "$ git diff --stat"),
-                .init(kind: .commandOutput, groupID: "cmd-1", text: "README.md | 1 +"),
-            ]
-        )
-        var projection = ReviewMonitorLogProjection()
-        _ = projection.render(entries: job.logEntries)
-
-        job.appendLogEntry(.init(kind: .reasoningSummary, groupID: "reasoning-1", text: "Checking"))
-        let firstSourceDocument = projection.render(entries: job.logEntries)
-        let firstDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
-            from: firstSourceDocument,
-            expandedBlockIDs: []
-        )
-        guard case .append(let firstAppend) = firstDisplayDocument.lastChange else {
-            Issue.record("Expected first reasoning display update to remain an append.")
-            return
-        }
-        #expect(firstAppend.kind == .reasoningSummary)
-        #expect(firstAppend.animationSpans == [
-            .init(
-                kind: .wordFade,
-                range: NSRange(location: ("\n\n" as NSString).length, length: ("Checking" as NSString).length)
-            )
-        ])
-
-        job.appendLogEntry(.init(kind: .reasoningSummary, groupID: "reasoning-1", text: " whether"))
-        let secondSourceDocument = projection.render(entries: job.logEntries)
-        let secondDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
-            from: secondSourceDocument,
-            expandedBlockIDs: []
-        )
-        guard case .append(let secondAppend) = secondDisplayDocument.lastChange else {
-            Issue.record("Expected reasoning delta display update to remain an append.")
-            return
-        }
-        #expect(secondAppend.kind == .reasoningSummary)
-        #expect(secondAppend.animationSpans == [
-            .init(kind: .wordFade, range: NSRange(location: 0, length: (" whether" as NSString).length))
-        ])
     }
 
     @Test func commandDisplayUsesPanelBeforeOutputArrives() {
@@ -448,7 +554,7 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(displayText == "Ran swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == false)
-        #expect(attachmentCount == 2)
+        #expect(attachmentCount == 1)
     }
 
     @Test func commandActionsDriveReadSearchAndListTitles() {
@@ -749,6 +855,43 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(displayDocument.commandOutputPanels.first?.outputText == "Tests passed")
         #expect(displayDocument.commandOutputPanels.first?.exitText == "Success")
+    }
+
+    @Test func collapsedCommandOutputDisplayKeepsOutputAsSourceRangeOnly() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-collapsed-source-range",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "Tests passed\nCoverage complete",
+                    metadata: .init(sourceType: "commandExecution", title: "Command output")
+                ),
+            ]
+        )
+        let sourceDocument = document(for: job)
+        let blockID = ReviewMonitorLogBlockID("commandOutput:cmd-1")
+
+        let collapsedDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: []
+        )
+        let expandedDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            expandedBlockIDs: [blockID]
+        )
+
+        let collapsedPanel = collapsedDocument.commandOutputPanels.first
+        #expect(collapsedPanel?.outputText == "")
+        #expect(collapsedPanel?.lineCount == 0)
+        #expect(collapsedPanel?.outputSourceRange != nil)
+        #expect(expandedDocument.commandOutputPanels.first?.outputText == "Tests passed\nCoverage complete")
+        #expect(expandedDocument.commandOutputPanels.first?.lineCount == 2)
     }
 
     @Test func metadataIsPreservedOnBlocks() {

@@ -466,7 +466,6 @@ extension CodexReviewStore {
                 activeRuns[job.id] = activeRun
             }
             job.core.output.summary = "Review started."
-            job.appendLogEntry(.init(kind: .event, text: "Turn started: \(turnID)", timestamp: clock.now()))
         case .message(let text):
             job.core.output.lastAgentMessage = text
             job.core.output.summary = text

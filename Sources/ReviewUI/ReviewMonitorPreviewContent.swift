@@ -452,8 +452,8 @@ public enum ReviewMonitorPreviewContent {
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .agentMessage,
-            groupName: "agent-message-main",
+            kind: .rawReasoning,
+            groupName: "raw-reasoning-follow-up",
             text: "I found the log update path and am keeping the current find session stable while new output streams in.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -462,7 +462,6 @@ public enum ReviewMonitorPreviewContent {
             kind: .agentMessage,
             groupName: "agent-message-summary",
             text: "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
-            chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]

@@ -112,6 +112,7 @@ struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
     var range: NSRange
     var commandText: String
     var outputText: String
+    var outputSourceRange: NSRange? = nil
     var lineCount: Int
     var isExpanded: Bool
     var isActive: Bool
@@ -281,7 +282,13 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
             hasher.combine(panel.blockID)
             combine(panel.range, into: &hasher)
             hasher.combine(panel.commandText)
-            hasher.combine(panel.outputText)
+            if let outputSourceRange = panel.outputSourceRange {
+                hasher.combine(true)
+                combine(outputSourceRange, into: &hasher)
+            } else {
+                hasher.combine(false)
+                hasher.combine(panel.outputText)
+            }
         }
         return hasher.finalize()
     }
@@ -1150,6 +1157,7 @@ struct ReviewMonitorLogProjection: Sendable {
     }
 
     private struct State: Sendable {
+        var entries: [ReviewLogEntry]
         var entrySignatures: [EntrySignature]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
@@ -1165,6 +1173,7 @@ struct ReviewMonitorLogProjection: Sendable {
 
         static func rebuild(entries: [ReviewLogEntry]) -> State {
             var state = State(
+                entries: entries,
                 entrySignatures: entries.map(EntrySignature.init),
                 blocks: [],
                 indexByGroup: [:],
@@ -1204,11 +1213,13 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         private init(
+            entries: [ReviewLogEntry],
             entrySignatures: [EntrySignature],
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             projection: Accumulator
         ) {
+            self.entries = entries
             self.entrySignatures = entrySignatures
             self.blocks = blocks
             self.indexByGroup = indexByGroup
@@ -1216,6 +1227,7 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         mutating func append(_ entry: ReviewLogEntry) -> AppendResult {
+            entries.append(entry)
             entrySignatures.append(.init(entry))
 
             if let key = ReviewMonitorLogProjection.mergeKey(for: entry) {
@@ -1304,6 +1316,22 @@ struct ReviewMonitorLogProjection: Sendable {
                 return .changed(.append(append))
             }
             return .noVisibleChange
+        }
+
+        mutating func rebuildResolvingReplacement(
+            previousDocument: ReviewMonitorLogDocument,
+            replacementBlockID: ReviewMonitorLogBlockID
+        ) -> ReviewMonitorLogReplacement? {
+            let rebuilt = Self.rebuild(entries: entries)
+            guard let replacement = Self.replacement(
+                previous: previousDocument,
+                current: rebuilt.document,
+                blockID: replacementBlockID
+            ) else {
+                return nil
+            }
+            self = rebuilt
+            return replacement
         }
 
         private mutating func appendBlock(
@@ -1462,9 +1490,22 @@ struct ReviewMonitorLogProjection: Sendable {
                 }
             case .noVisibleChange:
                 continue
-            case .needsReload:
-                state = previousState
-                return nil
+            case .needsReload(let replacementBlockID):
+                guard let replacementBlockID,
+                      let replacement = state.rebuildResolvingReplacement(
+                        previousDocument: previousDocument,
+                        replacementBlockID: replacementBlockID
+                      ),
+                      let resolved = Self.resolveDocument(
+                        previous: previousDocument,
+                        current: state.document,
+                        preferredChange: .replace(replacement)
+                      )
+                else {
+                    state = previousState
+                    return nil
+                }
+                document = resolved
             }
         }
         return document

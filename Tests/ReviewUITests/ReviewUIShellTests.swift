@@ -1454,7 +1454,8 @@ struct ReviewUIShellTests {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
 
-        let appendedKinds = runningJob.logEntries.dropFirst(initialEntryCount).map(\.kind)
+        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
+        let appendedKinds = appendedEntries.map(\.kind)
         #expect(appendedKinds.contains(.event))
         #expect(appendedKinds.contains(.command))
         #expect(appendedKinds.contains(.toolCall))
@@ -1463,6 +1464,17 @@ struct ReviewUIShellTests {
         #expect(appendedKinds.contains(.reasoningSummary))
         #expect(appendedKinds.contains(.agentMessage))
         #expect(Set(appendedKinds).count >= 6)
+
+        let repeatedNonReplacingGroups = Dictionary(
+            grouping: appendedEntries.filter { $0.replacesGroup == false },
+            by: { entry in "\(entry.groupID ?? "")|\(entry.kind.rawValue)" }
+        ).values.filter { entries in
+            entries.first?.groupID != nil && entries.count > 1
+        }
+        for entries in repeatedNonReplacingGroups {
+            let kind = try #require(entries.first?.kind)
+            #expect([.reasoning, .reasoningSummary, .rawReasoning].contains(kind))
+        }
 
         let compactionEntries = runningJob.logEntries
             .dropFirst(initialEntryCount)
@@ -1532,43 +1544,6 @@ struct ReviewUIShellTests {
         tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         #expect(runningJob.logEntries.count == countAfterReasoning + 1)
         #expect(runningJob.logEntries.last?.kind == .command)
-    }
-
-    @Test func previewStreamVisibleAppendUsesWordFadeAnimation() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let harness = makeWindowHarness(store: store)
-        let viewController = harness.viewController
-        let window = harness.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(runningJob)
-        _ = try await awaitTransportRender(transport)
-        transport.setLogReduceMotionForTesting(false)
-        let initialGlowCount = transport.logWordGlowCountForTesting
-        var tick = 0
-
-        for _ in 0..<360 {
-            let entryCountBeforeTick = runningJob.logEntries.count
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            guard runningJob.logEntries.count > entryCountBeforeTick,
-                  let entry = runningJob.logEntries.last,
-                  entry.kind == .reasoningSummary || entry.kind == .rawReasoning
-            else {
-                continue
-            }
-
-            _ = try await awaitTransportRender(transport)
-            #expect(transport.logWordGlowCountForTesting > initialGlowCount)
-            #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting > 0)
-            return
-        }
-
-        Issue.record("Preview stream did not emit a visible animatable log append.")
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {

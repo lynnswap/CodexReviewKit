@@ -103,7 +103,6 @@ struct CodexReviewStoreCommandTests {
         #expect(read.core.output.lastAgentMessage == "hello world")
         #expect(read.rawLogText.isEmpty)
         #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == [
-            "Turn started: turn-actual",
             "hello",
             " world",
             " with space",

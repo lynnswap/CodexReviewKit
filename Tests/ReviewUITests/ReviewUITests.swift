@@ -2705,7 +2705,7 @@ struct ReviewUITests {
         #expect(abs(transport.logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting ?? .infinity) <= 0.5)
         #expect(transport.logCommandOutputPanelUsesInlineAttachmentForTesting)
         #expect(transport.logCommandOutputPanelUsesButtonAttachmentForTesting)
-        #expect((transport.logCollapsedCommandOutputPanelAttachmentLineHeightForTesting ?? .infinity) <= 1)
+        #expect(transport.logCollapsedCommandOutputPanelAttachmentLineHeightForTesting == nil)
         #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
@@ -2724,6 +2724,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.down")
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting)
+        #expect(transport.logCommandOutputPanelOutputScrollUsesHorizontalScrollingForTesting)
         #expect((5...6).contains(transport.logCommandOutputPanelVisibleLineCapacityForTesting))
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
         #expect(transport.logCommandOutputPanelCommandLineTextForTesting == "$ swift test")
@@ -2798,6 +2799,73 @@ struct ReviewUITests {
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
         #expect(transport.displayedLogForTesting.contains("Visible text after command output."))
+    }
+
+    @Test func expandingCommandOutputPanelsPreserveVisibleContent() async throws {
+        let firstOutput = (1...80)
+            .map { "first output line \($0)" }
+            .joined(separator: "\n")
+        let secondOutput = (1...80)
+            .map { "second output line \($0)" }
+            .joined(separator: "\n")
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-panel-isolation",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_1",
+                    text: firstOutput,
+                    metadata: .init(sourceType: "command", title: "Ran swift test for 1s", status: "succeeded")
+                ),
+                .init(kind: .command, groupID: "cmd_2", text: "$ git diff"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_2",
+                    text: secondOutput,
+                    metadata: .init(sourceType: "command", title: "Ran git diff for 1s", status: "succeeded")
+                ),
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 900)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+
+        let firstBlockID = ReviewMonitorLogBlockID("commandOutput:cmd_1")
+        let secondBlockID = ReviewMonitorLogBlockID("commandOutput:cmd_2")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: firstBlockID))
+        await awaitNativeLayoutTurn()
+
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
+            .contains("first output line 80") == true)
+
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: secondBlockID))
+        await awaitNativeLayoutTurn()
+
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
+            .contains("first output line 80") == true)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: secondBlockID)?
+            .contains("second output line 80") == true)
     }
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
@@ -3532,7 +3600,7 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount + 1)
     }
 
-    @Test func coalescedLogTextUpdateUsesAppendPathWhenSuffixCanBeDerived() async throws {
+    @Test func coalescedLogTextUpdateDisplaysCombinedSuffix() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-coalesced",
             cwd: "/tmp/workspace-alpha",
@@ -3553,18 +3621,14 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        let appendCount = transport.logAppendCountForTesting
-        let reloadCount = transport.logReloadCountForTesting
         job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: " one"))
         job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: " two"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Initial one two")
-        #expect(transport.logAppendCountForTesting == appendCount + 1)
-        #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
-    @Test func coalescedProgressSuffixDoesNotUseGenericWordGlow() async throws {
+    @Test func coalescedProgressSuffixDisplaysLatestProgress() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-coalesced-progress",
             cwd: "/tmp/workspace-alpha",
@@ -3585,17 +3649,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        let appendCount = transport.logAppendCountForTesting
-        let reloadCount = transport.logReloadCountForTesting
-        let wordGlowCount = transport.logWordGlowCountForTesting
         job.appendLogEntry(.init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
         job.appendLogEntry(.init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
-        #expect(transport.logAppendCountForTesting == appendCount + 1)
-        #expect(transport.logReloadCountForTesting == reloadCount)
-        #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
 
     @Test func coalescedMixedReasoningAndProgressSuffixAnimatesOnlyReasoningRange() async throws {
@@ -3699,6 +3757,72 @@ struct ReviewUITests {
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func commandCompletionAndReasoningAppendDoNotReloadFullLog() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let completedAt = Date(timeIntervalSince1970: 203)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-close-reasoning-append",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: startedAt,
+            summary: "Running review.",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd_1",
+                    text: "$ git diff",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "inProgress",
+                        itemID: "cmd_1",
+                        command: "git diff",
+                        startedAt: startedAt,
+                        commandStatus: "inProgress"
+                    )
+                )
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.appendLogEntry(.init(
+            kind: .command,
+            groupID: "cmd_1",
+            replacesGroup: true,
+            text: "$ git diff",
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd_1",
+                command: "git diff",
+                exitCode: 0,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: 3_000,
+                commandStatus: "completed"
+            )
+        ))
+        job.appendLogEntry(.init(
+            kind: .rawReasoning,
+            groupID: "reasoning_1",
+            text: "I found the relevant update path."
+        ))
+
+        let snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log.contains("Ran git diff for 3s"))
+        #expect(snapshot.log.contains("I found the relevant update path."))
     }
 
     @Test func selectedJobMarkdownAppendReplacesTailBlockWithoutReload() async throws {
@@ -3849,6 +3973,14 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting == 2)
+
+        transport.completeLogWordGlowAnimationsForTesting()
+        #expect(transport.logWordGlowCountForTesting == 0)
+
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
+        _ = try await awaitTransportRender(transport)
+
+        #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
         job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))

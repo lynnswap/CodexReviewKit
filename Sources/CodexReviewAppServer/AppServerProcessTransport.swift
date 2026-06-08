@@ -59,6 +59,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
     private var framer = JSONRPCFramer()
     private var pending: [Int: PendingResponse] = [:]
     private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPCNotification, Error>.Continuation] = [:]
+    private var stderrLogFilter = AppServerStderrLogFilter()
     private var closed = false
 
     package init(configuration: Configuration = .init()) throws {
@@ -185,15 +186,20 @@ package actor AppServerProcessTransport: JSONRPCTransport {
     }
 
     private func receiveStderr(_ event: AppServerPipeReadEvent) {
-        guard case .data(let data) = event else {
-            return
+        let events: [AppServerStderrLogFilter.Event]
+        switch event {
+        case .data(let data):
+            events = stderrLogFilter.append(data)
+        case .end:
+            events = stderrLogFilter.finish()
         }
-        guard let text = String(data: data, encoding: .utf8) else {
-            logger.error("codex app-server stderr emitted \(data.count, privacy: .public) undecodable bytes")
-            return
-        }
-        for line in text.split(whereSeparator: \.isNewline) {
-            logger.error("codex app-server stderr: \(String(line), privacy: .public)")
+        for event in events {
+            switch event.level {
+            case .error:
+                logger.error("codex app-server stderr: \(event.message, privacy: .public)")
+            case .warning:
+                logger.warning("codex app-server stderr: \(event.message, privacy: .public)")
+            }
         }
     }
 
@@ -325,6 +331,157 @@ private struct AppServerProcessLaunch {
 private enum AppServerPipeReadEvent: Sendable {
     case data(Data)
     case end
+}
+
+package struct AppServerStderrLogFilter: Sendable {
+    package struct Event: Equatable, Sendable {
+        package enum Level: Equatable, Sendable {
+            case error
+            case warning
+        }
+
+        package var level: Level
+        package var message: String
+    }
+
+    private var partialLine = ""
+    private var isAwaitingToolErrorOutput = false
+    private var suppressingCommandOutput = false
+    private var suppressedCommandOutputLineCount = 0
+
+    package init() {}
+
+    package mutating func append(_ data: Data) -> [Event] {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return [.init(
+                level: .error,
+                message: "emitted \(data.count) undecodable bytes"
+            )]
+        }
+        return append(text)
+    }
+
+    package mutating func append(_ text: String) -> [Event] {
+        guard text.isEmpty == false else {
+            return []
+        }
+
+        let bufferedText = partialLine + text
+        partialLine = ""
+
+        var events: [Event] = []
+        var lineStart = bufferedText.startIndex
+        var index = bufferedText.startIndex
+        while index < bufferedText.endIndex {
+            if bufferedText[index].isNewline {
+                let line = String(bufferedText[lineStart..<index])
+                events.append(contentsOf: processLine(line))
+                let nextIndex = bufferedText.index(after: index)
+                if bufferedText[index] == "\r",
+                   nextIndex < bufferedText.endIndex,
+                   bufferedText[nextIndex] == "\n" {
+                    lineStart = bufferedText.index(after: nextIndex)
+                    index = lineStart
+                } else {
+                    lineStart = nextIndex
+                    index = nextIndex
+                }
+            } else {
+                index = bufferedText.index(after: index)
+            }
+        }
+
+        if lineStart < bufferedText.endIndex {
+            partialLine = String(bufferedText[lineStart...])
+        }
+        return events
+    }
+
+    package mutating func finish() -> [Event] {
+        var events: [Event] = []
+        if partialLine.isEmpty == false {
+            events.append(contentsOf: processLine(partialLine))
+            partialLine = ""
+        }
+        events.append(contentsOf: flushSuppressedCommandOutput())
+        return events
+    }
+
+    private mutating func processLine(_ rawLine: String) -> [Event] {
+        let line = Self.stripANSIEscapeSequences(rawLine)
+        if suppressingCommandOutput {
+            if Self.isStructuredLogLine(line) {
+                var events = flushSuppressedCommandOutput()
+                events.append(contentsOf: processLine(line))
+                return events
+            }
+            if Self.isTimeoutSummaryLine(line) {
+                return [.init(level: .warning, message: line)]
+            }
+            suppressedCommandOutputLineCount += 1
+            return []
+        }
+
+        guard line.isEmpty == false else {
+            return []
+        }
+        if isAwaitingToolErrorOutput, Self.isOutputStartLine(line) {
+            isAwaitingToolErrorOutput = false
+            suppressingCommandOutput = true
+            suppressedCommandOutputLineCount = 0
+            return [.init(level: .warning, message: "command output omitted after tool error")]
+        }
+        isAwaitingToolErrorOutput = Self.canBeFollowedByCommandOutput(line)
+        return [.init(level: .error, message: line)]
+    }
+
+    private mutating func flushSuppressedCommandOutput() -> [Event] {
+        guard suppressingCommandOutput else {
+            return []
+        }
+        suppressingCommandOutput = false
+        isAwaitingToolErrorOutput = false
+        let lineCount = suppressedCommandOutputLineCount
+        suppressedCommandOutputLineCount = 0
+        guard lineCount > 0 else {
+            return []
+        }
+        return [.init(level: .warning, message: "suppressed \(lineCount) command-output line(s)")]
+    }
+
+    private static func stripANSIEscapeSequences(_ line: String) -> String {
+        line.replacingOccurrences(
+            of: "\u{001B}\\[[0-?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression
+        )
+    }
+
+    private static func isOutputStartLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed == "Output:" || trimmed.hasSuffix(" Output:")
+    }
+
+    private static func isStructuredLogLine(_ line: String) -> Bool {
+        line.range(
+            of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:ERROR|WARN|INFO|DEBUG|TRACE)\s+"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isTimeoutSummaryLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.hasPrefix("command timed out after ") ||
+            trimmed.hasPrefix("Wall time: ") ||
+            trimmed.hasPrefix("Exit code: ")
+    }
+
+    private static func canBeFollowedByCommandOutput(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.contains("codex_core::tools::router: error=") ||
+            trimmed.hasPrefix("Wall time: ") ||
+            trimmed.hasPrefix("Exit code: ")
+    }
 }
 
 private final class AppServerPipeReadEventSource: @unchecked Sendable {
@@ -704,7 +861,6 @@ package enum CodexAppServerExecutable {
     }
 
     package static let fileBackedAuthConfiguration = #"cli_auth_credentials_store="file""#
-    package static let disableUnifiedExecConfiguration = "features.unified_exec=false"
 
     package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Command {
         let executable = resolveExecutable(environment: environment)
@@ -747,7 +903,6 @@ package enum CodexAppServerExecutable {
     package static func appServerArguments(supportsSessionSource: Bool = false) -> [String] {
         var arguments = [
             "-c", fileBackedAuthConfiguration,
-            "-c", disableUnifiedExecConfiguration,
             "app-server",
             "--listen", "stdio://",
         ]
