@@ -263,7 +263,8 @@ final class ReviewMonitorLogFragmentView: NSView {
 
 struct ReviewMonitorLogWordFadeAnimation {
     var range: NSRange
-    var startedAt: TimeInterval
+    var startedAt: TimeInterval?
+    var delay: TimeInterval
     var renderedStep: Int
     var baseColor: NSColor
 }

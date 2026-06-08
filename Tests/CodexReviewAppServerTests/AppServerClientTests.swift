@@ -1089,6 +1089,117 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        async let first = backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        async let second = backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        _ = try await (first, second)
+        await transport.waitForNotificationStreamCount(1)
+
+        #expect(await transport.notificationStreamCount() == 1)
+    }
+
+    @Test func backendRoutesInterleavedNotificationsToMatchingReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        let firstEvents = await backend.events(for: firstRun)
+        let secondEvents = await backend.events(for: secondRun)
+        var firstIterator = firstEvents.makeAsyncIterator()
+        var secondIterator = secondEvents.makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-2", turn: .init(id: "turn-2"))
+        )
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1"))
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(threadID: "thread-2", turnID: "turn-2", itemID: "msg-2", delta: "Second")
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(threadID: "thread-1", turnID: "turn-1", itemID: "msg-1", delta: "First")
+        )
+
+        #expect(try await firstIterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await firstIterator.next() == .messageDelta("First", itemID: "msg-1"))
+        #expect(try await secondIterator.next() == .started(turnID: "turn-2", reviewThreadID: "thread-2", model: nil))
+        #expect(try await secondIterator.next() == .messageDelta("Second", itemID: "msg-2"))
+    }
+
+    @Test func backendBroadcastsGlobalDiagnosticsToActiveReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
+        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: TestGlobalMessageNotification(message: "Global warning")
+        )
+
+        let expected = BackendReviewEvent.logEntry(
+            kind: .diagnostic,
+            text: "Global warning",
+            groupID: nil,
+            replacesGroup: false
+        )
+        #expect(try await firstIterator.next() == expected)
+        #expect(try await secondIterator.next() == expected)
+        #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
+        #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
+    }
+
     @Test func backendBuffersTerminalNotificationEmittedDuringReviewStart() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -3330,6 +3441,10 @@ private struct TestMessageNotification: Encodable, Sendable {
         case itemID = "itemId"
         case message
     }
+}
+
+private struct TestGlobalMessageNotification: Encodable, Sendable {
+    var message: String
 }
 
 private struct TestErrorNotification: Encodable, Sendable {

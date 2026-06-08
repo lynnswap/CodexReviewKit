@@ -70,13 +70,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         ]
     }
 
-    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
-        .agentMessage,
-        .plan,
-        .reasoning,
-        .reasoningSummary,
-        .rawReasoning,
-    ]
     private static let maxWordFadeCount = 80
     private static let maxWordFadeUTF16Length = 8 * 1024
     private static let maxLineFadeChunkUTF16Length = 12
@@ -263,25 +256,25 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
         let appendBaseLocation = textStorage.length
         let invalidationStart = appendInvalidationStartUTF16Offset()
-        let fadeRanges = wordFadeRanges(in: suffix, baseLocation: appendBaseLocation, animation: animation)
+        let fadeRanges = wordFadeRanges(
+            in: suffix,
+            baseLocation: appendBaseLocation,
+            animationSpans: animation?.animationSpans ?? []
+        )
         textContentStorage.performEditingTransaction {
             textStorage.append(NSAttributedString(string: suffix, attributes: baseAttributes))
         }
         invalidateFinderStringMapping()
         clampSelectedRange()
         increaseEstimatedDocumentHeightForAppend(suffix)
-        let glowAnimationStart = CACurrentMediaTime()
-        if let animation,
-           shouldAnimateGlow,
-           animation.range.length > 0,
-           Self.wordFadeKinds.contains(animation.kind) {
-            enqueueWordFadeAnimations(ranges: fadeRanges, startedAt: glowAnimationStart)
+        if shouldAnimateGlow, fadeRanges.isEmpty == false {
+            enqueueWordFadeAnimations(ranges: fadeRanges)
         }
         invalidateTextLayout(
             in: NSRange(location: invalidationStart, length: textStorage.length - invalidationStart),
             measureEstimatedHeightImmediately: false
         )
-        if animation != nil {
+        if fadeRanges.isEmpty == false {
             startGlowTimerIfNeeded()
         }
     }
@@ -917,7 +910,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
     }
 
-    private func enqueueWordFadeAnimations(ranges: [NSRange], startedAt: TimeInterval) {
+    private func enqueueWordFadeAnimations(ranges: [NSRange]) {
         guard ranges.isEmpty == false else {
             return
         }
@@ -936,7 +929,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             wordFadeAnimations.append(
                 ReviewMonitorLogWordFadeAnimation(
                     range: range,
-                    startedAt: startedAt + TimeInterval(index) * Self.wordFadeStagger,
+                    startedAt: nil,
+                    delay: TimeInterval(index) * Self.wordFadeStagger,
                     renderedStep: 0,
                     baseColor: baseColor
                 )
@@ -949,39 +943,50 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func wordFadeRanges(
         in suffix: String,
         baseLocation: Int,
-        animation: ReviewMonitorLogAppend?
+        animationSpans: [ReviewMonitorLogAnimationSpan]
     ) -> [NSRange] {
         guard shouldAnimateGlow,
-              let animation,
-              Self.wordFadeKinds.contains(animation.kind)
+              animationSpans.isEmpty == false
         else {
             return []
         }
 
         let nsString = suffix as NSString
         let suffixRange = NSRange(location: baseLocation, length: nsString.length)
-        let clampedRange = NSIntersectionRange(animation.range, suffixRange)
-        guard clampedRange.length > 0 else {
-            return []
-        }
-        let localRange = NSRange(location: clampedRange.location - suffixRange.location, length: clampedRange.length)
-        let cappedRange = NSRange(
-            location: localRange.location,
-            length: min(clampedRange.length, Self.maxWordFadeUTF16Length)
-        )
         var ranges: [NSRange] = []
-        nsString.enumerateSubstrings(
-            in: cappedRange,
-            options: [.byLines, .substringNotRequired, .localized]
-        ) { _, lineRange, _, stop in
-            ranges.append(contentsOf: self.lineFadeRanges(
-                in: nsString,
-                localLineRange: lineRange,
-                baseLocation: suffixRange.location,
-                limit: Self.maxWordFadeCount - ranges.count
-            ))
-            if ranges.count >= Self.maxWordFadeCount {
-                stop.pointee = true
+        for span in animationSpans where span.kind == .wordFade {
+            guard ranges.count < Self.maxWordFadeCount else {
+                break
+            }
+            let absoluteSpanRange = NSRange(
+                location: suffixRange.location + span.range.location,
+                length: span.range.length
+            )
+            let clampedRange = NSIntersectionRange(absoluteSpanRange, suffixRange)
+            guard clampedRange.length > 0 else {
+                continue
+            }
+            let localRange = NSRange(
+                location: clampedRange.location - suffixRange.location,
+                length: clampedRange.length
+            )
+            let cappedRange = NSRange(
+                location: localRange.location,
+                length: min(clampedRange.length, Self.maxWordFadeUTF16Length)
+            )
+            nsString.enumerateSubstrings(
+                in: cappedRange,
+                options: [.byLines, .substringNotRequired, .localized]
+            ) { _, lineRange, _, stop in
+                ranges.append(contentsOf: self.lineFadeRanges(
+                    in: nsString,
+                    localLineRange: lineRange,
+                    baseLocation: suffixRange.location,
+                    limit: Self.maxWordFadeCount - ranges.count
+                ))
+                if ranges.count >= Self.maxWordFadeCount {
+                    stop.pointee = true
+                }
             }
         }
         return ranges
@@ -1060,13 +1065,22 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         var colorUpdates: [(range: NSRange, color: NSColor)] = []
         var finishedRanges: [NSRange] = []
         for var animation in wordFadeAnimations {
-            if now >= animation.startedAt + Self.wordFadeDuration {
+            if animation.startedAt == nil {
+                animation.startedAt = now + animation.delay
+            }
+            let startedAt = animation.startedAt ?? now
+            guard now >= startedAt else {
+                activeAnimations.append(animation)
+                continue
+            }
+
+            if now >= startedAt + Self.wordFadeDuration {
                 finishedRanges.append(animation.range)
                 updatedRanges.append(animation.range)
                 continue
             }
 
-            let progress = min(1, max(0, (now - animation.startedAt) / Self.wordFadeDuration))
+            let progress = min(1, max(0, (now - startedAt) / Self.wordFadeDuration))
             let step = wordFadeAlphaStep(for: progress)
             if step != animation.renderedStep {
                 colorUpdates.append((
@@ -2967,12 +2981,17 @@ extension ReviewMonitorLogDocumentView {
     func completeWordGlowAnimationsForTesting() {
         glowTimer?.invalidate()
         glowTimer = nil
+        updateWordFadeAnimations(at: CACurrentMediaTime())
         let completionTime = wordFadeAnimations
-            .map(\.startedAt)
+            .compactMap(\.startedAt)
             .max()
             .map { $0 + Self.wordFadeDuration }
             ?? CACurrentMediaTime()
         updateWordFadeAnimations(at: completionTime)
+    }
+
+    func advanceWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+        updateWordFadeAnimations(at: CACurrentMediaTime() + delay)
     }
 
     func contextMenuForTesting() -> NSMenu? {

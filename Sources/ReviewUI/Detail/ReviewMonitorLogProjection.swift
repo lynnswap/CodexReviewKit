@@ -78,6 +78,15 @@ struct ReviewMonitorLogTextRun: Equatable, Sendable {
     var style: ReviewMonitorLogTextStyle
 }
 
+struct ReviewMonitorLogAnimationSpan: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case wordFade
+    }
+
+    var kind: Kind
+    var range: NSRange
+}
+
 enum ReviewMonitorLogDecorationStyle: Hashable, Sendable {
     case transcript
     case command(tone: ReviewMonitorLogStatusTone)
@@ -117,24 +126,53 @@ struct ReviewMonitorLogAppend: Equatable, Sendable {
     var range: NSRange
     var text: String
     var textUTF16Length: Int
+    var animationSpans: [ReviewMonitorLogAnimationSpan]
 
     init(
         kind: ReviewLogEntry.Kind,
         blockID: ReviewMonitorLogBlockID,
         range: NSRange,
         text: String,
-        textUTF16Length: Int? = nil
+        textUTF16Length: Int? = nil,
+        animationSpans: [ReviewMonitorLogAnimationSpan] = []
     ) {
         self.kind = kind
         self.blockID = blockID
         self.range = range
         self.text = text
         self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+        self.animationSpans = animationSpans
     }
 
     private static func utf16Length(_ text: String) -> Int {
         (text as NSString).length
     }
+
+    static func animationSpans(
+        forKind kind: ReviewLogEntry.Kind,
+        absoluteRange: NSRange,
+        appendBaseLocation: Int
+    ) -> [ReviewMonitorLogAnimationSpan] {
+        guard Self.wordFadeKinds.contains(kind),
+              absoluteRange.length > 0,
+              absoluteRange.location >= appendBaseLocation
+        else {
+            return []
+        }
+        return [.init(
+            kind: .wordFade,
+            range: NSRange(
+                location: absoluteRange.location - appendBaseLocation,
+                length: absoluteRange.length
+            )
+        )]
+    }
+
+    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
+        .reasoning,
+        .reasoningSummary,
+        .rawReasoning,
+    ]
 }
 
 struct ReviewMonitorLogReplacement: Equatable, Sendable {
@@ -982,7 +1020,12 @@ struct ReviewMonitorLogProjection: Sendable {
                 blockID: block.id,
                 range: blockRange,
                 text: appended,
-                textUTF16Length: suffixLength
+                textUTF16Length: suffixLength,
+                animationSpans: ReviewMonitorLogAppend.animationSpans(
+                    forKind: block.kind,
+                    absoluteRange: blockRange,
+                    appendBaseLocation: previousLength
+                )
             )
         }
 
@@ -1015,7 +1058,15 @@ struct ReviewMonitorLogProjection: Sendable {
                 blockID: block.id,
                 range: NSRange(location: previousLength, length: document.textUTF16Length - previousLength),
                 text: renderedDelta,
-                textUTF16Length: document.textUTF16Length - previousLength
+                textUTF16Length: document.textUTF16Length - previousLength,
+                animationSpans: ReviewMonitorLogAppend.animationSpans(
+                    forKind: block.kind,
+                    absoluteRange: NSRange(
+                        location: previousLength,
+                        length: document.textUTF16Length - previousLength
+                    ),
+                    appendBaseLocation: previousLength
+                )
             )
         }
 

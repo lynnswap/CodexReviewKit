@@ -238,14 +238,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
            canApplyFallbackAppend(suffix, to: document) {
             let suffixUTF16Length = (suffix as NSString).length
             let append = ReviewMonitorLogAppend(
-                kind: fallbackAppendKind(for: document.lastChange),
+                kind: .event,
                 blockID: ReviewMonitorLogBlockID("fallback"),
                 range: NSRange(
                     location: displayedUTF16Length,
                     length: suffixUTF16Length
                 ),
                 text: suffix,
-                textUTF16Length: suffixUTF16Length
+                textUTF16Length: suffixUTF16Length,
+                animationSpans: fallbackAppendAnimationSpans(
+                    suffixUTF16Length: suffixUTF16Length,
+                    in: document
+                )
             )
             let didRender = applyAppend(
                 append,
@@ -300,13 +304,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
     }
 
-    private func fallbackAppendKind(for change: ReviewMonitorLogChange) -> ReviewLogEntry.Kind {
-        if case .append(let append) = change {
-            return append.kind
-        }
-        return .event
-    }
-
     private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLogDocument) -> Bool {
         guard let displayedPresentationSignature else {
             return false
@@ -318,6 +315,26 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
+    }
+
+    private func fallbackAppendAnimationSpans(
+        suffixUTF16Length: Int,
+        in document: ReviewMonitorLogDocument
+    ) -> [ReviewMonitorLogAnimationSpan] {
+        let suffixRange = NSRange(location: displayedUTF16Length, length: suffixUTF16Length)
+        var spans: [ReviewMonitorLogAnimationSpan] = []
+        for block in document.blocks {
+            let intersection = NSIntersectionRange(block.range, suffixRange)
+            guard intersection.length > 0 else {
+                continue
+            }
+            spans.append(contentsOf: ReviewMonitorLogAppend.animationSpans(
+                forKind: block.kind,
+                absoluteRange: intersection,
+                appendBaseLocation: displayedUTF16Length
+            ))
+        }
+        return spans
     }
 
     @discardableResult
@@ -1485,6 +1502,10 @@ extension ReviewMonitorLogScrollView {
 
     func completeWordGlowAnimationsForTesting() {
         logDocumentView.completeWordGlowAnimationsForTesting()
+    }
+
+    func advanceWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+        logDocumentView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
     }
 
     func setReduceMotionForTesting(_ reduceMotion: Bool?) {

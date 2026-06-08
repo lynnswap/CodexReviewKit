@@ -752,6 +752,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.completeWordGlowAnimationsForTesting()
     }
 
+    func advanceLogWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+        logScrollView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
+    }
+
     func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
         logScrollView.setReduceMotionForTesting(reduceMotion)
     }
