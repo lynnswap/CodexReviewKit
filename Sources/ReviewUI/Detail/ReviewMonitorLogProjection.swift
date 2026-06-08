@@ -1271,6 +1271,16 @@ struct ReviewMonitorLogProjection: Sendable {
                     }
                     state.indexByGroup[key] = state.blocks.count
                 }
+                if let key = ReviewMonitorLogProjection.replacementOnlyKey(for: entry) {
+                    if entry.replacesGroup,
+                       let index = state.indexByGroup[key] {
+                        state.blocks[index].text = entry.text
+                        state.blocks[index].metadata = entry.metadata
+                        state.blocks[index].contentBlocks = entry.contentBlocks
+                        continue
+                    }
+                    state.indexByGroup[key] = state.blocks.count
+                }
 
                 state.blocks.append(.init(
                     id: ReviewMonitorLogProjection.blockID(for: entry),
@@ -1374,6 +1384,13 @@ struct ReviewMonitorLogProjection: Sendable {
                     return .noVisibleChange
                 }
 
+                indexByGroup[key] = blocks.count
+            }
+            if let key = ReviewMonitorLogProjection.replacementOnlyKey(for: entry) {
+                if entry.replacesGroup,
+                   let blockIndex = indexByGroup[key] {
+                    return .needsReload(replacementBlockID: blocks[blockIndex].id)
+                }
                 indexByGroup[key] = blocks.count
             }
 
@@ -1671,11 +1688,21 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .toolCall, .contextCompaction:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
             return GroupKey(kind: entry.kind, groupID: groupID)
-        case .todoList, .diagnostic, .error, .progress, .event:
+        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
             return nil
         }
+    }
+
+    private static func replacementOnlyKey(for entry: ReviewLogEntry) -> GroupKey? {
+        guard entry.kind == .toolCall,
+              let groupID = entry.groupID,
+              groupID.isEmpty == false
+        else {
+            return nil
+        }
+        return GroupKey(kind: entry.kind, groupID: groupID)
     }
 
     private static func isVisible(kind: ReviewLogEntry.Kind, text: String) -> Bool {

@@ -329,6 +329,22 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.panels.first?.outputText == "new")
     }
 
+    @Test func nonReplacingToolCallProgressKeepsDistinctBlocks() {
+        let entries: [ReviewLogEntry] = [
+            .init(kind: .toolCall, groupID: "tool-1", text: "MCP review_read started."),
+            .init(kind: .toolCall, groupID: "tool-1", text: "Reading review job."),
+        ]
+        var projection = ReviewMonitorLogProjection()
+        let document = projection.render(entries: entries)
+        let nsText = document.text as NSString
+
+        #expect(document.blocks.map { nsText.substring(with: $0.range) } == [
+            "MCP review_read started.",
+            "Reading review job.",
+        ])
+        #expect(document.text.contains("started.Reading") == false)
+    }
+
     @Test func commandDisplayVisibleTextPreservesNewlineBeforeToggleAttachment() {
         let attachment = ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
         let displayText = "Agent line\n\(attachment)Ran swift test\n\(attachment)\nNext line"

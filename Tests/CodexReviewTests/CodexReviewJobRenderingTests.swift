@@ -102,4 +102,30 @@ struct CodexReviewJobRenderingTests {
         #expect(job.logEntries.count == 2)
         #expect(job.logText == "- updated")
     }
+
+    @Test func contentBlocksCountTowardLogLimit() {
+        let largeResult = String(repeating: "x", count: 300 * 1024)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-large-content-block",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(
+                    kind: .toolCall,
+                    text: "Tool completed. Result available.",
+                    contentBlocks: [
+                        .init(role: .result, title: "Result", text: largeResult, languageHint: "plaintext")
+                    ]
+                ),
+            ]
+        )
+
+        #expect(job.cappedLogBytes <= 256 * 1024)
+        #expect(job.logEntries.first?.text == "Tool completed. Result available.")
+        let retainedResult = job.logEntries.first?.contentBlocks.first?.text ?? ""
+        #expect(retainedResult.isEmpty == false)
+        #expect(retainedResult.utf8.count < largeResult.utf8.count)
+    }
 }

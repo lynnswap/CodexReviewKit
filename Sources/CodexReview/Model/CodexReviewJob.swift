@@ -82,6 +82,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         var errorProjection: ProjectionAccumulator
         var rawProjection: ProjectionAccumulator
         var cappedProjection: ProjectionAccumulator
+        var cappedContentBytes: Int
 
         init(
             blocks: [RenderedBlock],
@@ -91,7 +92,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
             activityProjection: ProjectionAccumulator,
             errorProjection: ProjectionAccumulator,
             rawProjection: ProjectionAccumulator,
-            cappedProjection: ProjectionAccumulator
+            cappedProjection: ProjectionAccumulator,
+            cappedContentBytes: Int
         ) {
             self.blocks = blocks
             self.indexByGroup = indexByGroup
@@ -101,6 +103,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             self.errorProjection = errorProjection
             self.rawProjection = rawProjection
             self.cappedProjection = cappedProjection
+            self.cappedContentBytes = cappedContentBytes
         }
 
         init(entries: [ReviewLogEntry]) {
@@ -133,7 +136,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
 
         var cappedBytes: Int {
-            cappedProjection.text.utf8.count
+            cappedProjection.text.utf8.count + cappedContentBytes
         }
 
         static func rebuild(entries: [ReviewLogEntry]) -> LogState {
@@ -145,7 +148,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 activityProjection: .init(joinMode: .rendered),
                 errorProjection: .init(joinMode: .rendered),
                 rawProjection: .init(joinMode: .rawLines),
-                cappedProjection: .init(joinMode: .rendered)
+                cappedProjection: .init(joinMode: .rendered),
+                cappedContentBytes: entries.reduce(0) { total, entry in
+                    total + CodexReviewJob.cappedContentBlockBytes(for: entry)
+                }
             )
 
             for entry in entries {
@@ -185,6 +191,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
 
         mutating func append(_ entry: ReviewLogEntry) {
+            cappedContentBytes += CodexReviewJob.cappedContentBlockBytes(for: entry)
+
             if let key = CodexReviewJob.mergeKey(for: entry) {
                 if let blockIndex = indexByGroup[key] {
                     let oldText = blocks[blockIndex].text
@@ -571,6 +579,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 replacesGroup: entry.replacesGroup,
                 text: truncatedText,
                 metadata: entry.metadata,
+                contentBlocks: entry.contentBlocks,
                 timestamp: entry.timestamp
             )
         }
@@ -681,13 +690,48 @@ public final class CodexReviewJob: Identifiable, Hashable {
     ) -> [ReviewLogEntry] {
         var trimmedEntries = entries
         let entry = trimmedEntries[index]
+        let contentBytes = cappedContentBlockBytes(for: entry)
+        let totalEntryBytes = entry.text.utf8.count + contentBytes
 
-        if entry.text.utf8.count <= overflowBytes {
+        if totalEntryBytes <= overflowBytes {
             trimmedEntries.remove(at: index)
             return trimmedEntries
         }
 
-        let retainedBytes = max(0, entry.text.utf8.count - overflowBytes)
+        var remainingOverflowBytes = overflowBytes
+        var contentBlocks = entry.contentBlocks
+        if contentBytes > 0 {
+            let retainedContentBytes = max(0, contentBytes - remainingOverflowBytes)
+            contentBlocks = trimContentBlocks(entry.contentBlocks, toMaximumBytes: retainedContentBytes)
+            var removedContentBytes = contentBytes - contentBlockBytes(contentBlocks)
+            if removedContentBytes == 0,
+               retainedContentBytes < contentBytes {
+                contentBlocks = []
+                removedContentBytes = contentBytes
+            }
+            remainingOverflowBytes = max(0, remainingOverflowBytes - removedContentBytes)
+
+            if remainingOverflowBytes == 0 {
+                trimmedEntries[index] = .init(
+                    id: entry.id,
+                    kind: entry.kind,
+                    groupID: entry.groupID,
+                    replacesGroup: entry.replacesGroup,
+                    text: entry.text,
+                    metadata: entry.metadata,
+                    contentBlocks: contentBlocks,
+                    timestamp: entry.timestamp
+                )
+                return trimmedEntries
+            }
+        }
+
+        if entry.text.utf8.count <= remainingOverflowBytes {
+            trimmedEntries.remove(at: index)
+            return trimmedEntries
+        }
+
+        let retainedBytes = max(0, entry.text.utf8.count - remainingOverflowBytes)
         let truncatedText = switch direction {
         case .prefix:
             truncateTextKeepingUTF8Prefix(entry.text, bytes: retainedBytes)
@@ -707,9 +751,68 @@ public final class CodexReviewJob: Identifiable, Hashable {
             replacesGroup: entry.replacesGroup,
             text: truncatedText,
             metadata: entry.metadata,
+            contentBlocks: contentBlocks,
             timestamp: entry.timestamp
         )
         return trimmedEntries
+    }
+
+    private nonisolated static func trimContentBlocks(
+        _ blocks: [ReviewLogEntry.ContentBlock],
+        toMaximumBytes maximumBytes: Int
+    ) -> [ReviewLogEntry.ContentBlock] {
+        guard maximumBytes > 0 else {
+            return []
+        }
+
+        var remainingBytes = maximumBytes
+        var trimmedBlocks: [ReviewLogEntry.ContentBlock] = []
+        for block in blocks {
+            let metadataBytes = contentBlockMetadataBytes(block)
+            guard remainingBytes > metadataBytes else {
+                break
+            }
+
+            let retainedText = truncateTextKeepingUTF8Prefix(
+                block.text,
+                bytes: remainingBytes - metadataBytes
+            )
+            trimmedBlocks.append(.init(
+                role: block.role,
+                title: block.title,
+                text: retainedText,
+                languageHint: block.languageHint
+            ))
+
+            remainingBytes -= metadataBytes + retainedText.utf8.count
+            if retainedText.utf8.count < block.text.utf8.count {
+                break
+            }
+        }
+        return trimmedBlocks
+    }
+
+    private nonisolated static func cappedContentBlockBytes(for entry: ReviewLogEntry) -> Int {
+        guard cappedLogKinds.contains(entry.kind) else {
+            return 0
+        }
+        return contentBlockBytes(entry.contentBlocks)
+    }
+
+    private nonisolated static func contentBlockBytes(_ blocks: [ReviewLogEntry.ContentBlock]) -> Int {
+        blocks.reduce(0) { total, block in
+            total + contentBlockBytes(block)
+        }
+    }
+
+    private nonisolated static func contentBlockBytes(_ block: ReviewLogEntry.ContentBlock) -> Int {
+        contentBlockMetadataBytes(block) + block.text.utf8.count
+    }
+
+    private nonisolated static func contentBlockMetadataBytes(_ block: ReviewLogEntry.ContentBlock) -> Int {
+        block.role.rawValue.utf8.count
+            + (block.title?.utf8.count ?? 0)
+            + (block.languageHint?.utf8.count ?? 0)
     }
 
     private nonisolated static func truncateTextKeepingUTF8Prefix(_ text: String, bytes maxBytes: Int) -> String {
