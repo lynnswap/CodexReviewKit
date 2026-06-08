@@ -512,7 +512,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         if supportsIncrementalAppend == false {
             logState = LogState(entries: logEntries)
         }
-        let didTrim = core.lifecycle.status.isTerminal ? applyReviewLogLimit() : false
+        let didTrim = core.lifecycle.status.isTerminal ? trimReviewLogToLimit() : false
         syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
@@ -529,6 +529,15 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     @discardableResult
     package func applyReviewLogLimit() -> Bool {
+        guard trimReviewLogToLimit() else {
+            return false
+        }
+        syncLogState(mutation: .reload)
+        return true
+    }
+
+    @discardableResult
+    private func trimReviewLogToLimit() -> Bool {
         guard logState.cappedBytes > Self.logLimitBytes else {
             return false
         }

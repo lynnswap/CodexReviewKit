@@ -28,6 +28,7 @@ extension CodexReviewStore {
         job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
+        job.applyReviewLogLimit()
         noteJobMutation()
     }
 
@@ -111,6 +112,7 @@ extension CodexReviewStore {
                 ?? reason.nilIfEmpty
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
+            job.applyReviewLogLimit()
         }
         noteJobMutation()
     }

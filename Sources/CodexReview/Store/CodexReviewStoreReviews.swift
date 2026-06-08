@@ -416,6 +416,7 @@ extension CodexReviewStore {
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
         job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
+        job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
     }
 
@@ -551,6 +552,7 @@ extension CodexReviewStore {
            result != previousAgentMessage {
             job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
         }
+        job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
     }
 
