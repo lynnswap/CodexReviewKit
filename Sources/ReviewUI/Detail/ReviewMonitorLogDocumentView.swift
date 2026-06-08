@@ -41,8 +41,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private var keyboardSelectionFocusUTF16Offset: Int?
     private var preferredTextContainerWidth: CGFloat = 0
     private var currentDecorations: [ReviewMonitorLogDecoration] = []
-    private var currentCommandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = []
-    private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLogBlockID>()
+    private var currentPanels: [ReviewMonitorLogPanel] = []
+    private var expandedPanelIDs = Set<ReviewMonitorLogBlockID>()
     private var cachedFinderStringMapping: FinderStringMapping?
     private(set) var estimatedDocumentHeight: CGFloat = 0
     private var glowTimer: Timer?
@@ -394,71 +394,71 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
               append != nil || replacement != nil || document.text == textStorage.string
         else {
             currentDecorations = []
-            currentCommandOutputPanels = []
-            expandedCommandOutputBlockIDs.removeAll()
+            currentPanels = []
+            expandedPanelIDs.removeAll()
             invalidateFinderStringMapping()
             decorationView.decorations = []
             return
         }
 
-        let commandOutputPanels = displayPanelsWithCurrentExpansionState(document.commandOutputPanels)
+        let panels = displayPanelsWithCurrentExpansionState(document.panels)
         let changedPanelRanges = changedCommandOutputPanelRanges(
-            from: currentCommandOutputPanels,
-            to: commandOutputPanels
+            from: currentPanels,
+            to: panels
         )
         currentDecorations = document.decorations
-        currentCommandOutputPanels = commandOutputPanels
+        currentPanels = panels
         invalidateFinderStringMapping()
         if let append,
            let invalidationRange = styleInvalidationRange(for: append, in: document) {
             applyStyleRuns(
                 document.styleRuns,
-                commandOutputPanels: commandOutputPanels,
+                panels: panels,
                 in: [invalidationRange] + changedPanelRanges
             )
         } else if let replacement,
                   let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
             applyStyleRuns(
                 document.styleRuns,
-                commandOutputPanels: commandOutputPanels,
+                panels: panels,
                 in: [invalidationRange] + changedPanelRanges
             )
         } else {
-            applyStyleRuns(document.styleRuns, commandOutputPanels: commandOutputPanels)
+            applyStyleRuns(document.styleRuns, panels: panels)
         }
         updateDecorationRects()
     }
 
     func resetCommandOutputPanelState() {
-        expandedCommandOutputBlockIDs.removeAll()
-        currentCommandOutputPanels = displayPanelsWithCurrentExpansionState(currentCommandOutputPanels)
+        expandedPanelIDs.removeAll()
+        currentPanels = displayPanelsWithCurrentExpansionState(currentPanels)
         invalidateFinderStringMapping()
     }
 
-    func pruneCommandOutputPanelExpansionState(for panels: [ReviewMonitorLogCommandOutputPanel]) {
+    func pruneCommandOutputPanelExpansionState(for panels: [ReviewMonitorLogPanel]) {
         let blockIDs = Set(panels.map(\.blockID))
-        expandedCommandOutputBlockIDs.formIntersection(blockIDs)
+        expandedPanelIDs.formIntersection(blockIDs)
     }
 
     @discardableResult
     func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) -> Bool {
-        guard let panelIndex = currentCommandOutputPanels.firstIndex(where: { $0.blockID == blockID }) else {
+        guard let panelIndex = currentPanels.firstIndex(where: { $0.blockID == blockID }) else {
             return false
         }
 
-        let willExpand = expandedCommandOutputBlockIDs.contains(blockID) == false
+        let willExpand = expandedPanelIDs.contains(blockID) == false
         let animation = shouldAnimateCommandOutputPanelTransitions
             ? commandOutputPanelLayoutAnimation(toggledBlockID: blockID)
             : nil
 
         if willExpand {
-            expandedCommandOutputBlockIDs.insert(blockID)
+            expandedPanelIDs.insert(blockID)
         } else {
-            expandedCommandOutputBlockIDs.remove(blockID)
+            expandedPanelIDs.remove(blockID)
         }
 
-        currentCommandOutputPanels[panelIndex].isExpanded = willExpand
-        let panel = currentCommandOutputPanels[panelIndex]
+        currentPanels[panelIndex].isExpanded = willExpand
+        let panel = currentPanels[panelIndex]
         refreshCommandOutputPanelAttachments(for: panel)
         invalidateFinderStringMapping()
         invalidateTextLayout(
@@ -477,7 +477,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLogTextRun],
-        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel]
+        panels: [ReviewMonitorLogPanel]
     ) {
         guard textStorage.length > 0 else {
             return
@@ -493,22 +493,22 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 }
                 textStorage.addAttributes(attributes(for: styleRun.style), range: range)
             }
-            applyCommandOutputAttachments(commandOutputPanels, in: fullRange)
+            applyCommandOutputAttachments(panels, in: fullRange)
         }
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
     }
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLogTextRun],
-        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel],
+        panels: [ReviewMonitorLogPanel],
         in invalidationRange: NSRange
     ) {
-        applyStyleRuns(styleRuns, commandOutputPanels: commandOutputPanels, in: [invalidationRange])
+        applyStyleRuns(styleRuns, panels: panels, in: [invalidationRange])
     }
 
     private func applyStyleRuns(
         _ styleRuns: [ReviewMonitorLogTextRun],
-        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel],
+        panels: [ReviewMonitorLogPanel],
         in invalidationRanges: [NSRange]
     ) {
         guard textStorage.length > 0 else {
@@ -531,7 +531,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                     }
                     textStorage.addAttributes(attributes(for: styleRun.style), range: range)
                 }
-                applyCommandOutputAttachments(commandOutputPanels, in: targetRange)
+                applyCommandOutputAttachments(panels, in: targetRange)
             }
         }
         for targetRange in targetRanges {
@@ -540,8 +540,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func changedCommandOutputPanelRanges(
-        from previousPanels: [ReviewMonitorLogCommandOutputPanel],
-        to nextPanels: [ReviewMonitorLogCommandOutputPanel]
+        from previousPanels: [ReviewMonitorLogPanel],
+        to nextPanels: [ReviewMonitorLogPanel]
     ) -> [NSRange] {
         let previousPanelsByID = firstCommandOutputPanelsByID(previousPanels)
         let nextPanelsByID = firstCommandOutputPanelsByID(nextPanels)
@@ -556,9 +556,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func firstCommandOutputPanelsByID(
-        _ panels: [ReviewMonitorLogCommandOutputPanel]
-    ) -> [ReviewMonitorLogBlockID: ReviewMonitorLogCommandOutputPanel] {
-        var panelsByID: [ReviewMonitorLogBlockID: ReviewMonitorLogCommandOutputPanel] = [:]
+        _ panels: [ReviewMonitorLogPanel]
+    ) -> [ReviewMonitorLogBlockID: ReviewMonitorLogPanel] {
+        var panelsByID: [ReviewMonitorLogBlockID: ReviewMonitorLogPanel] = [:]
         for panel in panels where panelsByID[panel.blockID] == nil {
             panelsByID[panel.blockID] = panel
         }
@@ -566,17 +566,17 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func displayPanelsWithCurrentExpansionState(
-        _ panels: [ReviewMonitorLogCommandOutputPanel]
-    ) -> [ReviewMonitorLogCommandOutputPanel] {
+        _ panels: [ReviewMonitorLogPanel]
+    ) -> [ReviewMonitorLogPanel] {
         pruneCommandOutputPanelExpansionState(for: panels)
         return panels.map { panel in
             var panel = panel
-            panel.isExpanded = expandedCommandOutputBlockIDs.contains(panel.blockID)
+            panel.isExpanded = expandedPanelIDs.contains(panel.blockID)
             return panel
         }
     }
 
-    private func refreshCommandOutputPanelAttachments(for panel: ReviewMonitorLogCommandOutputPanel) {
+    private func refreshCommandOutputPanelAttachments(for panel: ReviewMonitorLogPanel) {
         let targetRange = NSIntersectionRange(panel.range, NSRange(location: 0, length: textStorage.length))
         guard targetRange.length > 0 else {
             return
@@ -617,7 +617,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func applyCommandOutputAttachments(
-        _ panels: [ReviewMonitorLogCommandOutputPanel],
+        _ panels: [ReviewMonitorLogPanel],
         in targetRange: NSRange
     ) {
         for panel in panels {
@@ -676,42 +676,37 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func commandOutputPanelAttachmentPayload(
-        for panel: ReviewMonitorLogCommandOutputPanel
-    ) -> ReviewMonitorLogCommandOutputPanel {
+        for panel: ReviewMonitorLogPanel
+    ) -> ReviewMonitorLogPanel {
         guard panel.isExpanded == false else {
             return panel
         }
-        var payload = panel
-        payload.commandText = ""
-        payload.outputText = ""
-        payload.lineCount = 0
-        payload.exitText = nil
-        return payload
+        return panel.collapsedPayload()
     }
 
     private func commandOutputPanelAttachmentRange(
-        for panel: ReviewMonitorLogCommandOutputPanel
+        for panel: ReviewMonitorLogPanel
     ) -> NSRange {
         let labelLength = commandOutputHeaderUTF16Length(for: panel)
         return NSRange(location: panel.range.location + labelLength + 1, length: 1)
     }
 
     private func commandOutputTimerAttachmentRange(
-        for panel: ReviewMonitorLogCommandOutputPanel
+        for panel: ReviewMonitorLogPanel
     ) -> NSRange? {
         guard panel.startedAt != nil else {
             return nil
         }
         let location = panel.range.location
-            + (ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter + panel.title).utf16.count
+            + (ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter + panel.title).utf16.count
         return NSRange(location: location, length: 1)
     }
 
-    private func commandOutputHeaderUTF16Length(for panel: ReviewMonitorLogCommandOutputPanel) -> Int {
+    private func commandOutputHeaderUTF16Length(for panel: ReviewMonitorLogPanel) -> Int {
         (
-            ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+            ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
                 + panel.title
-                + (panel.isActive && panel.startedAt != nil ? ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter : "")
+                + (panel.isActive && panel.startedAt != nil ? ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter : "")
         ).utf16.count
     }
 
@@ -1496,7 +1491,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
 
         var cursor = 0
-        let panels = currentCommandOutputPanels
+        let panels = currentPanels
             .filter { $0.range.location >= 0 && NSMaxRange($0.range) <= documentString.length }
             .sorted { $0.range.location < $1.range.location }
 
@@ -1529,7 +1524,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         return mapping
     }
 
-    private func commandOutputFinderText(for panel: ReviewMonitorLogCommandOutputPanel) -> String {
+    private func commandOutputFinderText(for panel: ReviewMonitorLogPanel) -> String {
         let trimmedCommandText = panel.commandText.trimmingCharacters(in: .whitespacesAndNewlines)
         let commandLineText = trimmedCommandText.isEmpty ? "" : "$ \(trimmedCommandText)"
         let trimmedOutputText = panel.outputText.trimmingCharacters(in: .newlines)
@@ -1836,7 +1831,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private static func userVisibleString(_ string: String) -> String {
-        ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: string)
+        ReviewMonitorLogDisplayDocument.userVisibleText(from: string)
     }
 
     private func invalidateTextLayout(measureEstimatedHeightImmediately: Bool) {
@@ -2659,7 +2654,7 @@ extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelCountForTesting: Int {
         layoutTextViewport(force: true)
-        return currentCommandOutputPanels.count
+        return currentPanels.count
     }
 
     var terminalDecorationRectCountForTesting: Int {
@@ -2674,7 +2669,7 @@ extension ReviewMonitorLogDocumentView {
 
     var expandedCommandOutputPanelCountForTesting: Int {
         layoutTextViewport(force: true)
-        return currentCommandOutputPanels.filter(\.isExpanded).count
+        return currentPanels.filter(\.isExpanded).count
     }
 
     var commandOutputPanelUsesTextKit2ForTesting: Bool {
@@ -2698,7 +2693,7 @@ extension ReviewMonitorLogDocumentView {
 
     var collapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
+        guard let panel = currentPanels.first(where: { $0.isExpanded == false }) else {
             return nil
         }
         let attachmentRange = commandOutputPanelAttachmentRange(for: panel)
@@ -2707,7 +2702,7 @@ extension ReviewMonitorLogDocumentView {
 
     var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
+        guard let panel = currentPanels.first(where: { $0.isExpanded == false }) else {
             return false
         }
         let attachmentRange = commandOutputPanelAttachmentRange(for: panel)
@@ -2806,7 +2801,7 @@ extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first,
+        guard let panel = currentPanels.first,
               let panelView = firstVisibleCommandOutputPanelViewForTesting(),
               let attachmentLeadingX = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
                 .first?.rectValue.minX
@@ -2827,7 +2822,7 @@ extension ReviewMonitorLogDocumentView {
 
     var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first,
+        guard let panel = currentPanels.first,
               panel.range.length > 1,
               let attachmentMidY = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
                 .first?.rectValue.midY,
@@ -2854,7 +2849,7 @@ extension ReviewMonitorLogDocumentView {
 
     func toggleFirstCommandOutputPanelForTesting() {
         layoutTextViewport(force: true)
-        guard let blockID = currentCommandOutputPanels.first?.blockID else {
+        guard let blockID = currentPanels.first?.blockID else {
             return
         }
         onCommandOutputPanelToggle?(blockID)
@@ -2863,7 +2858,7 @@ extension ReviewMonitorLogDocumentView {
     @discardableResult
     func clickFirstCommandOutputPanelHeaderForTesting() -> Bool {
         layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first,
+        guard let panel = currentPanels.first,
               let rect = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1)).first?.rectValue,
               let event = NSEvent.mouseEvent(
                   with: .leftMouseDown,
@@ -2893,7 +2888,7 @@ extension ReviewMonitorLogDocumentView {
     }
 
     private func firstCommandOutputToggleAttachmentForTesting() -> ReviewMonitorCommandOutputToggleAttachment? {
-        guard let panel = currentCommandOutputPanels.first,
+        guard let panel = currentPanels.first,
               panel.range.location < textStorage.length
         else {
             return nil

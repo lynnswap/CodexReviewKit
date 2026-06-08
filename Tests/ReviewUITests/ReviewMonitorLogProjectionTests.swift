@@ -214,27 +214,120 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         )
-        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+        let displayText = ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Running swift test")
         #expect(displayDocument.text.contains("$ swift test") == false)
         #expect(displayDocument.decorations.isEmpty)
-        #expect(displayDocument.commandOutputPanels.count == 1)
-        #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
-        #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
-        #expect(displayDocument.commandOutputPanels.first?.isActive == true)
+        #expect(displayDocument.panels.count == 1)
+        #expect(displayDocument.panels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(displayDocument.panels.first?.commandText == "swift test")
+        #expect(displayDocument.panels.first?.isActive == true)
+    }
+
+    @Test func contentBlockProjectsSyntaxPanelAndPrettyPrintsJSON() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-tool-json",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .toolCall,
+                    groupID: "tool-1",
+                    replacesGroup: true,
+                    text: "Tool completed. Result available.",
+                    contentBlocks: [
+                        .init(
+                            role: .result,
+                            title: "Result",
+                            text: #"{"z":1,"a":[true]}"#,
+                            languageHint: "json"
+                        )
+                    ]
+                ),
+            ]
+        )
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(from: document(for: job))
+        let panel = displayDocument.panels.first
+
+        #expect(displayDocument.panels.count == 1)
+        #expect(panel?.title == "Result")
+        guard case .syntax(let syntax)? = panel?.payload else {
+            Issue.record("Expected content block to project as a syntax panel.")
+            return
+        }
+        #expect(syntax.languageHint == "json")
+        #expect(syntax.text.contains(#""a" : ["#))
+        #expect(syntax.text.contains(#""z" : 1"#))
+        #expect(syntax.text.range(of: #""a""#)!.lowerBound < syntax.text.range(of: #""z""#)!.lowerBound)
+    }
+
+    @Test func contentBlockPlaintextFallsBackToPlainTextSyntaxPanel() {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-tool-plaintext",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .toolCall,
+                    text: "Dynamic tool completed. Result available.",
+                    contentBlocks: [
+                        .init(role: .result, title: "Result", text: "no matches", languageHint: "plaintext")
+                    ]
+                ),
+            ]
+        )
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(from: document(for: job))
+
+        guard case .syntax(let syntax)? = displayDocument.panels.first?.payload else {
+            Issue.record("Expected plaintext content block to project as a syntax panel.")
+            return
+        }
+        #expect(syntax.text == "no matches")
+        #expect(syntax.languageHint == "plaintext")
+    }
+
+    @Test func groupedReplacementReplacesContentBlocks() {
+        let initialEntry = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            replacesGroup: true,
+            text: "Tool started.",
+            contentBlocks: [
+                .init(role: .result, title: "Result", text: "old", languageHint: "plaintext")
+            ]
+        )
+        let replacementEntry = ReviewLogEntry(
+            kind: .toolCall,
+            groupID: "tool-1",
+            replacesGroup: true,
+            text: "Tool completed. Result available.",
+            contentBlocks: [
+                .init(role: .result, title: "Result", text: "new", languageHint: "plaintext")
+            ]
+        )
+        var projection = ReviewMonitorLogProjection()
+        let document = projection.render(entries: [initialEntry, replacementEntry])
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(from: document)
+
+        #expect(document.blocks.first?.contentBlocks.map(\.text) == ["new"])
+        #expect(displayDocument.panels.first?.outputText == "new")
     }
 
     @Test func commandDisplayVisibleTextPreservesNewlineBeforeToggleAttachment() {
-        let attachment = ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+        let attachment = ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
         let displayText = "Agent line\n\(attachment)Ran swift test\n\(attachment)\nNext line"
 
         #expect(
-            ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayText) ==
+            ReviewMonitorLogDisplayDocument.userVisibleText(from: displayText) ==
                 "Agent line\nRan swift test\nNext line"
         )
     }
@@ -252,13 +345,13 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         )
-        let blockIDs = displayDocument.commandOutputPanels.map(\.blockID)
+        let blockIDs = displayDocument.panels.map(\.blockID)
 
-        #expect(displayDocument.commandOutputPanels.count == 2)
+        #expect(displayDocument.panels.count == 2)
         #expect(Set(blockIDs).count == blockIDs.count)
         #expect(blockIDs.first == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
     }
@@ -284,16 +377,16 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
 
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: document(for: job),
-            expandedBlockIDs: [],
+            expandedPanelIDs: [],
             currentDate: Date(timeIntervalSince1970: 104)
         )
-        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+        let displayText = ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Running swift test")
-        #expect(displayDocument.commandOutputPanels.first?.isActive == true)
-        #expect(displayDocument.commandOutputPanels.first?.startedAt == startedAt)
+        #expect(displayDocument.panels.first?.isActive == true)
+        #expect(displayDocument.panels.first?.startedAt == startedAt)
     }
 
     @Test func completedCommandLifecycleDisplaysFixedDurationTitle() {
@@ -320,22 +413,22 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let firstDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let firstDisplayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: [],
+            expandedPanelIDs: [],
             currentDate: Date(timeIntervalSince1970: 120)
         )
-        let laterDisplayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let laterDisplayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: [],
+            expandedPanelIDs: [],
             currentDate: Date(timeIntervalSince1970: 180)
         )
 
         #expect(firstDisplayDocument.text == laterDisplayDocument.text)
-        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+        #expect(ReviewMonitorLogDisplayDocument.userVisibleText(
             from: firstDisplayDocument.text
         ) == "Ran swift test for 3s")
-        #expect(firstDisplayDocument.commandOutputPanels.first?.isActive == false)
+        #expect(firstDisplayDocument.panels.first?.isActive == false)
     }
 
     @Test func statusOnlyCompletedCommandWithoutOutputDisplaysRanTitle() {
@@ -355,14 +448,14 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
 
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: document(for: job),
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         )
-        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+        let displayText = ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument.text)
 
         #expect(displayText == "Ran swift test")
-        #expect(displayDocument.commandOutputPanels.first?.isActive == false)
+        #expect(displayDocument.panels.first?.isActive == false)
     }
 
     @Test func canceledCommandStatusIsInactive() {
@@ -388,17 +481,17 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
 
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: document(for: job),
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         )
-        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+        let displayText = ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument.text)
         let attachmentCount = displayDocument.text.filter {
-            String($0) == ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+            String($0) == ReviewMonitorLogDisplayDocument.toggleAttachmentCharacter
         }.count
 
         #expect(displayText == "Ran swift test")
-        #expect(displayDocument.commandOutputPanels.first?.isActive == false)
+        #expect(displayDocument.panels.first?.isActive == false)
         #expect(attachmentCount == 2)
     }
 
@@ -454,16 +547,16 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
 
-        let readText = ReviewMonitorCommandOutputDisplayDocument.make(
+        let readText = ReviewMonitorLogDisplayDocument.make(
             from: document(for: readJob),
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         ).text
-        let visibleReadText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: readText)
-        let searchText = ReviewMonitorCommandOutputDisplayDocument.make(
+        let visibleReadText = ReviewMonitorLogDisplayDocument.userVisibleText(from: readText)
+        let searchText = ReviewMonitorLogDisplayDocument.make(
             from: document(for: searchJob),
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         ).text
-        let visibleSearchText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: searchText)
+        let visibleSearchText = ReviewMonitorLogDisplayDocument.userVisibleText(from: searchText)
 
         #expect(visibleReadText == "Reading ThreadItem.ts")
         #expect(visibleSearchText == "Searched files in workspace for 2s")
@@ -604,12 +697,12 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: []
+            expandedPanelIDs: []
         )
 
-        let displayText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+        let displayText = ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument.text)
         #expect(displayText.hasPrefix("Ran command for 3s\n\nMCP codex_review.review_read started."))
         #expect(displayDocument.text.contains("$ swift test") == false)
     }
@@ -637,12 +730,12 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+            expandedPanelIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
         )
 
-        #expect(displayDocument.commandOutputPanels.first?.exitText == "exit 1")
+        #expect(displayDocument.panels.first?.exitText == "exit 1")
     }
 
     @Test func commandOutputPanelResultUsesMergedCompletionMetadata() {
@@ -693,13 +786,13 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
 
-        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+        let displayDocument = ReviewMonitorLogDisplayDocument.make(
             from: document(for: job),
-            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+            expandedPanelIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
         )
 
-        #expect(displayDocument.commandOutputPanels.first?.outputText == "Tests passed")
-        #expect(displayDocument.commandOutputPanels.first?.exitText == "Success")
+        #expect(displayDocument.panels.first?.outputText == "Tests passed")
+        #expect(displayDocument.panels.first?.exitText == "Success")
     }
 
     @Test func metadataIsPreservedOnBlocks() {

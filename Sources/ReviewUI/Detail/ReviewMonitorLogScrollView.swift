@@ -207,7 +207,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     ) -> Bool {
         sourceDocument = document
         let document = displayDocument(for: document)
-        logDocumentView.pruneCommandOutputPanelExpansionState(for: document.commandOutputPanels)
+        logDocumentView.pruneCommandOutputPanelExpansionState(for: document.panels)
         if allowIncrementalUpdate, displayedRevision == document.revision {
             return false
         }
@@ -276,7 +276,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func displayDocument(for document: ReviewMonitorLogDocument) -> ReviewMonitorLogDocument {
-        ReviewMonitorCommandOutputDisplayDocument.make(from: document)
+        ReviewMonitorLogDisplayDocument.make(from: document)
     }
 
     private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
@@ -712,7 +712,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(decoration.style)
         }
 
-        for panel in document.commandOutputPanels {
+        for panel in document.panels {
             guard let range = clippedRange(panel.range, upperBound: clampedPrefixLength) else {
                 continue
             }
@@ -1110,11 +1110,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 @MainActor
 extension ReviewMonitorLogScrollView {
     var displayedTextForTesting: String {
-        ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayedText)
+        ReviewMonitorLogDisplayDocument.userVisibleText(from: displayedText)
     }
 
     func displayTextForTesting(sourceDocument: ReviewMonitorLogDocument) -> String {
-        ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument(for: sourceDocument).text)
+        ReviewMonitorLogDisplayDocument.userVisibleText(from: displayDocument(for: sourceDocument).text)
     }
 
     var usesCustomTextKit2SurfaceForTesting: Bool {

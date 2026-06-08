@@ -1,6 +1,31 @@
 import Foundation
 
 public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
+    public struct ContentBlock: Codable, Sendable, Hashable {
+        public enum Role: String, Codable, Sendable, Hashable {
+            case result
+            case error
+            case detail
+        }
+
+        public let role: Role
+        public let title: String?
+        public let text: String
+        public let languageHint: String?
+
+        public init(
+            role: Role,
+            title: String? = nil,
+            text: String,
+            languageHint: String? = nil
+        ) {
+            self.role = role
+            self.title = title
+            self.text = text
+            self.languageHint = languageHint
+        }
+    }
+
     public struct Metadata: Codable, Sendable, Hashable {
         public struct CommandAction: Codable, Sendable, Hashable {
             public enum Kind: String, Codable, Sendable, Hashable {
@@ -49,8 +74,6 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         public let tool: String?
         public let query: String?
         public let path: String?
-        public let resultText: String?
-        public let errorText: String?
 
         public init(
             sourceType: String,
@@ -70,9 +93,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
             server: String? = nil,
             tool: String? = nil,
             query: String? = nil,
-            path: String? = nil,
-            resultText: String? = nil,
-            errorText: String? = nil
+            path: String? = nil
         ) {
             self.sourceType = sourceType
             self.title = title
@@ -92,8 +113,6 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
             self.tool = tool
             self.query = query
             self.path = path
-            self.resultText = resultText
-            self.errorText = errorText
         }
     }
 
@@ -120,6 +139,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
     public let replacesGroup: Bool
     public let text: String
     public let metadata: Metadata?
+    public let contentBlocks: [ContentBlock]
     public let timestamp: Date
 
     public init(
@@ -129,6 +149,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         replacesGroup: Bool = false,
         text: String,
         metadata: Metadata? = nil,
+        contentBlocks: [ContentBlock] = [],
         timestamp: Date = Date()
     ) {
         self.id = id
@@ -137,6 +158,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         self.replacesGroup = replacesGroup
         self.text = text
         self.metadata = metadata
+        self.contentBlocks = contentBlocks
         self.timestamp = timestamp
     }
 

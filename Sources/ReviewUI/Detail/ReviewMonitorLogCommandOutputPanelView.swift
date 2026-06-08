@@ -1,4 +1,5 @@
 import AppKit
+import SyntaxEditorUI
 
 @MainActor
 class ReviewMonitorLogTiledContentView: NSView {
@@ -819,11 +820,11 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
 
 final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
     let blockID: ReviewMonitorLogBlockID
-    let panel: ReviewMonitorLogCommandOutputPanel
+    let panel: ReviewMonitorLogPanel
     let outputLineHeight: CGFloat
 
     init(
-        panel: ReviewMonitorLogCommandOutputPanel,
+        panel: ReviewMonitorLogPanel,
         outputLineHeight: CGFloat
     ) {
         self.blockID = panel.blockID
@@ -1179,10 +1180,13 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private let outputScrollView = ReviewMonitorCommandOutputScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
     private let resultLabel = NSTextField(labelWithString: "")
-    private var panel: ReviewMonitorLogCommandOutputPanel?
+    private var syntaxEditorView: SyntaxEditorView?
+    private var syntaxEditorModel: SyntaxEditorModel?
+    private var panel: ReviewMonitorLogPanel?
     private var terminalText = ""
     private var commandLineText = ""
     private var outputText = ""
+    private var syntaxText = ""
     private var outputLineCount = 0
     private var shouldScrollOutputToBottomOnNextLayout = false
 
@@ -1234,7 +1238,16 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         nil
     }
 
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
+    func configure(_ panel: ReviewMonitorLogPanel) {
+        switch panel.payload {
+        case .terminal:
+            configureTerminalPanel(panel)
+        case .syntax(let syntax):
+            configureSyntaxPanel(panel, syntax: syntax)
+        }
+    }
+
+    private func configureTerminalPanel(_ panel: ReviewMonitorLogPanel) {
         let previousPanel = self.panel
         let wasExpanded = previousPanel?.isExpanded == true
         self.panel = panel
@@ -1280,16 +1293,64 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             terminalText = nextTerminalText
         }
         resultLabel.stringValue = panel.exitText ?? ""
+        syntaxEditorView?.isHidden = true
+        needsLayout = true
+    }
+
+    private func configureSyntaxPanel(
+        _ panel: ReviewMonitorLogPanel,
+        syntax: ReviewMonitorLogPanel.Syntax
+    ) {
+        self.panel = panel
+        terminalText = syntax.text
+        commandLineText = ""
+        outputText = syntax.text
+        syntaxText = syntax.text
+        outputLineCount = Self.lineCount(syntax.text)
+        shouldScrollOutputToBottomOnNextLayout = false
+
+        shellLabel.isHidden = true
+        commandTextView.isHidden = true
+        outputScrollView.isHidden = true
+        resultLabel.isHidden = true
+
+        let editorView = ensureSyntaxEditorView()
+        editorView.isHidden = panel.isExpanded == false
+        guard panel.isExpanded else {
+            needsLayout = true
+            return
+        }
+
+        let language = Self.syntaxLanguage(for: syntax.languageHint)
+        let nextModel = SyntaxEditorModel(
+            text: syntax.text,
+            language: language,
+            isEditable: false,
+            lineWrappingEnabled: true,
+            colorTheme: .default,
+            drawsBackground: false
+        )
+        syntaxEditorModel = nextModel
+        editorView.update(model: nextModel)
+        editorView.drawsBackground = false
+        editorView.hasVerticalScroller = true
+        editorView.hasHorizontalScroller = false
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
+        if case .syntax = panel?.payload {
+            layoutSyntaxPanel()
+            return
+        }
+
         guard panel?.isExpanded == true else {
             shellLabel.frame = .zero
             commandTextView.frame = .zero
             outputScrollView.frame = .zero
             resultLabel.frame = .zero
+            syntaxEditorView?.frame = .zero
             return
         }
 
@@ -1365,7 +1426,30 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             width: resultWidth,
             height: footerHeight
         )
+        syntaxEditorView?.frame = .zero
         scrollOutputToBottomIfNeeded()
+    }
+
+    private func layoutSyntaxPanel() {
+        shellLabel.frame = .zero
+        commandTextView.frame = .zero
+        outputScrollView.frame = .zero
+        resultLabel.frame = .zero
+
+        guard panel?.isExpanded == true,
+              let syntaxEditorView,
+              syntaxEditorView.isHidden == false
+        else {
+            syntaxEditorView?.frame = .zero
+            return
+        }
+
+        syntaxEditorView.frame = NSRect(
+            x: Self.horizontalInset,
+            y: Self.topInset,
+            width: max(0, bounds.width - Self.horizontalInset * 2),
+            height: max(0, bounds.height - Self.topInset - Self.bottomInset)
+        )
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -1374,6 +1458,11 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
               bounds.contains(point)
         else {
             return nil
+        }
+        if let syntaxEditorView,
+           syntaxEditorView.isHidden == false,
+           syntaxEditorView.frame.contains(point) {
+            return syntaxEditorView.hitTest(convert(point, to: syntaxEditorView))
         }
         if outputScrollView.isHidden == false,
            outputScrollView.frame.contains(point) {
@@ -1403,6 +1492,9 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         guard panel?.isExpanded == true else {
             return []
         }
+        if case .syntax = panel?.payload {
+            return syntaxPanelRects(forRange: range, convertedTo: targetView)
+        }
 
         var rects: [NSRect] = []
         for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
@@ -1419,6 +1511,10 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         guard panel?.isExpanded == true else {
             return
         }
+        if case .syntax = panel?.payload {
+            scrollSyntaxPanelRangeToVisible(range)
+            return
+        }
         for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
             mappedRange.textView.scrollRangeToVisible(mappedRange.range)
         }
@@ -1428,8 +1524,92 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         guard panel?.isExpanded == true else {
             return
         }
+        if case .syntax = panel?.payload {
+            return
+        }
         for mappedRange in mappedTextViewRanges(forTerminalRange: range) {
             drawCharacters(in: mappedRange.range, textView: mappedRange.textView, forContentView: view)
+        }
+    }
+
+    private func syntaxPanelRects(
+        forRange range: NSRange,
+        convertedTo targetView: NSView
+    ) -> [NSRect] {
+        guard let syntaxEditorView,
+              syntaxEditorView.isHidden == false
+        else {
+            return []
+        }
+        let fullRange = NSRange(location: 0, length: (syntaxText as NSString).length)
+        guard NSIntersectionRange(range, fullRange).length > 0 else {
+            return []
+        }
+        let visibleRect = syntaxEditorView.convert(syntaxEditorView.contentView.bounds, to: targetView)
+        if visibleRect.isNull == false, visibleRect.isEmpty == false {
+            return [visibleRect]
+        }
+        let frameRect = convert(syntaxEditorView.frame, to: targetView)
+        return frameRect.isNull || frameRect.isEmpty ? [] : [frameRect]
+    }
+
+    private func scrollSyntaxPanelRangeToVisible(_ range: NSRange) {
+        guard let syntaxEditorView else {
+            return
+        }
+        let fullRange = NSRange(location: 0, length: (syntaxText as NSString).length)
+        guard NSIntersectionRange(range, fullRange).length > 0 else {
+            return
+        }
+        syntaxEditorView.contentView.scroll(to: .zero)
+        syntaxEditorView.reflectScrolledClipView(syntaxEditorView.contentView)
+    }
+
+    private func ensureSyntaxEditorView() -> SyntaxEditorView {
+        if let syntaxEditorView {
+            return syntaxEditorView
+        }
+
+        let model = SyntaxEditorModel(
+            text: "",
+            language: .plainText,
+            isEditable: false,
+            lineWrappingEnabled: true,
+            colorTheme: .default,
+            drawsBackground: false
+        )
+        let editorView = SyntaxEditorView(model: model)
+        editorView.isFindInteractionEnabled = false
+        editorView.drawsBackground = false
+        editorView.hasVerticalScroller = true
+        editorView.hasHorizontalScroller = false
+        editorView.autohidesScrollers = true
+        editorView.scrollerStyle = .overlay
+        editorView.isHidden = true
+        addSubview(editorView)
+        syntaxEditorModel = model
+        syntaxEditorView = editorView
+        return editorView
+    }
+
+    private nonisolated static func syntaxLanguage(for languageHint: String?) -> SyntaxLanguage {
+        let normalized = languageHint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+
+        switch normalized {
+        case "json":
+            return .json
+        case "swift":
+            return .swift
+        case "objective-c", "objectivec", "objc":
+            return .objectiveC
+        case "js", "javascript":
+            return .javascript
+        case "plain", "plaintext", "plain-text", "text", "":
+            return .plainText
+        default:
+            return SyntaxLanguage.named(normalized) ?? .plainText
         }
     }
 
@@ -1638,10 +1818,16 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     nonisolated static func cardHeight(
-        for panel: ReviewMonitorLogCommandOutputPanel,
+        for panel: ReviewMonitorLogPanel,
         width: CGFloat,
         outputLineHeight: CGFloat
     ) -> CGFloat {
+        if case .syntax = panel.payload {
+            return topInset +
+                outputLineHeight * CGFloat(visibleOutputLineCount + 7) +
+                bottomInset
+        }
+
         let contentWidth = max(0, width - commandLeadingInset - commandTrailingInset)
         let commandHeight = commandTextHeight(
             for: commandLineText(for: panel.commandText),

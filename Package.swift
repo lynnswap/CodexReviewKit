@@ -25,6 +25,7 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.11.0")),
+        .package(url: "https://github.com/lynnswap/SyntaxEditorUI.git", exact: "0.11.0"),
     ],
     targets: [
         .target(
@@ -84,6 +85,7 @@ let package = Package(
             dependencies: [
                 "CodexReview",
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
+                .product(name: "SyntaxEditorUI", package: "SyntaxEditorUI"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

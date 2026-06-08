@@ -16,6 +16,7 @@ struct ReviewMonitorLogBlock: Equatable, Sendable {
     var range: NSRange
     var sourceRange: NSRange
     var metadata: ReviewLogEntry.Metadata?
+    var contentBlocks: [ReviewLogEntry.ContentBlock]
 
     init(
         id: ReviewMonitorLogBlockID,
@@ -23,7 +24,8 @@ struct ReviewMonitorLogBlock: Equatable, Sendable {
         groupID: String?,
         range: NSRange,
         sourceRange: NSRange? = nil,
-        metadata: ReviewLogEntry.Metadata? = nil
+        metadata: ReviewLogEntry.Metadata? = nil,
+        contentBlocks: [ReviewLogEntry.ContentBlock] = []
     ) {
         self.id = id
         self.kind = kind
@@ -31,6 +33,7 @@ struct ReviewMonitorLogBlock: Equatable, Sendable {
         self.range = range
         self.sourceRange = sourceRange ?? range
         self.metadata = metadata
+        self.contentBlocks = contentBlocks
     }
 }
 
@@ -98,17 +101,140 @@ struct ReviewMonitorLogDecoration: Equatable, Sendable {
     var style: ReviewMonitorLogDecorationStyle
 }
 
-struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
+struct ReviewMonitorLogPanel: Equatable, Hashable, Sendable {
+    enum Payload: Equatable, Hashable, Sendable {
+        case terminal(Terminal)
+        case syntax(Syntax)
+    }
+
+    struct Terminal: Equatable, Hashable, Sendable {
+        var commandText: String
+        var outputText: String
+        var lineCount: Int
+        var isActive: Bool
+        var startedAt: Date?
+        var exitText: String?
+    }
+
+    struct Syntax: Equatable, Hashable, Sendable {
+        var text: String
+        var languageHint: String?
+        var tone: ReviewMonitorLogStatusTone
+    }
+
     var blockID: ReviewMonitorLogBlockID
     var range: NSRange
-    var commandText: String
-    var outputText: String
-    var lineCount: Int
     var isExpanded: Bool
-    var isActive: Bool
-    var startedAt: Date?
     var title: String
-    var exitText: String?
+    var payload: Payload
+
+    var terminal: Terminal? {
+        guard case .terminal(let terminal) = payload else { return nil }
+        return terminal
+    }
+
+    var syntax: Syntax? {
+        guard case .syntax(let syntax) = payload else { return nil }
+        return syntax
+    }
+
+    var isActive: Bool {
+        terminal?.isActive ?? false
+    }
+
+    var startedAt: Date? {
+        terminal?.startedAt
+    }
+
+    var exitText: String? {
+        get {
+            terminal?.exitText
+        }
+        set {
+            guard case .terminal(var terminal) = payload else {
+                return
+            }
+            terminal.exitText = newValue
+            payload = .terminal(terminal)
+        }
+    }
+
+    var commandText: String {
+        get {
+            terminal?.commandText ?? ""
+        }
+        set {
+            guard case .terminal(var terminal) = payload else {
+                return
+            }
+            terminal.commandText = newValue
+            payload = .terminal(terminal)
+        }
+    }
+
+    var outputText: String {
+        get {
+            switch payload {
+            case .terminal(let terminal):
+                terminal.outputText
+            case .syntax(let syntax):
+                syntax.text
+            }
+        }
+        set {
+            switch payload {
+            case .terminal(var terminal):
+                terminal.outputText = newValue
+                terminal.lineCount = Self.lineCount(newValue)
+                payload = .terminal(terminal)
+            case .syntax(var syntax):
+                syntax.text = newValue
+                payload = .syntax(syntax)
+            }
+        }
+    }
+
+    var lineCount: Int {
+        get {
+            switch payload {
+            case .terminal(let terminal):
+                terminal.lineCount
+            case .syntax(let syntax):
+                Self.lineCount(syntax.text)
+            }
+        }
+        set {
+            guard case .terminal(var terminal) = payload else {
+                return
+            }
+            terminal.lineCount = newValue
+            payload = .terminal(terminal)
+        }
+    }
+
+    func collapsedPayload() -> ReviewMonitorLogPanel {
+        var collapsed = self
+        switch collapsed.payload {
+        case .terminal(var terminal):
+            terminal.commandText = ""
+            terminal.outputText = ""
+            terminal.lineCount = 0
+            terminal.exitText = nil
+            collapsed.payload = .terminal(terminal)
+        case .syntax(var syntax):
+            syntax.text = ""
+            collapsed.payload = .syntax(syntax)
+        }
+        return collapsed
+    }
+
+    private static func lineCount(_ text: String) -> Int {
+        guard text.isEmpty == false else {
+            return 0
+        }
+        let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
+    }
 }
 
 struct ReviewMonitorLogAppend: Equatable, Sendable {
@@ -177,7 +303,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     var blocks: [ReviewMonitorLogBlock]
     var styleRuns: [ReviewMonitorLogTextRun]
     var decorations: [ReviewMonitorLogDecoration]
-    var commandOutputPanels: [ReviewMonitorLogCommandOutputPanel]
+    var panels: [ReviewMonitorLogPanel]
     var revision: UInt64
     var lastChange: ReviewMonitorLogChange
 
@@ -189,7 +315,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         blocks: [ReviewMonitorLogBlock] = [],
         styleRuns: [ReviewMonitorLogTextRun] = [],
         decorations: [ReviewMonitorLogDecoration] = [],
-        commandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = [],
+        panels: [ReviewMonitorLogPanel] = [],
         revision: UInt64 = 0,
         lastChange: ReviewMonitorLogChange = .reload
     ) {
@@ -200,7 +326,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         self.blocks = blocks
         self.styleRuns = styleRuns
         self.decorations = decorations
-        self.commandOutputPanels = commandOutputPanels
+        self.panels = panels
         self.revision = revision
         self.lastChange = lastChange
     }
@@ -212,7 +338,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     mutating func rebuildPresentation() {
         styleRuns.removeAll(keepingCapacity: true)
         decorations.removeAll(keepingCapacity: true)
-        commandOutputPanels.removeAll(keepingCapacity: true)
+        panels.removeAll(keepingCapacity: true)
         for block in blocks {
             ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
         }
@@ -231,7 +357,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
         decorations.removeAll {
             $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
         }
-        commandOutputPanels.removeAll {
+        panels.removeAll {
             $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
         }
         ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
@@ -239,11 +365,10 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
 
     var finderSupplementSignature: Int {
         var hasher = Hasher()
-        for panel in commandOutputPanels {
+        for panel in panels {
             hasher.combine(panel.blockID)
             combine(panel.range, into: &hasher)
-            hasher.combine(panel.commandText)
-            hasher.combine(panel.outputText)
+            hasher.combine(panel.payload)
         }
         return hasher.finalize()
     }
@@ -883,6 +1008,7 @@ struct ReviewMonitorLogProjection: Sendable {
         var groupID: String?
         var text: String
         var metadata: ReviewLogEntry.Metadata?
+        var contentBlocks: [ReviewLogEntry.ContentBlock]
     }
 
     private struct EntrySignature: Equatable, Sendable {
@@ -893,6 +1019,7 @@ struct ReviewMonitorLogProjection: Sendable {
         var textUTF16Length: Int
         var textHash: Int
         var metadataHash: Int?
+        var contentBlocksHash: Int
         var timestamp: Date
 
         init(_ entry: ReviewLogEntry) {
@@ -911,6 +1038,9 @@ struct ReviewMonitorLogProjection: Sendable {
             self.replacesGroup = entry.replacesGroup
             self.textUTF16Length = ReviewMonitorLogProjection.utf16Length(entry.text)
             self.textHash = textHasher.finalize()
+            var contentBlocksHasher = Hasher()
+            contentBlocksHasher.combine(entry.contentBlocks)
+            self.contentBlocksHash = contentBlocksHasher.finalize()
             self.timestamp = entry.timestamp
         }
     }
@@ -972,7 +1102,8 @@ struct ReviewMonitorLogProjection: Sendable {
                 groupID: block.groupID,
                 range: blockRange,
                 sourceRange: sourceBlockRange,
-                metadata: block.metadata
+                metadata: block.metadata,
+                contentBlocks: block.contentBlocks
             )
             document.blocks.append(logBlock)
             ReviewMonitorLogStyler.appendPresentation(for: logBlock, to: &document)
@@ -1008,6 +1139,7 @@ struct ReviewMonitorLogProjection: Sendable {
             document.blocks[blockIndexInDocument].range.length += deltaLength
             document.blocks[blockIndexInDocument].sourceRange.length += sourceDeltaLength
             document.blocks[blockIndexInDocument].metadata = block.metadata
+            document.blocks[blockIndexInDocument].contentBlocks = block.contentBlocks
             document.rebuildPresentation(forBlockAt: blockIndexInDocument)
             lastBlockIndex = blockIndex
             return .init(
@@ -1059,7 +1191,8 @@ struct ReviewMonitorLogProjection: Sendable {
                 groupID: block.groupID,
                 range: NSRange(location: previousBlock.range.location, length: renderedLength),
                 sourceRange: NSRange(location: previousBlock.sourceRange.location, length: sourceLength),
-                metadata: block.metadata
+                metadata: block.metadata,
+                contentBlocks: block.contentBlocks
             )
             document.styleRuns.removeAll {
                 $0.range.location >= previousBlock.range.location ||
@@ -1126,11 +1259,13 @@ struct ReviewMonitorLogProjection: Sendable {
                         if entry.replacesGroup {
                             state.blocks[index].text = entry.text
                             state.blocks[index].metadata = entry.metadata
+                            state.blocks[index].contentBlocks = entry.contentBlocks
                         } else {
                             state.blocks[index].text.append(entry.text)
                             if let metadata = entry.metadata {
                                 state.blocks[index].metadata = metadata
                             }
+                            state.blocks[index].contentBlocks.append(contentsOf: entry.contentBlocks)
                         }
                         continue
                     }
@@ -1142,7 +1277,8 @@ struct ReviewMonitorLogProjection: Sendable {
                     kind: entry.kind,
                     groupID: entry.groupID,
                     text: entry.text,
-                    metadata: entry.metadata
+                    metadata: entry.metadata,
+                    contentBlocks: entry.contentBlocks
                 ))
             }
 
@@ -1180,6 +1316,7 @@ struct ReviewMonitorLogProjection: Sendable {
                     if let metadata = entry.metadata {
                         blocks[blockIndex].metadata = metadata
                     }
+                    blocks[blockIndex].contentBlocks.append(contentsOf: entry.contentBlocks)
                     let newText = blocks[blockIndex].text
                     let wasVisible = ReviewMonitorLogProjection.isVisible(kind: entry.kind, text: oldText)
                     let isVisible = ReviewMonitorLogProjection.isVisible(kind: entry.kind, text: newText)
@@ -1246,7 +1383,8 @@ struct ReviewMonitorLogProjection: Sendable {
                 kind: entry.kind,
                 groupID: entry.groupID,
                 text: entry.text,
-                metadata: entry.metadata
+                metadata: entry.metadata,
+                contentBlocks: entry.contentBlocks
             )
             blocks.append(block)
             if let append = appendBlock(block, at: blockIndex) {
@@ -1533,9 +1671,9 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
+        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .toolCall, .contextCompaction:
             return GroupKey(kind: entry.kind, groupID: groupID)
-        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
+        case .todoList, .diagnostic, .error, .progress, .event:
             return nil
         }
     }

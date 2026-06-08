@@ -273,9 +273,7 @@ public enum ReviewMonitorPreviewContent {
             server: metadata.server,
             tool: metadata.tool,
             query: metadata.query,
-            path: metadata.path,
-            resultText: metadata.resultText,
-            errorText: metadata.errorText
+            path: metadata.path
         )
     }
 
@@ -805,7 +803,7 @@ public enum ReviewMonitorPreviewContent {
         workspaceName: String
     ) -> [ReviewLogEntry] {
         let sourceReadGroupID = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
-        let sourceReadCommand = "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+        let sourceReadCommand = "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorLogDisplayDocument.swift"
         return [
             .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
             .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
@@ -867,8 +865,8 @@ public enum ReviewMonitorPreviewContent {
                         .init(
                             kind: .read,
                             command: sourceReadCommand,
-                            name: "ReviewMonitorCommandOutputDisplayDocument.swift",
-                            path: "Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+                            name: "ReviewMonitorLogDisplayDocument.swift",
+                            path: "Sources/ReviewUI/Detail/ReviewMonitorLogDisplayDocument.swift"
                         )
                     ],
                     commandStatus: "inProgress"

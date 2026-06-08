@@ -1,7 +1,7 @@
 import Foundation
 import CodexReview
 
-enum ReviewMonitorCommandOutputDisplayDocument {
+enum ReviewMonitorLogDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
 
     static func userVisibleText(from displayText: String) -> String {
@@ -36,11 +36,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     static func make(
         from source: ReviewMonitorLogDocument,
-        expandedBlockIDs: Set<ReviewMonitorLogBlockID> = [],
+        expandedPanelIDs: Set<ReviewMonitorLogBlockID> = [],
         currentDate: Date = Date()
     ) -> ReviewMonitorLogDocument {
-        _ = expandedBlockIDs
-        guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
+        _ = expandedPanelIDs
+        guard source.blocks.contains(where: isPanelCandidate) else {
             return source
         }
 
@@ -50,7 +50,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         var blocks: [ReviewMonitorLogBlock] = []
         var styleRuns: [ReviewMonitorLogTextRun] = []
         var decorations: [ReviewMonitorLogDecoration] = []
-        var panels: [ReviewMonitorLogCommandOutputPanel] = []
+        var panels: [ReviewMonitorLogPanel] = []
         var usedPanelBlockIDs: Set<ReviewMonitorLogBlockID> = []
         var cursor = 0
 
@@ -111,12 +111,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     for: panelSource,
                     sourceString: sourceString
                 )
-                let placeholder = commandOutputPlaceholder(
+                let placeholder = panelPlaceholder(
                     title: title,
                     includesActiveTimer: isActive && metadata?.startedAt != nil
                 )
                 let displayRange = appendText(placeholder)
-                let controlRange = commandOutputControlRange(
+                let controlRange = panelControlRange(
                     in: displayRange,
                     title: title,
                     includesActiveTimer: isActive && metadata?.startedAt != nil
@@ -127,7 +127,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     groupID: panelSource.anchor.groupID,
                     range: displayRange,
                     sourceRange: commandPanelSourceRange(panelSource),
-                    metadata: metadata
+                    metadata: metadata,
+                    contentBlocks: panelSource.output?.contentBlocks ?? panelSource.command?.contentBlocks ?? panelSource.anchor.contentBlocks
                 ))
                 styleRuns.append(.init(
                     range: controlRange,
@@ -136,14 +137,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 panels.append(.init(
                     blockID: blockID,
                     range: displayRange,
-                    commandText: commandText,
-                    outputText: outputText,
-                    lineCount: commandOutputLineCount(outputText),
                     isExpanded: false,
-                    isActive: isActive,
-                    startedAt: metadata?.startedAt,
                     title: title,
-                    exitText: commandOutputResultText(for: metadata)
+                    payload: .terminal(.init(
+                        commandText: commandText,
+                        outputText: outputText,
+                        lineCount: commandOutputLineCount(outputText),
+                        isActive: isActive,
+                        startedAt: metadata?.startedAt,
+                        exitText: commandOutputResultText(for: metadata)
+                    ))
                 ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
@@ -153,7 +156,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     groupID: block.groupID,
                     range: displayRange,
                     sourceRange: block.sourceRange,
-                    metadata: block.metadata
+                    metadata: block.metadata,
+                    contentBlocks: block.contentBlocks
                 ))
                 appendPresentationRuns(
                     from: source,
@@ -161,6 +165,13 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     displayRange: displayRange,
                     styleRuns: &styleRuns,
                     decorations: &decorations
+                )
+                appendSyntaxPanels(
+                    for: block,
+                    styleRuns: &styleRuns,
+                    panels: &panels,
+                    usedPanelBlockIDs: &usedPanelBlockIDs,
+                    appendText: appendText
                 )
             }
 
@@ -180,7 +191,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             blocks: blocks,
             styleRuns: styleRuns,
             decorations: decorations,
-            commandOutputPanels: panels,
+            panels: panels,
             revision: source.revision,
             lastChange: mappedLastChange(
                 source.lastChange,
@@ -234,9 +245,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         let tool = primary.tool ?? fallback.tool
         let query = primary.query ?? fallback.query
         let path = primary.path ?? fallback.path
-        let resultText = primary.resultText ?? fallback.resultText
-        let errorText = primary.errorText ?? fallback.errorText
-
         return ReviewLogEntry.Metadata(
             sourceType: primary.sourceType,
             title: title,
@@ -255,10 +263,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             server: server,
             tool: tool,
             query: query,
-            path: path,
-            resultText: resultText,
-            errorText: errorText
+            path: path
         )
+    }
+
+    private static func isPanelCandidate(_ block: ReviewMonitorLogBlock) -> Bool {
+        block.kind == .command ||
+            block.kind == .commandOutput ||
+            block.contentBlocks.contains { $0.text.nilIfEmpty != nil }
     }
 
     private static func firstBlocksByGroupID(
@@ -331,17 +343,29 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         usedBlockIDs: inout Set<ReviewMonitorLogBlockID>
     ) -> ReviewMonitorLogBlockID {
         let preferredBlockID = commandPanelBlockID(for: block)
+        return uniquePanelBlockID(
+            preferred: preferredBlockID,
+            fallback: block.id,
+            usedBlockIDs: &usedBlockIDs
+        )
+    }
+
+    private static func uniquePanelBlockID(
+        preferred preferredBlockID: ReviewMonitorLogBlockID,
+        fallback fallbackBlockID: ReviewMonitorLogBlockID,
+        usedBlockIDs: inout Set<ReviewMonitorLogBlockID>
+    ) -> ReviewMonitorLogBlockID {
         if usedBlockIDs.insert(preferredBlockID).inserted {
             return preferredBlockID
         }
 
-        if usedBlockIDs.insert(block.id).inserted {
-            return block.id
+        if usedBlockIDs.insert(fallbackBlockID).inserted {
+            return fallbackBlockID
         }
 
         var suffix = 2
         while true {
-            let candidate = ReviewMonitorLogBlockID("\(block.id.rawValue):\(suffix)")
+            let candidate = ReviewMonitorLogBlockID("\(fallbackBlockID.rawValue):\(suffix)")
             if usedBlockIDs.insert(candidate).inserted {
                 return candidate
             }
@@ -400,7 +424,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         )
     }
 
-    private static func commandOutputPlaceholder(
+    private static func panelPlaceholder(
         title: String,
         includesActiveTimer: Bool
     ) -> String {
@@ -408,7 +432,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return "\(label)\n\(toggleAttachmentCharacter)"
     }
 
-    private static func commandOutputControlRange(
+    private static func panelControlRange(
         in displayRange: NSRange,
         title: String,
         includesActiveTimer: Bool
@@ -421,6 +445,89 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     + (includesActiveTimer ? toggleAttachmentCharacter : "")
             ).utf16.count
         )
+    }
+
+    private static func appendSyntaxPanels(
+        for block: ReviewMonitorLogBlock,
+        styleRuns: inout [ReviewMonitorLogTextRun],
+        panels: inout [ReviewMonitorLogPanel],
+        usedPanelBlockIDs: inout Set<ReviewMonitorLogBlockID>,
+        appendText: (String) -> NSRange
+    ) {
+        for (index, contentBlock) in block.contentBlocks.enumerated() {
+            guard contentBlock.text.nilIfEmpty != nil else {
+                continue
+            }
+            let title = syntaxPanelTitle(for: contentBlock)
+            let placeholder = "\n" + panelPlaceholder(title: title, includesActiveTimer: false)
+            let displayRange = appendText(placeholder)
+            let controlRange = panelControlRange(
+                in: NSRange(location: displayRange.location + 1, length: max(0, displayRange.length - 1)),
+                title: title,
+                includesActiveTimer: false
+            )
+            let panelID = uniquePanelBlockID(
+                preferred: ReviewMonitorLogBlockID("syntax:\(block.id.rawValue):\(index)"),
+                fallback: block.id,
+                usedBlockIDs: &usedPanelBlockIDs
+            )
+            let content = normalizedSyntaxContent(contentBlock)
+            styleRuns.append(.init(
+                range: controlRange,
+                style: .commandOutputControl(keepsTrailingContent: false)
+            ))
+            panels.append(.init(
+                blockID: panelID,
+                range: displayRange,
+                isExpanded: false,
+                title: title,
+                payload: .syntax(.init(
+                    text: content.text,
+                    languageHint: content.languageHint,
+                    tone: contentBlock.role == .error ? .failure : .neutral
+                ))
+            ))
+        }
+    }
+
+    private static func syntaxPanelTitle(for contentBlock: ReviewLogEntry.ContentBlock) -> String {
+        if let title = contentBlock.title?.nilIfEmpty {
+            return title
+        }
+        switch contentBlock.role {
+        case .result:
+            return "Result"
+        case .error:
+            return "Error"
+        case .detail:
+            return "Detail"
+        }
+    }
+
+    private static func normalizedSyntaxContent(
+        _ contentBlock: ReviewLogEntry.ContentBlock
+    ) -> (text: String, languageHint: String?) {
+        if let jsonText = prettyPrintedJSONText(from: contentBlock.text) {
+            return (jsonText, "json")
+        }
+        return (contentBlock.text, contentBlock.languageHint ?? "plaintext")
+    }
+
+    private static func prettyPrintedJSONText(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+              let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(object),
+              let prettyData = try? JSONSerialization.data(
+                  withJSONObject: object,
+                  options: [.prettyPrinted, .sortedKeys]
+              ),
+              let prettyText = String(data: prettyData, encoding: .utf8)
+        else {
+            return nil
+        }
+        return prettyText
     }
 
     private static func commandOutputLineCount(_ text: String) -> Int {

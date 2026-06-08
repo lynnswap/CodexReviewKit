@@ -924,10 +924,9 @@ private extension ReviewLogEntry {
                 server: metadata?.server,
                 tool: metadata?.tool,
                 query: metadata?.query,
-                path: metadata?.path,
-                resultText: metadata?.resultText,
-                errorText: metadata?.errorText
+                path: metadata?.path
             ),
+            contentBlocks: contentBlocks,
             timestamp: completedAt
         )
     }

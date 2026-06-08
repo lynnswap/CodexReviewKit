@@ -1502,7 +1502,7 @@ struct AppServerClientTests {
 
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
 
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata, let contentBlocks) = try await iterator.next()
         else {
             Issue.record("Expected active command to be closed before cancellation.")
             return
@@ -1516,6 +1516,7 @@ struct AppServerClientTests {
         #expect(metadata?.itemID == "cmd-1")
         #expect(metadata?.command == "git diff")
         #expect(metadata?.startedAt == startedAt)
+        #expect(contentBlocks.isEmpty)
         #expect(metadata?.completedAt != nil)
         #expect(metadata?.durationMs != nil)
         #expect(metadata?.commandStatus == "canceled")
@@ -2022,7 +2023,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "codex_review.review_read completed. Result: ok",
+            text: "codex_review.review_read completed. Result available.",
             groupID: "tool-1",
             replacesGroup: true,
             metadata: .init(
@@ -2030,9 +2031,11 @@ struct AppServerClientTests {
                 title: "codex_review.review_read",
                 status: "completed",
                 server: "codex_review",
-                tool: "review_read",
-                resultText: "ok"
-            )
+                tool: "review_read"
+            ),
+            contentBlocks: [
+                .init(role: .result, title: "Result", text: "ok", languageHint: "plaintext")
+            ]
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .reasoningSummary,
@@ -2443,9 +2446,11 @@ struct AppServerClientTests {
                 sourceType: "contextCompaction",
                 status: "failed",
                 itemID: "compact-1",
-                completedAt: completedAt,
-                errorText: "compaction failed"
-            )
+                completedAt: completedAt
+            ),
+            contentBlocks: [
+                .init(role: .error, title: "Error", text: "compaction failed", languageHint: "plaintext")
+            ]
         ))
     }
 
@@ -2735,7 +2740,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "codex_review.review_read completed. Error: denied",
+            text: "codex_review.review_read completed. Error available.",
             groupID: "tool-error",
             replacesGroup: true,
             metadata: .init(
@@ -2743,13 +2748,15 @@ struct AppServerClientTests {
                 title: "codex_review.review_read",
                 status: "failed",
                 server: "codex_review",
-                tool: "review_read",
-                errorText: "denied"
-            )
+                tool: "review_read"
+            ),
+            contentBlocks: [
+                .init(role: .error, title: "Error", text: "denied", languageHint: "plaintext")
+            ]
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "Dynamic tool web.search completed. Result: no matches",
+            text: "Dynamic tool web.search completed. Result available.",
             groupID: "tool-success-false",
             replacesGroup: true,
             metadata: .init(
@@ -2757,9 +2764,67 @@ struct AppServerClientTests {
                 title: "web.search",
                 status: "failed",
                 namespace: "web",
-                tool: "search",
-                resultText: "no matches"
+                tool: "search"
+            ),
+            contentBlocks: [
+                .init(role: .result, title: "Result", text: "no matches", languageHint: "plaintext")
+            ]
+        ))
+    }
+
+    @Test func backendMapsStructuredToolResultToJSONContentBlock() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "dynamicToolCall",
+                    id: "tool-json",
+                    namespace: "web",
+                    tool: "search",
+                    result: .object([
+                        "z": 1,
+                        "a": .array([true]),
+                    ])
+                )
             )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "Dynamic tool web.search completed. Result available.",
+            groupID: "tool-json",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "dynamicToolCall",
+                title: "web.search",
+                status: "completed",
+                namespace: "web",
+                tool: "search"
+            ),
+            contentBlocks: [
+                .init(
+                    role: .result,
+                    title: "Result",
+                    text: """
+                    {
+                      "a" : [
+                        true
+                      ],
+                      "z" : 1
+                    }
+                    """,
+                    languageHint: "json"
+                )
+            ]
         ))
     }
 
@@ -3197,8 +3262,8 @@ private struct TestItem: Encodable, Sendable {
     var tool: String?
     var query: String?
     var path: String?
-    var result: String?
-    var error: String?
+    var result: TestItemValue?
+    var error: TestItemValue?
     var success: Bool?
     var prompt: String?
     var summary: [String]?
@@ -3222,8 +3287,8 @@ private struct TestItem: Encodable, Sendable {
         tool: String? = nil,
         query: String? = nil,
         path: String? = nil,
-        result: String? = nil,
-        error: String? = nil,
+        result: TestItemValue? = nil,
+        error: TestItemValue? = nil,
         success: Bool? = nil,
         prompt: String? = nil,
         summary: [String]? = nil,
@@ -3252,6 +3317,42 @@ private struct TestItem: Encodable, Sendable {
         self.prompt = prompt
         self.summary = summary
         self.content = content
+    }
+}
+
+private enum TestItemValue: Encodable, Sendable, ExpressibleByStringLiteral, ExpressibleByIntegerLiteral, ExpressibleByBooleanLiteral {
+    case string(String)
+    case int(Int)
+    case bool(Bool)
+    case object([String: TestItemValue])
+    case array([TestItemValue])
+
+    init(stringLiteral value: String) {
+        self = .string(value)
+    }
+
+    init(integerLiteral value: Int) {
+        self = .int(value)
+    }
+
+    init(booleanLiteral value: Bool) {
+        self = .bool(value)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .int(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        }
     }
 }
 

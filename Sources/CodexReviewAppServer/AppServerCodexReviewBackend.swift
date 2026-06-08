@@ -1609,7 +1609,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 startedAt: startedAt,
                 completedAt: completedAt,
                 lifecycle: lifecycle
-            )
+            ),
+            contentBlocks: contentBlocks()
         )
     }
 
@@ -1657,10 +1658,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
             server: server,
             tool: tool,
             query: query,
-            path: path,
-            resultText: result?.nonNullDebugText?.nilIfEmpty,
-            errorText: error?.nonNullDebugText?.nilIfEmpty
+            path: path
         )
+    }
+
+    private func contentBlocks() -> [ReviewLogEntry.ContentBlock] {
+        var blocks: [ReviewLogEntry.ContentBlock] = []
+        if let errorBlock = error?.contentBlock(role: .error, title: "Error") {
+            blocks.append(errorBlock)
+        }
+        if let resultBlock = result?.contentBlock(role: .result, title: "Result") {
+            blocks.append(resultBlock)
+        }
+        return blocks
     }
 
     var metadataCommandActions: [ReviewLogEntry.Metadata.CommandAction]? {
@@ -1733,11 +1743,11 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     private var resultSuffix: String {
-        if let error = error?.nonNullDebugText?.nilIfEmpty {
-            return " Error: \(error)"
+        if error?.contentText != nil {
+            return " Error available."
         }
-        if let result = result?.nonNullDebugText?.nilIfEmpty {
-            return " Result: \(result)"
+        if result?.contentText != nil {
+            return " Result available."
         }
         return ""
     }
@@ -1813,6 +1823,28 @@ private enum AppServerNotificationValue: Decodable, Sendable {
         return debugText
     }
 
+    var contentText: String? {
+        if case .null = self {
+            return nil
+        }
+        return displayText.nilIfEmpty
+    }
+
+    func contentBlock(
+        role: ReviewLogEntry.ContentBlock.Role,
+        title: String?
+    ) -> ReviewLogEntry.ContentBlock? {
+        guard let text = contentText else {
+            return nil
+        }
+        return ReviewLogEntry.ContentBlock(
+            role: role,
+            title: title,
+            text: text,
+            languageHint: languageHint
+        )
+    }
+
     private var debugText: String {
         switch self {
         case .string(let value):
@@ -1829,6 +1861,28 @@ private enum AppServerNotificationValue: Decodable, Sendable {
             Self.jsonText(value.map(\.foundationObject), fallback: "[]")
         case .null:
             "null"
+        }
+    }
+
+    private var displayText: String {
+        switch self {
+        case .object(let value):
+            Self.jsonText(value.mapValues(\.foundationObject), fallback: "{}", prettyPrinted: true)
+        case .array(let value):
+            Self.jsonText(value.map(\.foundationObject), fallback: "[]", prettyPrinted: true)
+        default:
+            debugText
+        }
+    }
+
+    private var languageHint: String? {
+        switch self {
+        case .object, .array:
+            "json"
+        case .string, .int, .double, .bool:
+            "plaintext"
+        case .null:
+            nil
         }
     }
 
@@ -1851,10 +1905,14 @@ private enum AppServerNotificationValue: Decodable, Sendable {
         }
     }
 
-    private static func jsonText(_ object: Any, fallback: String) -> String {
+    private static func jsonText(_ object: Any, fallback: String, prettyPrinted: Bool = false) -> String {
+        var options: JSONSerialization.WritingOptions = [.sortedKeys]
+        if prettyPrinted {
+            options.insert(.prettyPrinted)
+        }
         guard let data = try? JSONSerialization.data(
             withJSONObject: object,
-            options: [.sortedKeys]
+            options: options
         ),
               let text = String(data: data, encoding: .utf8)
         else {

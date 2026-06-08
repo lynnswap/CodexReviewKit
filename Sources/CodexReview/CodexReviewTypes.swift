@@ -228,7 +228,8 @@ package enum BackendReviewEvent: Equatable, Sendable {
         text: String,
         groupID: String?,
         replacesGroup: Bool,
-        metadata: ReviewLogEntry.Metadata? = nil
+        metadata: ReviewLogEntry.Metadata? = nil,
+        contentBlocks: [ReviewLogEntry.ContentBlock] = []
     )
     case completed(summary: String, result: String?)
     case failed(String)
