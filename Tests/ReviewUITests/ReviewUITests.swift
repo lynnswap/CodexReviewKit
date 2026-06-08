@@ -3825,6 +3825,64 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("I found the relevant update path."))
     }
 
+    @Test func coalescedCommandAppendAfterReasoningKeepsReasoningAndDoesNotReload() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-reasoning-command-append",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: startedAt,
+            summary: "Running review.",
+            logEntries: [
+                .init(
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Need to inspect files."
+                )
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+
+        job.appendLogEntry(.init(
+            kind: .command,
+            groupID: "cmd_1",
+            text: "$ git diff",
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd_1",
+                command: "git diff",
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        ))
+        job.appendLogEntry(.init(
+            kind: .rawReasoning,
+            groupID: "reasoning_2",
+            text: "Inspecting details after the command starts."
+        ))
+
+        let snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log.contains("Need to inspect files."))
+        #expect(snapshot.log.contains("Running git diff"))
+        #expect(snapshot.log.contains("Inspecting details after the command starts."))
+        #expect(transport.logAppendCountForTesting == appendCount + 2)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
     @Test func selectedJobMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-markdown-append-fallback",

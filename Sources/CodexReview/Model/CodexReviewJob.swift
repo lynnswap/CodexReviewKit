@@ -512,7 +512,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         if supportsIncrementalAppend == false {
             logState = LogState(entries: logEntries)
         }
-        let didTrim = applyReviewLogLimit()
+        let didTrim = core.lifecycle.status.isTerminal ? applyReviewLogLimit() : false
         syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
@@ -622,7 +622,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 entries: entries,
                 at: index,
                 overflowBytes: overflowBytes,
-                direction: .prefix
+                direction: .suffix
             )
         }
 

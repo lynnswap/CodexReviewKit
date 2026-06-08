@@ -194,7 +194,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 source.lastChange,
                 sourceBlocks: source.blocks,
                 displayBlocks: blocks,
-                previousDisplayBlocks: previousDisplay?.blocks ?? [],
+                previousDisplay: previousDisplay,
                 displayText: text
             )
         )
@@ -768,7 +768,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         _ change: ReviewMonitorLogChange,
         sourceBlocks: [ReviewMonitorLogBlock],
         displayBlocks: [ReviewMonitorLogBlock],
-        previousDisplayBlocks: [ReviewMonitorLogBlock],
+        previousDisplay: ReviewMonitorLogDocument?,
         displayText: String
     ) -> ReviewMonitorLogChange {
         switch change {
@@ -779,15 +779,15 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 sourceBlocks: sourceBlocks,
                 displayBlocks: displayBlocks
             ) else {
-                if let replacement = mappedCommandPanelReplacement(
+                if let panelMutation = mappedCommandPanelMutation(
                     sourceRange: append.range,
                     blockID: append.blockID,
                     sourceBlocks: sourceBlocks,
                     displayBlocks: displayBlocks,
-                    previousDisplayBlocks: previousDisplayBlocks,
+                    previousDisplay: previousDisplay,
                     displayText: displayText
                 ) {
-                    return .replace(replacement)
+                    return panelMutation
                 }
                 return .reload
             }
@@ -806,15 +806,15 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 sourceBlocks: sourceBlocks,
                 displayBlocks: displayBlocks
             ) else {
-                if let panelReplacement = mappedCommandPanelReplacement(
+                if let panelMutation = mappedCommandPanelMutation(
                     sourceRange: replacement.range,
                     blockID: replacement.blockID,
                     sourceBlocks: sourceBlocks,
                     displayBlocks: displayBlocks,
-                    previousDisplayBlocks: previousDisplayBlocks,
+                    previousDisplay: previousDisplay,
                     displayText: displayText
                 ) {
-                    return .replace(panelReplacement)
+                    return panelMutation
                 }
                 return .reload
             }
@@ -830,14 +830,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
     }
 
-    private static func mappedCommandPanelReplacement(
+    private static func mappedCommandPanelMutation(
         sourceRange: NSRange,
         blockID: ReviewMonitorLogBlockID,
         sourceBlocks: [ReviewMonitorLogBlock],
         displayBlocks: [ReviewMonitorLogBlock],
-        previousDisplayBlocks: [ReviewMonitorLogBlock],
+        previousDisplay: ReviewMonitorLogDocument?,
         displayText: String
-    ) -> ReviewMonitorLogReplacement? {
+    ) -> ReviewMonitorLogChange? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
               sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
               NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
@@ -854,16 +854,63 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return nil
         }
         let replacementText = displayString.substring(with: displayBlock.range)
-        let previousRange = commandPanelDisplayBlock(
+        if let previousRange = commandPanelDisplayBlock(
             for: sourceBlock,
-            displayBlocks: previousDisplayBlocks
-        )?.range ?? displayBlock.range
+            displayBlocks: previousDisplay?.blocks ?? []
+        )?.range {
+            return .replace(.init(
+                kind: displayBlock.kind,
+                blockID: displayBlock.id,
+                range: previousRange,
+                text: replacementText,
+                textUTF16Length: displayBlock.range.length
+            ))
+        }
+
+        guard let append = mappedNewCommandPanelAppend(
+            displayBlock: displayBlock,
+            displayText: displayText,
+            previousDisplay: previousDisplay
+        ) else {
+            return nil
+        }
+        return .append(append)
+    }
+
+    private static func mappedNewCommandPanelAppend(
+        displayBlock: ReviewMonitorLogBlock,
+        displayText: String,
+        previousDisplay: ReviewMonitorLogDocument?
+    ) -> ReviewMonitorLogAppend? {
+        guard let previousDisplay else {
+            return nil
+        }
+
+        let displayString = displayText as NSString
+        let previousLength = previousDisplay.textUTF16Length
+        guard previousLength <= displayString.length else {
+            return nil
+        }
+        guard displayString.substring(with: NSRange(location: 0, length: previousLength)) == previousDisplay.text else {
+            return nil
+        }
+
+        let suffixRange = NSRange(
+            location: previousLength,
+            length: displayString.length - previousLength
+        )
+        guard suffixRange.length > 0,
+              NSIntersectionRange(displayBlock.range, suffixRange).length > 0
+        else {
+            return nil
+        }
+
         return .init(
             kind: displayBlock.kind,
             blockID: displayBlock.id,
-            range: previousRange,
-            text: replacementText,
-            textUTF16Length: displayBlock.range.length
+            range: suffixRange,
+            text: displayString.substring(with: suffixRange),
+            textUTF16Length: suffixRange.length
         )
     }
 

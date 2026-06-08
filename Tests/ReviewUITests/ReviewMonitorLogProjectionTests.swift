@@ -198,6 +198,114 @@ struct ReviewMonitorLogProjectionTests {
         ])
     }
 
+    @Test func rendererAppendsNewCommandPanelAfterReasoningWithoutReplacingReasoning() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let initialEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning-1",
+                text: "Need to inspect files."
+            ),
+        ]
+        let appendedEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .command,
+                groupID: "cmd-1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "inProgress",
+                    itemID: "cmd-1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "inProgress"
+                )
+            ),
+        ]
+        let renderer = ReviewMonitorLogRenderer()
+        _ = await renderer.render(entries: initialEntries)
+
+        let documents = try #require(await renderer.appendSteps(
+            entries: appendedEntries,
+            sourceRange: initialEntries.count..<(initialEntries.count + appendedEntries.count)
+        ))
+        let commandAppendDocument = try #require(documents.first)
+        #expect(documents.dropFirst().isEmpty)
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: commandAppendDocument.display.text
+        )
+
+        #expect(visibleText.contains("Need to inspect files."))
+        #expect(visibleText.contains("Running git diff"))
+        guard case .append(let append) = commandAppendDocument.display.lastChange else {
+            Issue.record("Expected new command panel to map to a display append.")
+            return
+        }
+        #expect(append.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(append.text.hasPrefix("\n\n"))
+        #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: append.text
+        ).hasPrefix("\n\nRunning git diff"))
+        #expect(append.animationSpans.isEmpty)
+    }
+
+    @Test func rendererKeepsBlankSeparatorBetweenCommandPanelAndFollowingReasoning() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let completedAt = Date(timeIntervalSince1970: 213)
+        let initialEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .command,
+                groupID: "cmd-1",
+                text: "$ sed -n '1,120p' Sources/File.swift",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-1",
+                    command: "sed -n '1,120p' Sources/File.swift",
+                    exitCode: 0,
+                    startedAt: startedAt,
+                    completedAt: completedAt,
+                    durationMs: 13_000,
+                    commandStatus: "completed"
+                )
+            ),
+        ]
+        let appendedEntries: [ReviewLogEntry] = [
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning-1",
+                text: "Inspecting network components\n\nI need to inspect the details."
+            ),
+        ]
+        let renderer = ReviewMonitorLogRenderer()
+        _ = await renderer.render(entries: initialEntries)
+
+        let documents = try #require(await renderer.appendSteps(
+            entries: appendedEntries,
+            sourceRange: initialEntries.count..<(initialEntries.count + appendedEntries.count)
+        ))
+        let reasoningAppendDocument = try #require(documents.first)
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
+            from: reasoningAppendDocument.display.text
+        )
+
+        #expect(visibleText.contains("Ran sed -n for 13s\n\nInspecting network components"))
+        guard case .append(let append) = reasoningAppendDocument.display.lastChange else {
+            Issue.record("Expected following reasoning to remain a display append.")
+            return
+        }
+        #expect(append.text.hasPrefix("\n\nInspecting network components"))
+        #expect(append.animationSpans == [
+            .init(
+                kind: .wordFade,
+                range: NSRange(
+                    location: ("\n\n" as NSString).length,
+                    length: ("Inspecting network components\n\nI need to inspect the details." as NSString).length
+                )
+            ),
+        ])
+    }
+
     @Test func contextCompactionMarkerUsesDedicatedProjectionStyle() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "contextCompaction",
