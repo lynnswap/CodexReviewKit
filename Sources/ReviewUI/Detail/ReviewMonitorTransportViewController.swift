@@ -1166,6 +1166,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.setFinderSelectedRangeForTesting(range)
     }
 
+    func scrollLogFinderRangeToVisibleForTesting(_ range: NSRange) {
+        logScrollView.scrollFinderRangeToVisibleForTesting(range)
+    }
+
     func simulateLogFinderEmptySelectedRangesForTesting() {
         logScrollView.simulateFinderEmptySelectedRangesForTesting()
     }

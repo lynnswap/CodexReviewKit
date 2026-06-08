@@ -1558,11 +1558,34 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             return
         }
         let fullRange = NSRange(location: 0, length: (syntaxText as NSString).length)
-        guard NSIntersectionRange(range, fullRange).length > 0 else {
+        let clampedRange = NSIntersectionRange(range, fullRange)
+        guard clampedRange.length > 0 else {
             return
         }
-        syntaxEditorView.contentView.scroll(to: .zero)
+        syntaxEditorView.selectedRange = clampedRange
+        if let documentRect = syntaxPanelDocumentRect(forRange: clampedRange, in: syntaxEditorView) {
+            syntaxEditorView.documentView?.scrollToVisible(documentRect.insetBy(dx: -4, dy: -4))
+        }
         syntaxEditorView.reflectScrolledClipView(syntaxEditorView.contentView)
+    }
+
+    private func syntaxPanelDocumentRect(forRange range: NSRange, in syntaxEditorView: SyntaxEditorView) -> NSRect? {
+        guard let documentView = syntaxEditorView.documentView,
+              let textInputClient = documentView as? any NSTextInputClient
+        else {
+            return nil
+        }
+
+        var actualRange = NSRange(location: NSNotFound, length: 0)
+        let screenRect = textInputClient.firstRect(forCharacterRange: range, actualRange: &actualRange)
+        guard screenRect.isNull == false, screenRect.isEmpty == false else {
+            return nil
+        }
+
+        if let window = documentView.window {
+            return documentView.convert(window.convertFromScreen(screenRect), from: nil)
+        }
+        return screenRect
     }
 
     private func ensureSyntaxEditorView() -> SyntaxEditorView {
@@ -1993,21 +2016,42 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
 
     var outputScrollIsScrollableForTesting: Bool {
         layoutSubtreeIfNeeded()
+        if let syntaxEditorView = visibleSyntaxEditorViewForTesting {
+            return (syntaxEditorView.documentView?.frame.height ?? 0) > syntaxEditorView.contentView.bounds.height + 0.5
+        }
         return outputTextView.frame.height > outputScrollView.contentSize.height + 0.5
     }
 
     var outputScrollVerticalOffsetForTesting: CGFloat {
         layoutSubtreeIfNeeded()
+        if let syntaxEditorView = visibleSyntaxEditorViewForTesting {
+            return syntaxEditorView.contentView.bounds.origin.y
+        }
         return outputScrollView.contentView.bounds.origin.y
     }
 
     var outputScrollMaximumVerticalOffsetForTesting: CGFloat {
         layoutSubtreeIfNeeded()
+        if let syntaxEditorView = visibleSyntaxEditorViewForTesting {
+            return max(0, (syntaxEditorView.documentView?.frame.height ?? 0) - syntaxEditorView.contentView.bounds.height)
+        }
         return max(0, outputTextView.frame.height - outputScrollView.contentView.bounds.height)
     }
 
     func scrollOutputForTesting(deltaY: CGFloat) -> Bool {
         layoutSubtreeIfNeeded()
+        if let syntaxEditorView = visibleSyntaxEditorViewForTesting {
+            let clipView = syntaxEditorView.contentView
+            let before = clipView.bounds.origin.y
+            let maxY = max(0, (syntaxEditorView.documentView?.frame.height ?? 0) - clipView.bounds.height)
+            let nextY = min(max(0, before + deltaY), maxY)
+            guard abs(nextY - before) > 0.5 else {
+                return false
+            }
+            clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: nextY))
+            syntaxEditorView.reflectScrolledClipView(clipView)
+            return abs(clipView.bounds.origin.y - before) > 0.5
+        }
         guard outputScrollView.isHidden == false else {
             return false
         }
@@ -2037,6 +2081,15 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         )
         let panelPoint = outputTextView.convert(outputPoint, to: self)
         return hitTest(panelPoint) === outputTextView
+    }
+
+    private var visibleSyntaxEditorViewForTesting: SyntaxEditorView? {
+        guard let syntaxEditorView,
+              syntaxEditorView.isHidden == false
+        else {
+            return nil
+        }
+        return syntaxEditorView
     }
 #endif
 }

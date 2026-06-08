@@ -2800,6 +2800,65 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("Visible text after command output."))
     }
 
+    @Test func syntaxPanelFindScrollsEmbeddedEditorToMatchedRange() async throws {
+        let resultLines = (1...140)
+            .map { "  \"line\($0)\": \"filler \($0)\"," }
+        let resultText = """
+        {
+        \(resultLines.joined(separator: "\n"))
+          "target": "needle near the bottom"
+        }
+        """
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-syntax-panel-find-scroll",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: [
+                .init(
+                    kind: .toolCall,
+                    text: "MCP tool completed. Result available.",
+                    contentBlocks: [
+                        .init(role: .result, title: "Result", text: resultText, languageHint: "json")
+                    ]
+                ),
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+
+        _ = try await awaitTransportRender(transport)
+        #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
+        let initialOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        #expect(initialOffset <= 0.5)
+
+        let finderRange = (transport.logFindStringForTesting as NSString).range(of: "needle near the bottom")
+        try #require(finderRange.location != NSNotFound)
+        transport.scrollLogFinderRangeToVisibleForTesting(finderRange)
+        await awaitNativeLayoutTurn()
+
+        let scrolledOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        #expect(scrolledOffset > initialOffset + 20)
+    }
+
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-start-panel",

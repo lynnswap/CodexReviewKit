@@ -1181,6 +1181,10 @@ extension ReviewMonitorLogScrollView {
         textFinderClient.selectedRanges = [NSValue(range: range)]
     }
 
+    func scrollFinderRangeToVisibleForTesting(_ range: NSRange) {
+        textFinderClient.scrollRangeToVisible(range)
+    }
+
     var findIncrementalMatchRangeCountForTesting: Int {
         textFinder.incrementalMatchRanges.count
     }
