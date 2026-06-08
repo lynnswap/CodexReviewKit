@@ -653,6 +653,15 @@ public final class CodexReviewJob: Identifiable, Hashable {
             )
         }
 
+        if let index = entries.firstIndex(where: { contentBlockBytes($0.contentBlocks) > 0 }) {
+            return trimEntry(
+                entries: entries,
+                at: index,
+                overflowBytes: overflowBytes,
+                direction: .suffix
+            )
+        }
+
         return nil
     }
 
@@ -793,9 +802,6 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private nonisolated static func cappedContentBlockBytes(for entry: ReviewLogEntry) -> Int {
-        guard cappedLogKinds.contains(entry.kind) else {
-            return 0
-        }
         return contentBlockBytes(entry.contentBlocks)
     }
 

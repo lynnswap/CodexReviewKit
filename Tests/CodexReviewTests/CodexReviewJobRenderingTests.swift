@@ -128,4 +128,30 @@ struct CodexReviewJobRenderingTests {
         #expect(retainedResult.isEmpty == false)
         #expect(retainedResult.utf8.count < largeResult.utf8.count)
     }
+
+    @Test func contentBlocksOnNonCappedTextKindsCountTowardLogLimit() {
+        let largeError = String(repeating: "x", count: 300 * 1024)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-large-context-content-block",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(
+                    kind: .contextCompaction,
+                    text: "Context compaction failed. Error available.",
+                    contentBlocks: [
+                        .init(role: .error, title: "Error", text: largeError, languageHint: "plaintext")
+                    ]
+                ),
+            ]
+        )
+
+        #expect(job.cappedLogBytes <= 256 * 1024)
+        #expect(job.logEntries.first?.text == "Context compaction failed. Error available.")
+        let retainedError = job.logEntries.first?.contentBlocks.first?.text ?? ""
+        #expect(retainedError.isEmpty == false)
+        #expect(retainedError.utf8.count < largeError.utf8.count)
+    }
 }
