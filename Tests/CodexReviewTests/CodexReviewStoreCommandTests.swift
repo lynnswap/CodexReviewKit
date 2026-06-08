@@ -133,6 +133,32 @@ struct CodexReviewStoreCommandTests {
         #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["first", "second"])
     }
 
+    @Test func reviewCompletionDoesNotDuplicateAlreadyLoggedFinalMessage() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let result = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        await backend.waitForEventStream()
+        await backend.yield(.logEntry(
+            kind: .agentMessage,
+            text: "final review text",
+            groupID: "review-item-1",
+            replacesGroup: true
+        ))
+        await backend.yield(.completed(summary: "Succeeded.", result: "final review text"))
+        let read = try await result
+
+        #expect(read.core.output.lastAgentMessage == "final review text")
+        #expect(read.core.reviewText == "final review text")
+        #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["final review text"])
+    }
+
     @Test func readReviewDefaultsToCommandOutputFilteredLogs() throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

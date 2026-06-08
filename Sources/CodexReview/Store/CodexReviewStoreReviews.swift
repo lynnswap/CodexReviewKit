@@ -537,8 +537,9 @@ extension CodexReviewStore {
             return
         }
         let endedAt = clock.now()
-        let previousAgentMessage = job.core.output.lastAgentMessage
-        let finalReviewText = result?.nilIfEmpty ?? previousAgentMessage?.nilIfEmpty
+        let previousAgentMessage = job.core.output.lastAgentMessage?.nilIfEmpty
+        let resultText = result?.nilIfEmpty
+        let finalReviewText = resultText ?? previousAgentMessage
         job.closeActiveCommandLogEntries(status: "completed", completedAt: endedAt)
         job.core.lifecycle.status = .succeeded
         job.core.lifecycle.endedAt = endedAt
@@ -546,7 +547,8 @@ extension CodexReviewStore {
         job.core.output.lastAgentMessage = finalReviewText ?? summary
         job.core.output.hasFinalReview = finalReviewText != nil
         job.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalReviewText)
-        if let result = result?.nilIfEmpty {
+        if let result = resultText,
+           result != previousAgentMessage {
             job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
         }
         writeDiagnosticsIfNeeded()
