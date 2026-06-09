@@ -1122,6 +1122,7 @@ struct AppServerClientTests {
         try await enqueueInitialize(transport)
         try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
 
         let run = try await backend.startReview(.init(
@@ -1152,6 +1153,41 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
         #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
+    }
+
+    @Test func backendTracksSyntheticDetachedReviewThreadStartsForInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(threadID: "parent-thread", reviewThreadID: "review-thread")
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-new",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
     }
 
     @Test func backendBuffersDetachedReviewThreadNotificationsDuringReviewStart() async throws {
@@ -1193,7 +1229,7 @@ struct AppServerClientTests {
         let interruptRequest = try #require(await transport.recordedRequests().last)
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
-        #expect(interruptParams.threadID == "parent-thread")
+        #expect(interruptParams.threadID == "review-thread")
         #expect(interruptParams.turnID == "turn-new")
     }
 
@@ -2938,7 +2974,7 @@ struct AppServerClientTests {
                 threadID: "thread-1",
                 turnID: "turn-1",
                 itemID: "cmd-1",
-                delta: "Tests passed\n"
+                delta: " Tests passed\n"
             )
         )
         try await transport.emitServerNotification(
@@ -2969,7 +3005,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
-            text: "Tests passed\n",
+            text: " Tests passed\n",
             groupID: "cmd-1",
             replacesGroup: false,
             metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
@@ -2993,7 +3029,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .commandOutput,
-            text: "Tests passed",
+            text: " Tests passed\n",
             groupID: "cmd-1",
             replacesGroup: true,
             metadata: .init(
@@ -3008,6 +3044,60 @@ struct AppServerClientTests {
                 commandStatus: "succeeded"
             )
         ))
+    }
+
+    @Test func backendFlushesPendingStreamedCommandOutputBeforeNotificationStreamFinishes() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
+                startedAtMs: 2_000
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                commandStatus: "inProgress"
+            )
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "tail output\n"
+            )
+        )
+        await transport.close()
+
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: "tail output\n",
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        #expect(try await iterator.next() == nil)
     }
 
     @Test func backendReviewExitCompletesMissingCommandCompletion() async throws {

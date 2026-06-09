@@ -732,14 +732,14 @@ private actor AppServerReviewEventSession {
         guard finished == false else {
             return
         }
+        let precedingEvents = drainPendingStreamedLogEvents()
         finished = true
         completionCoordinator.cancelPendingCompletion()
         cancelPendingStreamedLogFlush()
-        pendingStreamedLogEntries.removeAll(keepingCapacity: true)
-        pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         bufferedNotifications.removeAll(keepingCapacity: true)
         if let continuation {
+            emitPrecedingEvents(precedingEvents, to: continuation)
             if let error {
                 continuation.finish(throwing: error)
             } else {
@@ -821,6 +821,7 @@ private actor AppServerReviewEventSession {
             return
         }
         metrics.decoded += 1
+        let controlThreadID = notification.payload.threadID
         guard decoded.events.isEmpty == false else {
             metrics.ignored += 1
             return
@@ -868,7 +869,7 @@ private actor AppServerReviewEventSession {
                     reviewThreadID: run.reviewThreadID ?? run.threadID,
                     model: nil
                 )
-                if emit(started, continuation: continuation) {
+                if emit(started, continuation: continuation, controlThreadID: controlThreadID) {
                     return
                 }
             }
@@ -885,11 +886,14 @@ private actor AppServerReviewEventSession {
             notification: notification,
             decoded: decoded
         ) {
-            if flushPendingStreamedLog(continuation: continuation) {
+            if flushPendingStreamedLog(continuation: continuation, controlThreadID: controlThreadID) {
                 return
             }
             let closedItemIDs = Set(commandLifecycleByItemID.keys)
-            if closeActiveCommandsForProgressBoundary(continuation: continuation) {
+            if closeActiveCommandsForProgressBoundary(
+                continuation: continuation,
+                controlThreadID: controlThreadID
+            ) {
                 return
             }
             for itemID in closedItemIDs {
@@ -899,10 +903,13 @@ private actor AppServerReviewEventSession {
         commandLifecycleByItemID = decodedCommandLifecycleByItemID
 
         if decoded.finishesReviewMode {
-            if flushPendingStreamedLog(continuation: continuation) {
+            if flushPendingStreamedLog(continuation: continuation, controlThreadID: controlThreadID) {
                 return
             }
-            if closeActiveCommandsForReviewExit(continuation: continuation) {
+            if closeActiveCommandsForReviewExit(
+                continuation: continuation,
+                controlThreadID: controlThreadID
+            ) {
                 return
             }
         }
@@ -911,11 +918,11 @@ private actor AppServerReviewEventSession {
             if bufferStreamedLog(event) {
                 continue
             }
-            if flushPendingStreamedLog(continuation: continuation) {
+            if flushPendingStreamedLog(continuation: continuation, controlThreadID: controlThreadID) {
                 return
             }
             for commandEvent in commandLifecycleByItemID.closeActiveCommands(for: event) {
-                if emit(commandEvent, continuation: continuation) {
+                if emit(commandEvent, continuation: continuation, controlThreadID: controlThreadID) {
                     return
                 }
             }
@@ -926,29 +933,41 @@ private actor AppServerReviewEventSession {
                 completionCoordinator.deferCompletion(event)
                 continue
             }
-            if emit(event, continuation: continuation) {
+            if emit(event, continuation: continuation, controlThreadID: controlThreadID) {
                 return
             }
         }
 
         if decoded.finishesReviewMode {
-            if flushPendingStreamedLog(continuation: continuation) {
+            if flushPendingStreamedLog(continuation: continuation, controlThreadID: controlThreadID) {
                 return
             }
             awaitingReviewExit = false
             if let cancellationRequestedMessage {
-                if emit(.cancelled(cancellationRequestedMessage), continuation: continuation) {
+                if emit(
+                    .cancelled(cancellationRequestedMessage),
+                    continuation: continuation,
+                    controlThreadID: controlThreadID
+                ) {
                     return
                 }
             }
             if let reviewExitResult = decoded.reviewExitResult {
                 completionCoordinator.cancelPendingCompletion()
-                if emit(.completed(summary: "Succeeded.", result: reviewExitResult), continuation: continuation) {
+                if emit(
+                    .completed(summary: "Succeeded.", result: reviewExitResult),
+                    continuation: continuation,
+                    controlThreadID: controlThreadID
+                ) {
                     return
                 }
-            } else if flushPendingCompletion(continuation: continuation) {
+            } else if flushPendingCompletion(continuation: continuation, controlThreadID: controlThreadID) {
                 return
-            } else if emit(.completed(summary: "Succeeded.", result: nil), continuation: continuation) {
+            } else if emit(
+                .completed(summary: "Succeeded.", result: nil),
+                continuation: continuation,
+                controlThreadID: controlThreadID
+            ) {
                 return
             }
         }
@@ -956,14 +975,15 @@ private actor AppServerReviewEventSession {
 
     private func emit(
         _ event: BackendReviewEvent,
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        controlThreadID: String? = nil
     ) -> Bool {
         noteEmission(event)
         let didFinish = completionCoordinator.emit(
             event,
             continuation: continuation
         )
-        recordReviewEvent(event)
+        recordReviewEvent(event, controlThreadID: controlThreadID)
         return didFinish
     }
 
@@ -1008,14 +1028,15 @@ private actor AppServerReviewEventSession {
     }
 
     private func closeActiveCommandsForProgressBoundary(
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        controlThreadID: String? = nil
     ) -> Bool {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
         }
         let status = cancellationRequestedMessage == nil ? "completed" : "canceled"
         for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
-            if emit(commandEvent, continuation: continuation) {
+            if emit(commandEvent, continuation: continuation, controlThreadID: controlThreadID) {
                 return true
             }
         }
@@ -1024,7 +1045,8 @@ private actor AppServerReviewEventSession {
     }
 
     private func closeActiveCommandsForReviewExit(
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        controlThreadID: String? = nil
     ) -> Bool {
         guard commandLifecycleByItemID.isEmpty == false else {
             return false
@@ -1034,7 +1056,7 @@ private actor AppServerReviewEventSession {
             "Review mode exited with \(self.commandLifecycleByItemID.count, privacy: .public) active command execution(s); closing as \(status, privacy: .public)."
         )
         for commandEvent in commandLifecycleByItemID.closeActiveCommands(status: status) {
-            if emit(commandEvent, continuation: continuation) {
+            if emit(commandEvent, continuation: continuation, controlThreadID: controlThreadID) {
                 return true
             }
         }
@@ -1079,7 +1101,8 @@ private actor AppServerReviewEventSession {
     }
 
     private func flushPendingStreamedLog(
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        controlThreadID: String? = nil
     ) -> Bool {
         let events = drainPendingStreamedLogEvents()
         guard events.isEmpty == false else {
@@ -1087,7 +1110,7 @@ private actor AppServerReviewEventSession {
         }
         cancelPendingStreamedLogFlush()
         for event in events {
-            if emit(event, continuation: continuation) {
+            if emit(event, continuation: continuation, controlThreadID: controlThreadID) {
                 return true
             }
         }
@@ -1107,7 +1130,8 @@ private actor AppServerReviewEventSession {
     }
 
     private func flushPendingCompletion(
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        controlThreadID: String? = nil
     ) -> Bool {
         guard let event = completionCoordinator.flushPendingCompletion(
             continuation: continuation
@@ -1115,14 +1139,14 @@ private actor AppServerReviewEventSession {
             return false
         }
         noteEmission(event)
-        recordReviewEvent(event)
+        recordReviewEvent(event, controlThreadID: controlThreadID)
         return true
     }
 
-    private func recordReviewEvent(_ event: BackendReviewEvent) {
+    private func recordReviewEvent(_ event: BackendReviewEvent, controlThreadID: String? = nil) {
         switch event {
         case .started(let turnID, _, _):
-            control.recordTurnStarted(threadID: run.threadID, turnID: turnID)
+            control.recordTurnStarted(threadID: controlThreadID ?? run.threadID, turnID: turnID)
         case .completed, .failed, .cancelled:
             control.finish()
             appServerBackendLogger.debug(
@@ -1136,6 +1160,17 @@ private actor AppServerReviewEventSession {
     private func noteEmissions(_ events: [BackendReviewEvent]) {
         for event in events {
             noteEmission(event)
+        }
+    }
+
+    private func emitPrecedingEvents(
+        _ events: [BackendReviewEvent],
+        to continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+    ) {
+        noteEmissions(events)
+        for event in events {
+            continuation.yield(event)
+            recordReviewEvent(event)
         }
     }
 
@@ -1937,7 +1972,7 @@ private struct AppServerCommandLifecycle: Sendable {
     private var streamedOutput = ""
 
     var streamedOutputIfAvailable: String? {
-        streamedOutput.nilIfEmpty
+        streamedOutput.isEmpty ? nil : streamedOutput
     }
 
     init(
