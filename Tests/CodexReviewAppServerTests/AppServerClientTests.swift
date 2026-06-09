@@ -1159,6 +1159,7 @@ struct AppServerClientTests {
         try await enqueueInitialize(transport)
         try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let gate = AsyncGate()
         await transport.hold(method: "review/start", gate: gate)
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
@@ -1188,6 +1189,12 @@ struct AppServerClientTests {
 
         #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "parent-thread")
+        #expect(interruptParams.turnID == "turn-new")
     }
 
     @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
@@ -1835,7 +1842,7 @@ struct AppServerClientTests {
                 continue
             }
             sawClosedOutput = true
-            #expect(text == "M README.md?? Sources/New.swift")
+            #expect(text == " M README.md\n?? Sources/New.swift\n")
             #expect(groupID == "cmd-1")
             #expect(metadata?.sourceType == "commandExecution")
             #expect(metadata?.status == "canceled")
@@ -3098,7 +3105,7 @@ struct AppServerClientTests {
             return
         }
         #expect(outputKind == .commandOutput)
-        #expect(outputText == "M README.md")
+        #expect(outputText == " M README.md\n")
         #expect(outputGroupID == "cmd-1")
         #expect(outputReplacesGroup == true)
         #expect(outputMetadata?.sourceType == "commandExecution")
@@ -3203,7 +3210,7 @@ struct AppServerClientTests {
             return
         }
         #expect(outputKind == .commandOutput)
-        #expect(outputText == "diff output")
+        #expect(outputText == "diff output\n")
         #expect(outputGroupID == "cmd-1")
         #expect(outputReplacesGroup == true)
         #expect(outputMetadata?.status == "completed")

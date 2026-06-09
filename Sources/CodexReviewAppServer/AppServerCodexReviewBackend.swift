@@ -148,10 +148,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
+        control.recordReviewStarted(threadID: thread.threadID, turnID: review.turnID)
         await drainUnmatchedReviewNotifications(for: run, to: session)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
-        control.recordReviewStarted(threadID: thread.threadID, turnID: review.turnID)
 
         return run
     }
@@ -1557,7 +1557,8 @@ private func decodeReviewNotification(
         ).map { [$0] } ?? []
     case "item/commandExecution/outputDelta":
         if let itemID = payload.itemID,
-           let output = payload.delta?.nilIfEmpty {
+           let output = payload.delta,
+           output.isEmpty == false {
             commandLifecycleByItemID[itemID]?.appendOutput(output)
         }
         events = payload.deltaLog(
@@ -1572,7 +1573,8 @@ private func decodeReviewNotification(
     case "command/exec/outputDelta",
         "process/outputDelta":
         if let itemID = payload.itemID,
-           let output = payload.decodedBase64Output?.nilIfEmpty {
+           let output = payload.decodedBase64Output,
+           output.isEmpty == false {
             commandLifecycleByItemID[itemID]?.appendOutput(output)
         }
         events = payload.base64OutputLog(
