@@ -42,7 +42,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private var preferredTextContainerWidth: CGFloat = 0
     private var currentDecorations: [ReviewMonitorLogDecoration] = []
     private var currentCommandOutputPanels: [ReviewMonitorLogCommandOutputPanel] = []
-    private var currentSourceText = ""
     private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLogBlockID>()
     private var cachedFinderStringMapping: FinderStringMapping?
     private(set) var estimatedDocumentHeight: CGFloat = 0
@@ -98,16 +97,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private struct FinderStringSegment {
         var finderRange: NSRange
-        var target: FinderStringSegmentTarget
-    }
-
-    private enum FinderStringSegmentTarget {
-        case document(NSRange)
-        case commandOutput(
-            blockID: ReviewMonitorLogBlockID,
-            outputRange: NSRange,
-            panelRange: NSRange
-        )
+        var documentRange: NSRange
     }
 
     private struct CommandOutputPanelLayoutAnimation {
@@ -393,14 +383,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         else {
             currentDecorations = []
             currentCommandOutputPanels = []
-            currentSourceText = ""
             expandedCommandOutputBlockIDs.removeAll()
             invalidateFinderStringMapping()
             decorationView.decorations = []
             return
         }
 
-        currentSourceText = document.sourceText
         let commandOutputPanels = displayPanelsWithCurrentExpansionState(document.commandOutputPanels)
         let changedPanelRanges = changedCommandOutputPanelRanges(
             from: currentCommandOutputPanels,
@@ -430,7 +418,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     func updateFinderSupplement(_ document: ReviewMonitorLogDocument) {
-        currentSourceText = document.sourceText
         currentCommandOutputPanels = displayPanelsWithCurrentExpansionState(document.commandOutputPanels)
         invalidateFinderStringMapping()
     }
@@ -1256,12 +1243,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         let mapping = finderStringMapping()
         let clampedRange = clampFinderRange(range, in: mapping)
         let documentRange = firstDocumentRange(for: clampedRange, in: mapping) ?? NSRange(location: 0, length: 0)
-        let supplementalText = supplementalSelectionText(forFinderRange: clampedRange, in: mapping)
         isApplyingTextFinderSelection = true
         setSelectedRange(
             documentRange,
             preserveKeyboardSelection: false,
-            supplementalSelectedText: supplementalText
+            supplementalSelectedText: nil
         )
         isApplyingTextFinderSelection = false
         return documentRange
@@ -1344,22 +1330,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
         var ranges: [NSRange] = []
         for segment in mapping.segments {
-            switch segment.target {
-            case .document(let documentRange):
-                for visibleRange in visibleDocumentRanges {
-                    let intersection = NSIntersectionRange(documentRange, visibleRange)
-                    guard intersection.length > 0 else {
-                        continue
-                    }
-                    ranges.append(mapDocumentRange(intersection, in: segment))
-                }
-            case .commandOutput(_, _, let panelRange):
-                guard visibleDocumentRanges.contains(where: {
-                    NSIntersectionRange($0, panelRange).length > 0
-                }) else {
+            for visibleRange in visibleDocumentRanges {
+                let intersection = NSIntersectionRange(segment.documentRange, visibleRange)
+                guard intersection.length > 0 else {
                     continue
                 }
-                ranges.append(segment.finderRange)
+                ranges.append(mapDocumentRange(intersection, in: segment))
             }
         }
         return ranges.map(NSValue.init(range:))
@@ -1374,7 +1350,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     func scrollFinderRangeToVisible(_ range: NSRange) {
-        scrollCommandOutputFinderRangesToVisible(range)
         let rects = rects(forFinderCharacterRange: range).map(\.rectValue)
         guard let firstRect = rects.first else {
             return
@@ -1394,17 +1369,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             guard intersection.length > 0 else {
                 continue
             }
-            switch segment.target {
-            case .document:
-                rects.append(contentsOf: self.rects(forCharacterRange: mapFinderRange(intersection, in: segment)))
-            case .commandOutput(let blockID, _, let panelRange):
-                let panelRects = commandOutputPanelRects(
-                    blockID: blockID,
-                    terminalRange: mapFinderRange(intersection, in: segment),
-                    fallbackPanelRange: panelRange
-                )
-                rects.append(contentsOf: panelRects.map(NSValue.init(rect:)))
-            }
+            rects.append(contentsOf: self.rects(forCharacterRange: mapFinderRange(intersection, in: segment)))
         }
         return rects
     }
@@ -1458,17 +1423,6 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             guard intersection.length > 0 else {
                 continue
             }
-            guard case .document = segment.target else {
-                if case .commandOutput(let blockID, _, let panelRange) = segment.target {
-                    drawCommandOutputCharacters(
-                        blockID: blockID,
-                        terminalRange: mapFinderRange(intersection, in: segment),
-                        fallbackPanelRange: panelRange,
-                        forContentView: view
-                    )
-                }
-                continue
-            }
             drawCharacters(in: mapFinderRange(intersection, in: segment), forContentView: view)
         }
     }
@@ -1498,73 +1452,13 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 return
             }
             let finderRange = append(documentString.substring(with: range))
-            segments.append(.init(finderRange: finderRange, target: .document(range)))
+            segments.append(.init(finderRange: finderRange, documentRange: range))
         }
 
-        var cursor = 0
-        let panels = currentCommandOutputPanels
-            .filter { $0.range.location >= 0 && NSMaxRange($0.range) <= documentString.length }
-            .sorted { $0.range.location < $1.range.location }
-
-        for panel in panels {
-            guard panel.range.location >= cursor else {
-                continue
-            }
-            appendDocumentRange(NSRange(location: cursor, length: NSMaxRange(panel.range) - cursor))
-            cursor = NSMaxRange(panel.range)
-
-            let panelFinderText = commandOutputFinderText(for: panel)
-            guard panelFinderText.isEmpty == false else {
-                continue
-            }
-            let outputRange = NSRange(location: 0, length: (panelFinderText as NSString).length)
-            let finderRange = append(panelFinderText)
-            segments.append(.init(
-                finderRange: finderRange,
-                target: .commandOutput(
-                    blockID: panel.blockID,
-                    outputRange: outputRange,
-                    panelRange: panel.range
-                )
-            ))
-        }
-
-        appendDocumentRange(NSRange(location: cursor, length: documentString.length - cursor))
+        appendDocumentRange(NSRange(location: 0, length: documentString.length))
         let mapping = FinderStringMapping(string: finderString, segments: segments)
         cachedFinderStringMapping = mapping
         return mapping
-    }
-
-    private func commandOutputFinderText(for panel: ReviewMonitorLogCommandOutputPanel) -> String {
-        let trimmedCommandText = panel.commandText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let commandLineText = trimmedCommandText.isEmpty ? "" : "$ \(trimmedCommandText)"
-        let outputText = commandOutputTextForFinder(panel)
-        let trimmedOutputText = outputText.trimmingCharacters(in: .newlines)
-        if commandLineText.isEmpty {
-            return outputText
-        }
-        if trimmedOutputText.isEmpty {
-            return commandLineText
-        }
-        return "\(commandLineText)\n\(trimmedOutputText)"
-    }
-
-    private func commandOutputTextForFinder(_ panel: ReviewMonitorLogCommandOutputPanel) -> String {
-        if panel.outputText.isEmpty == false {
-            return panel.outputText
-        }
-        guard let outputSourceRange = panel.outputSourceRange else {
-            return ""
-        }
-        let sourceString = currentSourceText as NSString
-        let sourceBounds = NSRange(location: 0, length: sourceString.length)
-        let intersection = NSIntersectionRange(outputSourceRange, sourceBounds)
-        guard intersection.location == outputSourceRange.location,
-              intersection.length == outputSourceRange.length
-        else {
-            return ""
-        }
-        return sourceString.substring(with: outputSourceRange)
     }
 
     private func invalidateFinderStringMapping() {
@@ -1575,18 +1469,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         _ range: NSRange,
         in segment: FinderStringSegment
     ) -> NSRange {
-        switch segment.target {
-        case .document(let documentRange):
-            return NSRange(
-                location: documentRange.location + range.location - segment.finderRange.location,
-                length: range.length
-            )
-        case .commandOutput(_, let outputRange, _):
-            return NSRange(
-                location: outputRange.location + range.location - segment.finderRange.location,
-                length: range.length
-            )
-        }
+        NSRange(
+            location: segment.documentRange.location + range.location - segment.finderRange.location,
+            length: range.length
+        )
     }
 
     private func firstDocumentRange(
@@ -1598,12 +1484,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             guard intersection.length > 0 else {
                 continue
             }
-            if case .document = segment.target {
-                return mapFinderRange(intersection, in: segment)
-            }
-            if case .commandOutput(_, _, let panelRange) = segment.target {
-                return panelRange
-            }
+            return mapFinderRange(intersection, in: segment)
         }
         return nil
     }
@@ -1613,42 +1494,13 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         in mapping: FinderStringMapping
     ) -> NSRange? {
         for segment in mapping.segments {
-            guard case .document(let segmentDocumentRange) = segment.target else {
-                continue
-            }
-            let intersection = NSIntersectionRange(segmentDocumentRange, documentRange)
+            let intersection = NSIntersectionRange(segment.documentRange, documentRange)
             guard intersection.length > 0 else {
                 continue
             }
             return mapDocumentRange(intersection, in: segment)
         }
         return nil
-    }
-
-    private func supplementalSelectionText(
-        forFinderRange range: NSRange,
-        in mapping: FinderStringMapping
-    ) -> String? {
-        guard range.length > 0,
-              mapping.segments.contains(where: { segment in
-                  if case .commandOutput = segment.target {
-                      return NSIntersectionRange(segment.finderRange, range).length > 0
-                  }
-                  return false
-              })
-        else {
-            return nil
-        }
-
-        let finderString = mapping.string as NSString
-        let clampedRange = NSIntersectionRange(
-            range,
-            NSRange(location: 0, length: finderString.length)
-        )
-        guard clampedRange.length > 0 else {
-            return nil
-        }
-        return finderString.substring(with: clampedRange)
     }
 
     private func clampFinderRange(_ range: NSRange, in mapping: FinderStringMapping) -> NSRange {
@@ -1665,57 +1517,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         _ range: NSRange,
         in segment: FinderStringSegment
     ) -> NSRange {
-        guard case .document(let documentRange) = segment.target else {
-            return segment.finderRange
-        }
-        return NSRange(
-            location: segment.finderRange.location + range.location - documentRange.location,
+        NSRange(
+            location: segment.finderRange.location + range.location - segment.documentRange.location,
             length: range.length
         )
-    }
-
-    private func commandOutputPanelRects(
-        blockID: ReviewMonitorLogBlockID,
-        terminalRange: NSRange,
-        fallbackPanelRange: NSRange
-    ) -> [NSRect] {
-        if let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID }) {
-            let rects = panelView.rects(forTerminalRange: terminalRange, convertedTo: self)
-            if rects.isEmpty == false {
-                return rects
-            }
-            return [panelView.convert(panelView.bounds, to: self)]
-        }
-        return rects(forCharacterRange: fallbackPanelRange).map(\.rectValue)
-    }
-
-    private func scrollCommandOutputFinderRangesToVisible(_ range: NSRange) {
-        let mapping = finderStringMapping()
-        for segment in mapping.segments {
-            let intersection = NSIntersectionRange(segment.finderRange, range)
-            guard intersection.length > 0 else {
-                continue
-            }
-            guard case .commandOutput(let blockID, _, _) = segment.target,
-                  let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID })
-            else {
-                continue
-            }
-            panelView.scrollTerminalRangeToVisible(mapFinderRange(intersection, in: segment))
-        }
-    }
-
-    private func drawCommandOutputCharacters(
-        blockID: ReviewMonitorLogBlockID,
-        terminalRange: NSRange,
-        fallbackPanelRange: NSRange,
-        forContentView view: NSView
-    ) {
-        guard let panelView = visibleCommandOutputPanelAttachmentViews().first(where: { $0.blockID == blockID }) else {
-            drawCharacters(in: fallbackPanelRange, forContentView: view)
-            return
-        }
-        panelView.drawTerminalCharacters(in: terminalRange, forContentView: view)
     }
 
     override func mouseDown(with event: NSEvent) {

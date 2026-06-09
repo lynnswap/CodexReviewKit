@@ -2709,8 +2709,9 @@ struct ReviewUITests {
         #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
-        #expect(transport.logFindStringForTesting.contains("$ swift test"))
-        #expect(transport.logFindStringForTesting.contains("output line 3"))
+        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
+        #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
         let expandReloadCount = transport.logReloadCountForTesting
         #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
@@ -2731,25 +2732,9 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("$ swift test") == false)
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("output line 1") == true)
         #expect(transport.logCommandOutputPanelOutputHitTestTargetsTextViewForTesting)
-        #expect(transport.logFindStringForTesting.contains("$ swift test"))
-        #expect(transport.logFindStringForTesting.contains("output line 3"))
-        let visibleOutputFinderRange = (transport.logFindStringForTesting as NSString).range(of: "output line 9")
-        try #require(visibleOutputFinderRange.location != NSNotFound)
-        let visibleOutputRects = transport.logFinderRectsForTesting(visibleOutputFinderRange)
-        let visibleOutputRect = try #require(visibleOutputRects.first)
-        let panelRect = try #require(transport.logFirstCommandOutputPanelRectForTesting)
-        #expect(visibleOutputRect.width < panelRect.width - 16)
-        #expect(visibleOutputRect.height < panelRect.height / 2)
-        let commandFinderRange = (transport.logFindStringForTesting as NSString).range(of: "$ swift test")
-        try #require(commandFinderRange.location != NSNotFound)
-        transport.setLogFinderSelectedRangeForTesting(commandFinderRange)
-        #expect(transport.logFindClientFirstSelectedRangeForTesting == commandFinderRange)
-        #expect(transport.logSelectedTextForTesting == "$ swift test")
-        let outputFinderRange = (transport.logFindStringForTesting as NSString).range(of: "output line 3")
-        try #require(outputFinderRange.location != NSNotFound)
-        transport.setLogFinderSelectedRangeForTesting(outputFinderRange)
-        #expect(transport.logFindClientFirstSelectedRangeForTesting == outputFinderRange)
-        #expect(transport.logSelectedTextForTesting == "output line 3")
+        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
+        #expect(transport.logFindStringForTesting.contains("output line 3") == false)
         #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
         let initialOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         let initialOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
@@ -2788,7 +2773,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
-        #expect(transport.logFindStringForTesting.contains("output line 9"))
+        #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
         job.appendLogEntry(.init(
             kind: .commandOutput,
@@ -2800,6 +2785,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
+        #expect(transport.logFindStringForTesting.contains("output line 11") == false)
         #expect(transport.displayedLogForTesting.contains("Visible text after command output."))
     }
 
@@ -2917,7 +2903,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 1") == false)
     }
 
-    @Test func expandingCommandOutputRefreshesActiveFindSnapshot() async throws {
+    @Test func expandingCommandOutputKeepsPanelTextOutOfActiveFindSnapshot() async throws {
         let outputText = (1...5)
             .map { "output line \($0)" }
             .joined(separator: "\n")
@@ -2954,24 +2940,27 @@ struct ReviewUITests {
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
-            #expect(transport.setLogVisibleFindBarSearchStringForTesting("output line 3"))
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
-            #expect(transport.logFindStringForTesting.contains("output line 3"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
+            #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
             #expect(transport.clickFirstLogCommandOutputPanelHeaderForTesting())
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
-            #expect(transport.logFindStringForTesting.contains("$ swift test"))
-            #expect(transport.logFindStringForTesting.contains("output line 3"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
+            #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
             job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
-            try await waitForCondition {
-                transport.logFindStringForTesting.contains("output line 6")
-            }
+            _ = try await awaitTransportRender(transport)
+            await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
-            #expect(transport.logFindStringForTesting.contains("output line 6"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }
     }
 
