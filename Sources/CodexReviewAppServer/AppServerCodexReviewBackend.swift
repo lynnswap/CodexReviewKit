@@ -321,6 +321,20 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return completedReviewEventSessionMetricsByThreadID[threadID]
     }
 
+    package func activeReviewEventStreamSubscriptionIDForTesting(threadID: String) async -> Int? {
+        guard let session = reviewEventSession(forThreadID: threadID) else {
+            return nil
+        }
+        return await session.activeStreamSubscriptionIDForTesting()
+    }
+
+    package func detachReviewEventStreamForTesting(threadID: String, subscriptionID: Int) async {
+        guard let session = reviewEventSession(forThreadID: threadID) else {
+            return
+        }
+        await session.detach(subscriptionID: subscriptionID)
+    }
+
     private func reviewEventSession(for run: BackendReviewRun) async -> AppServerReviewEventSession {
         await ensureNotificationRouterStarted()
         if let session = reviewEventSessionsByThreadID[run.threadID] {
@@ -643,6 +657,8 @@ private actor AppServerReviewEventSession {
     private var run: BackendReviewRun
     private let control: AppServerReviewControl
     private var continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation?
+    private var activeStreamSubscriptionID: Int?
+    private var nextStreamSubscriptionID = 0
     private var pendingFinish: PendingReviewEventStreamFinish?
     private var bufferedNotifications: [AppServerRoutedReviewNotification] = []
     private var trackedTurnIDs: Set<String>
@@ -680,14 +696,16 @@ private actor AppServerReviewEventSession {
     }
 
     func events() -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        AsyncThrowingStream { continuation in
+        let subscriptionID = nextStreamSubscriptionID
+        nextStreamSubscriptionID += 1
+        return AsyncThrowingStream { continuation in
             let attachTask = Task {
-                await self.attach(continuation)
+                await self.attach(continuation, subscriptionID: subscriptionID)
             }
             continuation.onTermination = { @Sendable _ in
                 attachTask.cancel()
                 Task {
-                    await self.detach(continuation)
+                    await self.detach(subscriptionID: subscriptionID)
                 }
             }
         }
@@ -747,13 +765,21 @@ private actor AppServerReviewEventSession {
             }
         }
         continuation = nil
+        activeStreamSubscriptionID = nil
     }
 
     func metricsSnapshot() -> AppServerReviewEventSessionMetrics {
         metrics
     }
 
-    private func attach(_ continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation) async {
+    func activeStreamSubscriptionIDForTesting() -> Int? {
+        activeStreamSubscriptionID
+    }
+
+    private func attach(
+        _ continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        subscriptionID: Int
+    ) async {
         if let pendingFinish {
             self.pendingFinish = nil
             noteEmissions(pendingFinish.precedingEvents)
@@ -766,6 +792,7 @@ private actor AppServerReviewEventSession {
             return
         }
         self.continuation = continuation
+        self.activeStreamSubscriptionID = subscriptionID
         let notifications = bufferedNotifications
         bufferedNotifications.removeAll(keepingCapacity: true)
         for notification in notifications {
@@ -776,8 +803,12 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func detach(_ continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation) {
+    func detach(subscriptionID: Int) {
+        guard activeStreamSubscriptionID == subscriptionID else {
+            return
+        }
         self.continuation = nil
+        self.activeStreamSubscriptionID = nil
     }
 
     private func finish(
@@ -801,6 +832,7 @@ private actor AppServerReviewEventSession {
         noteEmissions(pendingFinish.precedingEvents)
         pendingFinish.emit(to: continuation)
         self.continuation = nil
+        self.activeStreamSubscriptionID = nil
         finished = true
     }
 

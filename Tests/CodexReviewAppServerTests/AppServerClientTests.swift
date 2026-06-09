@@ -1162,6 +1162,51 @@ struct AppServerClientTests {
         #expect(interruptParams.turnID == "turn-new")
     }
 
+    @Test func backendIgnoresStaleEventStreamDetachAfterResubscribe() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let firstEvents = await backend.events(for: run)
+        _ = firstEvents
+
+        let firstAttached = await waitUntil {
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != nil
+        }
+        #expect(firstAttached)
+        let firstSubscriptionID = try #require(
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
+        )
+
+        let secondEvents = await backend.events(for: run)
+        var secondIterator = secondEvents.makeAsyncIterator()
+        let secondAttached = await waitUntil {
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != firstSubscriptionID
+        }
+        #expect(secondAttached)
+        let secondSubscriptionID = try #require(
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
+        )
+
+        await backend.detachReviewEventStreamForTesting(
+            threadID: "thread-1",
+            subscriptionID: firstSubscriptionID
+        )
+        #expect(await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") == secondSubscriptionID)
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await secondIterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await secondIterator.next() == .messageDelta("review text", itemID: "message-1"))
+    }
+
     @Test func backendTracksSyntheticDetachedReviewThreadStartsForInterrupt() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
