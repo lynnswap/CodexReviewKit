@@ -328,6 +328,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.activeStreamSubscriptionIDForTesting()
     }
 
+    package func notificationRouterIsRunningForTesting() -> Bool {
+        notificationRouterTask != nil
+    }
+
     package func detachReviewEventStreamForTesting(threadID: String, subscriptionID: Int) async {
         guard let session = reviewEventSession(forThreadID: threadID) else {
             return
@@ -523,6 +527,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 private struct PendingReviewEventStreamFinish {
     var precedingEvents: [BackendReviewEvent] = []
     var cancellationMessage: String?
+    var error: (any Error)?
 
     func emit(to continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation) {
         for event in precedingEvents {
@@ -531,7 +536,11 @@ private struct PendingReviewEventStreamFinish {
         if let cancellationMessage {
             continuation.yield(.cancelled(cancellationMessage))
         }
-        continuation.finish()
+        if let error {
+            continuation.finish(throwing: error)
+        } else {
+            continuation.finish()
+        }
     }
 }
 
@@ -763,6 +772,11 @@ private actor AppServerReviewEventSession {
             } else {
                 continuation.finish()
             }
+        } else {
+            pendingFinish = .init(
+                precedingEvents: precedingEvents,
+                error: error
+            )
         }
         continuation = nil
         activeStreamSubscriptionID = nil

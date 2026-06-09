@@ -1207,6 +1207,33 @@ struct AppServerClientTests {
         #expect(try await secondIterator.next() == .messageDelta("review text", itemID: "message-1"))
     }
 
+    @Test func backendPreservesNotificationStreamErrorForLateEventStreamSubscriber() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        #expect(await transport.notificationStreamCount() == 1)
+
+        await transport.finishNotificationStreams(throwing: JSONRPCError.closed)
+        let routerStopped = await waitUntil {
+            await backend.notificationRouterIsRunningForTesting() == false
+        }
+        #expect(routerStopped)
+
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+        await #expect(throws: JSONRPCError.closed) {
+            _ = try await iterator.next()
+        }
+        await transport.close()
+    }
+
     @Test func backendTracksSyntheticDetachedReviewThreadStartsForInterrupt() async throws {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
