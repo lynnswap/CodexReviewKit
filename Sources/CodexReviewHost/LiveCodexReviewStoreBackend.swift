@@ -22,6 +22,33 @@ private struct PendingLoginRuntimeCleanup {
     }
 }
 
+package struct CodexReviewMCPPortOwner: Equatable, Sendable {
+    package var processIdentifier: Int32
+    package var command: String?
+
+    package init(processIdentifier: Int32, command: String? = nil) {
+        self.processIdentifier = processIdentifier
+        self.command = command
+    }
+}
+
+package typealias CodexReviewMCPPortOwnerResolver = @MainActor @Sendable (
+    CodexReviewMCPHTTPServerConfiguration
+) async -> CodexReviewMCPPortOwner?
+
+package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
+    CodexReviewMCPHTTPServerConfiguration
+) async throws -> Void
+
+package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
+    var url: URL { get async }
+
+    func start() async throws
+    func stop() async
+}
+
+extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
+
 @MainActor
 public extension CodexReviewStore {
     static func makeLiveStore(
@@ -42,6 +69,8 @@ public extension CodexReviewStore {
         nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         transport: any JSONRPCTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -50,6 +79,8 @@ public extension CodexReviewStore {
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             externalURLOpener: externalURLOpener,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
             transportFactory: { _ in transport }
         )
     }
@@ -63,7 +94,9 @@ public extension CodexReviewStore {
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
             CodexReviewMCPHTTPServerConfiguration
-        ) -> CodexReviewMCPHTTPServer)? = nil,
+        ) -> any CodexReviewMCPHTTPServing)? = nil,
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPCTransport
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
@@ -73,6 +106,8 @@ public extension CodexReviewStore {
             webAuthenticationSessionFactory: webAuthenticationSessionFactory,
             externalURLOpener: externalURLOpener,
             mcpHTTPServerFactory: mcpHTTPServerFactory,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
             appServerRuntimeFactory: { codexHomeURL in
                 let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
                 return .init(
@@ -89,13 +124,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
         CodexReviewMCPHTTPServerConfiguration
-    ) -> CodexReviewMCPHTTPServer
+    ) -> any CodexReviewMCPHTTPServing
 
     let seed: CodexReviewStoreSeed
 
     private var client: AppServerClient?
     private var appServerBackend: AppServerCodexReviewBackend?
-    private var mcpHTTPServer: CodexReviewMCPHTTPServer?
+    private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
     private var loginChallenge: BackendLoginChallenge?
     private var loginBackend: AppServerCodexReviewBackend?
     private var loginClient: AppServerClient?
@@ -113,6 +148,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let webAuthenticationSessionFactory: CodexReviewWebAuthenticationSessionFactory
     private let externalURLOpener: ExternalURLOpener
     private let mcpHTTPServerFactory: MCPHTTPServerFactory?
+    private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
+    private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private weak var attachedStore: CodexReviewStore?
 
@@ -128,6 +165,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 configuration: configuration
             )
         },
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
@@ -144,6 +183,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.webAuthenticationSessionFactory = webAuthenticationSessionFactory
         self.externalURLOpener = externalURLOpener
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
+        self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
+        self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
         )
@@ -173,6 +214,80 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return URL(fileURLWithPath: codexHomePath, isDirectory: true)
         }
         return AppServerCodexHome.url(environment: environment)
+    }
+
+    private static func defaultMCPPortOwnerResolver(
+        configuration: CodexReviewMCPHTTPServerConfiguration
+    ) async -> CodexReviewMCPPortOwner? {
+        await Task.detached(priority: .utility) {
+            guard configuration.port > 0,
+                  let lsofOutput = runProcess(
+                    executable: "/usr/sbin/lsof",
+                    arguments: [
+                        "-nP",
+                        "-iTCP:\(configuration.port)",
+                        "-sTCP:LISTEN",
+                        "-Fp",
+                    ]
+                  ),
+                  let processIdentifier = parseLsofProcessIdentifier(from: lsofOutput)
+            else {
+                return nil
+            }
+            let command = runProcess(
+                executable: "/bin/ps",
+                arguments: [
+                    "-p",
+                    "\(processIdentifier)",
+                    "-o",
+                    "comm=",
+                ]
+            )?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return CodexReviewMCPPortOwner(
+                processIdentifier: processIdentifier,
+                command: command?.isEmpty == false ? command : nil
+            )
+        }.value
+    }
+
+    private nonisolated static func parseLsofProcessIdentifier(from output: String) -> Int32? {
+        output.split(whereSeparator: \.isNewline).lazy.compactMap { line -> Int32? in
+            guard line.first == "p" else {
+                return nil
+            }
+            return Int32(String(line.dropFirst()))
+        }.first
+    }
+
+    private nonisolated static func runProcess(executable: String, arguments: [String]) -> String? {
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            return nil
+        }
+        let process = Process()
+        let output = Pipe()
+        let errorOutput = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = errorOutput
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func defaultMCPHTTPServerBindChecker(
+        configuration: CodexReviewMCPHTTPServerConfiguration
+    ) async throws {
+        try await CodexReviewMCPHTTPServer.checkBind(configuration: configuration)
     }
 
     private static func makeAppServerRuntimeFactory(
@@ -218,8 +333,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
 
         var startedClient: AppServerClient?
-        var startedHTTPServer: CodexReviewMCPHTTPServer?
+        var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
         do {
+            if mcpHTTPServerFactory != nil {
+                try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
+            }
             let runtime = try await appServerRuntimeFactory(codexHomeURL)
             let client = runtime.client
             let backend = runtime.backend
@@ -239,7 +357,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await refreshSelectedAccountRateLimits(auth: store.auth)
             logger.info("Review runtime started")
         } catch {
-            logger.error("Review runtime failed to start: \(error.localizedDescription, privacy: .public)")
+            let failureMessage = await runtimeStartupFailureMessage(for: error)
+            logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
             await startedHTTPServer?.stop()
             await startedClient?.close()
             self.client = nil
@@ -247,8 +366,33 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.mcpHTTPServer = nil
             authNotificationTask?.cancel()
             authNotificationTask = nil
-            store.transitionToFailed(error.localizedDescription)
+            store.transitionToFailed(failureMessage)
         }
+    }
+
+    private func runtimeStartupFailureMessage(for error: Error) async -> String {
+        if let mcpHTTPServerError = error as? CodexReviewMCPHTTPServerError {
+            switch mcpHTTPServerError {
+            case .addressInUse:
+                return await mcpAddressInUseMessage()
+            }
+        }
+        return error.localizedDescription
+    }
+
+    private func mcpAddressInUseMessage() async -> String {
+        let endpoint = mcpHTTPServerConfiguration.url()
+        var message = "MCP endpoint \(endpoint.absoluteString) is already in use"
+        if let owner = await mcpPortOwnerResolver(mcpHTTPServerConfiguration) {
+            message += " by PID \(owner.processIdentifier)"
+            if let command = owner.command?.trimmingCharacters(in: .whitespacesAndNewlines),
+               command.isEmpty == false
+            {
+                message += " (\(command))"
+            }
+        }
+        message += ". Quit that process or change the MCP port in Settings, then reset the server."
+        return message
     }
 
     func stop(store _: CodexReviewStore) async {

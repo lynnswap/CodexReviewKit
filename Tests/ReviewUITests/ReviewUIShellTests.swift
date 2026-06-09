@@ -29,12 +29,17 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarTopAccessoryCountForTesting == 0)
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
         #expect(viewController.contentAccessoryCountForTesting == 0)
-        #expect(viewController.sidebarViewControllerForTesting.isShowingEmptyStateForTesting)
+        #expect(viewController.sidebarPresentationForTesting == .unavailable)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
     }
 
     @Test func splitViewShowsEmptyStateWithoutJobs() {
         let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: []
+        )
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -61,6 +66,30 @@ struct ReviewUIShellTests {
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
     }
 
+    @Test func splitViewShowsUnavailableSidebarWhenServerStartingOnLoad() {
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .starting,
+            workspaces: []
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+
+        #expect(viewController.sidebarPresentationForTesting == .unavailable)
+    }
+
+    @Test func splitViewShowsUnavailableSidebarWhenServerStoppedOnLoad() {
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .stopped,
+            workspaces: []
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+
+        #expect(viewController.sidebarPresentationForTesting == .unavailable)
+    }
+
     @Test func splitViewShowsJobSidebarWhenServerRunningOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -78,6 +107,11 @@ struct ReviewUIShellTests {
 
     @Test func splitViewSwitchesSidebarPresentationWhenPickerSelectionChanges() async throws {
         let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: []
+        )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
@@ -437,6 +471,11 @@ struct ReviewUIShellTests {
 
     @Test func sidebarPickerToolbarItemSwitchesSidebarPresentation() async throws {
         let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: []
+        )
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
         let window = harness.window
@@ -550,6 +589,11 @@ struct ReviewUIShellTests {
 
     @Test func sidebarKindObservationsKeepSelectionAndStoreTriggersSeparate() async throws {
         let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            workspaces: []
+        )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)

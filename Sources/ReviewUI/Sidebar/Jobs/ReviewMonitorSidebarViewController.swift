@@ -353,8 +353,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if sidebarSelection == .account {
             return .accountList
         }
-        if case .failed = serverState {
+        switch serverState {
+        case .failed, .starting, .stopped:
             return .unavailable
+        case .running:
+            break
         }
         let hasSidebarContent = hasReviewJobs || hasWorkspaces
         return hasSidebarContent ? .jobList : .empty
