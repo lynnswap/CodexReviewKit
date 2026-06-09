@@ -2942,6 +2942,7 @@ struct ReviewUITests {
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
             #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
@@ -2950,6 +2951,7 @@ struct ReviewUITests {
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
             #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
@@ -2959,6 +2961,7 @@ struct ReviewUITests {
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
+            #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
             #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }

@@ -461,7 +461,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let finderSupplementSignature = document.finderSupplementSignature
         let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
             to: finderSupplementSignature
-        )
+        ) || shouldRefreshFindSessionForCommandOutputReplacement(replacement)
         let shouldClearFindSelection = prepareFindSessionForLogMutation(
             .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
@@ -599,6 +599,19 @@ final class ReviewMonitorLogScrollView: NSScrollView {
               textFinderClient.usesSnapshot,
               let displayedFinderSupplementSignature,
               displayedFinderSupplementSignature != nextSignature
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func shouldRefreshFindSessionForCommandOutputReplacement(
+        _ replacement: ReviewMonitorLogReplacement
+    ) -> Bool {
+        guard replacement.kind == .commandOutput,
+              isFindBarVisible,
+              isFindQueryActive,
+              textFinderClient.usesSnapshot
         else {
             return false
         }
