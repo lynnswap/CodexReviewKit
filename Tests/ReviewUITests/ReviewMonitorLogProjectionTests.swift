@@ -1040,7 +1040,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(expandedDocument.commandOutputPanels.first?.lineCount == 2)
     }
 
-    @Test func collapsedCommandOutputFinderSupplementSignatureIncludesOutputContent() {
+    @Test func collapsedCommandOutputFinderSupplementSignatureIgnoresHiddenOutputContent() {
         let firstJob = CodexReviewJob.makeForTesting(
             id: "job-command-output-signature-1",
             cwd: "/tmp/workspace",
@@ -1086,7 +1086,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(firstDocument.text == secondDocument.text)
         #expect(firstDocument.commandOutputPanels.first?.outputSourceRange?.length == 3)
         #expect(secondDocument.commandOutputPanels.first?.outputSourceRange?.length == 3)
-        #expect(firstDocument.finderSupplementSignature != secondDocument.finderSupplementSignature)
+        #expect(firstDocument.finderSupplementSignature == secondDocument.finderSupplementSignature)
     }
 
     @Test func metadataIsPreservedOnBlocks() {
