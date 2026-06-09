@@ -15,10 +15,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByThreadID: [String: AppServerReviewEventSession] = [:]
     private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
+    private var unmatchedReviewNotificationsByThreadID: [String: [AppServerRoutedReviewNotification]] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: AppServerReviewEventSessionMetrics] = [:]
     private var notificationRouterTask: Task<Void, Never>?
     private var isNotificationRouterStarting = false
     private var notificationRouterMetrics = AppServerNotificationRouterMetrics()
+    private var reviewStartRequestsInFlight = 0
 
     package init(
         client: AppServerClient,
@@ -122,15 +124,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             model: thread.model ?? request.model
         )
         let session = AppServerReviewEventSession(run: provisionalRun, control: control)
-        reviewEventSessionsByThreadID[thread.threadID] = session
+        registerReviewEventSession(session, for: provisionalRun)
         control.recordThreadStarted(threadID: thread.threadID)
 
         let review: ReviewStartResponse
+        reviewStartRequestsInFlight += 1
         do {
             review = try await client.send(ReviewStartRequest(
                 params: .init(threadID: thread.threadID, target: request.request.target)
             ))
         } catch {
+            reviewStartRequestsInFlight -= 1
+            discardUnmatchedReviewNotificationsIfIdle()
             await cleanupReview(provisionalRun)
             throw error
         }
@@ -143,6 +148,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
+        await drainUnmatchedReviewNotifications(for: run, to: session)
+        reviewStartRequestsInFlight -= 1
+        discardUnmatchedReviewNotificationsIfIdle()
         control.recordReviewStarted(threadID: thread.threadID, turnID: review.turnID)
 
         return run
@@ -358,6 +366,38 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return reviewEventSessionsByThreadID.removeValue(forKey: run.threadID)
     }
 
+    private func bufferUnmatchedReviewNotification(_ notification: AppServerRoutedReviewNotification) -> Bool {
+        guard reviewStartRequestsInFlight > 0,
+              let threadID = notification.payload.threadID
+        else {
+            return false
+        }
+        notificationRouterMetrics.buffered += 1
+        unmatchedReviewNotificationsByThreadID[threadID, default: []].append(notification)
+        return true
+    }
+
+    private func drainUnmatchedReviewNotifications(
+        for run: BackendReviewRun,
+        to session: AppServerReviewEventSession
+    ) async {
+        guard let reviewThreadID = run.reviewThreadID else {
+            return
+        }
+        let notifications = unmatchedReviewNotificationsByThreadID.removeValue(forKey: reviewThreadID) ?? []
+        for notification in notifications {
+            notificationRouterMetrics.routed += 1
+            await session.receive(notification)
+        }
+    }
+
+    private func discardUnmatchedReviewNotificationsIfIdle() {
+        guard reviewStartRequestsInFlight == 0 else {
+            return
+        }
+        unmatchedReviewNotificationsByThreadID.removeAll(keepingCapacity: true)
+    }
+
     private func finishReviewEventStream(
         threadID: String,
         cancellationMessage: String?,
@@ -422,6 +462,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         if let threadID = payload.threadID {
             guard let session = reviewEventSession(forThreadID: threadID) else {
+                if bufferUnmatchedReviewNotification(routed) {
+                    return
+                }
                 notificationRouterMetrics.ignored += 1
                 return
             }
@@ -483,6 +526,7 @@ package struct AppServerNotificationRouterMetrics: Equatable, Sendable {
     package var decoded = 0
     package var routed = 0
     package var ignored = 0
+    package var buffered = 0
 
     package init() {}
 }

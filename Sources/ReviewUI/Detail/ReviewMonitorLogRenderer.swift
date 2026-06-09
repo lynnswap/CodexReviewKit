@@ -33,7 +33,10 @@ actor ReviewMonitorLogRenderer {
             return nil
         }
         guard projection.entryCount < sourceRange.upperBound else {
-            return []
+            guard sourceRange.lowerBound < projection.entryCount else {
+                return []
+            }
+            return [currentRenderedDocument()]
         }
 
         let skipCount = projection.entryCount - sourceRange.lowerBound
@@ -44,6 +47,9 @@ actor ReviewMonitorLogRenderer {
         }
 
         var documents: [ReviewMonitorRenderedLogDocument] = []
+        if skipCount > 0 {
+            documents.append(currentRenderedDocument())
+        }
         var entryIndex = sourceRange.lowerBound + skipCount
         for entry in entries.dropFirst(skipCount) {
             guard let document = projection.append(
@@ -56,6 +62,13 @@ actor ReviewMonitorLogRenderer {
             entryIndex += 1
         }
         return documents
+    }
+
+    private func currentRenderedDocument() -> ReviewMonitorRenderedLogDocument {
+        .init(
+            source: projection.currentDocument,
+            display: displayDocument
+        )
     }
 
     private func renderedDocument(

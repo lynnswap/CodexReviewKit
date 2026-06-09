@@ -326,6 +326,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         applyReplacement(replacement, document: display)
+        currentDisplayDocument = display
+        displayedRevision = display.revision
         invalidateDocumentLayout()
         restoreScrollPosition(restorationTarget, countAsAutoFollow: false)
         invalidateFindIndicator(reason: .viewportChanged)
@@ -419,6 +421,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = forceAutoFollow || isPinnedToBottom()
+        let finderSupplementSignature = document.finderSupplementSignature
+        let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+            to: finderSupplementSignature
+        )
         let shouldClearFindSelection = prepareFindSessionForLogMutation(.appendPreservingPrefix)
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
@@ -428,7 +434,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
-        displayedFinderSupplementSignature = document.finderSupplementSignature
+        displayedFinderSupplementSignature = finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -437,7 +443,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
         }
-        invalidateFindIndicator()
+        if shouldRefreshFindSession {
+            refreshFindSessionAfterUserVisibleLogChange()
+        } else {
+            invalidateFindIndicator()
+        }
         return true
     }
 
@@ -448,6 +458,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        let finderSupplementSignature = document.finderSupplementSignature
+        let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+            to: finderSupplementSignature
+        )
         let shouldClearFindSelection = prepareFindSessionForLogMutation(
             .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
@@ -460,7 +474,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
-        displayedFinderSupplementSignature = document.finderSupplementSignature
+        displayedFinderSupplementSignature = finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -469,7 +483,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
         }
-        invalidateFindIndicator()
+        if shouldRefreshFindSession {
+            refreshFindSessionAfterUserVisibleLogChange()
+        } else {
+            invalidateFindIndicator()
+        }
         return true
     }
 

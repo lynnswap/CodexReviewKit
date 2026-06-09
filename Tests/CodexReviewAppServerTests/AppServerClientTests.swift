@@ -1154,6 +1154,42 @@ struct AppServerClientTests {
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
     }
 
+    @Test func backendBuffersDetachedReviewThreadNotificationsDuringReviewStart() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        let gate = AsyncGate()
+        await transport.hold(method: "review/start", gate: gate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        async let started = backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        await transport.waitForRequestCount(3)
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-new"),
+                reviewThreadID: "review-thread"
+            )
+        )
+        let bufferedDetachedNotification = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().buffered == 1
+        }
+        #expect(bufferedDetachedNotification)
+
+        await gate.open()
+        let run = try await started
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
+    }
+
     @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

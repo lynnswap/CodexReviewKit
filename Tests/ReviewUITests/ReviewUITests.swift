@@ -2757,6 +2757,7 @@ struct ReviewUITests {
         #expect(transport.scrollCommandOutputPanelOutputForTesting(deltaY: -24))
         let scrolledOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
+        let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
         job.appendLogEntry(.init(
             kind: .commandOutput,
             groupID: "cmd_1",
@@ -2765,6 +2766,7 @@ struct ReviewUITests {
         ))
         _ = try await awaitTransportRender(transport)
         await awaitNativeLayoutTurn()
+        #expect(transport.logReloadCountForTesting == expandedOutputAppendReloadCount)
         let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(abs(offsetAfterOutputAppend - scrolledOutputScrollOffset) <= 0.5)
         let collapseReloadCount = transport.logReloadCountForTesting

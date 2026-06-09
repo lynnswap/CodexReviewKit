@@ -306,6 +306,44 @@ struct ReviewMonitorLogProjectionTests {
         ])
     }
 
+    @Test func rendererReturnsSkippedCurrentDocumentBeforeLaterAppendSteps() async throws {
+        let initialEntries: [ReviewLogEntry] = [
+            .init(kind: .rawReasoning, groupID: "reasoning-1", text: "Need to inspect files.")
+        ]
+        let firstAppend = ReviewLogEntry(
+            kind: .rawReasoning,
+            groupID: "reasoning-2",
+            text: "I found the first update."
+        )
+        let secondAppend = ReviewLogEntry(
+            kind: .rawReasoning,
+            groupID: "reasoning-3",
+            text: "I found the second update."
+        )
+        let renderer = ReviewMonitorLogRenderer()
+        _ = await renderer.render(entries: initialEntries)
+
+        _ = try #require(await renderer.appendSteps(
+            entries: [firstAppend],
+            sourceRange: initialEntries.count..<(initialEntries.count + 1)
+        ))
+        let recoveredDocuments = try #require(await renderer.appendSteps(
+            entries: [firstAppend, secondAppend],
+            sourceRange: initialEntries.count..<(initialEntries.count + 2)
+        ))
+
+        #expect(recoveredDocuments.count == 2)
+        #expect(recoveredDocuments[0].display.text.contains("I found the first update."))
+        #expect(recoveredDocuments[0].display.text.contains("I found the second update.") == false)
+        #expect(recoveredDocuments[1].display.text.contains("I found the first update."))
+        #expect(recoveredDocuments[1].display.text.contains("I found the second update."))
+        guard case .append(let append) = recoveredDocuments[1].display.lastChange else {
+            Issue.record("Expected later append to keep its append change.")
+            return
+        }
+        #expect(append.text == "\n\nI found the second update.")
+    }
+
     @Test func contextCompactionMarkerUsesDedicatedProjectionStyle() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "contextCompaction",

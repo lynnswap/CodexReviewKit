@@ -1424,6 +1424,10 @@ struct ReviewMonitorLogProjection: Sendable {
         state.entrySignatures.count
     }
 
+    var currentDocument: ReviewMonitorLogDocument {
+        document
+    }
+
     mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLogDocument {
         let entrySignatures = entries.map(EntrySignature.init)
         guard entrySignatures != state.entrySignatures else {
