@@ -285,6 +285,7 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
             if let outputSourceRange = panel.outputSourceRange {
                 hasher.combine(true)
                 combine(outputSourceRange, into: &hasher)
+                hasher.combine(sourceText(in: outputSourceRange) ?? "")
             } else {
                 hasher.combine(false)
                 hasher.combine(panel.outputText)
@@ -296,6 +297,18 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     private func combine(_ range: NSRange, into hasher: inout Hasher) {
         hasher.combine(range.location)
         hasher.combine(range.length)
+    }
+
+    private func sourceText(in range: NSRange) -> String? {
+        let sourceString = sourceText as NSString
+        let sourceBounds = NSRange(location: 0, length: sourceString.length)
+        let intersection = NSIntersectionRange(range, sourceBounds)
+        guard intersection.location == range.location,
+              intersection.length == range.length
+        else {
+            return nil
+        }
+        return sourceString.substring(with: range)
     }
 }
 

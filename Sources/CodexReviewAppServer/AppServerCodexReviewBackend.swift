@@ -14,6 +14,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private let threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByThreadID: [String: AppServerReviewEventSession] = [:]
+    private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: AppServerReviewEventSessionMetrics] = [:]
     private var notificationRouterTask: Task<Void, Never>?
     private var isNotificationRouterStarting = false
@@ -141,6 +142,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             model: thread.model ?? request.model
         )
         await session.updateRun(run)
+        registerReviewEventSession(session, for: run)
         control.recordReviewStarted(threadID: thread.threadID, turnID: review.turnID)
 
         return run
@@ -246,7 +248,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
         _ = try await client.initialize()
-        let session = reviewEventSessionsByThreadID[run.threadID]
+        let session = reviewEventSession(forThreadID: run.threadID)
         await session?.requestCancellation(message: reason.message)
         do {
             if let control = controlsByThreadID[run.threadID] {
@@ -276,9 +278,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func cleanupReview(_ run: BackendReviewRun) async {
         _ = try? await client.initialize()
         controlsByThreadID.removeValue(forKey: run.threadID)
-        if let session = reviewEventSessionsByThreadID.removeValue(forKey: run.threadID) {
+        if let session = unregisterReviewEventSession(for: run) {
             await session.finish(cancellationMessage: nil)
-            completedReviewEventSessionMetricsByThreadID[run.threadID] = await session.metricsSnapshot()
+            let metrics = await session.metricsSnapshot()
+            completedReviewEventSessionMetricsByThreadID[run.threadID] = metrics
+            if let reviewThreadID = run.reviewThreadID,
+               reviewThreadID != run.threadID {
+                completedReviewEventSessionMetricsByThreadID[reviewThreadID] = metrics
+            }
         }
         let _: EmptyResponse? = try? await client.send(BackgroundTerminalsCleanRequest(
             params: .init(threadID: run.threadID)
@@ -300,7 +307,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func reviewEventSessionMetricsForTesting(
         threadID: String
     ) async -> AppServerReviewEventSessionMetrics? {
-        if let session = reviewEventSessionsByThreadID[threadID] {
+        if let session = reviewEventSession(forThreadID: threadID) {
             return await session.metricsSnapshot()
         }
         return completedReviewEventSessionMetricsByThreadID[threadID]
@@ -310,6 +317,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await ensureNotificationRouterStarted()
         if let session = reviewEventSessionsByThreadID[run.threadID] {
             await session.updateRun(run)
+            registerReviewEventSession(session, for: run)
             return session
         }
         let control = controlsByThreadID[run.threadID] ?? AppServerReviewControl(client: client)
@@ -320,8 +328,34 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             control.recordThreadStarted(threadID: run.threadID)
         }
         let session = AppServerReviewEventSession(run: run, control: control)
-        reviewEventSessionsByThreadID[run.threadID] = session
+        registerReviewEventSession(session, for: run)
         return session
+    }
+
+    private func registerReviewEventSession(
+        _ session: AppServerReviewEventSession,
+        for run: BackendReviewRun
+    ) {
+        reviewEventSessionsByThreadID[run.threadID] = session
+        reviewEventSessionCanonicalThreadIDByThreadID[run.threadID] = run.threadID
+        if let reviewThreadID = run.reviewThreadID,
+           reviewThreadID != run.threadID {
+            reviewEventSessionCanonicalThreadIDByThreadID[reviewThreadID] = run.threadID
+        }
+    }
+
+    private func reviewEventSession(forThreadID threadID: String) -> AppServerReviewEventSession? {
+        let canonicalThreadID = reviewEventSessionCanonicalThreadIDByThreadID[threadID] ?? threadID
+        return reviewEventSessionsByThreadID[canonicalThreadID]
+    }
+
+    private func unregisterReviewEventSession(for run: BackendReviewRun) -> AppServerReviewEventSession? {
+        reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: run.threadID)
+        if let reviewThreadID = run.reviewThreadID,
+           reviewThreadID != run.threadID {
+            reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: reviewThreadID)
+        }
+        return reviewEventSessionsByThreadID.removeValue(forKey: run.threadID)
     }
 
     private func finishReviewEventStream(
@@ -329,7 +363,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         cancellationMessage: String?,
         buffersMissingContinuation: Bool = false
     ) async {
-        guard let session = reviewEventSessionsByThreadID[threadID] else {
+        guard let session = reviewEventSession(forThreadID: threadID) else {
             return
         }
         await session.finish(
@@ -387,13 +421,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             payload: payload
         )
         if let threadID = payload.threadID {
-            guard let session = reviewEventSessionsByThreadID[threadID] else {
+            guard let session = reviewEventSession(forThreadID: threadID) else {
                 notificationRouterMetrics.ignored += 1
                 return
             }
             notificationRouterMetrics.routed += 1
             await session.receive(routed)
-        } else if isGlobalDiagnosticMethod(notification.method) {
+        } else if isThreadlessBroadcastMethod(notification.method) {
             let sessions = Array(reviewEventSessionsByThreadID.values)
             guard sessions.isEmpty == false else {
                 notificationRouterMetrics.ignored += 1
@@ -1662,9 +1696,9 @@ private func isReviewNotificationMethod(_ method: String) -> Bool {
     }
 }
 
-private func isGlobalDiagnosticMethod(_ method: String) -> Bool {
+private func isThreadlessBroadcastMethod(_ method: String) -> Bool {
     switch method {
-    case "warning", "deprecationNotice", "configWarning":
+    case "warning", "deprecationNotice", "configWarning", "error":
         true
     default:
         false

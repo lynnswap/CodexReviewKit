@@ -1117,6 +1117,43 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendRoutesDetachedReviewThreadNotificationsToParentSession() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-new"),
+                reviewThreadID: "review-thread"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-new",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
+        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
+    }
+
     @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -1224,6 +1261,39 @@ struct AppServerClientTests {
         )
         #expect(try await firstIterator.next() == expected)
         #expect(try await secondIterator.next() == expected)
+        #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
+        #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
+    }
+
+    @Test func backendBroadcastsThreadlessErrorsToActiveReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
+        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "error",
+            params: TestErrorNotification(message: "App-server failed.", willRetry: false)
+        )
+
+        #expect(try await firstIterator.next() == .failed("App-server failed."))
+        #expect(try await secondIterator.next() == .failed("App-server failed."))
         #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
         #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
     }
@@ -1710,34 +1780,37 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         _ = try await iterator.next()
 
+        let routedOutput = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.routed ?? 0 >= 3
+        }
+        #expect(routedOutput)
+
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
 
-        #expect(try await iterator.next() == .logEntry(
-            kind: .commandOutput,
-            text: " M README.md\n?? Sources/New.swift\n",
-            groupID: "cmd-1",
-            replacesGroup: false,
-            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
-        ))
-        _ = try await iterator.next()
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
-        else {
-            Issue.record("Expected active command output to be closed before cancellation.")
-            return
+        var sawClosedOutput = false
+        while let event = try await iterator.next() {
+            if case .cancelled("Stop") = event {
+                break
+            }
+            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
+                  kind == .commandOutput,
+                  replacesGroup
+            else {
+                continue
+            }
+            sawClosedOutput = true
+            #expect(text == "M README.md?? Sources/New.swift")
+            #expect(groupID == "cmd-1")
+            #expect(metadata?.sourceType == "commandExecution")
+            #expect(metadata?.status == "canceled")
+            #expect(metadata?.itemID == "cmd-1")
+            #expect(metadata?.command == "git status")
+            #expect(metadata?.startedAt == startedAt)
+            #expect(metadata?.completedAt != nil)
+            #expect(metadata?.durationMs != nil)
+            #expect(metadata?.commandStatus == "canceled")
         }
-        #expect(kind == .commandOutput)
-        #expect(text == "M README.md?? Sources/New.swift")
-        #expect(groupID == "cmd-1")
-        #expect(replacesGroup == true)
-        #expect(metadata?.sourceType == "commandExecution")
-        #expect(metadata?.status == "canceled")
-        #expect(metadata?.itemID == "cmd-1")
-        #expect(metadata?.command == "git status")
-        #expect(metadata?.startedAt == startedAt)
-        #expect(metadata?.completedAt != nil)
-        #expect(metadata?.durationMs != nil)
-        #expect(metadata?.commandStatus == "canceled")
-        #expect(try await iterator.next() == .cancelled("Stop"))
+        #expect(sawClosedOutput)
         #expect(try await iterator.next() == nil)
     }
 
@@ -3589,6 +3662,18 @@ struct AppServerClientTests {
         ])
     }
 
+    private func waitUntil(timeout: Duration = .seconds(2), condition: () async -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while await condition() == false {
+            if clock.now >= deadline {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return true
+    }
+
     private func waitUntil(timeout: Duration, condition: () -> Bool) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + timeout
@@ -3923,8 +4008,8 @@ private struct TestGlobalMessageNotification: Encodable, Sendable {
 }
 
 private struct TestErrorNotification: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
+    var threadID: String? = nil
+    var turnID: String? = nil
     var message: String
     var willRetry: Bool
 

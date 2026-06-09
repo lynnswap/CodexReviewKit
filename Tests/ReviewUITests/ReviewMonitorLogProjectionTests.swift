@@ -1002,6 +1002,55 @@ struct ReviewMonitorLogProjectionTests {
         #expect(expandedDocument.commandOutputPanels.first?.lineCount == 2)
     }
 
+    @Test func collapsedCommandOutputFinderSupplementSignatureIncludesOutputContent() {
+        let firstJob = CodexReviewJob.makeForTesting(
+            id: "job-command-output-signature-1",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "abc",
+                    metadata: .init(sourceType: "commandExecution", title: "Command output")
+                ),
+            ]
+        )
+        let secondJob = CodexReviewJob.makeForTesting(
+            id: "job-command-output-signature-2",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-1",
+                    text: "xyz",
+                    metadata: .init(sourceType: "commandExecution", title: "Command output")
+                ),
+            ]
+        )
+
+        let firstDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: firstJob),
+            expandedBlockIDs: []
+        )
+        let secondDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document(for: secondJob),
+            expandedBlockIDs: []
+        )
+
+        #expect(firstDocument.text == secondDocument.text)
+        #expect(firstDocument.commandOutputPanels.first?.outputSourceRange?.length == 3)
+        #expect(secondDocument.commandOutputPanels.first?.outputSourceRange?.length == 3)
+        #expect(firstDocument.finderSupplementSignature != secondDocument.finderSupplementSignature)
+    }
+
     @Test func metadataIsPreservedOnBlocks() {
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",
