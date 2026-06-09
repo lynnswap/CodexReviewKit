@@ -15,22 +15,28 @@ struct MCPServerUnavailableView: View {
 
     var body: some View {
         ContentUnavailableView {
-            Button {
-                restartServer()
-            } label: {
-                Label("Reset Server", systemImage: "arrow.clockwise")
-                    .padding(.vertical, 8)
+            VStack(spacing: 12) {
+                if presentation.showsProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button {
+                    restartServer()
+                } label: {
+                    Label("Reset Server", systemImage: "arrow.clockwise")
+                        .padding(.vertical, 8)
+                }
+                .labelStyle(.titleAndIcon)
+                .buttonSizing(.flexible)
+                .buttonBorderShape(.capsule)
+                .buttonStyle(.bordered)
+                .disabled(isRestarting || presentation.canRestart == false)
             }
-            .labelStyle(.titleAndIcon)
-            .buttonSizing(.flexible)
-            .buttonBorderShape(.capsule)
-            .buttonStyle(.bordered)
-            .disabled(isRestarting)
         } description: {
             VStack {
-                Text("MCP Server Unavailable")
-                if let failureMessage {
-                    Text(failureMessage)
+                Text(presentation.title)
+                if let message = presentation.message {
+                    Text(message)
                         .textScale(.secondary)
                         .foregroundStyle(.secondary)
                 }
@@ -39,10 +45,40 @@ struct MCPServerUnavailableView: View {
         .frame(maxHeight:.infinity)
     }
 
-    private var failureMessage: String? {
-        guard case .failed(let message) = store.serverState else {
-            return nil
+    private var presentation: ServerPresentation {
+        switch store.serverState {
+        case .failed(let message):
+            return .init(
+                title: "MCP Server Unavailable",
+                message: Self.trimmedMessage(message),
+                canRestart: true,
+                showsProgress: false
+            )
+        case .starting:
+            return .init(
+                title: "Starting MCP Server",
+                message: "The embedded server is starting.",
+                canRestart: false,
+                showsProgress: true
+            )
+        case .stopped:
+            return .init(
+                title: "MCP Server Stopped",
+                message: "The embedded server is not running.",
+                canRestart: true,
+                showsProgress: false
+            )
+        case .running:
+            return .init(
+                title: "MCP Server Running",
+                message: nil,
+                canRestart: false,
+                showsProgress: false
+            )
         }
+    }
+
+    private static func trimmedMessage(_ message: String) -> String? {
         let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedMessage.isEmpty ? nil : trimmedMessage
     }
@@ -61,5 +97,12 @@ struct MCPServerUnavailableView: View {
             }
             await store.restart()
         }
+    }
+
+    private struct ServerPresentation {
+        var title: String
+        var message: String?
+        var canRestart: Bool
+        var showsProgress: Bool
     }
 }

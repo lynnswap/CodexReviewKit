@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import MCP
+@preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReview
 import CodexReviewMCPServer
@@ -87,6 +88,24 @@ struct CodexReviewMCPHTTPServerTests {
         #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
         #expect(denied.statusCode == 421)
         await server.stop()
+    }
+
+    @Test func streamableHTTPClassifiesAddressInUseBindError() {
+        let configuration = CodexReviewMCPHTTPServerConfiguration(
+            host: "127.0.0.1",
+            port: 54321
+        )
+        let error = IOError(errnoCode: EADDRINUSE, reason: "bind")
+
+        let classified = CodexReviewMCPHTTPServerError.classifyStartError(
+            error,
+            configuration: configuration
+        )
+
+        #expect((classified as? CodexReviewMCPHTTPServerError) == .addressInUse(
+            host: "127.0.0.1",
+            port: 54321
+        ))
     }
 
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {

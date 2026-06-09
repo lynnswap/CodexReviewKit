@@ -105,7 +105,11 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexReviewMCPServerTests",
-            dependencies: ["CodexReviewMCPServer", "CodexReviewTesting"],
+            dependencies: [
+                "CodexReviewMCPServer",
+                "CodexReviewTesting",
+                .product(name: "NIOCore", package: "swift-nio"),
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

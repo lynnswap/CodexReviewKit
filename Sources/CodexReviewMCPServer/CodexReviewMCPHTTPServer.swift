@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MCP
 import OSLog
@@ -10,6 +11,32 @@ private let logger = Logger(subsystem: "CodexReviewKit", category: "mcp-http")
 private struct TrackedHTTPResponse {
     var response: HTTPResponse
     var streamCompletion: ActiveRequestCompletion? = nil
+}
+
+package enum CodexReviewMCPHTTPServerError: LocalizedError, Equatable, Sendable {
+    case addressInUse(host: String, port: Int)
+
+    package static func classifyStartError(
+        _ error: Error,
+        configuration: CodexReviewMCPHTTPServerConfiguration
+    ) -> Error {
+        if let ioError = error as? IOError,
+           ioError.errnoCode == EADDRINUSE
+        {
+            return Self.addressInUse(
+                host: configuration.host,
+                port: configuration.port
+            )
+        }
+        return error
+    }
+
+    package var errorDescription: String? {
+        switch self {
+        case .addressInUse(let host, let port):
+            "MCP HTTP server address \(host):\(port) is already in use."
+        }
+    }
 }
 
 package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
@@ -104,6 +131,36 @@ package actor CodexReviewMCPHTTPServer {
         configuration.endpoint
     }
 
+    package static func checkBind(
+        configuration: CodexReviewMCPHTTPServerConfiguration
+    ) async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.backlog, value: 1)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.close(mode: .all)
+            }
+            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 1)
+            .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
+
+        do {
+            let channel = try await bootstrap.bind(
+                host: configuration.host,
+                port: configuration.port
+            ).get()
+            try? await channel.close()
+            try? await group.shutdownGracefully()
+        } catch {
+            try? await group.shutdownGracefully()
+            throw CodexReviewMCPHTTPServerError.classifyStartError(
+                error,
+                configuration: configuration
+            )
+        }
+    }
+
     package func start() async throws {
         guard channel == nil else {
             return
@@ -137,7 +194,10 @@ package actor CodexReviewMCPHTTPServer {
             logger.info("MCP Streamable HTTP server listening at \(self.url.absoluteString, privacy: .public)")
         } catch {
             try? await group.shutdownGracefully()
-            throw error
+            throw CodexReviewMCPHTTPServerError.classifyStartError(
+                error,
+                configuration: configuration
+            )
         }
     }
 

@@ -223,6 +223,7 @@ struct CodexReviewHostTests {
                     )
                 )
             },
+            mcpHTTPServerBindChecker: { _ in },
             transportFactory: { _ in transport }
         )
 
@@ -233,6 +234,85 @@ struct CodexReviewHostTests {
         #expect(capturedConfiguration?.endpoint == "/custom-mcp")
         #expect(serverURL.path == "/custom-mcp")
         await store.stop()
+    }
+
+    @Test func liveStoreReportsMCPPortOwnerWhenEndpointPortInUseAndDoesNotLaunchAppServer() async throws {
+        let homeURL = try temporaryHome()
+        let port = 54321
+
+        var didLaunchAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, configuration in
+                NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpPortOwnerResolver: { configuration in
+                #expect(configuration.port == port)
+                return .init(
+                    processIdentifier: 98695,
+                    command: "/Applications/CodexReviewMonitor.app/Contents/MacOS/CodexReviewMonitor"
+                )
+            },
+            mcpHTTPServerBindChecker: { configuration in
+                throw CodexReviewMCPHTTPServerError.addressInUse(
+                    host: configuration.host,
+                    port: configuration.port
+                )
+            },
+            transportFactory: { _ in
+                didLaunchAppServer = true
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(didLaunchAppServer == false)
+        guard case .failed(let message) = store.serverState else {
+            Issue.record("Expected failed server state.")
+            return
+        }
+        #expect(message.contains("MCP endpoint http://127.0.0.1:\(port)/mcp is already in use by PID 98695"))
+        #expect(message.contains("/Applications/CodexReviewMonitor.app/Contents/MacOS/CodexReviewMonitor"))
+        #expect(message.contains("Quit that process or change the MCP port in Settings"))
+    }
+
+    @Test func liveStoreReportsMCPPortInUseWhenOwnerCannotBeResolved() async throws {
+        let homeURL = try temporaryHome()
+        let port = 54322
+
+        var didLaunchAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, configuration in
+                NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpPortOwnerResolver: { _ in nil },
+            mcpHTTPServerBindChecker: { configuration in
+                throw CodexReviewMCPHTTPServerError.addressInUse(
+                    host: configuration.host,
+                    port: configuration.port
+                )
+            },
+            transportFactory: { _ in
+                didLaunchAppServer = true
+                return FakeJSONRPCTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(didLaunchAppServer == false)
+        guard case .failed(let message) = store.serverState else {
+            Issue.record("Expected failed server state.")
+            return
+        }
+        #expect(message.contains("MCP endpoint http://127.0.0.1:\(port)/mcp is already in use."))
+        #expect(message.contains("by PID") == false)
     }
 
     @Test func liveStoreLoadsPersistedRegistryAccountKind() throws {
@@ -1117,6 +1197,7 @@ struct CodexReviewHostTests {
                     configuration: .init(port: 0)
                 )
             },
+            mcpHTTPServerBindChecker: { _ in },
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
                 return transport
@@ -1765,6 +1846,24 @@ private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {
         return nil
     }
     return message
+}
+
+private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sendable {
+    private let endpoint: URL
+
+    init(endpoint: URL) {
+        self.endpoint = endpoint
+    }
+
+    var url: URL {
+        get async {
+            endpoint
+        }
+    }
+
+    func start() async throws {}
+
+    func stop() async {}
 }
 
 @MainActor
