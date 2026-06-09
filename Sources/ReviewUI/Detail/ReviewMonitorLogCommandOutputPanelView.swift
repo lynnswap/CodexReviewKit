@@ -852,7 +852,7 @@ final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
         guard panel.isExpanded else {
             return CGRect(x: 0, y: 0, width: availableWidth, height: 0)
         }
-        let cardHeight = ReviewMonitorCommandOutputPanelView.cardHeight(
+        let proposedSize = ReviewMonitorCommandOutputPanelView.proposedSize(
             for: panel,
             width: availableWidth,
             outputLineHeight: outputLineHeight
@@ -860,8 +860,8 @@ final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
         return CGRect(
             x: 0,
             y: 0,
-            width: availableWidth,
-            height: ReviewMonitorCommandOutputPanelAttachmentView.outerHeight(cardHeight: cardHeight)
+            width: proposedSize.width,
+            height: ReviewMonitorCommandOutputPanelAttachmentView.outerHeight(cardHeight: proposedSize.height)
         )
     }
 
@@ -1034,13 +1034,24 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
         attachment: ReviewMonitorCommandOutputPanelAttachment,
         backgroundAlpha: CGFloat
     ) {
+        let panelChanged = panelView.configure(attachment.panel)
+        let blockIDChanged = blockID != attachment.blockID
+        let backgroundChanged = abs(self.backgroundAlpha - backgroundAlpha) > 0.001
+        guard panelChanged || blockIDChanged || backgroundChanged else {
+            return
+        }
+
         blockID = attachment.blockID
-        panelView.configure(attachment.panel)
-        setBackgroundAlpha(backgroundAlpha)
+        if backgroundChanged {
+            setBackgroundAlpha(backgroundAlpha)
+        }
         needsLayout = true
     }
 
     func setBackgroundAlpha(_ alpha: CGFloat) {
+        guard abs(backgroundAlpha - alpha) > 0.001 else {
+            return
+        }
         backgroundAlpha = alpha
         backgroundView.alphaValue = alpha
     }
@@ -1093,6 +1104,10 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
 #if DEBUG
     private func prepareForTesting() {
         layoutSubtreeIfNeeded()
+    }
+
+    var outputScrollUsesHorizontalScrollingForTesting: Bool {
+        panelView.outputScrollUsesHorizontalScrollingForTesting
     }
 
     var usesTextKit2ForTesting: Bool {
@@ -1184,6 +1199,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private var commandLineText = ""
     private var outputText = ""
     private var outputLineCount = 0
+    private var outputMaximumLineUTF16Length = 0
     private var shouldScrollOutputToBottomOnNextLayout = false
 
     override var isFlipped: Bool {
@@ -1211,7 +1227,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         outputScrollView.drawsBackground = false
         outputScrollView.borderType = .noBorder
         outputScrollView.hasVerticalScroller = true
-        outputScrollView.hasHorizontalScroller = false
+        outputScrollView.hasHorizontalScroller = true
         outputScrollView.autohidesScrollers = true
         outputScrollView.scrollerStyle = .overlay
         outputScrollView.documentView = outputTextView
@@ -1221,7 +1237,8 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         configureTerminalTextView(
             outputTextView,
             textColor: .secondaryLabelColor,
-            textContainerInset: NSSize(width: 0, height: 2)
+            textContainerInset: NSSize(width: 0, height: 2),
+            wrapsLines: false
         )
 
         configureLabel(resultLabel)
@@ -1234,7 +1251,12 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         nil
     }
 
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) {
+    @discardableResult
+    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) -> Bool {
+        guard self.panel != panel else {
+            return false
+        }
+
         let previousPanel = self.panel
         let wasExpanded = previousPanel?.isExpanded == true
         self.panel = panel
@@ -1265,7 +1287,9 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
 
         if outputChanged {
             outputText = panel.outputText
-            outputLineCount = Self.lineCount(panel.outputText)
+            let outputMetrics = ReviewMonitorLogLineCounter.metrics(panel.outputText)
+            outputLineCount = outputMetrics.lineCount
+            outputMaximumLineUTF16Length = outputMetrics.maximumLineUTF16Length
             outputTextView.textStorage?.setAttributedString(
                 Self.terminalAttributedString(
                     text: panel.outputText,
@@ -1281,6 +1305,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         }
         resultLabel.stringValue = panel.exitText ?? ""
         needsLayout = true
+        return true
     }
 
     override func layout() {
@@ -1338,20 +1363,28 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         )
         let outputWidth = outputScrollView.contentSize.width
         outputTextView.minSize = NSSize(width: outputWidth, height: 0)
-        outputTextView.maxSize = NSSize(width: outputWidth, height: CGFloat.greatestFiniteMagnitude)
+        outputTextView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        let outputDocumentWidth = max(
+            outputWidth,
+            Self.outputTextWidth(
+                maximumLineUTF16Length: outputMaximumLineUTF16Length,
+                textContainerInset: outputTextView.textContainerInset
+            )
+        )
         outputTextView.textContainer?.containerSize = NSSize(
-            width: outputWidth,
+            width: outputDocumentWidth,
             height: CGFloat.greatestFiniteMagnitude
         )
         let outputHeight = Self.outputTextHeight(
-            for: outputText,
-            width: outputWidth,
             minimumLineCount: outputLineCount,
             textContainerInset: outputTextView.textContainerInset,
             lineHeight: outputLineHeight
         )
         outputTextView.frame.size = NSSize(
-            width: outputWidth,
+            width: outputDocumentWidth,
             height: max(
                 outputScrollView.contentSize.height,
                 outputHeight
@@ -1637,7 +1670,22 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         )
     }
 
-    nonisolated static func cardHeight(
+    nonisolated static func proposedSize(
+        for panel: ReviewMonitorLogCommandOutputPanel,
+        width: CGFloat,
+        outputLineHeight: CGFloat
+    ) -> NSSize {
+        NSSize(
+            width: width,
+            height: cardHeight(
+                for: panel,
+                width: width,
+                outputLineHeight: outputLineHeight
+            )
+        )
+    }
+
+    private nonisolated static func cardHeight(
         for panel: ReviewMonitorLogCommandOutputPanel,
         width: CGFloat,
         outputLineHeight: CGFloat
@@ -1703,19 +1751,19 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     private nonisolated static func outputTextHeight(
-        for text: String,
-        width: CGFloat,
         minimumLineCount: Int,
         textContainerInset: NSSize,
         lineHeight: CGFloat
     ) -> CGFloat {
-        let minimumHeight = CGFloat(max(1, minimumLineCount)) * lineHeight
-        let measuredHeight = terminalTextBoundingHeight(
-            for: text,
-            width: width,
-            foregroundColor: .secondaryLabelColor
-        )
-        return max(minimumHeight, measuredHeight) + textContainerInset.height * 2
+        CGFloat(max(1, minimumLineCount)) * lineHeight + textContainerInset.height * 2
+    }
+
+    private nonisolated static func outputTextWidth(
+        maximumLineUTF16Length: Int,
+        textContainerInset: NSSize
+    ) -> CGFloat {
+        let characterWidth = max(1, ceil(outputFont.maximumAdvancement.width))
+        return CGFloat(max(1, maximumLineUTF16Length)) * characterWidth + textContainerInset.width * 2
     }
 
     private nonisolated static func terminalTextBoundingHeight(
@@ -1734,14 +1782,6 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         return ceil(rect.height)
     }
 
-    private nonisolated static func lineCount(_ text: String) -> Int {
-        guard text.isEmpty == false else {
-            return 0
-        }
-        let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
-        return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
-    }
-
     private func configureLabel(_ label: NSTextField) {
         label.isEditable = false
         label.isSelectable = false
@@ -1755,7 +1795,8 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private func configureTerminalTextView(
         _ textView: NSTextView,
         textColor: NSColor,
-        textContainerInset: NSSize
+        textContainerInset: NSSize,
+        wrapsLines: Bool = true
     ) {
         textView.isEditable = false
         textView.isSelectable = true
@@ -1763,10 +1804,10 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         textView.textContainerInset = textContainerInset
         textView.font = Self.outputFont
         textView.textColor = textColor
-        textView.isHorizontallyResizable = false
+        textView.isHorizontallyResizable = wrapsLines == false
         textView.isVerticallyResizable = true
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.widthTracksTextView = true
+        textView.autoresizingMask = wrapsLines ? [.width] : []
+        textView.textContainer?.widthTracksTextView = wrapsLines
         textView.textContainer?.lineFragmentPadding = 0
     }
 
@@ -1808,6 +1849,13 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     var outputScrollIsScrollableForTesting: Bool {
         layoutSubtreeIfNeeded()
         return outputTextView.frame.height > outputScrollView.contentSize.height + 0.5
+    }
+
+    var outputScrollUsesHorizontalScrollingForTesting: Bool {
+        layoutSubtreeIfNeeded()
+        return outputScrollView.hasHorizontalScroller &&
+            outputTextView.isHorizontallyResizable &&
+            outputTextView.textContainer?.widthTracksTextView == false
     }
 
     var outputScrollVerticalOffsetForTesting: CGFloat {

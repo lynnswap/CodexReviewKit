@@ -78,4 +78,73 @@ struct CodexReviewJobRenderingTests {
         #expect(job.logEntries.count == 2)
         #expect(job.logText == "- updated")
     }
+
+    @Test func runningRawReasoningOverLimitRemainsAppendOnly() {
+        let initialText = String(repeating: "a", count: 250 * 1024)
+        let delta = String(repeating: "b", count: 20 * 1024)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-live-raw-reasoning-limit",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .rawReasoning, groupID: "reasoning-1", text: initialText)
+            ]
+        )
+
+        let initialRevision = job.logRevision
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning-1", text: delta))
+
+        #expect(job.logRevision == initialRevision + 1)
+        #expect(job.lastLogMutation == .append)
+        #expect(job.logEntries.count == 2)
+        #expect(job.logText.hasSuffix(delta))
+        #expect(job.cappedLogBytes > 256 * 1024)
+    }
+
+    @Test func terminalRawReasoningTrimKeepsNewestTail() {
+        let initialText = String(repeating: "a", count: 250 * 1024)
+        let delta = String(repeating: "b", count: 20 * 1024)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-terminal-raw-reasoning-limit",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(kind: .rawReasoning, groupID: "reasoning-1", text: initialText)
+            ]
+        )
+
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning-1", text: delta))
+
+        #expect(job.lastLogMutation == .reload)
+        #expect(job.logText.hasSuffix(delta))
+        #expect(job.logEntries.last?.text == delta)
+        #expect(job.cappedLogBytes <= 256 * 1024)
+    }
+
+    @Test func explicitReviewLogLimitApplicationPublishesReloadMutation() {
+        let initialText = String(repeating: "a", count: 250 * 1024)
+        let delta = String(repeating: "b", count: 20 * 1024)
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-explicit-raw-reasoning-limit",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(kind: .rawReasoning, groupID: "reasoning-1", text: initialText)
+            ]
+        )
+        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning-1", text: delta))
+        let appendRevision = job.logRevision
+
+        #expect(job.applyReviewLogLimit())
+        #expect(job.logRevision == appendRevision + 1)
+        #expect(job.lastLogMutation == .reload)
+        #expect(job.logText.hasSuffix(delta))
+        #expect(job.cappedLogBytes <= 256 * 1024)
+    }
 }

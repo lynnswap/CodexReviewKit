@@ -29,12 +29,13 @@ struct AppServerClientTests {
         )
 
         #expect(configuration.executable == codex.path)
-        #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments(supportsSessionSource: true))
+        #expect(configuration.arguments == [
+            "-c", CodexAppServerExecutable.fileBackedAuthConfiguration,
+            "app-server",
+            "--listen", "stdio://",
+            "--session-source", "app-server",
+        ])
         #expect(configuration.arguments.contains(#"cli_auth_credentials_store="file""#))
-        #expect(configuration.arguments.contains(CodexAppServerExecutable.disableUnifiedExecConfiguration))
-        let appServerIndex = try #require(configuration.arguments.firstIndex(of: "app-server"))
-        let disableUnifiedExecIndex = try #require(configuration.arguments.firstIndex(of: CodexAppServerExecutable.disableUnifiedExecConfiguration))
-        #expect(disableUnifiedExecIndex < appServerIndex)
         #expect(configuration.threadStartPermissionStrategy == .modernPermissions)
         let sessionSourceIndex = try #require(configuration.arguments.firstIndex(of: "--session-source"))
         #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
@@ -134,6 +135,33 @@ struct AppServerClientTests {
         let appBundleIndex = try #require(directories.firstIndex(of: "/Applications/Codex.app/Contents/Resources"))
         let homebrewIndex = try #require(directories.firstIndex(of: "/opt/homebrew/bin"))
         #expect(appBundleIndex < homebrewIndex)
+    }
+
+    @Test func stderrLogFilterSuppressesCommandOutputAfterToolError() {
+        var filter = AppServerStderrLogFilter()
+        let stderr = """
+        \u{001B}[31m2026-06-08T09:20:00.000Z ERROR codex_core::tools::router: error=Exit code: 124\u{001B}[0m
+        Wall time: 20 seconds
+        Output:
+        command timed out after 20000 milliseconds
+        README.md | 1 +
+        func expensiveDump() {}
+        2026-06-08T09:20:01.000Z ERROR codex_core::exec: next error
+
+        """
+
+        var events = filter.append(Data(stderr.utf8))
+        events.append(contentsOf: filter.finish())
+
+        #expect(events.map(\.level) == [.error, .error, .warning, .warning, .warning, .error])
+        #expect(events.map(\.message) == [
+            "2026-06-08T09:20:00.000Z ERROR codex_core::tools::router: error=Exit code: 124",
+            "Wall time: 20 seconds",
+            "command output omitted after tool error",
+            "command timed out after 20000 milliseconds",
+            "suppressed 2 command-output line(s)",
+            "2026-06-08T09:20:01.000Z ERROR codex_core::exec: next error",
+        ])
     }
 
     @Test func processTransportConfigurationUsesDedicatedCodexHome() throws {
@@ -439,7 +467,7 @@ struct AppServerClientTests {
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
-        await control.recordThreadStarted(threadID: "thread-1")
+        control.recordThreadStarted(threadID: "thread-1")
         #expect(try await control.interrupt())
 
         let request = try #require(await transport.recordedRequests().last)
@@ -455,7 +483,7 @@ struct AppServerClientTests {
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
-        await control.recordReviewStarted(threadID: "thread-1", turnID: "turn-1")
+        control.recordReviewStarted(threadID: "thread-1", turnID: "turn-1")
         #expect(try await control.interrupt())
 
         let request = try #require(await transport.recordedRequests().last)
@@ -476,7 +504,7 @@ struct AppServerClientTests {
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
-        await control.recordReviewStarted(threadID: "thread-1", turnID: "turn-old")
+        control.recordReviewStarted(threadID: "thread-1", turnID: "turn-old")
         #expect(try await control.interrupt())
 
         let requests = await transport.recordedRequests()
@@ -1089,6 +1117,338 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendRoutesDetachedReviewThreadNotificationsToParentSession() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-new"),
+                reviewThreadID: "review-thread"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-new",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
+        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 2)
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
+    }
+
+    @Test func backendIgnoresStaleEventStreamDetachAfterResubscribe() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let firstEvents = await backend.events(for: run)
+        _ = firstEvents
+
+        let firstAttached = await waitUntil {
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != nil
+        }
+        #expect(firstAttached)
+        let firstSubscriptionID = try #require(
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
+        )
+
+        let secondEvents = await backend.events(for: run)
+        var secondIterator = secondEvents.makeAsyncIterator()
+        let secondAttached = await waitUntil {
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != firstSubscriptionID
+        }
+        #expect(secondAttached)
+        let secondSubscriptionID = try #require(
+            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
+        )
+
+        await backend.detachReviewEventStreamForTesting(
+            threadID: "thread-1",
+            subscriptionID: firstSubscriptionID
+        )
+        #expect(await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") == secondSubscriptionID)
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await secondIterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await secondIterator.next() == .messageDelta("review text", itemID: "message-1"))
+    }
+
+    @Test func backendPreservesNotificationStreamErrorForLateEventStreamSubscriber() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        #expect(await transport.notificationStreamCount() == 1)
+
+        await transport.finishNotificationStreams(throwing: JSONRPCError.closed)
+        let routerStopped = await waitUntil {
+            await backend.notificationRouterIsRunningForTesting() == false
+        }
+        #expect(routerStopped)
+
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+        await #expect(throws: JSONRPCError.closed) {
+            _ = try await iterator.next()
+        }
+        await transport.close()
+    }
+
+    @Test func backendTracksSyntheticDetachedReviewThreadStartsForInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(threadID: "parent-thread", reviewThreadID: "review-thread")
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-new",
+                itemID: "message-1",
+                delta: "review text"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
+    }
+
+    @Test func backendBuffersDetachedReviewThreadNotificationsDuringReviewStart() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let gate = AsyncGate()
+        await transport.hold(method: "review/start", gate: gate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        async let started = backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        await transport.waitForRequestCount(3)
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-new"),
+                reviewThreadID: "review-thread"
+            )
+        )
+        let bufferedDetachedNotification = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().buffered == 1
+        }
+        #expect(bufferedDetachedNotification)
+
+        await gate.open()
+        let run = try await started
+        var iterator = await backend.events(for: run).makeAsyncIterator()
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
+        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
+    }
+
+    @Test func backendUsesSingleNotificationRouterForConcurrentReviews() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        async let first = backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        async let second = backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        _ = try await (first, second)
+        await transport.waitForNotificationStreamCount(1)
+
+        #expect(await transport.notificationStreamCount() == 1)
+    }
+
+    @Test func backendRoutesInterleavedNotificationsToMatchingReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        let firstEvents = await backend.events(for: firstRun)
+        let secondEvents = await backend.events(for: secondRun)
+        var firstIterator = firstEvents.makeAsyncIterator()
+        var secondIterator = secondEvents.makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-2", turn: .init(id: "turn-2"))
+        )
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1"))
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(threadID: "thread-2", turnID: "turn-2", itemID: "msg-2", delta: "Second")
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(threadID: "thread-1", turnID: "turn-1", itemID: "msg-1", delta: "First")
+        )
+
+        #expect(try await firstIterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await firstIterator.next() == .messageDelta("First", itemID: "msg-1"))
+        #expect(try await secondIterator.next() == .started(turnID: "turn-2", reviewThreadID: "thread-2", model: nil))
+        #expect(try await secondIterator.next() == .messageDelta("Second", itemID: "msg-2"))
+    }
+
+    @Test func backendBroadcastsGlobalDiagnosticsToActiveReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
+        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: TestGlobalMessageNotification(message: "Global warning")
+        )
+
+        let expected = BackendReviewEvent.logEntry(
+            kind: .diagnostic,
+            text: "Global warning",
+            groupID: nil,
+            replacesGroup: false
+        )
+        #expect(try await firstIterator.next() == expected)
+        #expect(try await secondIterator.next() == expected)
+        #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
+        #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
+    }
+
+    @Test func backendBroadcastsThreadlessErrorsToActiveReviewSessions() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-2", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let firstRun = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-1", target: .uncommittedChanges)
+        ))
+        let secondRun = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
+        ))
+        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
+        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "error",
+            params: TestErrorNotification(message: "App-server failed.", willRetry: false)
+        )
+
+        #expect(try await firstIterator.next() == .failed("App-server failed."))
+        #expect(try await secondIterator.next() == .failed("App-server failed."))
+        #expect(await backend.notificationRouterMetricsForTesting().decoded == 1)
+        #expect(await backend.notificationRouterMetricsForTesting().routed == 2)
+    }
+
     @Test func backendBuffersTerminalNotificationEmittedDuringReviewStart() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -1190,7 +1550,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendIgnoresTerminalNotificationFromStaleObservedTurn() async throws {
@@ -1254,7 +1614,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendIgnoresNonTerminalNotificationFromStaleObservedTurn() async throws {
@@ -1315,7 +1675,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendDoesNotCloseIgnoredTurnCommandLifecycleOnTrackedCompletion() async throws {
@@ -1523,6 +1883,139 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == nil)
     }
 
+    @Test func backendInterruptClosesActiveCommandOutputLifecycle() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+        let startedAtMs: Int64 = 1_700_000_000_000
+        let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "git status"),
+                startedAtMs: startedAtMs
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: " M README.md\n"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "?? Sources/New.swift\n"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        _ = try await iterator.next()
+
+        let routedOutput = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.routed ?? 0 >= 3
+        }
+        #expect(routedOutput)
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+
+        var sawClosedOutput = false
+        while let event = try await iterator.next() {
+            if case .cancelled("Stop") = event {
+                break
+            }
+            guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
+                  kind == .commandOutput,
+                  replacesGroup
+            else {
+                continue
+            }
+            sawClosedOutput = true
+            #expect(text == " M README.md\n?? Sources/New.swift\n")
+            #expect(groupID == "cmd-1")
+            #expect(metadata?.sourceType == "commandExecution")
+            #expect(metadata?.status == "canceled")
+            #expect(metadata?.itemID == "cmd-1")
+            #expect(metadata?.command == "git status")
+            #expect(metadata?.startedAt == startedAt)
+            #expect(metadata?.completedAt != nil)
+            #expect(metadata?.durationMs != nil)
+            #expect(metadata?.commandStatus == "canceled")
+        }
+        #expect(sawClosedOutput)
+        #expect(try await iterator.next() == nil)
+    }
+
+    @Test func backendCoalescesReasoningSummaryDeltasBeforeNextEvent() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        let events = await backend.events(for: run)
+        try await transport.emitServerNotification(
+            method: "item/reasoning/summaryTextDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                delta: "Need to "
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/reasoning/summaryTextDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                delta: "inspect logs."
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "log",
+            params: TestMessageNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                message: "Continuing."
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .reasoningSummary,
+            text: "Need to inspect logs.",
+            groupID: "reasoning-1:summary:0",
+            replacesGroup: false
+        ))
+        #expect(try await iterator.next() == .log("Continuing."))
+    }
+
     @Test func backendRebindsObservedTurnAndInterruptsLatestTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -1619,13 +2112,14 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .agentMessage,
             text: "final review text",
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendBindsActualTurnFromFirstReviewItemWhenStartedNotificationIsMissing() async throws {
@@ -1692,7 +2186,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendKeepsReviewResponseTurnWhenAuxiliaryTurnStarts() async throws {
@@ -1740,6 +2234,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
+        #expect(try await iterator.next() == .started(turnID: "active-turn", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .messageDelta("review output", itemID: "message-1"))
 
         try await backend.interruptReview(run, reason: .init())
@@ -1748,7 +2243,7 @@ struct AppServerClientTests {
             TurnInterruptParams.self,
             from: try #require(await transport.recordedRequests().last?.params)
         )
-        #expect(params.turnID == "review-turn")
+        #expect(params.turnID == "active-turn")
     }
 
     @Test func backendMapsReviewItemAndDiagnosticNotificationsToLogEntries() async throws {
@@ -2152,7 +2647,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendPreservesCommandLifecycleMetadata() async throws {
@@ -2530,6 +3025,375 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendCompletesStreamedCommandOutputWhenCompletionHasNoAggregatedOutput() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
+                startedAtMs: 2_000
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: " Tests passed\n"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test", exitCode: 0),
+                completedAtMs: 5_250
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: " Tests passed\n",
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "succeeded",
+                itemID: "cmd-1",
+                command: "swift test",
+                exitCode: 0,
+                startedAt: Date(timeIntervalSince1970: 2),
+                completedAt: Date(timeIntervalSince1970: 5.25),
+                durationMs: 3_250,
+                commandStatus: "succeeded"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: " Tests passed\n",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "succeeded",
+                itemID: "cmd-1",
+                command: "swift test",
+                exitCode: 0,
+                startedAt: Date(timeIntervalSince1970: 2),
+                completedAt: Date(timeIntervalSince1970: 5.25),
+                durationMs: 3_250,
+                commandStatus: "succeeded"
+            )
+        ))
+    }
+
+    @Test func backendFlushesPendingStreamedCommandOutputBeforeNotificationStreamFinishes() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test"),
+                startedAtMs: 2_000
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                commandStatus: "inProgress"
+            )
+        ))
+
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "tail output\n"
+            )
+        )
+        await transport.close()
+
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: "tail output\n",
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        #expect(try await iterator.next() == nil)
+    }
+
+    @Test func backendReviewExitCompletesMissingCommandCompletion() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        let startedAtMs: Int64 = 2_000
+        let startedAt = Date(timeIntervalSince1970: 2)
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "enteredReviewMode", id: "review-item-1", review: "current changes")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
+                startedAtMs: startedAtMs
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: " M README.md\n"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .progress,
+            text: "Reviewing current changes",
+            groupID: "review-item-1",
+            replacesGroup: true
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ git diff",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "git diff",
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: " M README.md\n",
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next()
+        else {
+            Issue.record("Expected review exit to close the active command execution.")
+            return
+        }
+        #expect(kind == .command)
+        #expect(text == "$ git diff")
+        #expect(groupID == "cmd-1")
+        #expect(replacesGroup == true)
+        #expect(metadata?.sourceType == "commandExecution")
+        #expect(metadata?.status == "completed")
+        #expect(metadata?.itemID == "cmd-1")
+        #expect(metadata?.command == "git diff")
+        #expect(metadata?.startedAt == startedAt)
+        #expect(metadata?.completedAt != nil)
+        #expect(metadata?.durationMs != nil)
+        #expect(metadata?.commandStatus == "completed")
+        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata) = try await iterator.next()
+        else {
+            Issue.record("Expected review exit to close the active command output.")
+            return
+        }
+        #expect(outputKind == .commandOutput)
+        #expect(outputText == " M README.md\n")
+        #expect(outputGroupID == "cmd-1")
+        #expect(outputReplacesGroup == true)
+        #expect(outputMetadata?.sourceType == "commandExecution")
+        #expect(outputMetadata?.status == "completed")
+        #expect(outputMetadata?.itemID == "cmd-1")
+        #expect(outputMetadata?.command == "git diff")
+        #expect(outputMetadata?.startedAt == startedAt)
+        #expect(outputMetadata?.completedAt != nil)
+        #expect(outputMetadata?.durationMs != nil)
+        #expect(outputMetadata?.commandStatus == "completed")
+        #expect(try await iterator.next() == .logEntry(
+            kind: .agentMessage,
+            text: "final review text",
+            groupID: "review-item-1",
+            replacesGroup: true
+        ))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
+        #expect(try await iterator.next() == nil)
+    }
+
+    @Test func backendClosesMissingCommandCompletionBeforeFollowingReasoning() async throws {
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await backend.events(for: run)
+
+        let startedAt = Date(timeIntervalSince1970: 2)
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "git diff"),
+                startedAtMs: 2_000
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "diff output\n"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/reasoning/summaryTextDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                delta: "Inspecting diffs"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "exitedReviewMode", id: "review-item-1", review: "final review text")
+            )
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ git diff",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "git diff",
+                startedAt: startedAt,
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: "diff output\n",
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        guard case .logEntry(let commandKind, _, let commandGroupID, let commandReplacesGroup, let commandMetadata) = try await iterator.next()
+        else {
+            Issue.record("Expected following reasoning to close the active command execution.")
+            return
+        }
+        #expect(commandKind == .command)
+        #expect(commandGroupID == "cmd-1")
+        #expect(commandReplacesGroup == true)
+        #expect(commandMetadata?.status == "completed")
+        #expect(commandMetadata?.itemID == "cmd-1")
+        #expect(commandMetadata?.startedAt == startedAt)
+        #expect(commandMetadata?.completedAt != nil)
+        guard case .logEntry(let outputKind, let outputText, let outputGroupID, let outputReplacesGroup, let outputMetadata) = try await iterator.next()
+        else {
+            Issue.record("Expected following reasoning to close the active command output.")
+            return
+        }
+        #expect(outputKind == .commandOutput)
+        #expect(outputText == "diff output\n")
+        #expect(outputGroupID == "cmd-1")
+        #expect(outputReplacesGroup == true)
+        #expect(outputMetadata?.status == "completed")
+        #expect(outputMetadata?.itemID == "cmd-1")
+        #expect(outputMetadata?.completedAt != nil)
+        #expect(try await iterator.next() == .logEntry(
+            kind: .reasoningSummary,
+            text: "Inspecting diffs",
+            groupID: "reasoning-1:summary:0",
+            replacesGroup: false
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .agentMessage,
+            text: "final review text",
+            groupID: "review-item-1",
+            replacesGroup: true
+        ))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
+        #expect(try await iterator.next() == nil)
+    }
+
     @Test func backendIgnoresEmptyCommandTerminalInteractionPolls() async throws {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
@@ -2812,7 +3676,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
     }
 
     @Test func backendReplaysBufferedReviewLifecycleNotifications() async throws {
@@ -2864,7 +3728,7 @@ struct AppServerClientTests {
             groupID: "review-item-1",
             replacesGroup: true
         ))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "final review text"))
         #expect(try await iterator.next() == nil)
     }
 
@@ -3001,6 +3865,18 @@ struct AppServerClientTests {
             "thread/backgroundTerminals/clean",
             "thread/unsubscribe",
         ])
+    }
+
+    private func waitUntil(timeout: Duration = .seconds(2), condition: () async -> Bool) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while await condition() == false {
+            if clock.now >= deadline {
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return true
     }
 
     private func waitUntil(timeout: Duration, condition: () -> Bool) async -> Bool {
@@ -3332,9 +4208,13 @@ private struct TestMessageNotification: Encodable, Sendable {
     }
 }
 
+private struct TestGlobalMessageNotification: Encodable, Sendable {
+    var message: String
+}
+
 private struct TestErrorNotification: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
+    var threadID: String? = nil
+    var turnID: String? = nil
     var message: String
     var willRetry: Bool
 

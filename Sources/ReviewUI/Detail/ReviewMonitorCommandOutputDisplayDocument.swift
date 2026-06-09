@@ -37,9 +37,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     static func make(
         from source: ReviewMonitorLogDocument,
         expandedBlockIDs: Set<ReviewMonitorLogBlockID> = [],
+        previousDisplay: ReviewMonitorLogDocument? = nil,
         currentDate: Date = Date()
     ) -> ReviewMonitorLogDocument {
-        _ = expandedBlockIDs
         guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
             return source
         }
@@ -93,6 +93,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     for: panelSource.anchor,
                     usedBlockIDs: &usedPanelBlockIDs
                 )
+                let isExpanded = expandedBlockIDs.contains(blockID)
                 let metadata = commandPanelMetadata(for: panelSource)
                 let commandText = commandOutputCommandText(
                     for: panelSource,
@@ -109,11 +110,13 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 )
                 let outputText = commandOutputText(
                     for: panelSource,
-                    sourceString: sourceString
+                    sourceString: sourceString,
+                    isExpanded: isExpanded
                 )
                 let placeholder = commandOutputPlaceholder(
                     title: title,
-                    includesActiveTimer: isActive && metadata?.startedAt != nil
+                    includesActiveTimer: isActive && metadata?.startedAt != nil,
+                    includesPanelAttachment: isExpanded
                 )
                 let displayRange = appendText(placeholder)
                 let controlRange = commandOutputControlRange(
@@ -138,8 +141,13 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     range: displayRange,
                     commandText: commandText,
                     outputText: outputText,
-                    lineCount: commandOutputLineCount(outputText),
-                    isExpanded: false,
+                    outputSourceRange: panelSource.output?.sourceRange,
+                    lineCount: commandOutputLineCount(
+                        for: panelSource,
+                        sourceString: sourceString,
+                        isExpanded: isExpanded
+                    ),
+                    isExpanded: isExpanded,
                     isActive: isActive,
                     startedAt: metadata?.startedAt,
                     title: title,
@@ -185,7 +193,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             lastChange: mappedLastChange(
                 source.lastChange,
                 sourceBlocks: source.blocks,
-                displayBlocks: blocks
+                displayBlocks: blocks,
+                previousDisplay: previousDisplay,
+                displayText: text
             )
         )
     }
@@ -402,10 +412,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandOutputPlaceholder(
         title: String,
-        includesActiveTimer: Bool
+        includesActiveTimer: Bool,
+        includesPanelAttachment: Bool
     ) -> String {
         let label = "\(toggleAttachmentCharacter)\(title)\(includesActiveTimer ? toggleAttachmentCharacter : "")"
-        return "\(label)\n\(toggleAttachmentCharacter)"
+        return includesPanelAttachment ? "\(label)\n\(toggleAttachmentCharacter)" : label
     }
 
     private static func commandOutputControlRange(
@@ -423,18 +434,28 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         )
     }
 
-    private static func commandOutputLineCount(_ text: String) -> Int {
-        guard text.isEmpty == false else {
+    private static func commandOutputLineCount(
+        for panelSource: CommandPanelSource,
+        sourceString: NSString,
+        isExpanded: Bool
+    ) -> Int {
+        guard isExpanded else {
             return 0
         }
-        let rawLineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
-        return text.hasSuffix("\n") ? max(0, rawLineCount - 1) : rawLineCount
+        guard let output = panelSource.output else {
+            return 0
+        }
+        return ReviewMonitorLogLineCounter.lineCount(in: sourceString, range: output.range)
     }
 
     private static func commandOutputText(
         for panelSource: CommandPanelSource,
-        sourceString: NSString
+        sourceString: NSString,
+        isExpanded: Bool
     ) -> String {
+        guard isExpanded else {
+            return ""
+        }
         guard let output = panelSource.output else {
             return ""
         }
@@ -746,7 +767,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     private static func mappedLastChange(
         _ change: ReviewMonitorLogChange,
         sourceBlocks: [ReviewMonitorLogBlock],
-        displayBlocks: [ReviewMonitorLogBlock]
+        displayBlocks: [ReviewMonitorLogBlock],
+        previousDisplay: ReviewMonitorLogDocument?,
+        displayText: String
     ) -> ReviewMonitorLogChange {
         switch change {
         case .append(let append):
@@ -756,6 +779,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 sourceBlocks: sourceBlocks,
                 displayBlocks: displayBlocks
             ) else {
+                if let panelMutation = mappedCommandPanelMutation(
+                    sourceRange: append.range,
+                    blockID: append.blockID,
+                    sourceBlocks: sourceBlocks,
+                    displayBlocks: displayBlocks,
+                    previousDisplay: previousDisplay,
+                    displayText: displayText
+                ) {
+                    return panelMutation
+                }
                 return .reload
             }
             return .append(.init(
@@ -763,7 +796,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 blockID: append.blockID,
                 range: mappedRange,
                 text: append.text,
-                textUTF16Length: append.textUTF16Length
+                textUTF16Length: append.textUTF16Length,
+                animationSpans: append.animationSpans
             ))
         case .replace(let replacement):
             guard let mappedRange = mappedChangeRange(
@@ -772,6 +806,16 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 sourceBlocks: sourceBlocks,
                 displayBlocks: displayBlocks
             ) else {
+                if let panelMutation = mappedCommandPanelMutation(
+                    sourceRange: replacement.range,
+                    blockID: replacement.blockID,
+                    sourceBlocks: sourceBlocks,
+                    displayBlocks: displayBlocks,
+                    previousDisplay: previousDisplay,
+                    displayText: displayText
+                ) {
+                    return panelMutation
+                }
                 return .reload
             }
             return .replace(.init(
@@ -783,6 +827,104 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             ))
         case .reload:
             return .reload
+        }
+    }
+
+    private static func mappedCommandPanelMutation(
+        sourceRange: NSRange,
+        blockID: ReviewMonitorLogBlockID,
+        sourceBlocks: [ReviewMonitorLogBlock],
+        displayBlocks: [ReviewMonitorLogBlock],
+        previousDisplay: ReviewMonitorLogDocument?,
+        displayText: String
+    ) -> ReviewMonitorLogChange? {
+        guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
+              sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
+              NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
+              let displayBlock = commandPanelDisplayBlock(
+                for: sourceBlock,
+                displayBlocks: displayBlocks
+              )
+        else {
+            return nil
+        }
+
+        let displayString = displayText as NSString
+        guard NSMaxRange(displayBlock.range) <= displayString.length else {
+            return nil
+        }
+        let replacementText = displayString.substring(with: displayBlock.range)
+        if let previousRange = commandPanelDisplayBlock(
+            for: sourceBlock,
+            displayBlocks: previousDisplay?.blocks ?? []
+        )?.range {
+            return .replace(.init(
+                kind: displayBlock.kind,
+                blockID: displayBlock.id,
+                range: previousRange,
+                text: replacementText,
+                textUTF16Length: displayBlock.range.length
+            ))
+        }
+
+        guard let append = mappedNewCommandPanelAppend(
+            displayBlock: displayBlock,
+            displayText: displayText,
+            previousDisplay: previousDisplay
+        ) else {
+            return nil
+        }
+        return .append(append)
+    }
+
+    private static func mappedNewCommandPanelAppend(
+        displayBlock: ReviewMonitorLogBlock,
+        displayText: String,
+        previousDisplay: ReviewMonitorLogDocument?
+    ) -> ReviewMonitorLogAppend? {
+        guard let previousDisplay else {
+            return nil
+        }
+
+        let displayString = displayText as NSString
+        let previousLength = previousDisplay.textUTF16Length
+        guard previousLength <= displayString.length else {
+            return nil
+        }
+        guard displayString.substring(with: NSRange(location: 0, length: previousLength)) == previousDisplay.text else {
+            return nil
+        }
+
+        let suffixRange = NSRange(
+            location: previousLength,
+            length: displayString.length - previousLength
+        )
+        guard suffixRange.length > 0,
+              NSIntersectionRange(displayBlock.range, suffixRange).length > 0
+        else {
+            return nil
+        }
+
+        return .init(
+            kind: displayBlock.kind,
+            blockID: displayBlock.id,
+            range: suffixRange,
+            text: displayString.substring(with: suffixRange),
+            textUTF16Length: suffixRange.length
+        )
+    }
+
+    private static func commandPanelDisplayBlock(
+        for sourceBlock: ReviewMonitorLogBlock,
+        displayBlocks: [ReviewMonitorLogBlock]
+    ) -> ReviewMonitorLogBlock? {
+        if let groupID = sourceBlock.groupID {
+            return displayBlocks.first {
+                $0.kind == .commandOutput && $0.groupID == groupID
+            }
+        }
+        return displayBlocks.first {
+            $0.kind == .commandOutput && $0.id == sourceBlock.id
         }
     }
 

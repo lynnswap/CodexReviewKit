@@ -965,6 +965,7 @@ struct CodexReviewHostTests {
         try await store.switchAccount(CodexAccount(email: "second@example.com"))
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
+        await firstTransport.waitForRequestCount(8)
 
         #expect(result.core.lifecycle.status == .cancelled)
         #expect(result.core.lifecycle.cancellation?.message == "Account switched.")

@@ -78,6 +78,15 @@ struct ReviewMonitorLogTextRun: Equatable, Sendable {
     var style: ReviewMonitorLogTextStyle
 }
 
+struct ReviewMonitorLogAnimationSpan: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case wordFade
+    }
+
+    var kind: Kind
+    var range: NSRange
+}
+
 enum ReviewMonitorLogDecorationStyle: Hashable, Sendable {
     case transcript
     case command(tone: ReviewMonitorLogStatusTone)
@@ -103,6 +112,7 @@ struct ReviewMonitorLogCommandOutputPanel: Equatable, Sendable {
     var range: NSRange
     var commandText: String
     var outputText: String
+    var outputSourceRange: NSRange? = nil
     var lineCount: Int
     var isExpanded: Bool
     var isActive: Bool
@@ -117,24 +127,53 @@ struct ReviewMonitorLogAppend: Equatable, Sendable {
     var range: NSRange
     var text: String
     var textUTF16Length: Int
+    var animationSpans: [ReviewMonitorLogAnimationSpan]
 
     init(
         kind: ReviewLogEntry.Kind,
         blockID: ReviewMonitorLogBlockID,
         range: NSRange,
         text: String,
-        textUTF16Length: Int? = nil
+        textUTF16Length: Int? = nil,
+        animationSpans: [ReviewMonitorLogAnimationSpan] = []
     ) {
         self.kind = kind
         self.blockID = blockID
         self.range = range
         self.text = text
         self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+        self.animationSpans = animationSpans
     }
 
     private static func utf16Length(_ text: String) -> Int {
         (text as NSString).length
     }
+
+    static func animationSpans(
+        forKind kind: ReviewLogEntry.Kind,
+        absoluteRange: NSRange,
+        appendBaseLocation: Int
+    ) -> [ReviewMonitorLogAnimationSpan] {
+        guard Self.wordFadeKinds.contains(kind),
+              absoluteRange.length > 0,
+              absoluteRange.location >= appendBaseLocation
+        else {
+            return []
+        }
+        return [.init(
+            kind: .wordFade,
+            range: NSRange(
+                location: absoluteRange.location - appendBaseLocation,
+                length: absoluteRange.length
+            )
+        )]
+    }
+
+    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
+        .reasoning,
+        .reasoningSummary,
+        .rawReasoning,
+    ]
 }
 
 struct ReviewMonitorLogReplacement: Equatable, Sendable {
@@ -243,7 +282,14 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
             hasher.combine(panel.blockID)
             combine(panel.range, into: &hasher)
             hasher.combine(panel.commandText)
-            hasher.combine(panel.outputText)
+            if let outputSourceRange = panel.outputSourceRange {
+                hasher.combine(true)
+                combine(outputSourceRange, into: &hasher)
+                hasher.combine(sourceText(in: outputSourceRange) ?? "")
+            } else {
+                hasher.combine(false)
+                hasher.combine(panel.outputText)
+            }
         }
         return hasher.finalize()
     }
@@ -251,6 +297,18 @@ struct ReviewMonitorLogDocument: Equatable, Sendable {
     private func combine(_ range: NSRange, into hasher: inout Hasher) {
         hasher.combine(range.location)
         hasher.combine(range.length)
+    }
+
+    private func sourceText(in range: NSRange) -> String? {
+        let sourceString = sourceText as NSString
+        let sourceBounds = NSRange(location: 0, length: sourceString.length)
+        let intersection = NSIntersectionRange(range, sourceBounds)
+        guard intersection.location == range.location,
+              intersection.length == range.length
+        else {
+            return nil
+        }
+        return sourceString.substring(with: range)
     }
 }
 
@@ -982,7 +1040,12 @@ struct ReviewMonitorLogProjection: Sendable {
                 blockID: block.id,
                 range: blockRange,
                 text: appended,
-                textUTF16Length: suffixLength
+                textUTF16Length: suffixLength,
+                animationSpans: ReviewMonitorLogAppend.animationSpans(
+                    forKind: block.kind,
+                    absoluteRange: blockRange,
+                    appendBaseLocation: previousLength
+                )
             )
         }
 
@@ -1015,7 +1078,15 @@ struct ReviewMonitorLogProjection: Sendable {
                 blockID: block.id,
                 range: NSRange(location: previousLength, length: document.textUTF16Length - previousLength),
                 text: renderedDelta,
-                textUTF16Length: document.textUTF16Length - previousLength
+                textUTF16Length: document.textUTF16Length - previousLength,
+                animationSpans: ReviewMonitorLogAppend.animationSpans(
+                    forKind: block.kind,
+                    absoluteRange: NSRange(
+                        location: previousLength,
+                        length: document.textUTF16Length - previousLength
+                    ),
+                    appendBaseLocation: previousLength
+                )
             )
         }
 
@@ -1099,6 +1170,7 @@ struct ReviewMonitorLogProjection: Sendable {
     }
 
     private struct State: Sendable {
+        var entries: [ReviewLogEntry]
         var entrySignatures: [EntrySignature]
         var blocks: [RenderedBlock]
         var indexByGroup: [GroupKey: Int]
@@ -1114,6 +1186,7 @@ struct ReviewMonitorLogProjection: Sendable {
 
         static func rebuild(entries: [ReviewLogEntry]) -> State {
             var state = State(
+                entries: entries,
                 entrySignatures: entries.map(EntrySignature.init),
                 blocks: [],
                 indexByGroup: [:],
@@ -1153,11 +1226,13 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         private init(
+            entries: [ReviewLogEntry],
             entrySignatures: [EntrySignature],
             blocks: [RenderedBlock],
             indexByGroup: [GroupKey: Int],
             projection: Accumulator
         ) {
+            self.entries = entries
             self.entrySignatures = entrySignatures
             self.blocks = blocks
             self.indexByGroup = indexByGroup
@@ -1165,6 +1240,7 @@ struct ReviewMonitorLogProjection: Sendable {
         }
 
         mutating func append(_ entry: ReviewLogEntry) -> AppendResult {
+            entries.append(entry)
             entrySignatures.append(.init(entry))
 
             if let key = ReviewMonitorLogProjection.mergeKey(for: entry) {
@@ -1255,6 +1331,22 @@ struct ReviewMonitorLogProjection: Sendable {
             return .noVisibleChange
         }
 
+        mutating func rebuildResolvingReplacement(
+            previousDocument: ReviewMonitorLogDocument,
+            replacementBlockID: ReviewMonitorLogBlockID
+        ) -> ReviewMonitorLogReplacement? {
+            let rebuilt = Self.rebuild(entries: entries)
+            guard let replacement = Self.replacement(
+                previous: previousDocument,
+                current: rebuilt.document,
+                blockID: replacementBlockID
+            ) else {
+                return nil
+            }
+            self = rebuilt
+            return replacement
+        }
+
         private mutating func appendBlock(
             _ block: RenderedBlock,
             at blockIndex: Int
@@ -1330,6 +1422,10 @@ struct ReviewMonitorLogProjection: Sendable {
 
     var entryCount: Int {
         state.entrySignatures.count
+    }
+
+    var currentDocument: ReviewMonitorLogDocument {
+        document
     }
 
     mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLogDocument {
@@ -1411,9 +1507,22 @@ struct ReviewMonitorLogProjection: Sendable {
                 }
             case .noVisibleChange:
                 continue
-            case .needsReload:
-                state = previousState
-                return nil
+            case .needsReload(let replacementBlockID):
+                guard let replacementBlockID,
+                      let replacement = state.rebuildResolvingReplacement(
+                        previousDocument: previousDocument,
+                        replacementBlockID: replacementBlockID
+                      ),
+                      let resolved = Self.resolveDocument(
+                        previous: previousDocument,
+                        current: state.document,
+                        preferredChange: .replace(replacement)
+                      )
+                else {
+                    state = previousState
+                    return nil
+                }
+                document = resolved
             }
         }
         return document

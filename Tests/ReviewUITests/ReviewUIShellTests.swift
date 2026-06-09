@@ -1454,7 +1454,8 @@ struct ReviewUIShellTests {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
 
-        let appendedKinds = runningJob.logEntries.dropFirst(initialEntryCount).map(\.kind)
+        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
+        let appendedKinds = appendedEntries.map(\.kind)
         #expect(appendedKinds.contains(.event))
         #expect(appendedKinds.contains(.command))
         #expect(appendedKinds.contains(.toolCall))
@@ -1463,6 +1464,17 @@ struct ReviewUIShellTests {
         #expect(appendedKinds.contains(.reasoningSummary))
         #expect(appendedKinds.contains(.agentMessage))
         #expect(Set(appendedKinds).count >= 6)
+
+        let repeatedNonReplacingGroups = Dictionary(
+            grouping: appendedEntries.filter { $0.replacesGroup == false },
+            by: { entry in "\(entry.groupID ?? "")|\(entry.kind.rawValue)" }
+        ).values.filter { entries in
+            entries.first?.groupID != nil && entries.count > 1
+        }
+        for entries in repeatedNonReplacingGroups {
+            let kind = try #require(entries.first?.kind)
+            #expect([.reasoning, .reasoningSummary, .rawReasoning].contains(kind))
+        }
 
         let compactionEntries = runningJob.logEntries
             .dropFirst(initialEntryCount)

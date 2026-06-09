@@ -181,12 +181,13 @@ final class ReviewMonitorLogFragmentView: NSView {
             guard targetFrame.isEmpty == false else {
                 continue
             }
-            attachmentView.needsLayout = true
             if attachmentView.superview !== self {
                 attachmentView.frame = targetFrame
                 addSubview(attachmentView)
-            } else {
+                attachmentView.needsLayout = true
+            } else if rectsAreNearlyEqual(attachmentView.frame, targetFrame) == false {
                 attachmentView.frame = targetFrame
+                attachmentView.needsLayout = true
             }
             visibleAttachmentViews.insert(ObjectIdentifier(attachmentView))
         }
@@ -261,9 +262,17 @@ final class ReviewMonitorLogFragmentView: NSView {
 #endif
 }
 
+private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+    abs(lhs.minX - rhs.minX) <= 0.5 &&
+        abs(lhs.minY - rhs.minY) <= 0.5 &&
+        abs(lhs.width - rhs.width) <= 0.5 &&
+        abs(lhs.height - rhs.height) <= 0.5
+}
+
 struct ReviewMonitorLogWordFadeAnimation {
     var range: NSRange
-    var startedAt: TimeInterval
+    var startedAt: TimeInterval?
+    var delay: TimeInterval
     var renderedStep: Int
     var baseColor: NSColor
 }

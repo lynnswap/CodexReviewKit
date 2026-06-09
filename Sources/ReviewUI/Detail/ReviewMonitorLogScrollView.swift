@@ -40,6 +40,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedPresentationSignature: Int?
     private var displayedFinderSupplementSignature: Int?
     private var sourceDocument: ReviewMonitorLogDocument?
+    private var currentDisplayDocument: ReviewMonitorLogDocument?
     private var logProjection = ReviewMonitorLogProjection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
@@ -176,6 +177,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         displayedPresentationSignature = nil
         displayedFinderSupplementSignature = nil
         sourceDocument = nil
+        currentDisplayDocument = nil
         logDocumentView.resetCommandOutputPanelState()
         return applyReload(
             "",
@@ -205,78 +207,153 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        sourceDocument = document
-        let document = displayDocument(for: document)
-        logDocumentView.pruneCommandOutputPanelExpansionState(for: document.commandOutputPanels)
-        if allowIncrementalUpdate, displayedRevision == document.revision {
+        render(
+            sourceDocument: document,
+            displayDocument: displayDocument(for: document),
+            restoring: restorationTarget,
+            allowIncrementalUpdate: allowIncrementalUpdate
+        )
+    }
+
+    @discardableResult
+    func render(
+        sourceDocument source: ReviewMonitorLogDocument,
+        displayDocument display: ReviewMonitorLogDocument,
+        restoring restorationTarget: ScrollRestorationTarget,
+        allowIncrementalUpdate: Bool
+    ) -> Bool {
+        let display = displayDocument(for: source, rendererDisplay: display)
+        sourceDocument = source
+        logDocumentView.pruneCommandOutputPanelExpansionState(for: display.commandOutputPanels)
+        if allowIncrementalUpdate, displayedRevision == display.revision {
             return false
         }
 
-        let canApplyLastChange = displayedRevision.map { $0 &+ 1 == document.revision } == true
+        let canApplyLastChange = displayedRevision.map { $0 &+ 1 == display.revision } == true
         if allowIncrementalUpdate,
            canApplyLastChange,
-           case .append(let append) = document.lastChange,
-           canApplyAppend(append, to: document) {
+           case .append(let append) = display.lastChange,
+           canApplyAppend(append, to: display) {
             let didRender = applyAppend(
                 append,
-                document: document,
+                document: display,
                 forceAutoFollow: restorationTarget == .bottom
             )
-            displayedRevision = document.revision
+            displayedRevision = display.revision
+            currentDisplayDocument = display
             return didRender
         }
         if allowIncrementalUpdate,
            canApplyLastChange,
-           case .replace(let replacement) = document.lastChange,
-           canApplyReplacement(replacement, to: document) {
-            let didRender = applyReplacement(replacement, document: document)
-            displayedRevision = document.revision
+           case .replace(let replacement) = display.lastChange,
+           canApplyReplacement(replacement, to: display) {
+            let didRender = applyReplacement(replacement, document: display)
+            displayedRevision = display.revision
+            currentDisplayDocument = display
             return didRender
         }
         if allowIncrementalUpdate,
-           let suffix = appendedSuffix(for: document.text),
-           canApplyFallbackAppend(suffix, to: document) {
+           let suffix = appendedSuffix(for: display.text),
+           canApplyFallbackAppend(suffix, to: display) {
             let suffixUTF16Length = (suffix as NSString).length
             let append = ReviewMonitorLogAppend(
-                kind: fallbackAppendKind(for: document.lastChange),
+                kind: .event,
                 blockID: ReviewMonitorLogBlockID("fallback"),
                 range: NSRange(
                     location: displayedUTF16Length,
                     length: suffixUTF16Length
                 ),
                 text: suffix,
-                textUTF16Length: suffixUTF16Length
+                textUTF16Length: suffixUTF16Length,
+                animationSpans: fallbackAppendAnimationSpans(
+                    suffixUTF16Length: suffixUTF16Length,
+                    in: display
+                )
             )
             let didRender = applyAppend(
                 append,
-                document: document,
+                document: display,
                 forceAutoFollow: restorationTarget == .bottom
             )
-            displayedRevision = document.revision
+            displayedRevision = display.revision
+            currentDisplayDocument = display
             return didRender
         }
         let didRender = applyReload(
-            document.text,
-            document: document,
+            display.text,
+            document: display,
             restoring: restorationTarget,
             countBottomRestoreAsAutoFollow: false
         )
-        displayedRevision = document.revision
+        displayedRevision = display.revision
+        currentDisplayDocument = display
         return didRender
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) {
         let restorationTarget = currentScrollRestorationTarget
-        guard logDocumentView.toggleCommandOutputPanel(blockID) else {
+        guard let sourceDocument
+        else {
             return
         }
+
+        let previousDisplay = displayDocument(for: sourceDocument)
+        guard displayedText == previousDisplay.text,
+              let previousPanel = previousDisplay.commandOutputPanels.first(where: { $0.blockID == blockID }),
+              logDocumentView.toggleCommandOutputPanelExpansionState(blockID)
+        else {
+            assertionFailure("Command output display state is not synchronized.")
+            return
+        }
+
+        let display = displayDocument(for: sourceDocument)
+        guard let nextPanel = display.commandOutputPanels.first(where: { $0.blockID == blockID }) else {
+            assertionFailure("Toggled command output panel disappeared from the display document.")
+            return
+        }
+
+        let replacementText = (display.text as NSString).substring(with: nextPanel.range)
+        let replacement = ReviewMonitorLogReplacement(
+            kind: .commandOutput,
+            blockID: blockID,
+            range: previousPanel.range,
+            text: replacementText,
+            textUTF16Length: nextPanel.range.length
+        )
+        guard canApplyReplacement(replacement, to: display) else {
+            assertionFailure("Command output panel replacement cannot be applied incrementally.")
+            return
+        }
+
+        applyReplacement(replacement, document: display)
+        currentDisplayDocument = display
+        displayedRevision = display.revision
         invalidateDocumentLayout()
         restoreScrollPosition(restorationTarget, countAsAutoFollow: false)
         invalidateFindIndicator(reason: .viewportChanged)
     }
 
     private func displayDocument(for document: ReviewMonitorLogDocument) -> ReviewMonitorLogDocument {
-        ReviewMonitorCommandOutputDisplayDocument.make(from: document)
+        displayDocument(for: document, rendererDisplay: nil)
+    }
+
+    private func displayDocument(
+        for document: ReviewMonitorLogDocument,
+        rendererDisplay: ReviewMonitorLogDocument?
+    ) -> ReviewMonitorLogDocument {
+        let expandedBlockIDs = logDocumentView.expandedCommandOutputBlockIDsForDisplayDocument
+        guard expandedBlockIDs.isEmpty == false else {
+            return rendererDisplay ?? ReviewMonitorCommandOutputDisplayDocument.make(
+                from: document,
+                expandedBlockIDs: [],
+                previousDisplay: currentDisplayDocument
+            )
+        }
+        return ReviewMonitorCommandOutputDisplayDocument.make(
+            from: document,
+            expandedBlockIDs: expandedBlockIDs,
+            previousDisplay: currentDisplayDocument
+        )
     }
 
     private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
@@ -300,13 +377,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
     }
 
-    private func fallbackAppendKind(for change: ReviewMonitorLogChange) -> ReviewLogEntry.Kind {
-        if case .append(let append) = change {
-            return append.kind
-        }
-        return .event
-    }
-
     private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLogDocument) -> Bool {
         guard let displayedPresentationSignature else {
             return false
@@ -320,6 +390,26 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         )
     }
 
+    private func fallbackAppendAnimationSpans(
+        suffixUTF16Length: Int,
+        in document: ReviewMonitorLogDocument
+    ) -> [ReviewMonitorLogAnimationSpan] {
+        let suffixRange = NSRange(location: displayedUTF16Length, length: suffixUTF16Length)
+        var spans: [ReviewMonitorLogAnimationSpan] = []
+        for block in document.blocks {
+            let intersection = NSIntersectionRange(block.range, suffixRange)
+            guard intersection.length > 0 else {
+                continue
+            }
+            spans.append(contentsOf: ReviewMonitorLogAppend.animationSpans(
+                forKind: block.kind,
+                absoluteRange: intersection,
+                appendBaseLocation: displayedUTF16Length
+            ))
+        }
+        return spans
+    }
+
     @discardableResult
     private func applyAppend(
         _ append: ReviewMonitorLogAppend,
@@ -331,6 +421,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let shouldAutoFollow = forceAutoFollow || isPinnedToBottom()
+        let finderSupplementSignature = document.finderSupplementSignature
+        let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+            to: finderSupplementSignature
+        )
         let shouldClearFindSelection = prepareFindSessionForLogMutation(.appendPreservingPrefix)
         logDocumentView.appendText(append.text, animation: append)
         displayedText += append.text
@@ -340,7 +434,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
-        displayedFinderSupplementSignature = document.finderSupplementSignature
+        displayedFinderSupplementSignature = finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -349,7 +443,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
         }
-        invalidateFindIndicator()
+        if shouldRefreshFindSession {
+            refreshFindSessionAfterUserVisibleLogChange()
+        } else {
+            invalidateFindIndicator()
+        }
         return true
     }
 
@@ -360,6 +458,10 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        let finderSupplementSignature = document.finderSupplementSignature
+        let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+            to: finderSupplementSignature
+        )
         let shouldClearFindSelection = prepareFindSessionForLogMutation(
             .structural,
             resultingTextIsEmpty: resultingTextUTF16Length == 0
@@ -372,7 +474,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             forPrefixUTF16Length: displayedUTF16Length,
             in: document
         )
-        displayedFinderSupplementSignature = document.finderSupplementSignature
+        displayedFinderSupplementSignature = finderSupplementSignature
         finishLogMutationForFindSession(clearSelection: shouldClearFindSelection)
         invalidateDocumentLayout()
 #if DEBUG
@@ -381,7 +483,11 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         if shouldAutoFollow {
             scrollToBottom(countAsAutoFollow: true)
         }
-        invalidateFindIndicator()
+        if shouldRefreshFindSession {
+            refreshFindSessionAfterUserVisibleLogChange()
+        } else {
+            invalidateFindIndicator()
+        }
         return true
     }
 
@@ -395,21 +501,28 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let finderSupplementSignature = document.finderSupplementSignature
         if displayedText == text {
             let previousOrigin = contentView.bounds.origin
-            let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
-                to: finderSupplementSignature
-            )
-            logDocumentView.applyPresentation(document)
-            displayedPresentationSignature = presentationSignature(
+            let presentationSignature = presentationSignature(
                 forPrefixUTF16Length: displayedUTF16Length,
                 in: document
             )
+            let presentationChanged = displayedPresentationSignature != presentationSignature
+            let finderSupplementChanged = displayedFinderSupplementSignature != finderSupplementSignature
+            let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
+                to: finderSupplementSignature
+            )
+            if presentationChanged {
+                logDocumentView.applyPresentation(document)
+                invalidateDocumentLayout()
+                restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
+            } else if finderSupplementChanged {
+                logDocumentView.updateFinderSupplement(document)
+            }
+            displayedPresentationSignature = presentationSignature
             displayedFinderSupplementSignature = finderSupplementSignature
-            invalidateDocumentLayout()
-            restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
             if shouldRefreshFindSession {
                 refreshFindSessionAfterUserVisibleLogChange()
             }
-            return contentView.bounds.origin != previousOrigin
+            return presentationChanged || contentView.bounds.origin != previousOrigin
         }
 
         let mutation = reloadMutation(for: text)
@@ -720,11 +833,15 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             hasher.combine(panel.blockID)
             combine(range, into: &hasher)
             hasher.combine(panel.commandText)
-            hasher.combine(panel.lineCount)
             hasher.combine(panel.isActive)
             hasher.combine(panel.startedAt)
             hasher.combine(panel.title)
             hasher.combine(panel.exitText)
+            hasher.combine(panel.isExpanded)
+            if panel.isExpanded {
+                hasher.combine(panel.lineCount)
+                hasher.combine(panel.outputText)
+            }
         }
 
         return hasher.finalize()
@@ -734,8 +851,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         for block: ReviewMonitorLogBlock,
         clippedDisplayRange: NSRange
     ) -> NSRange {
-        guard block.kind != .commandOutput else {
-            return block.sourceRange
+        if block.kind == .commandOutput {
+            return clippedDisplayRange
         }
         return NSRange(
             location: block.sourceRange.location,
@@ -1105,7 +1222,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 }
 
-
 #if DEBUG
 @MainActor
 extension ReviewMonitorLogScrollView {
@@ -1336,6 +1452,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelTerminalTextForTesting
     }
 
+    func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLogBlockID) -> String? {
+        logDocumentView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
+    }
+
     var commandOutputPanelCommandLineTextForTesting: String? {
         logDocumentView.commandOutputPanelCommandLineTextForTesting
     }
@@ -1346,6 +1466,10 @@ extension ReviewMonitorLogScrollView {
 
     var commandOutputPanelOutputScrollIsScrollableForTesting: Bool {
         logDocumentView.commandOutputPanelOutputScrollIsScrollableForTesting
+    }
+
+    var commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
+        logDocumentView.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
     }
 
     var commandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
@@ -1399,6 +1523,11 @@ extension ReviewMonitorLogScrollView {
     @discardableResult
     func clickFirstCommandOutputPanelHeaderForTesting() -> Bool {
         logDocumentView.clickFirstCommandOutputPanelHeaderForTesting()
+    }
+
+    @discardableResult
+    func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLogBlockID) -> Bool {
+        logDocumentView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
     }
 
     var visibleFragmentBoundsForTesting: NSRect {
@@ -1485,6 +1614,10 @@ extension ReviewMonitorLogScrollView {
 
     func completeWordGlowAnimationsForTesting() {
         logDocumentView.completeWordGlowAnimationsForTesting()
+    }
+
+    func advanceWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+        logDocumentView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
     }
 
     func setReduceMotionForTesting(_ reduceMotion: Bool?) {

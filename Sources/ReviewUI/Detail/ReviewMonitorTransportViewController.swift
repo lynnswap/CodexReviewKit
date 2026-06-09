@@ -9,6 +9,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
         case workspace(String)
     }
 
+    private struct LogEntryRenderSignature: Equatable, Sendable {
+        var entry: ReviewLogEntry
+
+        init(_ entry: ReviewLogEntry) {
+            self.entry = entry
+        }
+    }
+
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let logScrollView = ReviewMonitorLogScrollView()
@@ -29,7 +37,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderTask: Task<Void, Never>?
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
-    private var appliedLogEntryCount = 0
+    private var appliedLogEntrySignatures: [LogEntryRenderSignature] = []
     private var hasAppliedBoundJobLog = false
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
@@ -341,7 +349,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @discardableResult
     private func renderSelectedJobLog(
         entries: [ReviewLogEntry],
-        targetEntryCount: Int,
+        targetSignatures: [LogEntryRenderSignature],
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -355,7 +363,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let jobID = boundJob.id
         logRenderTask?.cancel()
         logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let document = await renderer.render(entries: entries)
+            let renderedDocument = await renderer.render(entries: entries)
             await MainActor.run { [weak self] in
                 guard Task.isCancelled == false,
                       let self,
@@ -365,11 +373,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     return
                 }
                 _ = self.logScrollView.render(
-                    document: document,
+                    sourceDocument: renderedDocument.source,
+                    displayDocument: renderedDocument.display,
                     restoring: restorationTarget,
                     allowIncrementalUpdate: allowIncrementalUpdate
                 )
-                self.appliedLogEntryCount = targetEntryCount
+                self.appliedLogEntrySignatures = targetSignatures
                 self.appliedLogRenderGeneration = generation
                 self.hasAppliedBoundJobLog = true
             }
@@ -381,7 +390,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func renderSelectedJobLogAppend(
         entries: [ReviewLogEntry],
         sourceRange: Range<Int>,
-        targetEntryCount: Int
+        targetSignatures: [LogEntryRenderSignature]
     ) -> Bool {
         guard let boundJob else {
             return false
@@ -393,11 +402,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let jobID = boundJob.id
         logRenderTask?.cancel()
         logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let resolved: (document: ReviewMonitorLogDocument, entryCount: Int)
-            if let document = await renderer.append(entries: entries, sourceRange: sourceRange) {
-                resolved = (document, targetEntryCount)
+            let resolved: (
+                documents: [ReviewMonitorRenderedLogDocument],
+                signatures: [LogEntryRenderSignature]
+            )
+            if let documents = await renderer.appendSteps(entries: entries, sourceRange: sourceRange) {
+                resolved = (documents, targetSignatures)
             } else {
-                guard let fallback = await MainActor.run(body: { [weak self] () -> (entries: [ReviewLogEntry], entryCount: Int)? in
+                guard let fallback = await MainActor.run(body: { [weak self] () -> (entries: [ReviewLogEntry], signatures: [LogEntryRenderSignature])? in
                     guard Task.isCancelled == false,
                           let self,
                           self.logRenderGeneration == generation,
@@ -406,12 +418,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     else {
                         return nil
                     }
-                    return (entries, entries.count)
+                    return (entries, entries.map(LogEntryRenderSignature.init))
                 }) else {
                     return
                 }
                 let document = await renderer.render(entries: fallback.entries)
-                resolved = (document, fallback.entryCount)
+                resolved = ([document], fallback.signatures)
             }
             await MainActor.run { [weak self] in
                 guard Task.isCancelled == false,
@@ -421,12 +433,15 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 else {
                     return
                 }
-                _ = self.logScrollView.render(
-                    document: resolved.document,
-                    restoring: self.logScrollView.currentScrollRestorationTarget,
-                    allowIncrementalUpdate: true
-                )
-                self.appliedLogEntryCount = resolved.entryCount
+                for document in resolved.documents {
+                    _ = self.logScrollView.render(
+                        sourceDocument: document.source,
+                        displayDocument: document.display,
+                        restoring: self.logScrollView.currentScrollRestorationTarget,
+                        allowIncrementalUpdate: true
+                    )
+                }
+                self.appliedLogEntrySignatures = resolved.signatures
                 self.appliedLogRenderGeneration = generation
                 self.hasAppliedBoundJobLog = true
             }
@@ -444,25 +459,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return false
         }
         let entries = job.logEntries
-        let targetEntryCount = entries.count
+        let targetSignatures = entries.map(LogEntryRenderSignature.init)
         if allowIncrementalUpdate,
            hasAppliedBoundJobLog,
-           job.lastLogMutation == .append,
-           appliedLogEntryCount <= targetEntryCount {
-            let appendedEntries = Array(entries.dropFirst(appliedLogEntryCount))
+           targetSignatures.starts(with: appliedLogEntrySignatures) {
+            let appendedStartIndex = appliedLogEntrySignatures.count
+            let appendedEntries = Array(entries.dropFirst(appendedStartIndex))
             if appendedEntries.isEmpty {
-                appliedLogEntryCount = targetEntryCount
                 return false
             }
             return renderSelectedJobLogAppend(
                 entries: appendedEntries,
-                sourceRange: appliedLogEntryCount..<targetEntryCount,
-                targetEntryCount: targetEntryCount
+                sourceRange: appendedStartIndex..<entries.count,
+                targetSignatures: targetSignatures
             )
         }
         return renderSelectedJobLog(
             entries: entries,
-            targetEntryCount: targetEntryCount,
+            targetSignatures: targetSignatures,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
         )
@@ -480,7 +494,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderTask = nil
         logRenderGeneration &+= 1
         appliedLogRenderGeneration = logRenderGeneration
-        appliedLogEntryCount = 0
+        appliedLogEntrySignatures = []
         hasAppliedBoundJobLog = false
         logRenderer = ReviewMonitorLogRenderer()
     }
@@ -683,6 +697,10 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelTerminalTextForTesting
     }
 
+    func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLogBlockID) -> String? {
+        logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
+    }
+
     var logCommandOutputPanelCommandLineTextForTesting: String? {
         logScrollView.commandOutputPanelCommandLineTextForTesting
     }
@@ -693,6 +711,10 @@ extension ReviewMonitorTransportViewController {
 
     var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
         logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
+    }
+
+    var logCommandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
+        logScrollView.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
     }
 
     var logCommandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
@@ -748,8 +770,17 @@ extension ReviewMonitorTransportViewController {
         logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
     }
 
+    @discardableResult
+    func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLogBlockID) -> Bool {
+        logScrollView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
+    }
+
     func completeLogWordGlowAnimationsForTesting() {
         logScrollView.completeWordGlowAnimationsForTesting()
+    }
+
+    func advanceLogWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+        logScrollView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
     }
 
     func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {

@@ -615,6 +615,10 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         }
     }
 
+    package func notificationStreamCount() -> Int {
+        serverNotificationContinuations.count
+    }
+
     package func isClosedForTesting() -> Bool {
         closed
     }
