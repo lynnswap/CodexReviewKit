@@ -97,6 +97,15 @@ private func schema(for tool: MCPToolName) -> Value {
                 "sessionID": .object(["type": .string("string")]),
                 "jobID": .object(["type": .string("string")]),
                 "jobId": .object(["type": .string("string")]),
+                "logOffset": .object([
+                    "type": .string("integer"),
+                    "minimum": .int(0),
+                ]),
+                "logLimit": .object([
+                    "type": .string("integer"),
+                    "minimum": .int(1),
+                    "maximum": .int(ReviewLogPageRequest.maxLimit),
+                ]),
                 "logFilter": .object([
                     "type": .string("string"),
                     "enum": .array([
@@ -148,7 +157,8 @@ private func toolRequest(
         return .reviewRead(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
             jobID: try requiredJobID(in: arguments),
-            logFilter: try reviewLogFilter(in: arguments)
+            logFilter: try reviewLogFilter(in: arguments),
+            logPage: try reviewLogPageRequest(in: arguments)
         )
     case .reviewList:
         return .reviewList(
@@ -193,7 +203,9 @@ private func toolResult(tool: MCPToolName, response: MCPToolResponse) throws -> 
         value = tool == .reviewStart
             ? result.structuredContentForStart()
             : result.structuredContentForRead()
-        text = result.textContent()
+        text = tool == .reviewStart
+            ? result.textContent()
+            : result.textContentForRead()
         isError = result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
@@ -232,6 +244,38 @@ private func reviewLogFilter(in arguments: [String: Value]) throws -> ReviewLogF
         )
     }
     return filter
+}
+
+private func reviewLogPageRequest(in arguments: [String: Value]) throws -> ReviewLogPageRequest {
+    let offset: Int?
+    if let value = arguments["logOffset"] {
+        guard let parsed = value.intValue else {
+            throw MCPProtocolServerError.invalidArgument("logOffset must be an integer.")
+        }
+        guard parsed >= 0 else {
+            throw MCPProtocolServerError.invalidArgument("logOffset must be greater than or equal to 0.")
+        }
+        offset = parsed
+    } else {
+        offset = nil
+    }
+
+    let limit: Int
+    if let value = arguments["logLimit"] {
+        guard let parsed = value.intValue else {
+            throw MCPProtocolServerError.invalidArgument("logLimit must be an integer.")
+        }
+        guard (1...ReviewLogPageRequest.maxLimit).contains(parsed) else {
+            throw MCPProtocolServerError.invalidArgument(
+                "logLimit must be between 1 and \(ReviewLogPageRequest.maxLimit)."
+            )
+        }
+        limit = parsed
+    } else {
+        limit = ReviewLogPageRequest.defaultLimit
+    }
+
+    return ReviewLogPageRequest(offset: offset, limit: limit)
 }
 
 private func reviewTarget(from object: [String: Value]) throws -> ReviewTarget {
@@ -388,6 +432,38 @@ private extension ReviewReadResult {
         core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
     }
 
+    func textContentForRead() -> String {
+        if core.lifecycle.status.isTerminal {
+            return textContent()
+        }
+
+        var parts: [String] = []
+        var status = "Review \(core.lifecycle.status.rawValue)"
+        if let elapsedSeconds {
+            status += " for \(elapsedSeconds)s"
+        }
+        parts.append(status + ".")
+        parts.append("Returned logs \(logsPage.rangeDescription) of \(logsPage.total).")
+        if let latest = logs.last(where: { $0.text.nilIfEmpty != nil }) {
+            parts.append("Latest: \(Self.truncatedLatestText(latest.text))")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private static func truncatedLatestText(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .joined(separator: " ")
+        let limit = 300
+        guard normalized.count > limit else {
+            return normalized
+        }
+        let index = normalized.index(normalized.startIndex, offsetBy: limit)
+        return String(normalized[..<index]) + "..."
+    }
+
     func structuredContentForStart() -> Value {
         structuredContent(includeDetails: false)
     }
@@ -408,9 +484,32 @@ private extension ReviewReadResult {
         ]
         if includeDetails {
             object["logs"] = .array(logs.map { $0.structuredContent() })
+            object["logsPage"] = logsPage.structuredContent()
             object["rawLogText"] = .string(rawLogText)
         }
         return .object(object)
+    }
+}
+
+private extension ReviewLogPage {
+    var rangeDescription: String {
+        guard returned > 0 else {
+            return "0"
+        }
+        return "\(offset + 1)-\(offset + returned)"
+    }
+
+    func structuredContent() -> Value {
+        .object([
+            "total": .int(total),
+            "offset": .int(offset),
+            "limit": .int(limit),
+            "returned": .int(returned),
+            "hasMoreBefore": .bool(hasMoreBefore),
+            "hasMoreAfter": .bool(hasMoreAfter),
+            "previousOffset": previousOffset.map(Value.int) ?? .null,
+            "nextOffset": nextOffset.map(Value.int) ?? .null,
+        ])
     }
 }
 

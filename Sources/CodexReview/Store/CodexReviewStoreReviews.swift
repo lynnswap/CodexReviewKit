@@ -150,26 +150,32 @@ extension CodexReviewStore {
 
     package func readReview(
         jobID: String,
-        logFilter: ReviewLogFilter = .defaultSetting
+        logFilter: ReviewLogFilter = .defaultSetting,
+        logPage: ReviewLogPageRequest = .default
     ) throws -> ReviewReadResult {
-        try readReview(sessionID: nil, jobID: jobID, logFilter: logFilter)
+        try readReview(sessionID: nil, jobID: jobID, logFilter: logFilter, logPage: logPage)
     }
 
     package func readReview(
         sessionID: String?,
         jobID: String,
-        logFilter: ReviewLogFilter = .defaultSetting
+        logFilter: ReviewLogFilter = .defaultSetting,
+        logPage: ReviewLogPageRequest = .default
     ) throws -> ReviewReadResult {
         let job = try job(jobID: jobID)
         if let sessionID, job.sessionID != sessionID {
             throw ReviewError.jobNotFound("Job \(jobID) was not found.")
         }
+        let pageRequest = try logPage.validated()
+        let filteredLogs = projectedLogsForReviewRead(job.logEntries).filter(logFilter.includes)
+        let page = pageRequest.page(total: filteredLogs.count)
         return ReviewReadResult(
             jobID: job.id,
             core: job.core,
             elapsedSeconds: elapsedSeconds(for: job),
             cancellable: job.isTerminal == false && job.cancellationRequested == false,
-            logs: job.logEntries.filter(logFilter.includes),
+            logs: Array(filteredLogs[page.offset..<page.offset + page.returned]),
+            logsPage: page,
             rawLogText: job.rawLogText
         )
     }
@@ -562,6 +568,88 @@ extension CodexReviewStore {
 
     private func nextWorkspaceSortOrder() -> Double {
         (workspaces.map(\.sortOrder).max() ?? -1) + 1
+    }
+}
+
+private struct ReviewReadLogGroupKey: Hashable {
+    var kind: ReviewLogEntry.Kind
+    var groupID: String
+}
+
+private func projectedLogsForReviewRead(_ entries: [ReviewLogEntry]) -> [ReviewLogEntry] {
+    var projected: [ReviewLogEntry] = []
+    var indexByGroup: [ReviewReadLogGroupKey: Int] = [:]
+
+    for entry in entries {
+        guard let key = reviewReadLogGroupKey(for: entry) else {
+            projected.append(entry)
+            continue
+        }
+
+        if let index = indexByGroup[key] {
+            guard entry.replacesGroup || shouldAppendReviewReadLogDelta(for: entry.kind) else {
+                projected.append(entry)
+                continue
+            }
+
+            let existing = projected[index]
+            let text = entry.replacesGroup ? entry.text : existing.text + entry.text
+            let metadata = entry.replacesGroup ? entry.metadata : entry.metadata ?? existing.metadata
+            projected[index] = ReviewLogEntry(
+                id: entry.id,
+                kind: entry.kind,
+                groupID: entry.groupID,
+                replacesGroup: false,
+                text: text,
+                metadata: metadata,
+                timestamp: entry.timestamp
+            )
+            continue
+        }
+
+        if entry.replacesGroup || shouldAppendReviewReadLogDelta(for: entry.kind) {
+            indexByGroup[key] = projected.count
+        }
+        projected.append(ReviewLogEntry(
+            id: entry.id,
+            kind: entry.kind,
+            groupID: entry.groupID,
+            replacesGroup: false,
+            text: entry.text,
+            metadata: entry.metadata,
+            timestamp: entry.timestamp
+        ))
+    }
+
+    return projected
+}
+
+private func reviewReadLogGroupKey(for entry: ReviewLogEntry) -> ReviewReadLogGroupKey? {
+    guard let groupID = entry.groupID?.nilIfEmpty else {
+        return nil
+    }
+
+    return ReviewReadLogGroupKey(kind: entry.kind, groupID: groupID)
+}
+
+private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bool {
+    switch kind {
+    case .agentMessage,
+         .command,
+         .commandOutput,
+         .plan,
+         .reasoning,
+         .reasoningSummary,
+         .rawReasoning,
+         .contextCompaction:
+        return true
+    case .todoList,
+         .toolCall,
+         .diagnostic,
+         .error,
+         .progress,
+         .event:
+        return false
     }
 }
 

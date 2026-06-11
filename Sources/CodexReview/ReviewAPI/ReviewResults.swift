@@ -6,6 +6,7 @@ package struct ReviewReadResult: Codable, Sendable, Hashable {
     package var elapsedSeconds: Int?
     package var cancellable: Bool
     package var logs: [ReviewLogEntry]
+    package var logsPage: ReviewLogPage
     package var rawLogText: String
 
     package init(
@@ -14,6 +15,7 @@ package struct ReviewReadResult: Codable, Sendable, Hashable {
         elapsedSeconds: Int? = nil,
         cancellable: Bool,
         logs: [ReviewLogEntry],
+        logsPage: ReviewLogPage,
         rawLogText: String
     ) {
         self.jobID = jobID
@@ -21,7 +23,84 @@ package struct ReviewReadResult: Codable, Sendable, Hashable {
         self.elapsedSeconds = elapsedSeconds
         self.cancellable = cancellable
         self.logs = logs
+        self.logsPage = logsPage
         self.rawLogText = rawLogText
+    }
+}
+
+package struct ReviewLogPageRequest: Codable, Sendable, Hashable {
+    package static let defaultLimit = 100
+    package static let maxLimit = 500
+    package static let `default` = ReviewLogPageRequest()
+
+    package var offset: Int?
+    package var limit: Int
+
+    package init(offset: Int? = nil, limit: Int = Self.defaultLimit) {
+        self.offset = offset
+        self.limit = limit
+    }
+
+    package func validated() throws -> ReviewLogPageRequest {
+        if let offset, offset < 0 {
+            throw ReviewError.invalidArguments("logOffset must be greater than or equal to 0.")
+        }
+        guard (1...Self.maxLimit).contains(limit) else {
+            throw ReviewError.invalidArguments("logLimit must be between 1 and \(Self.maxLimit).")
+        }
+        return self
+    }
+
+    package func page(total: Int) -> ReviewLogPage {
+        let resolvedOffset = if let offset {
+            min(offset, total)
+        } else {
+            max(0, total - limit)
+        }
+        let returned = min(limit, max(0, total - resolvedOffset))
+        let hasMoreBefore = resolvedOffset > 0
+        let hasMoreAfter = resolvedOffset + returned < total
+        return ReviewLogPage(
+            total: total,
+            offset: resolvedOffset,
+            limit: limit,
+            returned: returned,
+            hasMoreBefore: hasMoreBefore,
+            hasMoreAfter: hasMoreAfter,
+            previousOffset: hasMoreBefore ? max(0, resolvedOffset - limit) : nil,
+            nextOffset: hasMoreAfter ? resolvedOffset + returned : nil
+        )
+    }
+}
+
+package struct ReviewLogPage: Codable, Sendable, Hashable {
+    package var total: Int
+    package var offset: Int
+    package var limit: Int
+    package var returned: Int
+    package var hasMoreBefore: Bool
+    package var hasMoreAfter: Bool
+    package var previousOffset: Int?
+    package var nextOffset: Int?
+
+    package init(
+        total: Int,
+        offset: Int,
+        limit: Int,
+        returned: Int,
+        hasMoreBefore: Bool,
+        hasMoreAfter: Bool,
+        previousOffset: Int?,
+        nextOffset: Int?
+    ) {
+        self.total = total
+        self.offset = offset
+        self.limit = limit
+        self.returned = returned
+        self.hasMoreBefore = hasMoreBefore
+        self.hasMoreAfter = hasMoreAfter
+        self.previousOffset = previousOffset
+        self.nextOffset = nextOffset
     }
 }
 

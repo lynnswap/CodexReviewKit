@@ -20,7 +20,7 @@ package struct MCPToolDescriptor: Codable, Equatable, Sendable {
 
 package enum MCPToolRequest: Equatable, Sendable {
     case reviewStart(sessionID: String, request: ReviewStartRequest)
-    case reviewRead(sessionID: String?, jobID: String, logFilter: ReviewLogFilter)
+    case reviewRead(sessionID: String?, jobID: String, logFilter: ReviewLogFilter, logPage: ReviewLogPageRequest)
     case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
     case reviewCancel(sessionID: String?, selector: ReviewJobSelector, reason: ReviewCancellation)
 }
@@ -55,8 +55,13 @@ package final class CodexReviewMCPServer {
                 sessionID: sessionID,
                 request: reviewRequest
             ))
-        case .reviewRead(let sessionID, let jobID, let logFilter):
-            return .reviewRead(try store.readReview(sessionID: sessionID, jobID: jobID, logFilter: logFilter))
+        case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
+            return .reviewRead(try store.readReview(
+                sessionID: sessionID,
+                jobID: jobID,
+                logFilter: logFilter,
+                logPage: logPage
+            ))
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
                 sessionID: sessionID,
