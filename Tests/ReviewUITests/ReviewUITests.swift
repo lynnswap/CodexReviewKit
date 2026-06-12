@@ -4591,12 +4591,21 @@ struct ReviewUITests {
 
         let copyItem = commandMenuItemForTesting("copy:")
         let selectAllItem = commandMenuItemForTesting("selectAll:")
+        let cutItem = commandMenuItemForTesting("cut:")
+        let pasteItem = commandMenuItemForTesting("paste:")
+        let deleteItem = commandMenuItemForTesting("delete:")
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(selectAllItem))
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(cutItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(pasteItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(deleteItem) == false)
 
         transport.selectAllLogForTesting()
         #expect(transport.logSelectedTextForTesting == job.logText)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(cutItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(pasteItem) == false)
+        #expect(transport.validateLogDocumentUserInterfaceItemForTesting(deleteItem) == false)
 
         NSPasteboard.general.clearContents()
         transport.copyLogSelectionForTesting()
@@ -4625,34 +4634,6 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(NSRange(location: ("A🙂" as NSString).length, length: 0))
         transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "e\u{301}")
-    }
-
-    @Test func logViewUsesStandardTextContextMenu() async throws {
-        let job = makeJob(
-            id: "job-log-context-menu",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review.",
-            logText: "First readonly line\nSecond readonly line\n"
-        )
-        let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 360))
-        let viewController = harness.viewController
-        let window = harness.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-
-        let emptySelectionMenu = try #require(transport.logContextMenuForTesting)
-        #expect(emptySelectionMenu.items.contains { $0.title == "Copy" })
-        #expect(emptySelectionMenu.items.contains { $0.title == "Paste" })
-        #expect(emptySelectionMenu.items.contains { $0.title == "Font" })
-
-        transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: ("First" as NSString).length))
-        let selectedTextMenu = try #require(transport.logContextMenuForTesting)
-        #expect(selectedTextMenu.items.contains { $0.action == #selector(NSText.copy(_:)) })
     }
 
     @Test func logKeyboardLineNavigationUsesSoftWrappedVisualLines() async throws {

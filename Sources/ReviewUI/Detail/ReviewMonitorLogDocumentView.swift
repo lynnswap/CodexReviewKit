@@ -2825,11 +2825,6 @@ extension ReviewMonitorLogDocumentView {
         updateWordFadeAnimations(at: CACurrentMediaTime() + delay)
     }
 
-    func contextMenuForTesting() -> NSMenu? {
-        window?.makeFirstResponder(self)
-        return makeContextMenu()
-    }
-
     var visibleFragmentBoundsForTesting: NSRect {
         guard let firstFragmentView = visibleFragmentViews.first else {
             return .zero

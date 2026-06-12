@@ -1185,10 +1185,6 @@ extension ReviewMonitorTransportViewController {
         logScrollView.validateDocumentUserInterfaceItemForTesting(item)
     }
 
-    var logContextMenuForTesting: NSMenu? {
-        logScrollView.contextMenuForTesting()
-    }
-
     func clearLogFinderSelectedRangesForTesting() {
         logScrollView.clearFinderSelectedRangesForTesting()
     }

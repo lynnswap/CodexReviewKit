@@ -7,9 +7,8 @@ import Testing
 @_spi(PreviewSupport) @testable import ReviewUI
 import CodexReviewTesting
 
-@Suite(.serialized)
 @MainActor
-struct ReviewUIShellTests {
+extension ReviewUITests {
     @Test func rootViewControllerLoadsContentDuringViewLifecycle() {
         let rootViewController = makeReviewMonitorPreviewContentViewControllerForPreview()
 

@@ -3,7 +3,7 @@ import Testing
 @_spi(Testing) @testable import CodexReview
 import CodexReviewTesting
 
-@Suite("Codex review store")
+@Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
     @Test func reviewStartPublishesCompletedJobAndRetainsResult() async throws {
@@ -13,27 +13,28 @@ struct CodexReviewStoreCommandTests {
             clock: .init(now: { Date(timeIntervalSince1970: 1) }),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.log("started"))
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.log("started"))
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        let read = try await result
+            #expect(read.jobID == "job-1")
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.output.lastAgentMessage == "review text")
+            #expect(store.listReviews(sessionID: nil).items.map(\.jobID) == ["job-1"])
 
-        #expect(read.jobID == "job-1")
-        #expect(read.core.lifecycle.status == .succeeded)
-        #expect(read.core.output.lastAgentMessage == "review text")
-        #expect(store.listReviews(sessionID: nil).items.map(\.jobID) == ["job-1"])
-
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains(.cleanupReview(.init(
-            threadID: "thread-1",
-            turnID: "turn-1",
-            reviewThreadID: "review-thread-1"
-        ))))
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            ))))
+        }
     }
 
     @Test func boundedReviewStartReturnsRunningSnapshotAndCanBeAwaitedLater() async throws {
@@ -42,28 +43,29 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            let running = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-            waitTimeout: .milliseconds(20)
-        )
-        await backend.waitForEventStream()
-        let running = try await result
+            #expect(running.jobID == "job-1")
+            #expect(running.core.lifecycle.status == .running)
+            #expect(running.core.output.hasFinalReview == false)
 
-        #expect(running.jobID == "job-1")
-        #expect(running.core.lifecycle.status == .running)
-        #expect(running.core.output.hasFinalReview == false)
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            let final = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
 
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        let final = try await store.awaitReview(
-            sessionID: "session-1",
-            jobID: "job-1",
-            timeout: .seconds(1)
-        )
-
-        #expect(final.core.lifecycle.status == .succeeded)
-        #expect(final.core.output.lastAgentMessage == "review text")
+            #expect(final.core.lifecycle.status == .succeeded)
+            #expect(final.core.output.lastAgentMessage == "review text")
+        }
     }
 
     @Test func awaitReviewReturnsWhenRunningJobCompletes() async throws {
@@ -72,25 +74,26 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let start = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            _ = try await start
 
-        async let start = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-            waitTimeout: .milliseconds(20)
-        )
-        await backend.waitForEventStream()
-        _ = try await start
+            async let awaited = store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            let final = try await awaited
 
-        async let awaited = store.awaitReview(
-            sessionID: "session-1",
-            jobID: "job-1",
-            timeout: .seconds(1)
-        )
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        let final = try await awaited
-
-        #expect(final.core.lifecycle.status == .succeeded)
-        #expect(final.core.output.lastAgentMessage == "review text")
+            #expect(final.core.lifecycle.status == .succeeded)
+            #expect(final.core.output.lastAgentMessage == "review text")
+        }
     }
 
     @Test func awaitReviewReturnsWhenRunningJobIsCancelled() async throws {
@@ -99,39 +102,42 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let start = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            _ = try await start
 
-        async let start = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-            waitTimeout: .milliseconds(20)
-        )
-        await backend.waitForEventStream()
-        _ = try await start
+            async let awaited = store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            let final = try await awaited
 
-        async let awaited = store.awaitReview(
-            sessionID: "session-1",
-            jobID: "job-1",
-            timeout: .seconds(1)
-        )
-        _ = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        let final = try await awaited
-
-        #expect(final.core.lifecycle.status == .cancelled)
-        #expect(final.core.output.summary == "Stop")
+            #expect(final.core.lifecycle.status == .cancelled)
+            #expect(final.core.output.summary == "Stop")
+        }
     }
 
     @Test func forceStartWhileRunningInvokesBackendRestartPath() async {
-        let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        let reviewBackend = FakeCodexReviewBackend()
+        let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)
         let store = CodexReviewStore.makeTestingStore(backend: backend)
+        await withStoreCommandTestCleanup(backend: reviewBackend, store: store) {
+            await store.start()
+            await store.start()
+            await store.start(forceRestartIfNeeded: true)
 
-        await store.start()
-        await store.start()
-        await store.start(forceRestartIfNeeded: true)
-
-        #expect(backend.startRequests == [false, true])
+            #expect(backend.startRequests == [false, true])
+        }
     }
 
     @Test func reviewStartPassesEffectiveSettingsModelToBackend() async throws {
@@ -143,23 +149,24 @@ struct CodexReviewStoreCommandTests {
             ),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            _ = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        _ = try await result
-
-        let commands = await backend.recordedCommands()
-        let starts = commands.compactMap { command -> BackendReviewStart? in
-            if case .startReview(let request) = command {
-                return request
+            let commands = await backend.recordedCommands()
+            let starts = commands.compactMap { command -> BackendReviewStart? in
+                if case .startReview(let request) = command {
+                    return request
+                }
+                return nil
             }
-            return nil
+            #expect(starts.first?.model == "gpt-5.5")
         }
-        #expect(starts.first?.model == "gpt-5.5")
     }
 
     @Test func reviewStartAppliesStartedTurnAndMergesAgentMessageDeltas() async throws {
@@ -168,33 +175,34 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.started(turnID: "turn-actual", reviewThreadID: "review-thread-1", model: "gpt-5.5"))
+            await backend.yield(.messageDelta("hello", itemID: "message-1"))
+            await backend.yield(.messageDelta(" world", itemID: "message-1"))
+            await backend.yield(.logEntry(
+                kind: .reasoningSummary,
+                text: " with space",
+                groupID: "reasoning-1",
+                replacesGroup: false
+            ))
+            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.started(turnID: "turn-actual", reviewThreadID: "review-thread-1", model: "gpt-5.5"))
-        await backend.yield(.messageDelta("hello", itemID: "message-1"))
-        await backend.yield(.messageDelta(" world", itemID: "message-1"))
-        await backend.yield(.logEntry(
-            kind: .reasoningSummary,
-            text: " with space",
-            groupID: "reasoning-1",
-            replacesGroup: false
-        ))
-        await backend.yield(.completed(summary: "Succeeded.", result: nil))
-        let read = try await result
-
-        #expect(read.core.run.turnID == "turn-actual")
-        #expect(read.core.output.lastAgentMessage == "hello world")
-        #expect(read.rawLogText.isEmpty)
-        #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == [
-            "hello world",
-            " with space",
-        ])
-        #expect(try #require(store.job(id: "job-1")).reviewOutputText == "hello world\n\n with space")
-        #expect(try store.readReview(jobID: "job-1").core.run.model == "gpt-5.5")
+            #expect(read.core.run.turnID == "turn-actual")
+            #expect(read.core.output.lastAgentMessage == "hello world")
+            #expect(read.rawLogText.isEmpty)
+            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == [
+                "hello world",
+                " with space",
+            ])
+            #expect(try #require(store.job(id: "job-1")).reviewOutputText == "hello world\n\n with space")
+            #expect(try store.readReview(jobID: "job-1").core.run.model == "gpt-5.5")
+        }
     }
 
     @Test func reviewStartTracksAgentMessageDeltasByItemID() async throws {
@@ -203,20 +211,21 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.messageDelta("first", itemID: "message-1"))
+            await backend.yield(.messageDelta("second", itemID: "message-2"))
+            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.messageDelta("first", itemID: "message-1"))
-        await backend.yield(.messageDelta("second", itemID: "message-2"))
-        await backend.yield(.completed(summary: "Succeeded.", result: nil))
-        let read = try await result
-
-        #expect(read.core.output.lastAgentMessage == "second")
-        #expect(read.core.reviewText == "second")
-        #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["first", "second"])
+            #expect(read.core.output.lastAgentMessage == "second")
+            #expect(read.core.reviewText == "second")
+            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["first", "second"])
+        }
     }
 
     @Test func reviewCompletionDoesNotDuplicateAlreadyLoggedFinalMessage() async throws {
@@ -225,24 +234,25 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: "final review text",
+                groupID: "review-item-1",
+                replacesGroup: true
+            ))
+            await backend.yield(.completed(summary: "Succeeded.", result: "final review text"))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.logEntry(
-            kind: .agentMessage,
-            text: "final review text",
-            groupID: "review-item-1",
-            replacesGroup: true
-        ))
-        await backend.yield(.completed(summary: "Succeeded.", result: "final review text"))
-        let read = try await result
-
-        #expect(read.core.output.lastAgentMessage == "final review text")
-        #expect(read.core.reviewText == "final review text")
-        #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["final review text"])
+            #expect(read.core.output.lastAgentMessage == "final review text")
+            #expect(read.core.reviewText == "final review text")
+            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["final review text"])
+        }
     }
 
     @Test func reviewCompletionEnforcesLogLimitWithoutFinalAppend() async throws {
@@ -251,34 +261,36 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-        let initialText = String(repeating: "a", count: 250 * 1024)
-        let delta = String(repeating: "b", count: 20 * 1024)
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let initialText = String(repeating: "a", count: 250 * 1024)
+            let delta = String(repeating: "b", count: 20 * 1024)
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.logEntry(
-            kind: .rawReasoning,
-            text: initialText,
-            groupID: "reasoning-1",
-            replacesGroup: false
-        ))
-        await backend.yield(.logEntry(
-            kind: .rawReasoning,
-            text: delta,
-            groupID: "reasoning-1",
-            replacesGroup: false
-        ))
-        await backend.yield(.completed(summary: "Succeeded.", result: nil))
-        let read = try await result
-        let job = try #require(store.job(id: "job-1"))
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.logEntry(
+                kind: .rawReasoning,
+                text: initialText,
+                groupID: "reasoning-1",
+                replacesGroup: false
+            ))
+            await backend.yield(.logEntry(
+                kind: .rawReasoning,
+                text: delta,
+                groupID: "reasoning-1",
+                replacesGroup: false
+            ))
+            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            let read = try await result
+            let job = try #require(store.job(id: "job-1"))
 
-        #expect(read.core.lifecycle.status == .succeeded)
-        #expect(job.cappedLogBytes <= 256 * 1024)
-        #expect(job.logText.hasSuffix(delta))
-        #expect(job.lastLogMutation == .reload)
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(job.cappedLogBytes <= 256 * 1024)
+            #expect(job.logText.hasSuffix(delta))
+            #expect(job.lastLogMutation == .reload)
+        }
     }
 
     @Test func readReviewDefaultsToCommandOutputFilteredLogs() throws {
@@ -558,23 +570,24 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: """
+            Full review comments:
+            - [P2] Add parser tests — Sources/Parser.swift:12-15
+              The final review parser should be covered at the model layer.
+            """))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: """
-        Full review comments:
-        - [P2] Add parser tests — Sources/Parser.swift:12-15
-          The final review parser should be covered at the model layer.
-        """))
-        let read = try await result
-
-        #expect(read.core.output.hasFinalReview)
-        #expect(read.core.output.reviewResult?.state == .hasFindings)
-        #expect(read.core.output.reviewResult?.findingCount == 1)
-        #expect(read.core.output.reviewResult?.findings.first?.title == "[P2] Add parser tests")
+            #expect(read.core.output.hasFinalReview)
+            #expect(read.core.output.reviewResult?.state == .hasFindings)
+            #expect(read.core.output.reviewResult?.findingCount == 1)
+            #expect(read.core.output.reviewResult?.findings.first?.title == "[P2] Add parser tests")
+        }
     }
 
     @Test func newlyStartedWorkspaceAppearsBeforeExistingWorkspaces() async throws {
@@ -582,25 +595,26 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let first = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/old-project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "first"))
+            _ = try await first
+            await backend.finishEvents()
 
-        async let first = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/old-project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "first"))
-        _ = try await first
-        await backend.finishEvents()
+            async let second = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "second"))
+            _ = try await second
 
-        async let second = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "second"))
-        _ = try await second
-
-        #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
+            #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
+        }
     }
 
     @Test func newlyStartedWorkspaceUsesSortOrderAboveCurrentMaximum() async throws {
@@ -608,21 +622,23 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/old-project")]
-        )
-        store.workspace(cwd: "/tmp/old-project")?.sortOrder = 10
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/old-project")]
+            )
+            store.workspace(cwd: "/tmp/old-project")?.sortOrder = 10
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "new"))
-        _ = try await result
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "new"))
+            _ = try await result
 
-        #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
+            #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
+        }
     }
 
     @Test func newlyStartedReviewAppearsBeforeExistingJobsInWorkspace() async throws {
@@ -630,28 +646,29 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let first = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "first"))
+            _ = try await first
+            await backend.finishEvents()
 
-        async let first = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "first"))
-        _ = try await first
-        await backend.finishEvents()
+            async let second = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "second"))
+            _ = try await second
 
-        async let second = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "second"))
-        _ = try await second
-
-        #expect(store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary) == [
-            "Uncommitted changes",
-            "Base branch: main",
-        ])
+            #expect(store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary) == [
+                "Uncommitted changes",
+                "Base branch: main",
+            ])
+        }
     }
 
     @Test func runningReviewElapsedSecondsUsesInjectedClock() async throws {
@@ -662,18 +679,19 @@ struct CodexReviewStoreCommandTests {
             clock: .init(now: { clock.now() }),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            clock.current = Date(timeIntervalSince1970: 13)
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        clock.current = Date(timeIntervalSince1970: 13)
+            #expect(try store.readReview(jobID: "job-1").elapsedSeconds == 12)
 
-        #expect(try store.readReview(jobID: "job-1").elapsedSeconds == 12)
-
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        _ = try await result
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            _ = try await result
+        }
     }
 
     @Test func newlyStartedReviewUsesSortOrderAboveCurrentWorkspaceMaximum() async throws {
@@ -681,29 +699,31 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        let existing = CodexReviewJob.makeForTesting(
-            id: "job-existing",
-            cwd: "/tmp/project",
-            targetSummary: "Existing",
-            status: .succeeded,
-            summary: "Done"
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [existing]
-        )
-        store.job(id: "job-existing")?.sortOrder = 10
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let existing = CodexReviewJob.makeForTesting(
+                id: "job-existing",
+                cwd: "/tmp/project",
+                targetSummary: "Existing",
+                status: .succeeded,
+                summary: "Done"
+            )
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [existing]
+            )
+            store.job(id: "job-existing")?.sortOrder = 10
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "new"))
-        _ = try await result
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "new"))
+            _ = try await result
 
-        #expect(store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary).first == "Uncommitted changes")
+            #expect(store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary).first == "Uncommitted changes")
+        }
     }
 
     @Test func cancelRunningReviewUsesBackendInterruptAndPublicState() async throws {
@@ -712,26 +732,27 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            let cancel = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            await backend.yield(.cancelled("Stop"))
+            _ = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        let cancel = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        await backend.yield(.cancelled("Stop"))
-        _ = try await result
-
-        #expect(cancel.cancelled)
-        #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains(.interruptReview(
-            .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            .init(message: "Stop")
-        )))
+            #expect(cancel.cancelled)
+            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                .init(message: "Stop")
+            )))
+        }
     }
 
     @Test func cancellationEnforcesLogLimitWithoutPostTerminalAppend() async throws {
@@ -740,38 +761,40 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-        let initialText = String(repeating: "a", count: 250 * 1024)
-        let delta = String(repeating: "b", count: 20 * 1024)
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let initialText = String(repeating: "a", count: 250 * 1024)
+            let delta = String(repeating: "b", count: 20 * 1024)
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.logEntry(
-            kind: .rawReasoning,
-            text: initialText,
-            groupID: "reasoning-1",
-            replacesGroup: false
-        ))
-        await backend.yield(.logEntry(
-            kind: .rawReasoning,
-            text: delta,
-            groupID: "reasoning-1",
-            replacesGroup: false
-        ))
-        _ = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        await backend.yield(.cancelled("Stop"))
-        let read = try await result
-        let job = try #require(store.job(id: "job-1"))
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.logEntry(
+                kind: .rawReasoning,
+                text: initialText,
+                groupID: "reasoning-1",
+                replacesGroup: false
+            ))
+            await backend.yield(.logEntry(
+                kind: .rawReasoning,
+                text: delta,
+                groupID: "reasoning-1",
+                replacesGroup: false
+            ))
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            await backend.yield(.cancelled("Stop"))
+            let read = try await result
+            let job = try #require(store.job(id: "job-1"))
 
-        #expect(read.core.lifecycle.status == .cancelled)
-        #expect(job.cappedLogBytes <= 256 * 1024)
-        #expect(job.logText.hasSuffix(delta))
-        #expect(job.lastLogMutation == .reload)
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(job.cappedLogBytes <= 256 * 1024)
+            #expect(job.logText.hasSuffix(delta))
+            #expect(job.lastLogMutation == .reload)
+        }
     }
 
     @Test func cancelRunningReviewClosesActiveCommandLog() async throws {
@@ -782,59 +805,61 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             clock: .init(now: { completedAt })
         )
-        let running = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            threadID: "thread-1",
-            turnID: "turn-1",
-            status: .running,
-            startedAt: startedAt,
-            summary: "Running",
-            logEntries: [
-                .init(
-                    kind: .command,
-                    groupID: "cmd-1",
-                    replacesGroup: true,
-                    text: "$ git diff",
-                    metadata: .init(
-                        sourceType: "commandExecution",
-                        status: "inProgress",
-                        itemID: "cmd-1",
-                        command: "git diff",
-                        startedAt: startedAt,
-                        commandStatus: "inProgress"
-                    ),
-                    timestamp: startedAt
-                )
-            ]
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [running]
-        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let running = CodexReviewJob.makeForTesting(
+                id: "job-1",
+                cwd: "/tmp/project",
+                targetSummary: "Uncommitted changes",
+                threadID: "thread-1",
+                turnID: "turn-1",
+                status: .running,
+                startedAt: startedAt,
+                summary: "Running",
+                logEntries: [
+                    .init(
+                        kind: .command,
+                        groupID: "cmd-1",
+                        replacesGroup: true,
+                        text: "$ git diff",
+                        metadata: .init(
+                            sourceType: "commandExecution",
+                            status: "inProgress",
+                            itemID: "cmd-1",
+                            command: "git diff",
+                            startedAt: startedAt,
+                            commandStatus: "inProgress"
+                        ),
+                        timestamp: startedAt
+                    )
+                ]
+            )
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [running]
+            )
 
-        let cancel = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        let read = try store.readReview(jobID: "job-1", logFilter: .all)
-        let commandLogs = try #require(store.job(id: "job-1"))
-            .logEntries
-            .filter { $0.kind == .command && $0.groupID == "cmd-1" }
-        let closed = try #require(commandLogs.last)
+            let cancel = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            let read = try store.readReview(jobID: "job-1", logFilter: .all)
+            let commandLogs = try #require(store.job(id: "job-1"))
+                .logEntries
+                .filter { $0.kind == .command && $0.groupID == "cmd-1" }
+            let closed = try #require(commandLogs.last)
 
-        #expect(cancel.cancelled)
-        #expect(read.core.lifecycle.status == .cancelled)
-        #expect(commandLogs.count == 2)
-        #expect(closed.replacesGroup)
-        #expect(closed.metadata?.status == "canceled")
-        #expect(closed.metadata?.commandStatus == "canceled")
-        #expect(closed.metadata?.command == "git diff")
-        #expect(closed.metadata?.startedAt == startedAt)
-        #expect(closed.metadata?.completedAt == completedAt)
-        #expect(closed.metadata?.durationMs == 4_000)
+            #expect(cancel.cancelled)
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(commandLogs.count == 2)
+            #expect(closed.replacesGroup)
+            #expect(closed.metadata?.status == "canceled")
+            #expect(closed.metadata?.commandStatus == "canceled")
+            #expect(closed.metadata?.command == "git diff")
+            #expect(closed.metadata?.startedAt == startedAt)
+            #expect(closed.metadata?.completedAt == completedAt)
+            #expect(closed.metadata?.durationMs == 4_000)
+        }
     }
 
     @Test func sessionScopedCancelRejectsJobFromDifferentSession() async throws {
@@ -843,32 +868,33 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-
-        await #expect(throws: (any Error).self) {
-            try await store.cancelReview(
-                jobID: "job-1",
-                sessionID: "session-2",
-                cancellation: .mcpClient(message: "Stop")
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-        }
-        #expect(try store.readReview(jobID: "job-1").cancellable)
+            try await backend.waitForEventStream(timeout: .seconds(2))
 
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        _ = try await result
-
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains {
-            if case .interruptReview = $0 {
-                return true
+            await #expect(throws: (any Error).self) {
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    sessionID: "session-2",
+                    cancellation: .mcpClient(message: "Stop")
+                )
             }
-            return false
-        } == false)
+            #expect(try store.readReview(jobID: "job-1").cancellable)
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            _ = try await result
+
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains {
+                if case .interruptReview = $0 {
+                    return true
+                }
+                return false
+            } == false)
+        }
     }
 
     @Test func cancelledReviewStaysCancelledWhenStreamClosesWithError() async throws {
@@ -877,21 +903,22 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            await backend.finishEvents(throwing: StreamClosedError())
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        _ = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        await backend.finishEvents(throwing: StreamClosedError())
-        let read = try await result
-
-        #expect(read.core.lifecycle.status == .cancelled)
-        #expect(read.core.output.summary == "Stop")
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.output.summary == "Stop")
+        }
     }
 
     @Test func reviewStartCancellationInterruptsBackendRun() async throws {
@@ -900,21 +927,22 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.finishEvents(throwing: CancellationError())
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        await backend.finishEvents(throwing: CancellationError())
-        let read = try await result
-
-        #expect(read.core.lifecycle.status == .cancelled)
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains(.interruptReview(
-            .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            .init(message: "Cancellation requested.")
-        )))
+            #expect(read.core.lifecycle.status == .cancelled)
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                .init(message: "Cancellation requested.")
+            )))
+        }
     }
 
     @Test func reviewStartTaskCancellationInterruptsBackendRun() async throws {
@@ -923,23 +951,24 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let task = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+                )
+            }
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            task.cancel()
+            let read = try await task.value
 
-        let task = Task { @MainActor in
-            try await store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-            )
+            #expect(read.core.lifecycle.status == .cancelled)
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                .init(message: "Cancellation requested.")
+            )))
         }
-        await backend.waitForEventStream()
-        task.cancel()
-        let read = try await task.value
-
-        #expect(read.core.lifecycle.status == .cancelled)
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains(.interruptReview(
-            .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            .init(message: "Cancellation requested.")
-        )))
     }
 
     @Test func failedInterruptClearsCancellationRequestState() async throws {
@@ -949,26 +978,27 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        await #expect(throws: FakeCodexReviewBackendError.self) {
-            try await store.cancelReview(
-                jobID: "job-1",
-                cancellation: .mcpClient(message: "Stop")
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await #expect(throws: FakeCodexReviewBackendError.self) {
+                try await store.cancelReview(
+                    jobID: "job-1",
+                    cancellation: .mcpClient(message: "Stop")
+                )
+            }
+            let readAfterFailure = try store.readReview(jobID: "job-1")
+
+            #expect(readAfterFailure.cancellable)
+            #expect(readAfterFailure.core.lifecycle.cancellation == nil)
+            #expect(readAfterFailure.core.output.summary == "Failed to cancel review: Interrupt failed")
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            _ = try await result
         }
-        let readAfterFailure = try store.readReview(jobID: "job-1")
-
-        #expect(readAfterFailure.cancellable)
-        #expect(readAfterFailure.core.lifecycle.cancellation == nil)
-        #expect(readAfterFailure.core.output.summary == "Failed to cancel review: Interrupt failed")
-
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        _ = try await result
     }
 
     @Test func cancelledReviewIgnoresBufferedTerminalEvents() async throws {
@@ -977,22 +1007,23 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            _ = try await store.cancelReview(
+                jobID: "job-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            await backend.yield(.completed(summary: "Succeeded.", result: "late result"))
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
-        )
-        await backend.waitForEventStream()
-        _ = try await store.cancelReview(
-            jobID: "job-1",
-            cancellation: .mcpClient(message: "Stop")
-        )
-        await backend.yield(.completed(summary: "Succeeded.", result: "late result"))
-        let read = try await result
-
-        #expect(read.core.lifecycle.status == .cancelled)
-        #expect(read.core.output.summary == "Stop")
-        #expect(read.core.output.lastAgentMessage == nil)
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.output.summary == "Stop")
+            #expect(read.core.output.lastAgentMessage == nil)
+        }
     }
 
     @Test func terminalEventDuringPendingCancellationKeepsCancelledState() async throws {
@@ -1003,22 +1034,23 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            async let cancel = store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
+            await interruptGate.open()
+            _ = try await cancel
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        async let cancel = store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-        await backend.waitForInterruptReview()
-        await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
-        await interruptGate.open()
-        _ = try await cancel
-        let read = try await result
-
-        #expect(read.core.lifecycle.status == .cancelled)
-        #expect(read.core.output.summary == "Stop")
-        #expect(read.core.output.hasFinalReview == false)
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.output.summary == "Stop")
+            #expect(read.core.output.hasFinalReview == false)
+        }
     }
 
     @Test func cancelDuringReviewStartupInterruptsAfterRunBecomesAvailable() async throws {
@@ -1029,26 +1061,27 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let cancelledDuringStartup = try #require(store.jobs.first)
+            #expect(cancel.core.lifecycle.status == .cancelled)
+            #expect(cancelledDuringStartup.core.lifecycle.status == .cancelled)
+            await gate.open()
+            let read = try await result
 
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForStartReview()
-        let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
-        let cancelledDuringStartup = try #require(store.jobs.first)
-        #expect(cancel.core.lifecycle.status == .cancelled)
-        #expect(cancelledDuringStartup.core.lifecycle.status == .cancelled)
-        await gate.open()
-        let read = try await result
-
-        #expect(cancel.cancelled)
-        #expect(read.core.lifecycle.status == .cancelled)
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains(.interruptReview(
-            .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-            .init(message: "Stop")
-        )))
+            #expect(cancel.cancelled)
+            #expect(read.core.lifecycle.status == .cancelled)
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                .init(message: "Stop")
+            )))
+        }
     }
 
     @Test func closedSessionRejectsNewReviews() async throws {
@@ -1056,14 +1089,15 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
+        await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.closeSession("session-1")
 
-        await store.closeSession("session-1")
-
-        await #expect(throws: (any Error).self) {
-            try await store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-            )
+            await #expect(throws: (any Error).self) {
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
         }
     }
 
@@ -1073,33 +1107,35 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-        let running = CodexReviewJob.makeForTesting(
-            id: "running-job",
-            sessionID: "session-1",
-            cwd: "/tmp/project",
-            targetSummary: "Running",
-            status: .running,
-            summary: "Running"
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [running]
-        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let running = CodexReviewJob.makeForTesting(
+                id: "running-job",
+                sessionID: "session-1",
+                cwd: "/tmp/project",
+                targetSummary: "Running",
+                status: .running,
+                summary: "Running"
+            )
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [running]
+            )
 
-        await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
+            await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
 
-        #expect(running.core.lifecycle.status == .cancelled)
-        async let result = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
-        await backend.waitForEventStream()
-        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
-        let read = try await result
+            #expect(running.core.lifecycle.status == .cancelled)
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            let read = try await result
 
-        #expect(read.jobID == "job-1")
-        #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.jobID == "job-1")
+            #expect(read.core.lifecycle.status == .succeeded)
+        }
     }
 
     @Test func authAndSettingsUseSingleBackendContract() async throws {
@@ -1107,10 +1143,11 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
+        await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.refreshSettings()
 
-        await store.refreshSettings()
-
-        #expect(store.settings.effectiveModel == "gpt-5")
+            #expect(store.settings.effectiveModel == "gpt-5")
+        }
     }
 
     @Test func initialActiveAccountKeySelectsPersistedAccount() {
@@ -1155,12 +1192,13 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
+        await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.refreshSettings()
+            await store.updateSettingsReasoningEffort(.medium)
 
-        await store.refreshSettings()
-        await store.updateSettingsReasoningEffort(.medium)
-
-        #expect(store.settings.effectiveModel == "gpt-5.5")
-        #expect(store.settings.models == [model])
+            #expect(store.settings.effectiveModel == "gpt-5.5")
+            #expect(store.settings.models == [model])
+        }
     }
 
     @Test func primaryAuthenticationActionIsAvailableWhenRuntimeCanRecoverOrStartLogin() {
@@ -1191,20 +1229,46 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut, workspaces: [])
+        await withStoreCommandTestCleanup(backend: backend, store: store) {
+            store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut, workspaces: [])
 
-        await store.performPrimaryAuthenticationAction()
+            await store.performPrimaryAuthenticationAction()
 
-        #expect(store.serverState == .running)
-        #expect(store.auth.isAuthenticating)
-        let commands = await backend.recordedCommands()
-        #expect(commands.contains { command in
-            if case .startLogin = command {
-                return true
-            }
-            return false
-        })
+            #expect(store.serverState == .running)
+            #expect(store.auth.isAuthenticating)
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains { command in
+                if case .startLogin = command {
+                    return true
+                }
+                return false
+            })
+        }
     }
+}
+
+@MainActor
+private func withStoreCommandTestCleanup(
+    backend: FakeCodexReviewBackend,
+    store: CodexReviewStore,
+    operation: () async throws -> Void
+) async rethrows {
+    do {
+        try await operation()
+    } catch {
+        await cleanupStoreCommandTest(backend: backend, store: store)
+        throw error
+    }
+    await cleanupStoreCommandTest(backend: backend, store: store)
+}
+
+@MainActor
+private func cleanupStoreCommandTest(
+    backend: FakeCodexReviewBackend,
+    store: CodexReviewStore
+) async {
+    await backend.finishAllEvents()
+    await store.cancelAndDrainReviewWorkersForTesting()
 }
 
 private struct StreamClosedError: Error {}
