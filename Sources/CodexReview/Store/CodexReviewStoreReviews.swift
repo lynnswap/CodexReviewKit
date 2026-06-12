@@ -12,6 +12,48 @@ extension CodexReviewStore {
         sessionID: String,
         request: ReviewStartRequest
     ) async throws -> ReviewReadResult {
+        let jobID = try beginReview(sessionID: sessionID, request: request)
+        return try await withTaskCancellationHandler {
+            _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
+            await reviewWorkerTasks[jobID]?.value
+            return try readReview(sessionID: sessionID, jobID: jobID)
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.reviewWorkerTasks[jobID]?.cancel()
+            }
+        }
+    }
+
+    @discardableResult
+    package func startReview(
+        sessionID: String,
+        request: ReviewStartRequest,
+        waitTimeout: Duration
+    ) async throws -> ReviewReadResult {
+        let jobID = try beginReview(sessionID: sessionID, request: request)
+        return try await awaitReview(sessionID: sessionID, jobID: jobID, timeout: waitTimeout)
+    }
+
+    package func awaitReview(
+        sessionID: String?,
+        jobID: String,
+        timeout: Duration? = nil
+    ) async throws -> ReviewReadResult {
+        let job = try job(jobID: jobID)
+        if let sessionID, job.sessionID != sessionID {
+            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+        }
+        if job.isTerminal == false {
+            await waitForReviewTerminal(jobID: jobID, timeout: timeout)
+        }
+        return try readReview(sessionID: sessionID, jobID: jobID)
+    }
+
+    @discardableResult
+    private func beginReview(
+        sessionID: String,
+        request: ReviewStartRequest
+    ) throws -> String {
         guard closedSessions.contains(sessionID) == false else {
             throw ReviewError.invalidArguments("Review session \(sessionID) is closed.")
         }
@@ -33,10 +75,35 @@ extension CodexReviewStore {
         )
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
+        startingJobIDs.insert(jobID)
+        launchReviewWorker(jobID: jobID, sessionID: sessionID, request: validatedRequest)
+        return jobID
+    }
 
+    private func launchReviewWorker(
+        jobID: String,
+        sessionID: String,
+        request: ReviewStartRequest
+    ) {
+        reviewWorkerTasks[jobID]?.cancel()
+        reviewWorkerTasks[jobID] = Task { [weak self] in
+            await self?.runReviewWorker(jobID: jobID, sessionID: sessionID, request: request)
+        }
+    }
+
+    private func runReviewWorker(
+        jobID: String,
+        sessionID: String,
+        request validatedRequest: ReviewStartRequest
+    ) async {
+        guard let job = job(id: jobID) else {
+            startingJobIDs.remove(jobID)
+            reviewWorkerTasks.removeValue(forKey: jobID)
+            resumeReviewWaiters(for: jobID)
+            return
+        }
         var run: BackendReviewRun?
         do {
-            startingJobIDs.insert(jobID)
             let backendRun = try await backend.startReview(.init(
                 jobID: jobID,
                 sessionID: sessionID,
@@ -52,6 +119,9 @@ extension CodexReviewStore {
                 turnID: backendRun.turnID,
                 model: backendRun.model
             )
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             if let startupCancellation = startupCancellations.removeValue(forKey: jobID) {
                 try? await backend.interruptReview(
                     backendRun,
@@ -81,7 +151,6 @@ extension CodexReviewStore {
             }
             await backend.cleanupReview(backendRun)
             activeRuns.removeValue(forKey: jobID)
-            return try readReview(jobID: jobID)
         } catch let error where error is CancellationError || Task.isCancelled {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
@@ -96,7 +165,6 @@ extension CodexReviewStore {
                 )
             }
             activeRuns.removeValue(forKey: jobID)
-            return try readReview(jobID: jobID)
         } catch {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
@@ -104,19 +172,19 @@ extension CodexReviewStore {
                 await backend.cleanupReview(run)
             }
             activeRuns.removeValue(forKey: jobID)
-            if job.isTerminal {
-                return try readReview(jobID: jobID)
-            }
-            if let startupCancellation {
+            if job.isTerminal == false, let startupCancellation {
                 try? completeCancellationLocally(
                     jobID: job.id,
                     sessionID: job.sessionID,
                     cancellation: startupCancellation
                 )
-                return try readReview(jobID: jobID)
+            } else if job.isTerminal == false {
+                markReviewFailed(job, message: error.localizedDescription)
             }
-            markReviewFailed(job, message: error.localizedDescription)
-            return try readReview(jobID: jobID)
+        }
+        reviewWorkerTasks.removeValue(forKey: jobID)
+        if job.isTerminal {
+            resumeReviewWaiters(for: jobID)
         }
     }
 
@@ -424,6 +492,7 @@ extension CodexReviewStore {
         job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
+        resumeReviewWaiters(for: job.id)
     }
 
     private func consumeReviewEvents(
@@ -441,6 +510,9 @@ extension CodexReviewStore {
             }
         }
 
+        if Task.isCancelled {
+            throw CancellationError()
+        }
         if job.isTerminal == false {
             if completePendingCancellationIfNeeded(for: job) {
                 return
@@ -560,6 +632,69 @@ extension CodexReviewStore {
         }
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
+        resumeReviewWaiters(for: job.id)
+    }
+
+    private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
+        guard job(id: jobID)?.isTerminal == false else {
+            return
+        }
+        let waiterID = UUID()
+        let timeoutTask = timeout.map { duration in
+            Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: duration)
+                } catch {
+                    return
+                }
+                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
+            }
+        }
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if job(id: jobID)?.isTerminal != false {
+                    timeoutTask?.cancel()
+                    continuation.resume()
+                    return
+                }
+                reviewTerminalWaiters[jobID, default: []].append(.init(
+                    id: waiterID,
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                ))
+            }
+        } onCancel: {
+            timeoutTask?.cancel()
+            Task { @MainActor [weak self] in
+                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
+            }
+        }
+        timeoutTask?.cancel()
+    }
+
+    package func resumeReviewWaiters(for jobID: String) {
+        let waiters = reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume()
+        }
+    }
+
+    private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
+        guard var waiters = reviewTerminalWaiters[jobID],
+              let index = waiters.firstIndex(where: { $0.id == waiterID })
+        else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        if waiters.isEmpty {
+            reviewTerminalWaiters.removeValue(forKey: jobID)
+        } else {
+            reviewTerminalWaiters[jobID] = waiters
+        }
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume()
     }
 
     private func nextJobSortOrder(inWorkspace cwd: String) -> Double {

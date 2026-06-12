@@ -2,10 +2,39 @@ import Foundation
 import MCP
 import CodexReview
 
+package actor MCPClientSessionState {
+    private var clientInfo: Client.Info?
+
+    package init() {}
+
+    package func update(clientInfo: Client.Info) {
+        self.clientInfo = clientInfo
+    }
+
+    package func usesBoundedReviewStart(httpContext: HTTPRequest?) -> Bool {
+        if Self.isClaudeClientName(clientInfo?.name)
+            || Self.isClaudeClientName(clientInfo?.title)
+            || Self.isClaudeClientName(httpContext?.header("User-Agent"))
+        {
+            return true
+        }
+        return false
+    }
+
+    private static func isClaudeClientName(_ value: String?) -> Bool {
+        guard let value else {
+            return false
+        }
+        return value.localizedCaseInsensitiveContains("claude")
+    }
+}
+
 @MainActor
 package func makeMCPProtocolServer(
     adapter: CodexReviewMCPServer,
-    defaultSessionID: String? = nil
+    defaultSessionID: String? = nil,
+    clientSession: MCPClientSessionState = .init(),
+    boundedReviewWaitDuration: Duration = .seconds(540)
 ) async -> Server {
     let server = Server(
         name: "codex_review",
@@ -36,10 +65,14 @@ package func makeMCPProtocolServer(
         }
 
         do {
+            let httpContext = Server.currentHandlerContext?.httpContext
+            let useBoundedReviewStart = await clientSession.usesBoundedReviewStart(httpContext: httpContext)
             let request = try toolRequest(
                 tool: tool,
                 arguments: params.arguments ?? [:],
-                defaultSessionID: defaultSessionID
+                defaultSessionID: defaultSessionID,
+                boundedReviewWaitDuration: boundedReviewWaitDuration,
+                useBoundedReviewStart: useBoundedReviewStart
             )
             let response = try await adapter.handle(request)
             return try toolResult(tool: tool, response: response)
@@ -89,6 +122,19 @@ private func schema(for tool: MCPToolName) -> Value {
                 ]),
             ]),
             "required": .array([.string("cwd"), .string("target")]),
+        ])
+    case .reviewAwait:
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                "sessionID": .object(["type": .string("string")]),
+                "jobID": .object(["type": .string("string")]),
+                "jobId": .object(["type": .string("string")]),
+            ]),
+            "anyOf": .array([
+                .object(["required": .array([.string("jobId")])]),
+                .object(["required": .array([.string("jobID")])]),
+            ]),
         ])
     case .reviewRead:
         .object([
@@ -143,7 +189,9 @@ private func schema(for tool: MCPToolName) -> Value {
 private func toolRequest(
     tool: MCPToolName,
     arguments: [String: Value],
-    defaultSessionID: String?
+    defaultSessionID: String?,
+    boundedReviewWaitDuration: Duration,
+    useBoundedReviewStart: Bool
 ) throws -> MCPToolRequest {
     switch tool {
     case .reviewStart:
@@ -151,7 +199,14 @@ private func toolRequest(
         let target = try reviewTarget(from: requiredObject("target", in: arguments))
         return .reviewStart(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID) ?? "default",
-            request: .init(cwd: cwd, target: target)
+            request: .init(cwd: cwd, target: target),
+            waitTimeout: useBoundedReviewStart ? boundedReviewWaitDuration : nil
+        )
+    case .reviewAwait:
+        return .reviewAwait(
+            sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
+            jobID: try requiredJobID(in: arguments),
+            waitTimeout: boundedReviewWaitDuration
         )
     case .reviewRead:
         return .reviewRead(
@@ -200,12 +255,12 @@ private func toolResult(tool: MCPToolName, response: MCPToolResponse) throws -> 
     let isError: Bool
     switch response {
     case .reviewRead(let result):
-        value = tool == .reviewStart
-            ? result.structuredContentForStart()
-            : result.structuredContentForRead()
-        text = tool == .reviewStart
-            ? result.textContent()
-            : result.textContentForRead()
+        value = tool == .reviewRead
+            ? result.structuredContentForRead()
+            : result.structuredContentForStartOrAwait()
+        text = tool == .reviewRead
+            ? result.textContentForRead()
+            : result.textContentForStartOrAwait()
         isError = result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
@@ -320,7 +375,7 @@ private let helpResources: [HelpResource] = [
         content: """
         # Codex Review MCP
 
-        Use `review_start` to run a review, then `review_read`, `review_list`, or `review_cancel` to inspect or control review jobs.
+        Use `review_start` to run a review, `review_await` to continue waiting for long-running jobs, then `review_read`, `review_list`, or `review_cancel` to inspect or control review jobs.
         """
     ),
     .init(
@@ -333,6 +388,18 @@ private let helpResources: [HelpResource] = [
         Required arguments: `cwd` and `target`.
 
         Supported target types: `uncommittedChanges`, `baseBranch`, `commit`, and `custom`.
+        """
+    ),
+    .init(
+        uri: "codex-review://help/tools/review_await",
+        name: "review_await",
+        description: "Wait for a running Codex review job.",
+        content: """
+        # review_await
+
+        Required argument: `jobId`.
+
+        Use this after `review_start` returns a running job. The tool waits for the job to finish and returns the final review when available.
         """
     ),
     .init(
@@ -432,6 +499,18 @@ private extension ReviewReadResult {
         core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
     }
 
+    func textContentForStartOrAwait() -> String {
+        if core.lifecycle.status.isTerminal {
+            return textContent()
+        }
+
+        var status = "Review \(core.lifecycle.status.rawValue)"
+        if let elapsedSeconds {
+            status += " for \(elapsedSeconds)s"
+        }
+        return "\(status). jobId: \(jobID). Call `review_await` with this jobId to continue waiting."
+    }
+
     func textContentForRead() -> String {
         if core.lifecycle.status.isTerminal {
             return textContent()
@@ -464,15 +543,15 @@ private extension ReviewReadResult {
         return String(normalized[..<index]) + "..."
     }
 
-    func structuredContentForStart() -> Value {
-        structuredContent(includeDetails: false)
+    func structuredContentForStartOrAwait() -> Value {
+        structuredContent(includeDetails: false, includeNextAction: core.lifecycle.status.isTerminal == false)
     }
 
     func structuredContentForRead() -> Value {
-        structuredContent(includeDetails: true)
+        structuredContent(includeDetails: true, includeNextAction: false)
     }
 
-    func structuredContent(includeDetails: Bool) -> Value {
+    func structuredContent(includeDetails: Bool, includeNextAction: Bool) -> Value {
         var object: [String: Value] = [
             "jobId": .string(jobID),
             "run": core.run.structuredContent(),
@@ -486,6 +565,12 @@ private extension ReviewReadResult {
             object["logs"] = .array(logs.map { $0.structuredContent() })
             object["logsPage"] = logsPage.structuredContent()
             object["rawLogText"] = .string(rawLogText)
+        }
+        if includeNextAction {
+            object["nextAction"] = .object([
+                "tool": .string(MCPToolName.reviewAwait.rawValue),
+                "jobId": .string(jobID),
+            ])
         }
         return .object(object)
     }

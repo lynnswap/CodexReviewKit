@@ -92,7 +92,7 @@ names when the responsibility is more specific.
 
 `CodexReviewStore` is the single source of truth for review, runtime, auth,
 settings, workspace, job, and log state. It is also the command owner for
-`review_start`, `review_read`, `review_list`, `review_cancel`, session close,
+`review_start`, `review_await`, `review_read`, `review_list`, `review_cancel`, session close,
 auth actions, and settings updates. UI and MCP both use the same store API.
 
 `CodexReviewStoreBackend` is the dependency boundary below the store. Live,
@@ -134,6 +134,7 @@ client, and `DELETE` closes a session.
 The public tool surface is:
 
 - `review_start`
+- `review_await`
 - `review_read`
 - `review_list`
 - `review_cancel`

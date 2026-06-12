@@ -15,6 +15,7 @@ struct CodexReviewMCPServerTests {
 
         #expect(server.tools.map(\.name) == [
             .reviewStart,
+            .reviewAwait,
             .reviewRead,
             .reviewList,
             .reviewCancel,
@@ -31,7 +32,8 @@ struct CodexReviewMCPServerTests {
 
         async let response = server.handle(.reviewStart(
             sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: nil
         ))
         await backend.waitForEventStream()
         await backend.yield(.completed(summary: "Done", result: "review"))

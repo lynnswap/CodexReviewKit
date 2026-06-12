@@ -27,6 +27,7 @@ visible.
 3. Use the review tools from Codex:
 
    - `review_start`
+   - `review_await`
    - `review_list`
    - `review_read`
    - `review_cancel`

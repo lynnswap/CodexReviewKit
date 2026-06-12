@@ -4,6 +4,12 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
+    package struct ReviewTerminalWaiter {
+        package var id: UUID
+        package var continuation: CheckedContinuation<Void, Never>
+        package var timeoutTask: Task<Void, Never>?
+    }
+
     public package(set) var serverState: CodexReviewServerState = .stopped
     public let auth: CodexReviewAuthModel
     package let settings: SettingsStore
@@ -23,6 +29,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package var activeRuns: [String: BackendReviewRun] = [:]
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
+    @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
 
@@ -62,6 +70,15 @@ public final class CodexReviewStore {
 
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
+        for task in reviewWorkerTasks.values {
+            task.cancel()
+        }
+        for waiters in reviewTerminalWaiters.values {
+            for waiter in waiters {
+                waiter.timeoutTask?.cancel()
+                waiter.continuation.resume()
+            }
+        }
     }
 
     public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
