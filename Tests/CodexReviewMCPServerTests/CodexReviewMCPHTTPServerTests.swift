@@ -38,6 +38,12 @@ struct CodexReviewMCPHTTPServerTests {
             let target = try #require(properties["target"] as? [String: Any])
             let targetProperties = try #require(target["properties"] as? [String: Any])
             #expect(targetProperties.keys.contains("instructions"))
+
+            let reviewRead = try #require(tools.first { $0["name"] as? String == "review_read" })
+            let readSchema = try #require(reviewRead["inputSchema"] as? [String: Any])
+            let readProperties = try #require(readSchema["properties"] as? [String: Any])
+            #expect(readProperties["logOffset"] != nil)
+            #expect(readProperties["logLimit"] != nil)
         }
     }
 
@@ -384,6 +390,10 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(allowed.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-in-session")
             let defaultLogs = allowed.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
             #expect(defaultLogs?.compactMap { $0["kind"] as? String } == ["command", "agentMessage"])
+            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
+            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "offset"]) as? Int == 0)
+            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "limit"]) as? Int == 100)
+            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "returned"]) as? Int == 2)
             let unfilteredLogs = allLogs.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
             #expect(unfilteredLogs?.compactMap { $0["kind"] as? String } == [
                 "command",
@@ -395,6 +405,136 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect((denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "Job job-other-session was not found.")
+        }
+    }
+
+    @Test func streamableHTTPReviewReadReturnsPagedRunningSummary() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            clock: .init(now: { Date(timeIntervalSince1970: 10) })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let longLatest = "latest " + String(repeating: "x", count: 400)
+            let entries = (0..<119).map { index in
+                ReviewLogEntry(kind: .progress, text: "line-\(index)")
+            } + [
+                ReviewLogEntry(kind: .progress, text: longLatest),
+            ]
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-running",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Running",
+                        status: .running,
+                        startedAt: Date(timeIntervalSince1970: 5),
+                        summary: "Review started.",
+                        logEntries: entries
+                    ),
+                ]
+            )
+
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-running",
+                            "logLimit": 5,
+                        ],
+                    ],
+                ]
+            )
+
+            let logs = try #require(response.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            let readText = try #require((response.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String)
+            #expect(logs.compactMap { $0["text"] as? String }.first == "line-115")
+            #expect(logs.count == 5)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 120)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "offset"]) as? Int == 115)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "limit"]) as? Int == 5)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "returned"]) as? Int == 5)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "hasMoreBefore"]) as? Bool == true)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "hasMoreAfter"]) as? Bool == false)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "previousOffset"]) as? Int == 110)
+            #expect(response.value(for: ["result", "structuredContent", "logsPage", "nextOffset"]) is NSNull)
+            #expect(readText.hasPrefix("Review running for 5s. Returned logs 116-120 of 120. Latest: latest "))
+            #expect(readText.count < longLatest.count)
+            #expect(readText.contains("Review started.") == false)
+        }
+    }
+
+    @Test func streamableHTTPReviewReadRejectsInvalidPagingArguments() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-running",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Running",
+                        status: .running,
+                        summary: "Review started."
+                    ),
+                ]
+            )
+
+            let negativeOffset = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-running",
+                            "logOffset": -1,
+                        ],
+                    ],
+                ]
+            )
+            let tooLargeLimit = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-running",
+                            "logLimit": ReviewLogPageRequest.maxLimit + 1,
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(negativeOffset.value(for: ["result", "isError"]) as? Bool == true)
+            #expect((negativeOffset.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "logOffset must be greater than or equal to 0.")
+            #expect(tooLargeLimit.value(for: ["result", "isError"]) as? Bool == true)
+            #expect((tooLargeLimit.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "logLimit must be between 1 and 500.")
         }
     }
 
