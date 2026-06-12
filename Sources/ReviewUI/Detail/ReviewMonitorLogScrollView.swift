@@ -1580,10 +1580,6 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.validateUserInterfaceItem(item)
     }
 
-    func contextMenuForTesting() -> NSMenu? {
-        logDocumentView.contextMenuForTesting()
-    }
-
     func clearFinderSelectedRangesForTesting() {
         logDocumentView.setSelectedRange(NSRange(location: 0, length: 0))
     }
