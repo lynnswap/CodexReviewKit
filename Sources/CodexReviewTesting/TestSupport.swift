@@ -4,7 +4,7 @@ import CodexReviewAppServer
 
 package actor AsyncGate {
     private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     package init() {}
 
@@ -12,11 +12,18 @@ package actor AsyncGate {
         if isOpen {
             return
         }
-        await withCheckedContinuation { continuation in
-            if isOpen {
-                continuation.resume()
-            } else {
-                waiters.append(continuation)
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if isOpen {
+                    continuation.resume()
+                } else {
+                    waiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelWaiter(id: waiterID)
             }
         }
     }
@@ -26,11 +33,15 @@ package actor AsyncGate {
             return
         }
         isOpen = true
-        let waiters = waiters
+        let waiters = Array(waiters.values)
         self.waiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        waiters.removeValue(forKey: id)?.resume()
     }
 }
 
@@ -64,6 +75,38 @@ package struct FakeCodexReviewBackendError: LocalizedError, Sendable {
     }
 }
 
+package struct FakeCodexReviewBackendTimeout: LocalizedError, Sendable {
+    package var operation: String
+
+    package init(operation: String) {
+        self.operation = operation
+    }
+
+    package var errorDescription: String? {
+        "Timed out waiting for \(operation)."
+    }
+}
+
+private func withFakeBackendTimeout(
+    operation: String,
+    timeout: Duration,
+    wait: @escaping @Sendable () async -> Void
+) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask {
+            await wait()
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw FakeCodexReviewBackendTimeout(operation: operation)
+        }
+        defer {
+            group.cancelAll()
+        }
+        _ = try await group.next()
+    }
+}
+
 package actor FakeCodexReviewBackend: CodexReviewBackend {
     package enum Command: Equatable, Sendable {
         case readSettings
@@ -85,11 +128,17 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var nextRun: BackendReviewRun
     private var interruptFailureMessage: String?
     private var interruptReviewGate: AsyncGate?
-    private var interruptReviewWaiters: [CheckedContinuation<Void, Never>] = []
+    private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
-    private var startReviewWaiters: [CheckedContinuation<Void, Never>] = []
-    private var eventContinuations: [String: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation] = [:]
-    private var eventRegistrationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var eventContinuations: [String: EventContinuation] = [:]
+    private var eventRegistrationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var terminatedEventContinuationIDs: Set<UUID> = []
+
+    private struct EventContinuation: Sendable {
+        var id: UUID
+        var continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
+    }
 
     package init(
         settings: BackendSettingsSnapshot = .init(),
@@ -127,18 +176,31 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }) {
             return
         }
-        await withCheckedContinuation { continuation in
-            if commands.contains(where: {
-                if case .startReview = $0 {
-                    true
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if commands.contains(where: {
+                    if case .startReview = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    continuation.resume()
                 } else {
-                    false
+                    startReviewWaiters[waiterID] = continuation
                 }
-            }) {
-                continuation.resume()
-            } else {
-                startReviewWaiters.append(continuation)
             }
+        } onCancel: {
+            Task {
+                await self.cancelStartReviewWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForStartReview(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "startReview", timeout: timeout) {
+            await self.waitForStartReview()
         }
     }
 
@@ -152,18 +214,31 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }) {
             return
         }
-        await withCheckedContinuation { continuation in
-            if commands.contains(where: {
-                if case .interruptReview = $0 {
-                    true
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if commands.contains(where: {
+                    if case .interruptReview = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    continuation.resume()
                 } else {
-                    false
+                    interruptReviewWaiters[waiterID] = continuation
                 }
-            }) {
-                continuation.resume()
-            } else {
-                interruptReviewWaiters.append(continuation)
             }
+        } onCancel: {
+            Task {
+                await self.cancelInterruptReviewWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForInterruptReview(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "interruptReview", timeout: timeout) {
+            await self.waitForInterruptReview()
         }
     }
 
@@ -213,7 +288,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
         commands.append(.startReview(request))
-        let waiters = startReviewWaiters
+        let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
@@ -226,7 +301,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
         commands.append(.interruptReview(run, reason))
-        let waiters = interruptReviewWaiters
+        let waiters = Array(interruptReviewWaiters.values)
         interruptReviewWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
@@ -244,52 +319,113 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package nonisolated func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
+        let continuationID = UUID()
+        return AsyncThrowingStream<BackendReviewEvent, Error>(bufferingPolicy: .unbounded) { continuation in
+            continuation.onTermination = { @Sendable _ in
+                Task {
+                    await self.unregisterEventContinuation(id: continuationID, run: run)
+                }
+            }
             Task {
-                await self.register(continuation: continuation, run: run)
+                await self.register(continuation: continuation, id: continuationID, run: run)
             }
         }
     }
 
     package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) {
         let key = run?.threadID ?? nextRun.threadID
-        eventContinuations[key]?.yield(event)
+        eventContinuations[key]?.continuation.yield(event)
     }
 
     package func finishEvents(for run: BackendReviewRun? = nil) {
         let key = run?.threadID ?? nextRun.threadID
-        eventContinuations.removeValue(forKey: key)?.finish()
+        eventContinuations.removeValue(forKey: key)?.continuation.finish()
     }
 
     package func finishEvents(throwing error: any Error, for run: BackendReviewRun? = nil) {
         let key = run?.threadID ?? nextRun.threadID
-        eventContinuations.removeValue(forKey: key)?.finish(throwing: error)
+        eventContinuations.removeValue(forKey: key)?.continuation.finish(throwing: error)
+    }
+
+    package func finishAllEvents() {
+        let continuations = eventContinuations.values.map(\.continuation)
+        eventContinuations.removeAll(keepingCapacity: false)
+        terminatedEventContinuationIDs.removeAll(keepingCapacity: false)
+        for continuation in continuations {
+            continuation.finish()
+        }
+        let waiters = Array(eventRegistrationWaiters.values)
+        eventRegistrationWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 
     package func waitForEventStream() async {
         if eventContinuations.isEmpty == false {
             return
         }
-        await withCheckedContinuation { continuation in
-            if eventContinuations.isEmpty == false {
-                continuation.resume()
-            } else {
-                eventRegistrationWaiters.append(continuation)
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if eventContinuations.isEmpty == false {
+                    continuation.resume()
+                } else {
+                    eventRegistrationWaiters[waiterID] = continuation
+                }
             }
+        } onCancel: {
+            Task {
+                await self.cancelEventRegistrationWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForEventStream(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "event stream registration", timeout: timeout) {
+            await self.waitForEventStream()
         }
     }
 
     private func register(
         continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
+        id: UUID,
         run: BackendReviewRun
     ) {
+        guard terminatedEventContinuationIDs.remove(id) == nil else {
+            continuation.finish()
+            return
+        }
         commands.append(.events(run))
-        eventContinuations[run.threadID] = continuation
-        let waiters = eventRegistrationWaiters
+        eventContinuations[run.threadID] = .init(id: id, continuation: continuation)
+        let waiters = Array(eventRegistrationWaiters.values)
         eventRegistrationWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
             waiter.resume()
         }
+    }
+
+    private func unregisterEventContinuation(id: UUID, run: BackendReviewRun) {
+        guard let registered = eventContinuations[run.threadID] else {
+            terminatedEventContinuationIDs.insert(id)
+            return
+        }
+        guard registered.id == id else {
+            return
+        }
+        eventContinuations.removeValue(forKey: run.threadID)
+    }
+
+    private func cancelStartReviewWaiter(id: UUID) {
+        startReviewWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func cancelInterruptReviewWaiter(id: UUID) {
+        interruptReviewWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func cancelEventRegistrationWaiter(id: UUID) {
+        eventRegistrationWaiters.removeValue(forKey: id)?.resume()
     }
 }
 

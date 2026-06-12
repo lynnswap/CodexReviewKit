@@ -82,4 +82,26 @@ extension CodexReviewStore {
         }
         writeDiagnosticsIfNeeded()
     }
+
+    package func cancelAndDrainReviewWorkersForTesting() async {
+        let tasks = Array(reviewWorkerTasks.values)
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
+            await task.value
+        }
+
+        reviewWorkerTasks.removeAll(keepingCapacity: false)
+        startingJobIDs.removeAll(keepingCapacity: false)
+        startupCancellations.removeAll(keepingCapacity: false)
+        activeRuns.removeAll(keepingCapacity: false)
+
+        let waiters = reviewTerminalWaiters.values.flatMap { $0 }
+        reviewTerminalWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume()
+        }
+    }
 }
