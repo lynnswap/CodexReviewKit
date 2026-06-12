@@ -3,6 +3,7 @@ import CodexReview
 
 package enum MCPToolName: String, Codable, Equatable, Sendable, CaseIterable {
     case reviewStart = "review_start"
+    case reviewAwait = "review_await"
     case reviewRead = "review_read"
     case reviewList = "review_list"
     case reviewCancel = "review_cancel"
@@ -19,7 +20,8 @@ package struct MCPToolDescriptor: Codable, Equatable, Sendable {
 }
 
 package enum MCPToolRequest: Equatable, Sendable {
-    case reviewStart(sessionID: String, request: ReviewStartRequest)
+    case reviewStart(sessionID: String, request: ReviewStartRequest, waitTimeout: Duration?)
+    case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
     case reviewRead(sessionID: String?, jobID: String, logFilter: ReviewLogFilter, logPage: ReviewLogPageRequest)
     case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
     case reviewCancel(sessionID: String?, selector: ReviewJobSelector, reason: ReviewCancellation)
@@ -42,6 +44,7 @@ package final class CodexReviewMCPServer {
     package var tools: [MCPToolDescriptor] {
         [
             .init(name: .reviewStart, description: "Start a Codex review."),
+            .init(name: .reviewAwait, description: "Wait for a running Codex review job."),
             .init(name: .reviewRead, description: "Read a Codex review job."),
             .init(name: .reviewList, description: "List Codex review jobs."),
             .init(name: .reviewCancel, description: "Cancel a Codex review job."),
@@ -50,10 +53,20 @@ package final class CodexReviewMCPServer {
 
     package func handle(_ request: MCPToolRequest) async throws -> MCPToolResponse {
         switch request {
-        case .reviewStart(let sessionID, let reviewRequest):
-            return .reviewRead(try await store.startReview(
+        case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
+            if let waitTimeout {
+                return .reviewRead(try await store.startReview(
+                    sessionID: sessionID,
+                    request: reviewRequest,
+                    waitTimeout: waitTimeout
+                ))
+            }
+            return .reviewRead(try await store.startReview(sessionID: sessionID, request: reviewRequest))
+        case .reviewAwait(let sessionID, let jobID, let waitTimeout):
+            return .reviewRead(try await store.awaitReview(
                 sessionID: sessionID,
-                request: reviewRequest
+                jobID: jobID,
+                timeout: waitTimeout
             ))
         case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
             return .reviewRead(try store.readReview(

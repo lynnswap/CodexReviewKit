@@ -46,6 +46,7 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
     package var sessionTimeout: TimeInterval
     package var retryInterval: Int?
     package var streamHeartbeatInterval: Duration?
+    package var boundedReviewWaitDuration: Duration
 
     package init(
         host: String = "localhost",
@@ -60,7 +61,8 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
             endpoint: endpoint,
             sessionTimeout: sessionTimeout,
             retryInterval: retryInterval,
-            streamHeartbeatInterval: .seconds(30)
+            streamHeartbeatInterval: .seconds(30),
+            boundedReviewWaitDuration: .seconds(540)
         )
     }
 
@@ -70,7 +72,8 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
         endpoint: String = "/mcp",
         sessionTimeout: TimeInterval = 3600,
         retryInterval: Int? = 1000,
-        streamHeartbeatInterval: Duration?
+        streamHeartbeatInterval: Duration?,
+        boundedReviewWaitDuration: Duration = .seconds(540)
     ) {
         self.host = host
         self.port = port
@@ -78,6 +81,7 @@ package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
         self.sessionTimeout = sessionTimeout
         self.retryInterval = retryInterval
         self.streamHeartbeatInterval = streamHeartbeatInterval
+        self.boundedReviewWaitDuration = boundedReviewWaitDuration
     }
 
     package func url(boundPort: Int? = nil) -> URL {
@@ -254,6 +258,7 @@ package actor CodexReviewMCPHTTPServer {
 
     private func createSessionAndHandle(_ request: HTTPRequest) async -> TrackedHTTPResponse {
         let sessionID = UUID().uuidString
+        let clientSession = MCPClientSessionState()
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
             validationPipeline: makeValidationPipeline(),
@@ -263,9 +268,13 @@ package actor CodexReviewMCPHTTPServer {
         do {
             let server = await makeMCPProtocolServer(
                 adapter: adapter,
-                defaultSessionID: sessionID
+                defaultSessionID: sessionID,
+                clientSession: clientSession,
+                boundedReviewWaitDuration: configuration.boundedReviewWaitDuration
             )
-            try await server.start(transport: transport)
+            try await server.start(transport: transport) { clientInfo, _ in
+                await clientSession.update(clientInfo: clientInfo)
+            }
             sessions[sessionID] = SessionContext(
                 server: server,
                 transport: transport,

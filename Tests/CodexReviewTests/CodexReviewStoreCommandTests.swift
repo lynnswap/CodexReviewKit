@@ -36,6 +36,93 @@ struct CodexReviewStoreCommandTests {
         ))))
     }
 
+    @Test func boundedReviewStartReturnsRunningSnapshotAndCanBeAwaitedLater() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let result = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .milliseconds(20)
+        )
+        await backend.waitForEventStream()
+        let running = try await result
+
+        #expect(running.jobID == "job-1")
+        #expect(running.core.lifecycle.status == .running)
+        #expect(running.core.output.hasFinalReview == false)
+
+        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+        let final = try await store.awaitReview(
+            sessionID: "session-1",
+            jobID: "job-1",
+            timeout: .seconds(1)
+        )
+
+        #expect(final.core.lifecycle.status == .succeeded)
+        #expect(final.core.output.lastAgentMessage == "review text")
+    }
+
+    @Test func awaitReviewReturnsWhenRunningJobCompletes() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let start = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .milliseconds(20)
+        )
+        await backend.waitForEventStream()
+        _ = try await start
+
+        async let awaited = store.awaitReview(
+            sessionID: "session-1",
+            jobID: "job-1",
+            timeout: .seconds(1)
+        )
+        await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+        let final = try await awaited
+
+        #expect(final.core.lifecycle.status == .succeeded)
+        #expect(final.core.output.lastAgentMessage == "review text")
+    }
+
+    @Test func awaitReviewReturnsWhenRunningJobIsCancelled() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        async let start = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+            waitTimeout: .milliseconds(20)
+        )
+        await backend.waitForEventStream()
+        _ = try await start
+
+        async let awaited = store.awaitReview(
+            sessionID: "session-1",
+            jobID: "job-1",
+            timeout: .seconds(1)
+        )
+        _ = try await store.cancelReview(
+            jobID: "job-1",
+            cancellation: .mcpClient(message: "Stop")
+        )
+        let final = try await awaited
+
+        #expect(final.core.lifecycle.status == .cancelled)
+        #expect(final.core.output.summary == "Stop")
+    }
+
     @Test func forceStartWhileRunningInvokesBackendRestartPath() async {
         let backend = TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
         let store = CodexReviewStore.makeTestingStore(backend: backend)
@@ -821,6 +908,31 @@ struct CodexReviewStoreCommandTests {
         await backend.waitForEventStream()
         await backend.finishEvents(throwing: CancellationError())
         let read = try await result
+
+        #expect(read.core.lifecycle.status == .cancelled)
+        let commands = await backend.recordedCommands()
+        #expect(commands.contains(.interruptReview(
+            .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+            .init(message: "Cancellation requested.")
+        )))
+    }
+
+    @Test func reviewStartTaskCancellationInterruptsBackendRun() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+
+        let task = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+        }
+        await backend.waitForEventStream()
+        task.cancel()
+        let read = try await task.value
 
         #expect(read.core.lifecycle.status == .cancelled)
         let commands = await backend.recordedCommands()

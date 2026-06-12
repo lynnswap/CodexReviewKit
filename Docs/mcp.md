@@ -16,7 +16,7 @@ endpoint.
 
 ### `review_start`
 
-Runs a review through the shared long-lived `codex app-server` backend and blocks until the final result is ready.
+Runs a review through the shared long-lived `codex app-server` backend.
 
 Key inputs:
 
@@ -56,7 +56,7 @@ Returns:
 
 Notes:
 
-- `review_start` is the primary client flow. It waits for terminal completion, so MCP clients should configure a sufficiently large tool timeout.
+- `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the job is still running, call `review_await` with the returned `jobId`.
 - ReviewMonitor resolves the reported review model in this order:
   1. `~/.codex_review/config.toml` `review_model`
   2. the effective dedicated Codex config in `~/.codex_review/config.toml` `review_model`
@@ -68,10 +68,28 @@ Notes:
 If you are unsure how to build the `target` object, read:
 
 - `codex-review://help/tools/review_start`
+- `codex-review://help/tools/review_await`
 - `codex-review://help/targets/uncommittedChanges`
 - `codex-review://help/targets/baseBranch`
 - `codex-review://help/targets/commit`
 - `codex-review://help/targets/custom`
+
+### `review_await`
+
+Waits for a running review job owned by the current MCP session. The wait is
+bounded to 540 seconds so clients with fixed activity watchdogs can continue
+waiting with another tool call.
+
+Inputs:
+
+- `jobId` or `jobID`
+
+Returns the same lightweight shape as `review_start`: `jobId`, `run`,
+`lifecycle`, and `output`. It does not include `logs` or `rawLogText`; use
+`review_read` when log pages are needed.
+
+If the job is still running after the bounded wait, call `review_await` again
+with the same `jobId`.
 
 ### `review_read`
 
@@ -150,6 +168,7 @@ Useful resources:
 
 - `codex-review://help/overview`
 - `codex-review://help/tools/review_start`
+- `codex-review://help/tools/review_await`
 - `codex-review://help/targets/uncommittedChanges`
 - `codex-review://help/targets/baseBranch`
 - `codex-review://help/targets/commit`

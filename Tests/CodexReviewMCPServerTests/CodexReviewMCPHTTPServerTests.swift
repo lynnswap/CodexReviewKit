@@ -29,7 +29,7 @@ struct CodexReviewMCPHTTPServerTests {
             )
             let toolNames = try #require(response.value(for: ["result", "tools"]) as? [[String: Any]])
                 .compactMap { $0["name"] as? String }
-            #expect(toolNames == ["review_start", "review_read", "review_list", "review_cancel"])
+            #expect(toolNames == ["review_start", "review_await", "review_read", "review_list", "review_cancel"])
 
             let tools = try #require(response.value(for: ["result", "tools"]) as? [[String: Any]])
             let reviewStart = try #require(tools.first { $0["name"] as? String == "review_start" })
@@ -44,6 +44,15 @@ struct CodexReviewMCPHTTPServerTests {
             let readProperties = try #require(readSchema["properties"] as? [String: Any])
             #expect(readProperties["logOffset"] != nil)
             #expect(readProperties["logLimit"] != nil)
+            let reviewAwait = try #require(tools.first { $0["name"] as? String == "review_await" })
+            let awaitSchema = try #require(reviewAwait["inputSchema"] as? [String: Any])
+            let awaitProperties = try #require(awaitSchema["properties"] as? [String: Any])
+            #expect(awaitProperties["jobId"] != nil)
+            #expect(awaitProperties["logOffset"] == nil)
+            let awaitAnyOf = try #require(awaitSchema["anyOf"] as? [[String: Any]])
+            let requiredAliases = awaitAnyOf.compactMap { $0["required"] as? [String] }
+            #expect(requiredAliases.contains(["jobId"]))
+            #expect(requiredAliases.contains(["jobID"]))
         }
     }
 
@@ -161,6 +170,72 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 request: .init(cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
             ))))
+        }
+    }
+
+    @Test func streamableHTTPBoundsClaudeReviewStartAndContinuesWithReviewAwait() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        let configuration = CodexReviewMCPHTTPServerConfiguration(
+            port: 0,
+            streamHeartbeatInterval: nil,
+            boundedReviewWaitDuration: .milliseconds(50)
+        )
+
+        try await withHTTPServer(store: store, configuration: configuration) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint, clientName: "Claude Code")
+            let requestBody = try makeJSONBody([
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": [
+                    "name": "review_start",
+                    "arguments": [
+                        "cwd": "/tmp/project",
+                        "target": ["type": "uncommittedChanges"],
+                    ],
+                ],
+            ])
+            async let responseData = postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: requestBody
+            )
+            await backend.waitForEventStream()
+            let running = try decodeSSEJSON(from: try await responseData)
+
+            #expect(running.value(for: ["result", "isError"]) as? Bool == false)
+            #expect(running.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-1")
+            #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
+            #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
+            #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
+            #expect(running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
+
+            await backend.yield(.completed(summary: "Done", result: "review text"))
+            let awaited = try await postJSONRPC(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_await",
+                        "arguments": [
+                            "jobId": "job-1",
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(awaited.value(for: ["result", "isError"]) as? Bool == false)
+            #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+            #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
 
@@ -1059,7 +1134,10 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    private func initializeSession(endpoint: URL) async throws -> String {
+    private func initializeSession(
+        endpoint: URL,
+        clientName: String = "CodexReviewKitTests"
+    ) async throws -> String {
         let (_, response) = try await postJSONRPCResponse(
             endpoint: endpoint,
             sessionID: nil,
@@ -1071,7 +1149,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "protocolVersion": "2025-11-25",
                     "capabilities": [:],
                     "clientInfo": [
-                        "name": "CodexReviewKitTests",
+                        "name": clientName,
                         "version": "0.0.0",
                     ],
                 ],
