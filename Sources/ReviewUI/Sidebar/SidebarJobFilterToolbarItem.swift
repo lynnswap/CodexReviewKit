@@ -8,7 +8,7 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
     private let menuFormItem: NSMenuItem
     private let toolbarButton: NSButton
     private var filterMenuItems: [SidebarJobFilter: NSMenuItem] = [:]
-    private let observationScope = ObservationScope()
+    private var observation: PortableObservationTracking.Token?
 
     init(
         itemIdentifier: NSToolbarItem.Identifier,
@@ -35,6 +35,10 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         configureButton()
         configureMenu()
         bindObservation()
+    }
+
+    isolated deinit {
+        observation?.cancel()
     }
 
     private func configureButton() {
@@ -73,7 +77,8 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
     }
 
     private func bindObservation() {
-        observationScope.observe(uiState) { [weak self] _, uiState in
+        observation?.cancel()
+        observation = withPortableContinuousObservation { [weak self, uiState] _ in
             self?.applySelection(uiState.sidebarJobFilter)
         }
     }

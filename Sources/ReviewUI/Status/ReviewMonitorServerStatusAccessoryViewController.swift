@@ -7,7 +7,7 @@ import ObservationBridge
 final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAccessoryViewController {
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
-    private let observationScope = ObservationScope()
+    private var observation: PortableObservationTracking.Token?
     private var shouldHideStatusAccessory = false
 
     init(
@@ -32,8 +32,13 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
         nil
     }
 
+    isolated deinit {
+        observation?.cancel()
+    }
+
     private func bindObservation() {
-        observationScope.observe(uiState) { [weak self] event, uiState in
+        observation?.cancel()
+        observation = withPortableContinuousObservation { [weak self, uiState] event in
             let shouldHide = uiState.sidebarSelection == .account
             guard let self else {
                 return

@@ -243,7 +243,7 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .unavailable,
-            delivery: viewController.sidebarViewControllerForTesting.sidebarStoreKindDeliveryForTesting
+            observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
 
@@ -255,7 +255,7 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .jobList,
-            delivery: viewController.sidebarViewControllerForTesting.sidebarStoreKindDeliveryForTesting
+            observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
     }
@@ -489,7 +489,7 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .accountList,
-            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+            observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
 
         #expect(sidebarItem.isCollapsed == false)
@@ -533,7 +533,7 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .accountList,
-            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+            observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
 
         #expect(sidebarItem.isCollapsed == false)
@@ -555,7 +555,7 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .accountList,
-            delivery: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting
+            observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
 
         #expect(sidebarItem.isCollapsed == false)
@@ -579,14 +579,14 @@ extension ReviewUITests {
 
         uiState.sidebarSelection = .account
         try await waitForObservedValue(
-            from: viewController.sidebarViewControllerForTesting.sidebarSelectionDeliveryForTesting,
+            from: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting,
             true
         ) {
             viewController.sidebarPickerToolbarSelectedSelectionForTesting == .account
         }
     }
 
-    @Test func sidebarKindObservationsKeepSelectionAndStoreTriggersSeparate() async throws {
+    @Test func sidebarKindObservationTracksSelectionAndStoreChanges() async throws {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -600,23 +600,19 @@ extension ReviewUITests {
         viewController.attach(to: window)
         let sidebar = viewController.sidebarViewControllerForTesting
 
-        let storeDeliveryCountBeforeSelection = sidebar.sidebarStoreKindDeliveryCountForTesting
         uiState.sidebarSelection = .account
         try await waitForSidebarPresentation(
             viewController,
             .accountList,
-            delivery: sidebar.sidebarSelectionDeliveryForTesting
+            observation: sidebar.sidebarKindObservationForTesting
         )
-
-        #expect(sidebar.sidebarStoreKindDeliveryCountForTesting == storeDeliveryCountBeforeSelection)
 
         uiState.sidebarSelection = .workspace
         try await waitForSidebarPresentation(
             viewController,
             .jobList,
-            delivery: sidebar.sidebarSelectionDeliveryForTesting
+            observation: sidebar.sidebarKindObservationForTesting
         )
-        let selectionDeliveryCountBeforeStoreChange = sidebar.sidebarSelectionKindDeliveryCountForTesting
 
         store.loadForTesting(
             serverState: .failed("Embedded server is unavailable in preview mode."),
@@ -625,10 +621,19 @@ extension ReviewUITests {
         try await waitForSidebarPresentation(
             viewController,
             .unavailable,
-            delivery: sidebar.sidebarStoreKindDeliveryForTesting
+            observation: sidebar.sidebarKindObservationForTesting
         )
 
-        #expect(sidebar.sidebarSelectionKindDeliveryCountForTesting == selectionDeliveryCountBeforeStoreChange)
+        store.loadForTesting(
+            serverState: .running,
+            serverURL: URL(string: "http://localhost:9417/mcp"),
+            content: makeSidebarContent(from: [])
+        )
+        try await waitForSidebarPresentation(
+            viewController,
+            .jobList,
+            observation: sidebar.sidebarKindObservationForTesting
+        )
     }
 
     @Test func splitViewShowsAddAccountToolbarItemOnlyForAccountSidebar() async throws {

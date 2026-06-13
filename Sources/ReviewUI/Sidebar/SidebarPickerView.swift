@@ -8,7 +8,7 @@ final class ReviewMonitorSidebarPickerToolbarItem: NSToolbarItem {
     private let uiState: ReviewMonitorUIState
     private let segmentedControl: NSSegmentedControl
     private let selectionAction: (SidebarPickerSelection) -> Void
-    private let observationScope = ObservationScope()
+    private var observation: PortableObservationTracking.Token?
     private let overflowMenuItem = NSMenuItem(title: "Sidebar", action: nil, keyEquivalent: "")
     private var overflowSelectionMenuItems: [SidebarPickerSelection: NSMenuItem] = [:]
 
@@ -31,6 +31,10 @@ final class ReviewMonitorSidebarPickerToolbarItem: NSToolbarItem {
         segmentedControl.action = #selector(handleSegmentedControl(_:))
         configureOverflowMenu()
         bindObservation()
+    }
+
+    isolated deinit {
+        observation?.cancel()
     }
 
     private static func makeSegmentedControl() -> NSSegmentedControl {
@@ -81,7 +85,8 @@ final class ReviewMonitorSidebarPickerToolbarItem: NSToolbarItem {
     }
 
     private func bindObservation() {
-        observationScope.observe(uiState) { [weak self] _, uiState in
+        observation?.cancel()
+        observation = withPortableContinuousObservation { [weak self, uiState] _ in
             let selection = uiState.sidebarSelection
             self?.updateSelection(selection)
         }

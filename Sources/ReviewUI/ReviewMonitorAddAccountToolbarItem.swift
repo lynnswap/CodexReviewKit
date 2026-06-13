@@ -8,7 +8,7 @@ final class ReviewMonitorAddAccountToolbarItem: NSToolbarItem {
     private let auth: CodexReviewAuthModel
     private let toolbarView: AddAccountToolbarItemView
     private let overflowMenuItem: NSMenuItem
-    private let observationScope = ObservationScope()
+    private var observation: PortableObservationTracking.Token?
 
     init(
         itemIdentifier: NSToolbarItem.Identifier,
@@ -34,8 +34,13 @@ final class ReviewMonitorAddAccountToolbarItem: NSToolbarItem {
         bindObservation()
     }
 
+    isolated deinit {
+        observation?.cancel()
+    }
+
     private func bindObservation() {
-        observationScope.observe(auth) { [weak self] event, auth in
+        observation?.cancel()
+        observation = withPortableContinuousObservation { [weak self, auth] event in
             let progress = auth.progress
             self?.updateForAuthState(progress: progress, animated: event.kind != .initial)
         }

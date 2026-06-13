@@ -108,21 +108,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let unavailableView: NSHostingView<MCPServerUnavailableView>
     private let rowHeights: SidebarRowHeights
 
-    private let sidebarKindObservationScope = ObservationScope()
-    private let sidebarTopologyObservationScope = ObservationScope()
-    private let sidebarFilterObservationScope = ObservationScope()
-    private var sidebarSelectionDelivery: ObservationDelivery?
-    private var sidebarStoreKindDelivery: ObservationDelivery?
-    private var sidebarTopologyDelivery: ObservationDelivery?
-    private var sidebarFilterDelivery: ObservationDelivery?
+    private var sidebarKindObservation: PortableObservationTracking.Token?
+    private var sidebarTopologyObservation: PortableObservationTracking.Token?
+    private var sidebarFilterObservation: PortableObservationTracking.Token?
     private var isReconcilingSelection = false
 #if DEBUG
     private var fullReloadCountForTesting = 0
     private var workspaceReloadCountForTesting = 0
     private var incrementalMoveCountForTesting = 0
     private var incrementalMembershipChangeCountForTesting = 0
-    private var sidebarSelectionKindDeliveryCount = 0
-    private var sidebarStoreKindDeliveryCount = 0
 #endif
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
@@ -137,6 +131,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        sidebarKindObservation?.cancel()
+        sidebarTopologyObservation?.cancel()
+        sidebarFilterObservation?.cancel()
     }
 
     override func loadView() {
@@ -236,102 +236,61 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func bindObservation() {
-        sidebarKindObservationScope.cancelAll()
-        sidebarTopologyObservationScope.cancelAll()
-        sidebarFilterObservationScope.cancelAll()
+        sidebarKindObservation?.cancel()
+        sidebarTopologyObservation?.cancel()
+        sidebarFilterObservation?.cancel()
 
-        sidebarSelectionDelivery = sidebarKindObservationScope.observe(uiState, tracking: { uiState in
-            _ = uiState.sidebarSelection
-        }) { [weak self] _, uiState in
+        sidebarKindObservation = withPortableContinuousObservation { [weak self, uiState, store] _ in
             let sidebarSelection = uiState.sidebarSelection
-            guard let self else {
-                return
-            }
-#if DEBUG
-            self.sidebarSelectionKindDeliveryCount += 1
-#endif
-            self.applySidebarKind(Self.sidebarKind(
-                sidebarSelection: sidebarSelection,
-                serverState: self.store.serverState,
-                hasReviewJobs: self.store.hasReviewJobs,
-                hasWorkspaces: self.store.workspaces.isEmpty == false
-            ))
-        }
-
-        sidebarStoreKindDelivery = sidebarKindObservationScope.observe(store, tracking: { store in
-            _ = store.serverState
-            _ = store.hasReviewJobs
-            _ = store.workspaces.isEmpty
-        }) { [weak self] _, store in
             let serverState = store.serverState
             let hasReviewJobs = store.hasReviewJobs
             let hasWorkspaces = store.workspaces.isEmpty == false
             guard let self else {
                 return
             }
-#if DEBUG
-            self.sidebarStoreKindDeliveryCount += 1
-#endif
             self.applySidebarKind(Self.sidebarKind(
-                sidebarSelection: self.uiState.sidebarSelection,
+                sidebarSelection: sidebarSelection,
                 serverState: serverState,
                 hasReviewJobs: hasReviewJobs,
                 hasWorkspaces: hasWorkspaces
             ))
         }
 
-        sidebarFilterDelivery = sidebarFilterObservationScope.observe(uiState, tracking: { uiState in
-            _ = uiState.sidebarJobFilter
-        }) { [weak self] event, uiState in
+        let initialFilter = uiState.sidebarJobFilter
+        sidebarFilterObservation = withPortableContinuousObservation { [weak self, uiState] event in
             let filter = uiState.sidebarJobFilter
-            guard let self else {
+            guard event.kind != .initial else {
                 return
             }
-            self.bindSidebarStoreTopologyObservation(
-                filter: filter,
-                animatedInitialDelivery: event.kind != .initial
-            )
+            let animatedInitialDelivery = true
+            Task { @MainActor [weak self] in
+                self?.bindSidebarStoreTopologyObservation(
+                    filter: filter,
+                    animatedInitialDelivery: animatedInitialDelivery
+                )
+            }
         }
+        bindSidebarStoreTopologyObservation(
+            filter: initialFilter,
+            animatedInitialDelivery: false
+        )
     }
 
     private func bindSidebarStoreTopologyObservation(
         filter: SidebarJobFilter,
         animatedInitialDelivery: Bool
     ) {
-        sidebarTopologyObservationScope.cancelAll()
-        sidebarTopologyDelivery = sidebarTopologyObservationScope.observe(store, tracking: { store in
-            Self.trackSidebarStoreTopology(store, filter: filter)
-        }) { [weak self] event, _ in
+        sidebarTopologyObservation?.cancel()
+        sidebarTopologyObservation = withPortableContinuousObservation { [weak self] event in
             guard let self else {
                 return
             }
+            let workspaceTopologies = self.sidebarWorkspaceTopologies(filter: filter)
             let animated = event.kind == .initial ? animatedInitialDelivery : true
             self.applySidebarTopology(
-                self.sidebarWorkspaceTopologies,
+                workspaceTopologies,
                 animated: animated
             )
-        }
-    }
-
-    private static func trackSidebarStoreTopology(_ store: CodexReviewStore, filter: SidebarJobFilter) {
-        let tracksRunningMembership = filter.contains(.running)
-        let tracksLatestFinishedMembership = filter.contains(.latestFinished)
-        let tracksTerminalMembership = tracksRunningMembership || tracksLatestFinishedMembership
-
-        for workspace in store.orderedWorkspaces {
-            _ = workspace.sortOrder
-            _ = workspace.isExpanded
-
-            for job in store.orderedJobs(in: workspace) {
-                _ = job.sortOrder
-                if tracksTerminalMembership {
-                    _ = job.core.lifecycle.status
-                }
-                if tracksLatestFinishedMembership {
-                    _ = job.core.lifecycle.endedAt
-                    _ = job.core.lifecycle.startedAt
-                }
-            }
         }
     }
 
@@ -363,11 +322,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return hasSidebarContent ? .jobList : .empty
     }
 
-    private var sidebarWorkspaceTopologies: [SidebarWorkspaceTopology] {
+    private func sidebarWorkspaceTopologies(filter: SidebarJobFilter) -> [SidebarWorkspaceTopology] {
         store.orderedWorkspaces.map { workspace in
             SidebarWorkspaceTopology(
                 workspace: workspace,
-                jobs: visibleJobs(in: workspace)
+                jobs: visibleJobs(in: workspace, filter: filter)
             )
         }
     }
@@ -382,6 +341,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             animated: shouldAnimate
         )
         applyJobMembershipChange(workspaceTopologies, animated: shouldAnimate)
+        scheduleOutlineSelectionReconciliation()
     }
 
     private var shouldAnimateSidebarMutations: Bool {
@@ -392,7 +352,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         _ workspaces: [CodexReviewWorkspace],
         animated: Bool
     ) {
-        clearSelectionIfNeeded(for: workspaces)
         let currentWorkspaces = displayedWorkspaces()
         let insertedWorkspaces = applyMembershipChange(
             currentItems: currentWorkspaces,
@@ -401,7 +360,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             animated: animated
         )
         applyStoredExpansionState(for: insertedWorkspaces)
-        reconcileSelectionAfterOutlineMutation()
     }
 
     private func applyJobMembershipChange(
@@ -409,7 +367,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         animated: Bool
     ) {
         let workspaces = workspaceTopologies.map(\.workspace)
-        clearSelectionIfNeeded(for: workspaces)
         for workspace in displayedWorkspaces() {
             guard let topology = workspaceTopologies.first(where: { $0.workspace === workspace }) else {
                 continue
@@ -426,7 +383,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                     parent: workspace,
                     animated: animated
                 )
-                reconcileSelectionAfterOutlineMutation()
                 continue
             }
             reloadWorkspace(workspace, allWorkspaces: workspaces)
@@ -468,7 +424,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         _ workspace: CodexReviewWorkspace,
         allWorkspaces: [CodexReviewWorkspace]
     ) {
-        clearSelectionIfNeeded(for: allWorkspaces)
         guard let workspace = allWorkspaces.first(where: { $0 === workspace })
         else {
             return
@@ -480,8 +435,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         isReconcilingSelection = true
         outlineView.reloadItem(workspace, reloadChildren: true)
         setWorkspace(workspace, expanded: workspace.isExpanded)
-        reconcileOutlineSelection()
         isReconcilingSelection = false
+    }
+
+    private func scheduleOutlineSelectionReconciliation() {
+        Task { @MainActor [weak self] in
+            self?.reconcileSelectionAfterOutlineMutation()
+        }
     }
 
     private func reconcileSelectionAfterOutlineMutation() {
@@ -856,8 +816,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func visibleJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+        visibleJobs(in: workspace, filter: uiState.sidebarJobFilter)
+    }
+
+    private func visibleJobs(
+        in workspace: CodexReviewWorkspace,
+        filter: SidebarJobFilter
+    ) -> [CodexReviewJob] {
         let orderedJobs = store.orderedJobs(in: workspace)
-        let filter = uiState.sidebarJobFilter
         guard filter.isActive else {
             return orderedJobs
         }
@@ -1449,20 +1415,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 #if DEBUG
 @MainActor
 extension ReviewMonitorSidebarViewController {
-    var sidebarSelectionDeliveryForTesting: ObservationDelivery? {
-        sidebarSelectionDelivery
+    var sidebarKindObservationForTesting: PortableObservationTracking.Token? {
+        sidebarKindObservation
     }
 
-    var sidebarStoreKindDeliveryForTesting: ObservationDelivery? {
-        sidebarStoreKindDelivery
+    var sidebarTopologyObservationForTesting: PortableObservationTracking.Token? {
+        sidebarTopologyObservation
     }
 
-    var sidebarTopologyDeliveryForTesting: ObservationDelivery? {
-        sidebarTopologyDelivery
-    }
-
-    var sidebarFilterDeliveryForTesting: ObservationDelivery? {
-        sidebarFilterDelivery
+    var sidebarFilterObservationForTesting: PortableObservationTracking.Token? {
+        sidebarFilterObservation
     }
 
     var sidebarKindForTesting: SidebarKind {
@@ -1507,14 +1469,6 @@ extension ReviewMonitorSidebarViewController {
 
     var sidebarIncrementalMembershipChangeCountForTesting: Int {
         incrementalMembershipChangeCountForTesting
-    }
-
-    var sidebarSelectionKindDeliveryCountForTesting: Int {
-        sidebarSelectionKindDeliveryCount
-    }
-
-    var sidebarStoreKindDeliveryCountForTesting: Int {
-        sidebarStoreKindDeliveryCount
     }
 
     var isShowingEmptyStateForTesting: Bool {

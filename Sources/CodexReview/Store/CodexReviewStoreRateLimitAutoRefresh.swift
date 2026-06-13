@@ -259,7 +259,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     private weak var store: CodexReviewStore?
-    private var observationTask: Task<Void, Never>?
+    private var observation: PortableObservationTracking.Token?
     private var scheduledWakeUp: ScheduledWakeUp?
     private var accountStates: [String: CodexReviewStoreRateLimitAutoRefreshAccountState] = [:]
     package var inFlightAccountKeys: Set<String> {
@@ -291,31 +291,23 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     func start() {
-        guard observationTask == nil else {
+        guard observation == nil else {
             syncLatestTargets()
             return
         }
-        observationTask = Task { @MainActor [weak self, weak store] in
-            let observations: ObservationBridge<[CodexReviewStoreRateLimitAutoRefreshTarget]> = makeObservationBridgeStream {
-                guard let store else {
-                    return [CodexReviewStoreRateLimitAutoRefreshTarget]()
-                }
-                return store.accountRateLimitAutoRefreshTargets(now: store.clock.now())
+        observation = withPortableContinuousObservation { [weak self, weak store] _ in
+            guard let self, let store else {
+                return
             }
-            for await targets in observations {
-                guard let self,
-                      let store = self.store
-                else {
-                    continue
-                }
-                self.syncTargets(targets, now: store.clock.now())
-            }
+            let now = store.clock.now()
+            let targets = store.accountRateLimitAutoRefreshTargets(now: now)
+            self.syncTargets(targets, now: now)
         }
     }
 
     func cancel() {
-        observationTask?.cancel()
-        observationTask = nil
+        observation?.cancel()
+        observation = nil
         scheduledWakeUp?.task.cancel()
         scheduledWakeUp = nil
         accountStates.values.forEach { state in
