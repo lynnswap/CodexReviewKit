@@ -24,12 +24,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
-    private let uiStateObservationScope = ObservationScope()
-    private let selectedJobObservationScope = ObservationScope()
-    private let selectedWorkspaceObservationScope = ObservationScope()
-    private var selectionDelivery: ObservationDelivery?
-    private var selectedJobDelivery: ObservationDelivery?
-    private var selectedWorkspaceFindingsDelivery: ObservationDelivery?
+    private var selectionObservation: PortableObservationTracking.Token?
+    private var selectedJobObservation: PortableObservationTracking.Token?
+    private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var boundJob: CodexReviewJob?
     private var boundWorkspace: CodexReviewWorkspace?
     private var displayedSelection: DisplayedSelection?
@@ -52,6 +49,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     isolated deinit {
+        selectionObservation?.cancel()
+        selectedJobObservation?.cancel()
+        selectedWorkspaceFindingsObservation?.cancel()
         logRenderTask?.cancel()
     }
 
@@ -106,8 +106,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func bindObservation() {
-        uiStateObservationScope.cancelAll()
-        selectionDelivery = uiStateObservationScope.observe(uiState) { [weak self] event, uiState in
+        selectionObservation?.cancel()
+        selectionObservation = withPortableContinuousObservation { [weak self, uiState] event in
             let selection = uiState.selection
             guard let self else {
                 return
@@ -162,14 +162,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
         if isSwitchingRenderedJob {
             logScrollView.resetFindStateForContentReuse()
         }
-        selectedJobObservationScope.cancelAll()
-        selectedJobDelivery = nil
+        selectedJobObservation?.cancel()
+        selectedJobObservation = nil
         resetLogRenderer()
         boundJob = selectedJob
 
-        selectedJobDelivery = selectedJobObservationScope.observe(selectedJob, tracking: { selectedJob in
+        selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             _ = selectedJob.logRevision
-        }) { [weak self] event, selectedJob in
             guard let self,
                   self.boundJob === selectedJob
             else {
@@ -187,8 +186,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func clearDisplayedJob() {
         cacheBoundJobScrollTarget()
-        selectedJobObservationScope.cancelAll()
-        selectedJobDelivery = nil
+        selectedJobObservation?.cancel()
+        selectedJobObservation = nil
         boundJob = nil
         resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
@@ -197,23 +196,23 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func displayWorkspace(_ workspace: CodexReviewWorkspace) {
         if boundWorkspace !== workspace {
-            selectedWorkspaceObservationScope.cancelAll()
-            selectedWorkspaceFindingsDelivery = nil
+            selectedWorkspaceFindingsObservation?.cancel()
+            selectedWorkspaceFindingsObservation = nil
             boundWorkspace = workspace
             bindWorkspaceObservation(workspace)
         }
     }
 
     private func clearDisplayedWorkspace() {
-        selectedWorkspaceObservationScope.cancelAll()
-        selectedWorkspaceFindingsDelivery = nil
+        selectedWorkspaceFindingsObservation?.cancel()
+        selectedWorkspaceFindingsObservation = nil
         boundWorkspace = nil
         workspaceFindingsView.clear()
         workspaceFindingsView.isHidden = true
     }
 
     private func bindWorkspaceObservation(_ workspace: CodexReviewWorkspace) {
-        selectedWorkspaceFindingsDelivery = selectedWorkspaceObservationScope.observe(store) { [weak self, weak workspace] _, _ in
+        selectedWorkspaceFindingsObservation = withPortableContinuousObservation { [weak self, weak workspace] _ in
             guard let self,
                   let workspace,
                   self.boundWorkspace === workspace
@@ -556,30 +555,30 @@ extension ReviewMonitorTransportViewController {
         let selection: DisplayedSelectionForTesting?
     }
 
-    var selectionDeliveryForTesting: ObservationDelivery? {
-        selectionDelivery
+    var selectionObservationForTesting: PortableObservationTracking.Token? {
+        selectionObservation
     }
 
-    var selectedJobDeliveryForTesting: ObservationDelivery? {
-        selectedJobDelivery
+    var selectedJobObservationForTesting: PortableObservationTracking.Token? {
+        selectedJobObservation
     }
 
-    var selectedWorkspaceFindingsDeliveryForTesting: ObservationDelivery? {
-        selectedWorkspaceFindingsDelivery
+    var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
+        selectedWorkspaceFindingsObservation
     }
 
-    var deliveryForExpectedRenderedStateForTesting: ObservationDelivery? {
+    var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {
         let expectedSelection = expectedRenderedStateForTesting.selection
         if displayedSelectionForTesting != expectedSelection {
-            return selectionDelivery
+            return selectionObservation
         }
         switch expectedSelection {
         case .job:
-            return selectedJobDelivery ?? selectionDelivery
+            return selectedJobObservation ?? selectionObservation
         case .workspace:
-            return selectedWorkspaceFindingsDelivery ?? selectionDelivery
+            return selectedWorkspaceFindingsObservation ?? selectionObservation
         case nil:
-            return selectionDelivery
+            return selectionObservation
         }
     }
 

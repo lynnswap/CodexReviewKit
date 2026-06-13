@@ -18,10 +18,8 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     private let scrollView = NSScrollView()
     private let outlineView = ReviewMonitorAccountsOutlineView()
 
-    private let authObservationScope = ObservationScope()
-    private var accountListDelivery: ObservationDelivery?
-    private var accountSelectionDelivery: ObservationDelivery?
-    private var accountPromptDelivery: ObservationDelivery?
+    private var accountListObservation: PortableObservationTracking.Token?
+    private var accountPromptObservation: PortableObservationTracking.Token?
     private var isApplyingAuthSelection = false
     private var presentedPendingAccountAction: CodexReviewAuthModel.PendingAccountAction?
     private var presentedAccountActionAlert: CodexReviewAuthModel.AccountActionAlert?
@@ -40,6 +38,11 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        accountListObservation?.cancel()
+        accountPromptObservation?.cancel()
     }
 
     override func loadView() {
@@ -127,13 +130,10 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func bindObservation() {
-        authObservationScope.cancelAll()
+        accountListObservation?.cancel()
+        accountPromptObservation?.cancel()
 
-        accountListDelivery = authObservationScope.observe(auth, tracking: { auth in
-            for account in auth.accounts {
-                _ = account.accountKey
-            }
-        }) { [weak self] _, auth in
+        accountListObservation = withPortableContinuousObservation { [weak self, auth] _ in
             let accounts = auth.accounts
             let selectedAccount = auth.selectedAccount
             self?.applyAccountTopology(
@@ -142,21 +142,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
             )
         }
 
-        accountSelectionDelivery = authObservationScope.observe(auth) { [weak self] _, auth in
-            let selectedAccount = auth.selectedAccount
-            guard let self else {
-                return
-            }
-            self.reconcileSelection(
-                selectedAccount: selectedAccount,
-                accounts: self.displayedAccounts()
-            )
-        }
-
-        accountPromptDelivery = authObservationScope.observe(auth, tracking: { auth in
-            _ = auth.pendingAccountAction
-            _ = auth.accountActionAlert
-        }) { [weak self] _, auth in
+        accountPromptObservation = withPortableContinuousObservation { [weak self, auth] _ in
             let pendingAccountAction = auth.pendingAccountAction
             let accountActionAlert = auth.accountActionAlert
             self?.presentAccountPromptsIfNeeded(
@@ -602,16 +588,12 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
 #if DEBUG
 @MainActor
 extension ReviewMonitorAccountsViewController {
-    var accountListDeliveryForTesting: ObservationDelivery? {
-        accountListDelivery
+    var accountListObservationForTesting: PortableObservationTracking.Token? {
+        accountListObservation
     }
 
-    var accountSelectionDeliveryForTesting: ObservationDelivery? {
-        accountSelectionDelivery
-    }
-
-    var accountPromptDeliveryForTesting: ObservationDelivery? {
-        accountPromptDelivery
+    var accountPromptObservationForTesting: PortableObservationTracking.Token? {
+        accountPromptObservation
     }
 
     var accountFullReloadCountForTesting: Int {

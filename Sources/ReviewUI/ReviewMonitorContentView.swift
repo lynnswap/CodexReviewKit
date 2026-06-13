@@ -15,7 +15,7 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let store: CodexReviewStore
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
-    private let observationScope = ObservationScope()
+    private var observation: PortableObservationTracking.Token?
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
 
@@ -45,6 +45,10 @@ final class ReviewMonitorRootViewController: NSViewController {
         nil
     }
 
+    isolated deinit {
+        observation?.cancel()
+    }
+
     override func loadView() {
         let backgroundView = NSVisualEffectView()
         backgroundView.material = .underWindowBackground
@@ -60,7 +64,8 @@ final class ReviewMonitorRootViewController: NSViewController {
     }
 
     private func bindWindowState() {
-        observationScope.observe(uiState) { [weak self] event, uiState in
+        observation?.cancel()
+        observation = withPortableContinuousObservation { [weak self, uiState] event in
             let kind = uiState.contentKind
             self?.setContentViewController(kind, animated: event.kind != .initial)
         }

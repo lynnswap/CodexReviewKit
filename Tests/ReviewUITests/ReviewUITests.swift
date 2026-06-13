@@ -166,7 +166,7 @@ struct ReviewUITests {
             jobs: [alphaJob, betaJob]
         )
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             [
                 "workspace-alpha",
                 "workspace-beta",
@@ -219,7 +219,7 @@ struct ReviewUITests {
             jobs: [alphaJob, betaJob]
         )
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             [
                 "workspace-beta",
                 "workspace-alpha",
@@ -431,8 +431,8 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         uiState.sidebarJobFilter = .running
 
-        try await waitForObservedValue(
-            from: sidebar.sidebarFilterDeliveryForTesting,
+        try await waitForObservedValueFromCurrentObservation(
+            from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-alpha-running", "job-alpha-queued"]
         ) {
             sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
@@ -470,7 +470,7 @@ struct ReviewUITests {
         runningJob.core.lifecycle.status = .succeeded
         runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 201)
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             [String]()
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -479,7 +479,7 @@ struct ReviewUITests {
         runningJob.core.lifecycle.status = .running
         runningJob.core.lifecycle.endedAt = nil
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             ["job-filter-state"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -515,8 +515,8 @@ struct ReviewUITests {
         #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
 
         uiState.sidebarJobFilter = .running
-        try await waitForObservedValue(
-            from: sidebar.sidebarFilterDeliveryForTesting,
+        try await waitForObservedValueFromCurrentObservation(
+            from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-filter-running"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -602,8 +602,8 @@ struct ReviewUITests {
         sidebar.selectJobForTesting(alphaRunningJob)
         uiState.sidebarJobFilter = .latestFinished
 
-        try await waitForObservedValue(
-            from: sidebar.sidebarFilterDeliveryForTesting,
+        try await waitForObservedValueFromCurrentObservation(
+            from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-alpha-failed"]
         ) {
             sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
@@ -658,7 +658,7 @@ struct ReviewUITests {
 
         firstJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 400)
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             ["job-finished-first"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -667,7 +667,7 @@ struct ReviewUITests {
         runningJob.core.lifecycle.status = .cancelled
         runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 500)
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             ["job-running"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -833,8 +833,8 @@ struct ReviewUITests {
         #expect(sidebar.performJobDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
 
         uiState.sidebarJobFilter = [.running, .latestFinished]
-        try await waitForObservedValue(
-            from: sidebar.sidebarFilterDeliveryForTesting,
+        try await waitForObservedValueFromCurrentObservation(
+            from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-running", "job-finished-latest"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
@@ -882,7 +882,7 @@ struct ReviewUITests {
             jobs: [secondJob, firstJob]
         )
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             [
                 "job-sort-order-2",
                 "job-sort-order-1",
@@ -932,7 +932,7 @@ struct ReviewUITests {
             jobs: [firstJob, secondJob]
         )
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             [
                 "job-membership-1",
                 "job-membership-2",
@@ -1198,7 +1198,7 @@ struct ReviewUITests {
             "third@example.com",
         ])
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             [
                 "second@example.com",
                 "first@example.com",
@@ -1253,7 +1253,7 @@ struct ReviewUITests {
             "first@example.com",
         ])
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             [
                 "second@example.com",
                 "first@example.com",
@@ -1865,7 +1865,7 @@ struct ReviewUITests {
         )
 
         try await waitForObservedValue(
-            from: accountsViewController.accountSelectionDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1904,7 +1904,7 @@ struct ReviewUITests {
             store.auth.persistedAccounts.first { $0.email == "other@example.com" }
         )
         try await waitForObservedValue(
-            from: accountsViewController.accountSelectionDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1938,7 +1938,7 @@ struct ReviewUITests {
             .sidebarViewControllerForTesting
             .accountsViewControllerForTesting
         try await waitForObservedValue(
-            from: accountsViewController.accountSelectionDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1978,7 +1978,7 @@ struct ReviewUITests {
             store.auth.persistedAccounts.first { $0.email == "other@example.com" }
         )
         try await waitForObservedValue(
-            from: accountsViewController.accountSelectionDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -1991,7 +1991,7 @@ struct ReviewUITests {
 
         store.auth.selectPersistedAccount(displayedOtherAccount.accountKey)
         try await waitForObservedValue(
-            from: accountsViewController.accountSelectionDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "other@example.com"
@@ -2075,7 +2075,7 @@ struct ReviewUITests {
 
         store.auth.updateCurrentAccount(CodexAccount(email: "detached@example.com", planType: "pro"))
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             [
                 "saved@example.com",
                 "detached@example.com",
@@ -2098,7 +2098,7 @@ struct ReviewUITests {
 
         store.auth.selectPersistedAccount(savedAccount.accountKey)
         try await waitForObservedValue(
-            from: accountsViewController.accountListDeliveryForTesting,
+            from: accountsViewController.accountListObservationForTesting,
             ["saved@example.com"]
         ) {
             accountsViewController.displayedAccountEmailsForTesting
@@ -2147,7 +2147,7 @@ struct ReviewUITests {
             message: "Request failed."
         )
         try await waitForObservedValue(
-            from: accountsViewController.accountPromptDeliveryForTesting,
+            from: accountsViewController.accountPromptObservationForTesting,
             true
         ) {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
@@ -3410,7 +3410,7 @@ struct ReviewUITests {
             content: makeSidebarContent(from: [recentJob])
         )
         try await waitForObservedValue(
-            from: sidebar.sidebarTopologyDeliveryForTesting,
+            from: sidebar.sidebarTopologyObservationForTesting,
             true
         ) {
             sidebar.selectedJobForTesting == nil
@@ -3460,7 +3460,7 @@ struct ReviewUITests {
         job.core.output.summary = "Deselected summary"
         job.replaceLogEntries([.init(kind: .agentMessage, text: "Deselected log")])
 
-        #expect(contentPane.selectedJobDeliveryForTesting == nil)
+        #expect(contentPane.selectedJobObservationForTesting == nil)
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
     }
 
@@ -5523,10 +5523,10 @@ func waitForEmbeddedContentSubviewCount(
 func waitForSidebarPresentation(
     _ viewController: ReviewMonitorSplitViewController,
     _ expected: ReviewMonitorSplitViewController.SidebarPresentationForTesting,
-    delivery: ObservationDelivery?,
+    observation: PortableObservationTracking.Token?,
     timeout: Duration = .seconds(2)
 ) async throws {
-    try await waitForObservedValue(from: delivery, expected, timeout: timeout) {
+    try await waitForObservedValue(from: observation, expected, timeout: timeout) {
         viewController.sidebarPresentationForTesting
     }
 }
@@ -5640,36 +5640,69 @@ func waitForCondition(
 
 @MainActor
 func observedValues<Value: Sendable>(
-    from delivery: ObservationDelivery?,
+    from observation: PortableObservationTracking.Token?,
     sample: @escaping @MainActor @Sendable () -> Value
 ) async throws -> ObservedValues<Value> {
-    let delivery = try #require(delivery)
-    return await delivery.values {
+    let observation = try #require(observation)
+    return await observation.values {
         sample()
     }
 }
 
 @MainActor
 func waitForObservedValue<Value: Sendable & Equatable>(
-    from delivery: ObservationDelivery?,
+    from observation: PortableObservationTracking.Token?,
     _ expected: Value,
     timeout: Duration = .seconds(2),
     sample: @escaping @MainActor @Sendable () -> Value
 ) async throws {
-    let values = try await observedValues(from: delivery, sample: sample)
+    let values = try await observedValues(from: observation, sample: sample)
     guard await values.waitUntilValue(expected, timeout: timeout) else {
         throw TestFailure("timed out waiting for observed value")
     }
 }
 
 @MainActor
+func waitForObservedValueFromCurrentObservation<Value: Sendable & Equatable>(
+    from observation: @escaping @MainActor @Sendable () -> PortableObservationTracking.Token?,
+    _ expected: Value,
+    timeout: Duration = .seconds(2),
+    sample: @escaping @MainActor @Sendable () -> Value
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        if sample() == expected {
+            return
+        }
+
+        if let token = observation() {
+            let values = await token.values {
+                sample()
+            }
+            defer {
+                values.cancel()
+            }
+            if await values.waitUntilValue(expected, timeout: .milliseconds(50)) {
+                return
+            }
+        }
+
+        try Task.checkCancellation()
+        await Task.yield()
+    } while clock.now < deadline
+
+    throw TestFailure("timed out waiting for observed value")
+}
+
+@MainActor
 func awaitTransportRender(
     _ transport: ReviewMonitorTransportViewController,
-    delivery explicitDelivery: ObservationDelivery? = nil,
+    observation explicitObservation: PortableObservationTracking.Token? = nil,
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
-    _ = try #require(explicitDelivery ?? transport.deliveryForExpectedRenderedStateForTesting)
+    _ = try #require(explicitObservation ?? transport.observationForExpectedRenderedStateForTesting)
     let expectedState = transport.expectedRenderedStateForTesting
     let resolvedPredicate: @Sendable (ReviewMonitorTransportViewController.RenderedStateForTesting) -> Bool = { state in
         if let predicate {
@@ -5719,13 +5752,13 @@ func expectLogTextContainerWidthTracksContentView(
 @MainActor
 func awaitContentPaneRender(
     _ contentPane: ReviewMonitorTransportViewController,
-    delivery explicitDelivery: ObservationDelivery? = nil,
+    observation explicitObservation: PortableObservationTracking.Token? = nil,
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     try await awaitTransportRender(
         contentPane,
-        delivery: explicitDelivery,
+        observation: explicitObservation,
         timeout: timeout,
         matching: predicate
     )

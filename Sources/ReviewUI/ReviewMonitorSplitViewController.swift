@@ -28,7 +28,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var sidebarPickerToolbarItem: ReviewMonitorSidebarPickerToolbarItem?
     private var sidebarJobFilterToolbarItem: ReviewMonitorSidebarJobFilterToolbarItem?
     private var addAccountToolbarItem: ReviewMonitorAddAccountToolbarItem?
-    private let toolbarObservationScope = ObservationScope()
+    private var toolbarMembershipObservation: PortableObservationTracking.Token?
+    private var windowTitleObservation: PortableObservationTracking.Token?
     private var sidebarCollapseObservation: NSKeyValueObservation?
     private var windowCancellable: AnyCancellable?
     private weak var attachedWindow: NSWindow?
@@ -48,6 +49,10 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+
+    isolated deinit {
+        cancelToolbarObservations()
     }
 
     override func viewDidLoad() {
@@ -148,34 +153,43 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     }
 
     func detachFromWindow() {
-        toolbarObservationScope.cancelAll()
+        cancelToolbarObservations()
         attachedWindow = nil
     }
 
     private func bindToolbarState() {
-        toolbarObservationScope.cancelAll()
+        cancelToolbarObservations()
 
-        toolbarObservationScope.observe(uiState) { [weak self] _, uiState in
+        toolbarMembershipObservation = withPortableContinuousObservation { [weak self, uiState] _ in
+            let sidebarSelection = uiState.sidebarSelection
+            let isAuthenticating = uiState.auth.isAuthenticating
             guard let self else {
                 return
             }
             let isShowingAddAccount = Self.isShowingAddAccountToolbarItem(
-                sidebarSelection: uiState.sidebarSelection,
+                sidebarSelection: sidebarSelection,
                 isSidebarCollapsed: self.isSidebarCollapsed,
-                isAuthenticating: uiState.auth.isAuthenticating
+                isAuthenticating: isAuthenticating
             )
             let isShowingSidebarJobFilter = Self.isShowingSidebarJobFilterToolbarItem(
-                sidebarSelection: uiState.sidebarSelection,
+                sidebarSelection: sidebarSelection,
                 isSidebarCollapsed: self.isSidebarCollapsed
             )
             self.setShowingAddAccount(isShowingAddAccount)
             self.setShowingSidebarJobFilter(isShowingSidebarJobFilter)
         }
 
-        toolbarObservationScope.observe(uiState) { [weak self] _, uiState in
+        windowTitleObservation = withPortableContinuousObservation { [weak self, uiState] _ in
             let presentation = Self.windowTitlePresentation(for: uiState.selection)
             self?.applyWindowTitle(presentation)
         }
+    }
+
+    private func cancelToolbarObservations() {
+        toolbarMembershipObservation?.cancel()
+        toolbarMembershipObservation = nil
+        windowTitleObservation?.cancel()
+        windowTitleObservation = nil
     }
 
     private func installToolbarIfNeeded(on window: NSWindow) {
