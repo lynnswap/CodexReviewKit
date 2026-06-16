@@ -1179,6 +1179,7 @@ private struct ReviewNetworkRecoveryLoopState {
             return .none
         }
         guard isSettlingForNetworkRecovery == false else {
+            recoverySettleGeneration = recoveryGeneration
             return .none
         }
         isSettlingForNetworkRecovery = true
@@ -1323,6 +1324,8 @@ private actor ReviewNetworkSignalCoordinator {
             outageTask = nil
             recoveryGeneration += 1
             let recoveryGeneration = recoveryGeneration
+            recoveryTask?.cancel()
+            recoveryTask = nil
             continuation.yield(.networkSnapshot(snapshot, recoveryGeneration: recoveryGeneration))
             scheduleRecoveryConfirmationIfNeeded(generation: recoveryGeneration)
         case .unsatisfied, .requiresConnection:

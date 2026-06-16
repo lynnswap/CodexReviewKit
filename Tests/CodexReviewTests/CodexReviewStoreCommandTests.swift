@@ -975,6 +975,61 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func networkRecoveryRepeatedSatisfiedSnapshotsRestartAfterLatestSettle() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let settleGate = AsyncGate()
+        let sleeper = ControlledTestSleeper(gate: settleGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(
+                outageDebounce: .seconds(10),
+                recoverySettle: .seconds(1),
+                sleep: { _ in await sleeper.sleep() }
+            )
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            await sleeper.blockFutureSleeps()
+            networkMonitor.yield(.satisfied())
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
+            })
+            networkMonitor.yield(.satisfied())
+            await settleGate.open()
+            try await backend.waitForRecoverReview(timeout: .seconds(2))
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.run.turnID == "turn-2")
+            #expect(read.core.output.lastAgentMessage == "recovered review")
+        }
+    }
+
     @Test func networkRecoveryClosesActiveCommandsAsCanceled() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
