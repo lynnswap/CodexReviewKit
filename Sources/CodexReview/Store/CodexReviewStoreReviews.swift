@@ -250,24 +250,18 @@ extension CodexReviewStore {
         let backend = self.backend
         let networkMonitor = self.networkMonitor
         let policy = self.networkRecoveryPolicy
-        let events = await backend.events(for: run)
         let snapshots = networkMonitor.snapshots()
         let tracker = ReviewNetworkStatusTracker()
+        let eventSource = ReviewWorkerEventSource(backend: backend)
         let stream = AsyncThrowingStream<ReviewWorkerInput, Error>(bufferingPolicy: .unbounded) { continuation in
             let signalCoordinator = ReviewNetworkSignalCoordinator(
                 policy: policy,
                 tracker: tracker,
                 continuation: continuation
             )
-            let eventTask = Task {
-                do {
-                    for try await event in events {
-                        continuation.yield(.reviewEvent(event))
-                    }
-                    continuation.yield(.reviewEventsFinished)
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+            let initialEventSubscriptionTask = Task { @MainActor in
+                eventSource.attach(continuation)
+                await eventSource.subscribe(to: run)
             }
             let networkTask = Task {
                 for await snapshot in snapshots {
@@ -275,14 +269,15 @@ extension CodexReviewStore {
                 }
             }
             continuation.onTermination = { @Sendable _ in
-                eventTask.cancel()
+                initialEventSubscriptionTask.cancel()
                 networkTask.cancel()
-                Task {
+                Task { @MainActor in
+                    eventSource.cancel()
                     await signalCoordinator.cancel()
                 }
             }
         }
-        return .init(stream: stream, networkStatusTracker: tracker)
+        return .init(stream: stream, networkStatusTracker: tracker, eventSource: eventSource)
     }
 
     package func readReview(
@@ -572,6 +567,9 @@ extension CodexReviewStore {
         startRequest: BackendReviewStart
     ) async throws -> BackendReviewRun {
         let inputs = await reviewWorkerInputs(for: initialRun)
+        defer {
+            inputs.cancel()
+        }
         var recoveryState = ReviewNetworkRecoveryLoopState(currentRun: initialRun)
         for try await input in inputs.stream {
             if job.isTerminal {
@@ -589,7 +587,13 @@ extension CodexReviewStore {
                         return recoveryState.currentRun
                     }
                 }
-            case .reviewEventsFinished:
+            case .reviewEventsFinished(let finishedRun):
+                if recoveryState.shouldIgnoreFinishedEvent(for: finishedRun) {
+                    if await inputs.subscribeIfInactive(to: recoveryState.currentRun) {
+                        recoveryState.markEventSubscription(to: recoveryState.currentRun)
+                    }
+                    continue
+                }
                 if try handleReviewEventsFinished(
                     job: job,
                     isWaitingForNetworkRecovery: recoveryState.isWaitingForNetworkRecovery
@@ -613,7 +617,8 @@ extension CodexReviewStore {
                     return recoveryState.currentRun
                 case .recovered(let recoveredRun):
                     applyBackendRun(recoveredRun, to: job)
-                    recoveryState.markRecovered(with: recoveredRun)
+                    let didResubscribe = await inputs.subscribeIfInactive(to: recoveredRun)
+                    recoveryState.markRecovered(with: recoveredRun, didResubscribe: didResubscribe)
                 }
             case .networkOutageConfirmed:
                 guard recoveryState.isWaitingForNetworkRecovery == false,
@@ -1069,7 +1074,7 @@ private extension CodexReviewJob {
 
 private enum ReviewWorkerInput {
     case reviewEvent(BackendReviewEvent)
-    case reviewEventsFinished
+    case reviewEventsFinished(BackendReviewRun)
     case networkSnapshot(CodexReviewNetworkSnapshot)
     case networkOutageConfirmed
 }
@@ -1084,20 +1089,37 @@ private struct ReviewNetworkRecoveryLoopState {
     var currentRun: BackendReviewRun
     private(set) var isWaitingForNetworkRecovery = false
     private var pendingEvents: [BackendReviewEvent] = []
+    private var activeEventSubscriptionRun: BackendReviewRun
+    private var recoveredSinceEventSubscription = false
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
 
     init(currentRun: BackendReviewRun) {
         self.currentRun = currentRun
+        self.activeEventSubscriptionRun = currentRun
     }
 
     mutating func markWaitingForNetworkRecovery() {
         isWaitingForNetworkRecovery = true
     }
 
-    mutating func markRecovered(with run: BackendReviewRun) {
+    mutating func markRecovered(with run: BackendReviewRun, didResubscribe: Bool) {
         currentRun = run
         isWaitingForNetworkRecovery = false
+        if didResubscribe {
+            markEventSubscription(to: run)
+        } else {
+            recoveredSinceEventSubscription = true
+        }
         pendingEvents.removeAll(keepingCapacity: true)
+    }
+
+    mutating func markEventSubscription(to run: BackendReviewRun) {
+        activeEventSubscriptionRun = run
+        recoveredSinceEventSubscription = false
+    }
+
+    func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {
+        run != activeEventSubscriptionRun || recoveredSinceEventSubscription
     }
 
     mutating func eventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
@@ -1126,6 +1148,93 @@ private struct ReviewNetworkRecoveryLoopState {
 private struct ReviewWorkerInputs {
     var stream: AsyncThrowingStream<ReviewWorkerInput, Error>
     var networkStatusTracker: ReviewNetworkStatusTracker
+    var eventSource: ReviewWorkerEventSource
+
+    @MainActor
+    func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
+        await eventSource.subscribeIfInactive(to: run)
+    }
+
+    @MainActor
+    func cancel() {
+        eventSource.cancel()
+    }
+}
+
+@MainActor
+private final class ReviewWorkerEventSource {
+    private let backend: any CodexReviewStoreBackend
+    private var continuation: AsyncThrowingStream<ReviewWorkerInput, Error>.Continuation?
+    private var eventTask: Task<Void, Never>?
+    private var subscriptionID = 0
+
+    init(backend: any CodexReviewStoreBackend) {
+        self.backend = backend
+    }
+
+    func attach(_ continuation: AsyncThrowingStream<ReviewWorkerInput, Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func subscribe(to run: BackendReviewRun) async {
+        subscriptionID += 1
+        let subscriptionID = subscriptionID
+        eventTask?.cancel()
+        guard let continuation else {
+            return
+        }
+        let events = await backend.events(for: run)
+        eventTask = Task {
+            do {
+                for try await event in events {
+                    guard Task.isCancelled == false else {
+                        return
+                    }
+                    continuation.yield(.reviewEvent(event))
+                }
+                await MainActor.run {
+                    self.yieldEventsFinished(run: run, subscriptionID: subscriptionID)
+                }
+            } catch {
+                await MainActor.run {
+                    self.finish(throwing: error, subscriptionID: subscriptionID)
+                }
+            }
+        }
+    }
+
+    func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
+        guard eventTask == nil else {
+            return false
+        }
+        await subscribe(to: run)
+        return true
+    }
+
+    func cancel() {
+        subscriptionID += 1
+        eventTask?.cancel()
+        eventTask = nil
+        continuation?.finish()
+        continuation = nil
+    }
+
+    private func yieldEventsFinished(run: BackendReviewRun, subscriptionID: Int) {
+        guard subscriptionID == self.subscriptionID else {
+            return
+        }
+        continuation?.yield(.reviewEventsFinished(run))
+        eventTask = nil
+    }
+
+    private func finish(throwing error: any Error, subscriptionID: Int) {
+        guard subscriptionID == self.subscriptionID else {
+            return
+        }
+        continuation?.finish(throwing: error)
+        continuation = nil
+        eventTask = nil
+    }
 }
 
 private actor ReviewNetworkStatusTracker {
