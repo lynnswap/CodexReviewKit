@@ -571,16 +571,15 @@ extension CodexReviewStore {
             }
             switch input {
             case .reviewEvent(let event):
-                guard recoveryState.shouldConsumeReviewEvent(event) else {
-                    continue
-                }
-                recoveryState.currentRun = handleReviewEvent(
-                    event,
-                    job: job,
-                    currentRun: recoveryState.currentRun
-                )
-                if job.isTerminal {
-                    return recoveryState.currentRun
+                for eventToConsume in recoveryState.eventsToConsume(event) {
+                    recoveryState.currentRun = handleReviewEvent(
+                        eventToConsume,
+                        job: job,
+                        currentRun: recoveryState.currentRun
+                    )
+                    if job.isTerminal {
+                        return recoveryState.currentRun
+                    }
                 }
             case .reviewEventsFinished:
                 if try handleReviewEventsFinished(
@@ -1075,7 +1074,12 @@ private enum NetworkRestoreRestartResult {
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: BackendReviewRun
     private(set) var isWaitingForNetworkRecovery = false
+    private var pendingEvents: [BackendReviewEvent] = []
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
+
+    init(currentRun: BackendReviewRun) {
+        self.currentRun = currentRun
+    }
 
     mutating func markWaitingForNetworkRecovery() {
         isWaitingForNetworkRecovery = true
@@ -1084,13 +1088,25 @@ private struct ReviewNetworkRecoveryLoopState {
     mutating func markRecovered(with run: BackendReviewRun) {
         currentRun = run
         isWaitingForNetworkRecovery = false
+        pendingEvents.removeAll(keepingCapacity: true)
     }
 
-    func shouldConsumeReviewEvent(_ event: BackendReviewEvent) -> Bool {
+    mutating func eventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
         guard isWaitingForNetworkRecovery else {
-            return true
+            return [event]
         }
-        return event.isCompletedReview
+        if event.isCompletedReview {
+            defer {
+                pendingEvents.removeAll(keepingCapacity: true)
+            }
+            return pendingEvents + [event]
+        }
+        if event.completesReviewRun {
+            pendingEvents.removeAll(keepingCapacity: true)
+        } else {
+            pendingEvents.append(event)
+        }
+        return []
     }
 
     func shouldRestartReview(after snapshot: CodexReviewNetworkSnapshot) -> Bool {

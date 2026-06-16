@@ -752,6 +752,16 @@ private struct DecodedReviewNotification {
         }
         return result
     }
+
+    var isRecoveryInterruptionTerminal: Bool {
+        events.contains { event in
+            if case .cancelled = event {
+                true
+            } else {
+                false
+            }
+        }
+    }
 }
 
 private struct PendingStreamedLogEntry: Sendable {
@@ -866,6 +876,7 @@ private actor AppServerReviewEventSession {
     }
 
     func beginRecoveryRestartNotificationBuffering() {
+        clearInterruptedTurnProjectionState()
         buffersRecoveryRestartNotifications = true
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
     }
@@ -1261,20 +1272,21 @@ private actor AppServerReviewEventSession {
         guard recoveryInterruptionState.matchesNotification(turnID: turnID) else {
             return false
         }
-        let isTerminalNotification = decoded.events.contains(where: \.isTerminal)
-            || decoded.finishesReviewMode
-            || notification.method == "turn/completed"
-            || notification.method == "turn/cancelled"
-        if isTerminalNotification {
-            awaitingReviewExit = false
-            cancellationRequestedMessage = nil
-            completionCoordinator.cancelPendingCompletion()
-            commandLifecycleByItemID.removeAll(keepingCapacity: true)
-            _ = drainPendingStreamedLogEvents()
-            cancelPendingStreamedLogFlush()
+        guard decoded.isRecoveryInterruptionTerminal else {
+            return false
         }
+        clearInterruptedTurnProjectionState()
         metrics.ignored += 1
         return true
+    }
+
+    private func clearInterruptedTurnProjectionState() {
+        awaitingReviewExit = false
+        cancellationRequestedMessage = nil
+        completionCoordinator.cancelPendingCompletion()
+        commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        _ = drainPendingStreamedLogEvents()
+        cancelPendingStreamedLogFlush()
     }
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {

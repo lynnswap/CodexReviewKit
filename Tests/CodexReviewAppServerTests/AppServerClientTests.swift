@@ -1857,6 +1857,38 @@ struct AppServerClientTests {
         #expect(interruptRequests.count == 1)
     }
 
+    @Test func backendDoesNotSuppressCompletedRecoveryTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        try await backend.interruptReviewForRecovery(
+            run,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "completed"),
+                result: "finished review"
+            )
+        )
+
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "finished review"))
+        #expect(try await iterator.next() == nil)
+        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 0)
+    }
+
     @Test func backendCancelDuringFailingRecoveryInterruptStillInterruptsTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -1993,6 +2025,79 @@ struct AppServerClientTests {
 
         #expect(recoveredRun.turnID == "turn-2")
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+    }
+
+    @Test func backendRecoveryClearsInterruptedCommandStateBeforeReplayingRecoveredTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
+        let reviewStartGate = AsyncGate()
+        await transport.hold(method: "review/start", gate: reviewStartGate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
+            )
+        )
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                commandStatus: "inProgress"
+            )
+        ))
+        try await transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "old output"
+            )
+        )
+
+        async let recovered = backend.recoverReview(
+            run,
+            request: BackendReviewStart(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        await transport.waitForRequestCount(4)
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
+        )
+
+        await reviewStartGate.open()
+        let recoveredRun = try await recovered
+
+        #expect(recoveredRun.turnID == "turn-2")
+        #expect(try await iterator.next() == .started(turnID: "turn-2", reviewThreadID: "thread-1", model: nil))
     }
 
     @Test func backendCleanupDeletesAllRecoveryReviewThreads() async throws {
@@ -4454,11 +4559,13 @@ private struct TestTurnNotification: Encodable, Sendable {
     var threadID: String
     var turn: AppServerTurn
     var reviewThreadID: String? = nil
+    var result: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turn
         case reviewThreadID = "reviewThreadId"
+        case result
     }
 }
 

@@ -896,8 +896,8 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
             _ = try await running
 
-            await backend.yield(.message("stale aborted output"), for: initialRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"), for: initialRun)
+            await backend.yield(.message("completed review text"), for: initialRun)
+            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
             let final = try await store.awaitReview(
                 sessionID: "session-1",
                 jobID: "job-1",
@@ -906,7 +906,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(final.core.lifecycle.status == .succeeded)
             #expect(final.core.run.turnID == "turn-1")
-            #expect(final.core.output.lastAgentMessage == "review text")
+            #expect(final.core.output.lastAgentMessage == "completed review text")
             let commands = await backend.recordedCommands()
             #expect(commands.contains { command in
                 if case .recoverReview = command {
@@ -916,7 +916,7 @@ struct CodexReviewStoreCommandTests {
                 }
             } == false)
             let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
-            #expect(logText.contains("stale aborted output") == false)
+            #expect(logText.contains("completed review text"))
         }
     }
 
