@@ -53,6 +53,18 @@ final class ReviewMonitorUIState {
         }
     }
 
+    var selectedWorkspaceGroupEntry: ReviewMonitorWorkspaceGroupSelection? {
+        get {
+            guard case .workspaceGroup(let group) = selection else {
+                return nil
+            }
+            return group
+        }
+        set {
+            selection = newValue.map(ReviewMonitorSelection.workspaceGroup)
+        }
+    }
+
     var contentKind: ReviewMonitorContentKind {
         if auth.selectedAccount != nil || auth.hasAccounts {
             return .contentView
@@ -63,6 +75,7 @@ final class ReviewMonitorUIState {
 
 @MainActor
 enum ReviewMonitorSelection {
+    case workspaceGroup(ReviewMonitorWorkspaceGroupSelection)
     case workspace(CodexReviewWorkspace)
     case job(CodexReviewJob)
 }

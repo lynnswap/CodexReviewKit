@@ -2322,6 +2322,251 @@ struct ReviewUITests {
         #expect(transport.workspaceFindingsFindBarVisibleForTesting)
     }
 
+    @Test func sidebarGroupsLinkedWorktreeWorkspacesByCommonGitDirectory() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstJob = makeJob(
+            id: "job-first-worktree",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Base branch: refs/pr-fix/base/40",
+            reviewResult: .init(
+                state: .hasFindings,
+                findingCount: 1,
+                findings: [
+                    .init(
+                        title: "[P1] Keep first worktree visible",
+                        body: "The grouped sidebar should still render jobs from the first worktree.",
+                        priority: 1,
+                        location: .init(
+                            path: "\(firstWorkspace.cwd)/Sources/First.swift",
+                            startLine: 1,
+                            endLine: 1
+                        ),
+                        rawText: ""
+                    )
+                ],
+                source: .parsedFinalReviewText
+            )
+        )
+        let secondJob = makeJob(
+            id: "job-second-worktree",
+            cwd: secondWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Base branch: refs/pr-fix/base/41",
+            reviewResult: .init(
+                state: .hasFindings,
+                findingCount: 1,
+                findings: [
+                    .init(
+                        title: "[P2] Keep second worktree visible",
+                        body: "The grouped sidebar should also render jobs from the second worktree.",
+                        priority: 2,
+                        location: .init(
+                            path: "\(secondWorkspace.cwd)/Sources/Second.swift",
+                            startLine: 2,
+                            endLine: 2
+                        ),
+                        rawText: ""
+                    )
+                ],
+                source: .parsedFinalReviewText
+            )
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [firstJob, secondJob]
+        )
+        let backend = makeWindowHarness(store: store)
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let sidebar = viewController.sidebarViewControllerForTesting
+        let transport = viewController.transportViewControllerForTesting
+
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-worktree"])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree"])
+
+        sidebar.clickWorkspaceHeaderForTesting(firstWorkspace)
+        _ = try await awaitTransportRender(transport)
+
+        let selectedGroup = try #require(sidebar.selectedWorkspaceGroupForTesting)
+        #expect(selectedGroup.title == "CodexReviewKit")
+        #expect(selectedGroup.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd])
+        #expect(sidebar.selectedWorkspaceForTesting == nil)
+        #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Keep first worktree visible"))
+        #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Keep second worktree visible"))
+        #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Sources/First.swift:1-1"))
+        #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Sources/Second.swift:2-2"))
+        try await waitForCondition {
+            window.title == "CodexReviewKit" &&
+            window.subtitle == "2 workspaces"
+        }
+    }
+
+    @Test func workspaceSelectionPromotesToGroupWhenLinkedWorktreeArrives() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstJob = makeJob(
+            id: "job-existing-worktree",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Existing worktree"
+        )
+        let secondJob = makeJob(
+            id: "job-arriving-worktree",
+            cwd: secondWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Arriving worktree"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace],
+            jobs: [firstJob]
+        )
+        let backend = makeWindowHarness(store: store)
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.selectWorkspaceForTesting(firstWorkspace)
+        #expect(sidebar.selectedWorkspaceForTesting?.cwd == firstWorkspace.cwd)
+
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [firstJob, secondJob]
+        )
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyObservationForTesting,
+            ["CodexReviewKit"]
+        ) {
+            sidebar.displayedSectionTitlesForTesting
+        }
+        try await waitForCondition {
+            sidebar.selectedWorkspaceGroupForTesting?.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd]
+        }
+
+        #expect(sidebar.selectedWorkspaceForTesting == nil)
+        #expect(window.title == "CodexReviewKit")
+        #expect(window.subtitle == "2 workspaces")
+    }
+
+    @Test func groupSelectionDemotesToWorkspaceWhenLinkedWorktreeLeaves() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstJob = makeJob(
+            id: "job-remaining-worktree",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Remaining worktree"
+        )
+        let secondJob = makeJob(
+            id: "job-removed-worktree",
+            cwd: secondWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "Removed worktree"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [firstJob, secondJob]
+        )
+        let backend = makeWindowHarness(store: store)
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.clickWorkspaceHeaderForTesting(firstWorkspace)
+        #expect(sidebar.selectedWorkspaceGroupForTesting?.title == "CodexReviewKit")
+
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace],
+            jobs: [firstJob]
+        )
+        try await waitForCondition {
+            sidebar.selectedWorkspaceForTesting?.cwd == firstWorkspace.cwd
+        }
+
+        #expect(sidebar.selectedWorkspaceGroupForTesting == nil)
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(window.title == firstWorkspace.displayTitle)
+        #expect(window.subtitle == firstWorkspace.cwd)
+    }
+
+    @Test func groupedJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstWorkspaceJob = makeJob(
+            id: "job-first-workspace",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "First workspace"
+        )
+        let secondWorkspaceFirstJob = makeJob(
+            id: "job-second-workspace-first",
+            cwd: secondWorkspace.cwd,
+            status: .running,
+            targetSummary: "Second workspace first"
+        )
+        let secondWorkspaceSecondJob = makeJob(
+            id: "job-second-workspace-second",
+            cwd: secondWorkspace.cwd,
+            status: .queued,
+            targetSummary: "Second workspace second"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [firstWorkspaceJob, secondWorkspaceFirstJob, secondWorkspaceSecondJob]
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            "job-second-workspace-first",
+            "job-second-workspace-second",
+        ])
+
+        #expect(sidebar.performJobDropForTesting(
+            secondWorkspaceFirstJob,
+            proposedWorkspace: secondWorkspace,
+            childIndex: 2
+        ))
+        await Task.yield()
+
+        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            "job-second-workspace-second",
+            "job-second-workspace-first",
+        ])
+    }
+
     @Test func workspaceFindingsTextWrapsWithinDetailWidth() async throws {
         let workspaceCWD = "/tmp/workspace-alpha"
         let longBody = Array(repeating: "structured finding text should wrap inside the detail pane", count: 12)
@@ -5821,6 +6066,68 @@ func makeWorkspaces(from jobs: [CodexReviewJob]) -> [CodexReviewWorkspace] {
 @MainActor
 func makeSidebarContent(from jobs: [CodexReviewJob]) -> (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]) {
     (makeWorkspaces(from: jobs), Array(jobs.reversed()))
+}
+
+struct LinkedWorktreeFixtureForTesting {
+    var rootURL: URL
+    var firstWorktreeURL: URL
+    var secondWorktreeURL: URL
+}
+
+func makeLinkedWorktreeFixtureForTesting(
+    repositoryName: String,
+    fileManager: FileManager = .default
+) throws -> LinkedWorktreeFixtureForTesting {
+    let rootURL = fileManager.temporaryDirectory
+        .appendingPathComponent("CodexReviewKitWorktreeGrouping-\(UUID().uuidString)", isDirectory: true)
+    let repositoryURL = rootURL.appendingPathComponent(repositoryName, isDirectory: true)
+    let repositoryGitURL = repositoryURL.appendingPathComponent(".git", isDirectory: true)
+    let worktreesURL = rootURL.appendingPathComponent("worktrees", isDirectory: true)
+    let firstWorktreeURL = worktreesURL
+        .appendingPathComponent("825b", isDirectory: true)
+        .appendingPathComponent(repositoryName, isDirectory: true)
+    let secondWorktreeURL = worktreesURL
+        .appendingPathComponent("be78", isDirectory: true)
+        .appendingPathComponent(repositoryName, isDirectory: true)
+    let firstGitDirURL = repositoryGitURL
+        .appendingPathComponent("worktrees", isDirectory: true)
+        .appendingPathComponent("825b", isDirectory: true)
+    let secondGitDirURL = repositoryGitURL
+        .appendingPathComponent("worktrees", isDirectory: true)
+        .appendingPathComponent("be78", isDirectory: true)
+
+    try fileManager.createDirectory(at: repositoryGitURL, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: firstWorktreeURL, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: secondWorktreeURL, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: firstGitDirURL, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: secondGitDirURL, withIntermediateDirectories: true)
+
+    try "gitdir: \(firstGitDirURL.path)\n".write(
+        to: firstWorktreeURL.appendingPathComponent(".git"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "gitdir: \(secondGitDirURL.path)\n".write(
+        to: secondWorktreeURL.appendingPathComponent(".git"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "../..\n".write(
+        to: firstGitDirURL.appendingPathComponent("commondir"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "../..\n".write(
+        to: secondGitDirURL.appendingPathComponent("commondir"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    return LinkedWorktreeFixtureForTesting(
+        rootURL: rootURL,
+        firstWorktreeURL: firstWorktreeURL,
+        secondWorktreeURL: secondWorktreeURL
+    )
 }
 
 struct TestFailure: Error {
