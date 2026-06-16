@@ -271,18 +271,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func interruptReviewForRecovery(_ run: BackendReviewRun, reason _: BackendCancellationReason) async throws {
+    package func interruptReviewForRecovery(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
+        _ = try await interruptReviewForRecoveryInterruption(run, reason: reason)
+    }
+
+    private func interruptReviewForRecoveryInterruption(
+        _ run: BackendReviewRun,
+        reason _: BackendCancellationReason
+    ) async throws -> AppServerReviewInterruption? {
         _ = try await client.initialize()
         let session = await reviewEventSession(for: run)
         guard await session.beginNetworkRecoveryInterruption(turnID: run.turnID) else {
-            return
+            return await session.networkRecoveryInterruption(turnID: run.turnID)
         }
         do {
             let interruption = try await sendTurnInterrupt(for: run)
             await session.recordNetworkRecoveryInterruption(
                 requestedTurnID: run.turnID,
-                interruptedTurnID: interruption.turnID
+                interruption: interruption
             )
+            return interruption
         } catch {
             await session.cancelNetworkRecoveryInterruption(turnID: run.turnID)
             throw error
@@ -296,10 +304,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ) async throws -> BackendReviewRun {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
-        try await interruptReviewForRecovery(run, reason: reason)
+        let recoveryInterruption = try await interruptReviewForRecoveryInterruption(run, reason: reason)
 
         let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
-            params: .init(threadID: run.threadID, numTurns: 1)
+            params: .init(threadID: recoveryInterruption?.threadID ?? run.threadID, numTurns: 1)
         ))
 
         let session = await reviewEventSession(for: run)
@@ -758,6 +766,8 @@ private actor AppServerReviewEventSession {
     private var awaitingReviewExit = false
     private var cancellationRequestedMessage: String?
     private var networkRecoveryInterruptedTurnIDs: Set<String> = []
+    private var networkRecoveryInterruptionByTurnID: [String: AppServerReviewInterruption] = [:]
+    private var unknownTurnNetworkRecoveryInterruption: AppServerReviewInterruption?
     private var interruptedUnknownTurnForNetworkRecovery = false
     private var buffersRecoveryRestartNotifications = false
     private let completionCoordinator = ReviewCompletionCoordinator()
@@ -834,18 +844,34 @@ private actor AppServerReviewEventSession {
     func cancelNetworkRecoveryInterruption(turnID: String?) {
         if let turnID = turnID?.nilIfEmpty {
             networkRecoveryInterruptedTurnIDs.remove(turnID)
+            networkRecoveryInterruptionByTurnID.removeValue(forKey: turnID)
         } else {
             interruptedUnknownTurnForNetworkRecovery = false
+            unknownTurnNetworkRecoveryInterruption = nil
         }
     }
 
-    func recordNetworkRecoveryInterruption(requestedTurnID: String?, interruptedTurnID: String?) {
+    func recordNetworkRecoveryInterruption(
+        requestedTurnID: String?,
+        interruption: AppServerReviewInterruption
+    ) {
         if let requestedTurnID = requestedTurnID?.nilIfEmpty {
             networkRecoveryInterruptedTurnIDs.insert(requestedTurnID)
+            networkRecoveryInterruptionByTurnID[requestedTurnID] = interruption
+        } else {
+            unknownTurnNetworkRecoveryInterruption = interruption
         }
-        if let interruptedTurnID = interruptedTurnID?.nilIfEmpty {
+        if let interruptedTurnID = interruption.turnID.nilIfEmpty {
             networkRecoveryInterruptedTurnIDs.insert(interruptedTurnID)
+            networkRecoveryInterruptionByTurnID[interruptedTurnID] = interruption
         }
+    }
+
+    func networkRecoveryInterruption(turnID: String?) -> AppServerReviewInterruption? {
+        if let turnID = turnID?.nilIfEmpty {
+            return networkRecoveryInterruptionByTurnID[turnID]
+        }
+        return unknownTurnNetworkRecoveryInterruption
     }
 
     func events() -> AsyncThrowingStream<BackendReviewEvent, Error> {
