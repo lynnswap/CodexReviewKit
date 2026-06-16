@@ -407,7 +407,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return
         }
         for run in runs {
+            if Task.isCancelled {
+                return
+            }
             try? await interruptReview(run, reason: reason)
+            if Task.isCancelled {
+                return
+            }
             await cleanupReview(run)
         }
     }

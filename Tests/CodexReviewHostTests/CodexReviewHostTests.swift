@@ -1244,17 +1244,20 @@ struct CodexReviewHostTests {
         )
 
         await store.start(forceRestartIfNeeded: true)
-        async let reviewRead = store.startReview(
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        )
+        let reviewRead = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
 
         let startedAt = Date()
         await store.stop()
         let elapsed = Date().timeIntervalSince(startedAt)
+        let resultBeforeRemoteCleanupUnblocked = try await waitForTaskValue(reviewRead, timeout: .seconds(1))
         await interruptGate.open()
-        let result = try await reviewRead
+        let result = try #require(resultBeforeRemoteCleanupUnblocked)
 
         #expect(elapsed < 1)
         #expect(result.core.lifecycle.status == .cancelled)
@@ -1918,5 +1921,23 @@ private func waitUntil(_ condition: @escaping () -> Bool) async {
 private func waitUntil(_ condition: @escaping () async -> Bool) async {
     for _ in 0..<100 where await condition() == false {
         await Task.yield()
+    }
+}
+
+private func waitForTaskValue<T: Sendable>(
+    _ task: Task<T, any Error>,
+    timeout: Duration
+) async throws -> T? {
+    try await withThrowingTaskGroup(of: T?.self) { group in
+        group.addTask {
+            try await task.value
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            return nil
+        }
+        let result = try await group.next() ?? nil
+        group.cancelAll()
+        return result
     }
 }

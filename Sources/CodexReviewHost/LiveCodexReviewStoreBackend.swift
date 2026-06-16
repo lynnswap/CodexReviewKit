@@ -455,6 +455,25 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return message
     }
 
+    private func cancelActiveReviewsForRuntimeTeardown(
+        store: CodexReviewStore,
+        appServerBackend: AppServerCodexReviewBackend,
+        reason: ReviewCancellation,
+        timeoutWarning: String
+    ) async {
+        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            reason: reason,
+            cancelWorkers: false
+        )
+        let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+        }
+        await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        if didCleanUp == false {
+            logger.warning("\(timeoutWarning, privacy: .public)")
+        }
+    }
+
     func stop(store: CodexReviewStore) async {
         let client = client
         let appServerBackend = appServerBackend
@@ -467,17 +486,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         logger.info("Stopping review runtime")
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            await cancelActiveReviewsForRuntimeTeardown(
+                store: store,
+                appServerBackend: appServerBackend,
                 reason: reason,
-                cancelWorkers: false
+                timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
             )
-            let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-                await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
-                await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-            }
-            if didCleanUp == false {
-                logger.warning("Timed out cleaning active reviews before stopping runtime")
-            }
         }
         self.client = nil
         self.mcpHTTPServer = nil
@@ -1152,17 +1166,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: message)
-            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            await cancelActiveReviewsForRuntimeTeardown(
+                store: store,
+                appServerBackend: appServerBackend,
                 reason: reason,
-                cancelWorkers: false
+                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
             )
-            let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-                await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
-                await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-            }
-            if didCleanUp == false {
-                logger.warning("Timed out cleaning active reviews after runtime failure")
-            }
         }
         let failedClient = client
         let failedMCPHTTPServer = mcpHTTPServer
