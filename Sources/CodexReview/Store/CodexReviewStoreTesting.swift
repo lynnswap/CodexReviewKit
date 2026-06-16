@@ -96,6 +96,7 @@ extension CodexReviewStore {
         startingJobIDs.removeAll(keepingCapacity: false)
         startupCancellations.removeAll(keepingCapacity: false)
         activeRuns.removeAll(keepingCapacity: false)
+        reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
 
         let waiters = reviewTerminalWaiters.values.flatMap { $0 }
         reviewTerminalWaiters.removeAll(keepingCapacity: false)

@@ -29,6 +29,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored package var activeRuns: [String: BackendReviewRun] = [:]
+    @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]

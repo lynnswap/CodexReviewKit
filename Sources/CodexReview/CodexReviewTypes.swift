@@ -200,21 +200,54 @@ package struct BackendReviewStart: Equatable, Sendable {
 }
 
 package struct BackendReviewRun: Codable, Equatable, Sendable {
+    package var attemptID: String
     package var threadID: String
     package var turnID: String?
     package var reviewThreadID: String?
     package var model: String?
 
+    enum CodingKeys: String, CodingKey {
+        case attemptID
+        case threadID
+        case turnID
+        case reviewThreadID
+        case model
+    }
+
     package init(
+        attemptID: String = "attempt-1",
         threadID: String,
         turnID: String? = nil,
         reviewThreadID: String? = nil,
         model: String? = nil
     ) {
+        self.attemptID = attemptID
         self.threadID = threadID
         self.turnID = turnID
         self.reviewThreadID = reviewThreadID
         self.model = model
+    }
+
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.attemptID = try container.decodeIfPresent(String.self, forKey: .attemptID) ?? "attempt-1"
+        self.threadID = try container.decode(String.self, forKey: .threadID)
+        self.turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
+        self.reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
+        self.model = try container.decodeIfPresent(String.self, forKey: .model)
+    }
+}
+
+package struct BackendReviewRecoveryToken: Equatable, Sendable {
+    package var interruptedRun: BackendReviewRun
+    package var rollbackThreadID: String
+
+    package init(
+        interruptedRun: BackendReviewRun,
+        rollbackThreadID: String
+    ) {
+        self.interruptedRun = interruptedRun
+        self.rollbackThreadID = rollbackThreadID
     }
 }
 

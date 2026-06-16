@@ -5,6 +5,17 @@ import Testing
 import CodexReview
 import CodexReviewTesting
 
+private extension AppServerCodexReviewBackend {
+    func resumeReviewRecovery(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        let token = try await beginReviewRecovery(run, reason: reason)
+        return try await resumeReviewRecovery(token, request: request)
+    }
+}
+
 @Suite("app-server client")
 struct AppServerClientTests {
     @Test func processTransportConfigurationResolvesCodexFromProvidedPath() throws {
@@ -1536,7 +1547,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.recoverReview(
+        let recovered = try await backend.resumeReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -1585,7 +1596,7 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
 
-        let recovered = try await backend.recoverReview(
+        let recovered = try await backend.resumeReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -1650,16 +1661,15 @@ struct AppServerClientTests {
         )
         let reason = BackendCancellationReason(message: "Network unavailable; waiting to reconnect.")
 
-        try await backend.interruptReviewForRecovery(currentRun, reason: reason)
-        let recovered = try await backend.recoverReview(
-            currentRun,
+        let token = try await backend.beginReviewRecovery(currentRun, reason: reason)
+        let recovered = try await backend.resumeReviewRecovery(
+            token,
             request: .init(
                 jobID: "job-1",
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
-            ),
-            reason: reason
+            )
         )
 
         #expect(recovered.threadID == "parent-thread")
@@ -1696,7 +1706,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.recoverReview(
+        let recovered = try await backend.resumeReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -1728,7 +1738,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        let recoveredRun = try await backend.recoverReview(
+        let recoveredRun = try await backend.resumeReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",
@@ -1775,7 +1785,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        try await backend.interruptReviewForRecovery(
+        let token = try await backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -1786,20 +1796,19 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Network unavailable"))
             )
         )
-        let suppressedTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        let ignoredInterruptedTurn = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(suppressedTerminal)
+        #expect(ignoredInterruptedTurn)
 
-        let recovered = try await backend.recoverReview(
-            run,
+        let recovered = try await backend.resumeReviewRecovery(
+            token,
             request: .init(
                 jobID: "job-1",
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 model: "gpt-5"
-            ),
-            reason: .init(message: "Network unavailable; waiting to reconnect.")
+            )
         )
 
         #expect(recovered.turnID == "turn-2")
@@ -1837,7 +1846,7 @@ struct AppServerClientTests {
         let events = await backend.events(for: run)
         var iterator = events.makeAsyncIterator()
 
-        try await backend.interruptReviewForRecovery(
+        _ = try await backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -1848,20 +1857,19 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Network unavailable"))
             )
         )
-        let suppressedTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        let ignoredInterruptedTurn = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(suppressedTerminal)
+        #expect(ignoredInterruptedTurn)
 
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
 
-        #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
         let interruptRequests = await transport.recordedRequests().filter { $0.method == "turn/interrupt" }
         #expect(interruptRequests.count == 1)
     }
 
-    @Test func backendDoesNotSuppressCompletedRecoveryTurn() async throws {
+    @Test func backendIgnoresCompletedAbandonedRecoveryTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -1875,7 +1883,7 @@ struct AppServerClientTests {
         let events = await backend.events(for: run)
         var iterator = events.makeAsyncIterator()
 
-        try await backend.interruptReviewForRecovery(
+        _ = try await backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -1888,9 +1896,11 @@ struct AppServerClientTests {
             )
         )
 
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "finished review"))
         #expect(try await iterator.next() == nil)
-        #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 0)
+        let ignoredCompletedTurn = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
+        }
+        #expect(ignoredCompletedTurn)
     }
 
     @Test func backendCancelDuringFailingRecoveryInterruptStillInterruptsTurn() async throws {
@@ -1913,7 +1923,7 @@ struct AppServerClientTests {
         let events = await backend.events(for: run)
         var iterator = events.makeAsyncIterator()
 
-        async let recovery: Void = backend.interruptReviewForRecovery(
+        async let recovery: BackendReviewRecoveryToken = backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -1930,7 +1940,7 @@ struct AppServerClientTests {
 
         await interruptGate.open()
         do {
-            try await recovery
+            _ = try await recovery
             Issue.record("Expected recovery interrupt to fail.")
         } catch {}
         try await cancellation
@@ -1961,7 +1971,7 @@ struct AppServerClientTests {
         )
         let events = await backend.events(for: run)
 
-        try await backend.interruptReviewForRecovery(
+        _ = try await backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -1979,10 +1989,10 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
             )
         )
-        let suppressedTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        let ignoredInterruptedTurn = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(suppressedTerminal)
+        #expect(ignoredInterruptedTurn)
         _ = events
     }
 
@@ -2011,7 +2021,7 @@ struct AppServerClientTests {
         )
         let events = await backend.events(for: run)
 
-        async let recovery: Void = backend.interruptReviewForRecovery(
+        async let recovery: BackendReviewRecoveryToken = backend.beginReviewRecovery(
             run,
             reason: .init(message: "Network unavailable; waiting to reconnect.")
         )
@@ -2027,13 +2037,13 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
             )
         )
-        let suppressedTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        let ignoredTerminal = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(suppressedTerminal)
+        #expect(ignoredTerminal)
 
         await retryInterruptGate.open()
-        try await recovery
+        _ = try await recovery
         _ = events
     }
 
@@ -2055,7 +2065,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.recoverReview(
+        async let recovered = backend.resumeReviewRecovery(
             run,
             request: BackendReviewStart(
                 jobID: "job-1",
@@ -2084,7 +2094,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
-    @Test func backendBuffersStaleTerminalWhileRecoveryInterruptIsInFlight() async throws {
+    @Test func backendIgnoresStaleTerminalWhileRecoveryInterruptIsInFlight() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -2102,7 +2112,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.recoverReview(
+        async let recovered = backend.resumeReviewRecovery(
             run,
             request: BackendReviewStart(
                 jobID: "job-1",
@@ -2124,10 +2134,10 @@ struct AppServerClientTests {
                 turn: .init(id: "turn-1", status: "failed", error: .init(message: "Old turn failed"))
             )
         )
-        let bufferedStaleTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
+        let ignoredStaleTerminal = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(bufferedStaleTerminal)
+        #expect(ignoredStaleTerminal)
 
         await interruptGate.open()
         let recoveredRun = try await recovered
@@ -2152,7 +2162,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
-    @Test func backendBuffersStaleInterruptedTurnNotificationsWhileRollbackIsInFlight() async throws {
+    @Test func backendIgnoresStaleInterruptedTurnNotificationsWhileRollbackIsInFlight() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
@@ -2170,7 +2180,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.recoverReview(
+        async let recovered = backend.resumeReviewRecovery(
             run,
             request: BackendReviewStart(
                 jobID: "job-1",
@@ -2193,10 +2203,10 @@ struct AppServerClientTests {
                 item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
             )
         )
-        let bufferedStaleNotification = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
+        let ignoredStaleNotification = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(bufferedStaleNotification)
+        #expect(ignoredStaleNotification)
 
         await rollbackGate.open()
         let recoveredRun = try await recovered
@@ -2215,7 +2225,7 @@ struct AppServerClientTests {
         ))
     }
 
-    @Test func backendSuppressesRetriedActiveTurnNotificationsBufferedDuringRollback() async throws {
+    @Test func backendSuppressesRetriedActiveTurnNotificationsDuringRollback() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         await transport.enqueueFailure(
@@ -2240,7 +2250,7 @@ struct AppServerClientTests {
         let initialEvents = await backend.events(for: run)
         defer { withExtendedLifetime(initialEvents) {} }
 
-        async let recovered = backend.recoverReview(
+        async let recovered = backend.resumeReviewRecovery(
             run,
             request: BackendReviewStart(
                 jobID: "job-1",
@@ -2259,21 +2269,16 @@ struct AppServerClientTests {
             method: "turn/started",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-active"))
         )
-        let bufferedStaleNotification = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
+        let ignoredStaleNotification = await waitUntil {
+            await backend.notificationRouterMetricsForTesting().ignored == 1
         }
-        #expect(bufferedStaleNotification)
+        #expect(ignoredStaleNotification)
 
         await rollbackGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
         let recoveredEvents = await backend.events(for: recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
-        let ignoredStaleNotification = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
-        }
-        #expect(ignoredStaleNotification)
-
         try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
@@ -2335,7 +2340,7 @@ struct AppServerClientTests {
             )
         )
 
-        async let recovered = backend.recoverReview(
+        async let recovered = backend.resumeReviewRecovery(
             run,
             request: BackendReviewStart(
                 jobID: "job-1",
@@ -2391,7 +2396,7 @@ struct AppServerClientTests {
             model: "gpt-5"
         )
 
-        let recovered = try await backend.recoverReview(
+        let recovered = try await backend.resumeReviewRecovery(
             run,
             request: .init(
                 jobID: "job-1",

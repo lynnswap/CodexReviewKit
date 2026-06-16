@@ -147,6 +147,7 @@ extension CodexReviewStore {
             if job.isTerminal {
                 await backend.cleanupReview(backendRun)
                 activeRuns.removeValue(forKey: jobID)
+                reviewRecoveryWaitingJobIDs.remove(jobID)
             } else {
                 let currentRun = try await consumeReviewEvents(
                     for: backendRun,
@@ -156,6 +157,7 @@ extension CodexReviewStore {
                 run = currentRun
                 await backend.cleanupReview(currentRun)
                 activeRuns.removeValue(forKey: jobID)
+                reviewRecoveryWaitingJobIDs.remove(jobID)
             }
         } catch let error where error is CancellationError || Task.isCancelled {
             startingJobIDs.remove(jobID)
@@ -171,6 +173,7 @@ extension CodexReviewStore {
                 )
             }
             activeRuns.removeValue(forKey: jobID)
+            reviewRecoveryWaitingJobIDs.remove(jobID)
         } catch {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
@@ -178,6 +181,7 @@ extension CodexReviewStore {
                 await backend.cleanupReview(cleanupRun)
             }
             activeRuns.removeValue(forKey: jobID)
+            reviewRecoveryWaitingJobIDs.remove(jobID)
             if job.isTerminal == false, let startupCancellation {
                 try? completeCancellationLocally(
                     jobID: job.id,
@@ -261,7 +265,7 @@ extension CodexReviewStore {
             )
             let initialEventSubscriptionTask = Task { @MainActor in
                 eventSource.attach(continuation)
-                await eventSource.subscribe(to: run, retainingExisting: false)
+                await eventSource.subscribe(to: run)
             }
             let networkTask = Task {
                 for await snapshot in snapshots {
@@ -407,6 +411,16 @@ extension CodexReviewStore {
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
+            return .init(jobID: job.id, cancelled: true, core: job.core)
+        }
+
+        if reviewRecoveryWaitingJobIDs.contains(jobID) {
+            try completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: cancellation
+            )
+            reviewWorkerTasks[jobID]?.cancel()
             return .init(jobID: job.id, cancelled: true, core: job.core)
         }
 
@@ -577,21 +591,19 @@ extension CodexReviewStore {
             }
             switch input {
             case .reviewEvent(let event):
-                for eventToConsume in recoveryState.eventsToConsume(event) {
-                    recoveryState.currentRun = handleReviewEvent(
-                        eventToConsume,
-                        job: job,
-                        currentRun: recoveryState.currentRun
-                    )
-                    if job.isTerminal {
-                        return recoveryState.currentRun
-                    }
+                guard recoveryState.shouldConsumeEvent(from: event.subscriptionRun) else {
+                    continue
+                }
+                recoveryState.currentRun = handleReviewEvent(
+                    event.event,
+                    job: job,
+                    currentRun: recoveryState.currentRun
+                )
+                if job.isTerminal {
+                    return recoveryState.currentRun
                 }
             case .reviewEventsFinished(let finishedRun):
                 if recoveryState.shouldIgnoreFinishedEvent(for: finishedRun) {
-                    if await inputs.subscribeIfInactive(to: recoveryState.currentRun) {
-                        recoveryState.markEventSubscription(to: recoveryState.currentRun)
-                    }
                     continue
                 }
                 if try handleReviewEventsFinished(
@@ -615,20 +627,21 @@ extension CodexReviewStore {
                 }
                 switch try await restartReviewAfterNetworkRestore(
                     job: job,
-                    currentRun: recoveryState.currentRun,
                     startRequest: startRequest,
                     inputs: inputs,
-                    reason: recoveryState.recoveryReason
+                    recoveryToken: recoveryState.recoveryToken
                 ) {
                 case .continueWaiting:
                     recoveryState.markWaitingForNetworkRecovery()
                     continue
                 case .finished:
+                    reviewRecoveryWaitingJobIDs.remove(job.id)
                     return recoveryState.currentRun
                 case .recovered(let recoveredRun):
                     applyBackendRun(recoveredRun, to: job)
                     recoveryState.markRecovered(with: recoveredRun)
-                    await inputs.subscribeRetainingExisting(to: recoveredRun)
+                    reviewRecoveryWaitingJobIDs.remove(job.id)
+                    await inputs.subscribe(to: recoveredRun)
                 }
             case .networkOutageConfirmed:
                 guard recoveryState.isWaitingForNetworkRecovery == false,
@@ -640,10 +653,13 @@ extension CodexReviewStore {
                 }
                 recoveryState.markWaitingForNetworkRecovery()
                 markReviewWaitingForNetworkRecovery(job)
-                try await backend.interruptReviewForRecovery(
+                reviewRecoveryWaitingJobIDs.insert(job.id)
+                await inputs.cancelActiveEventSubscription()
+                let recoveryToken = try await backend.beginReviewRecovery(
                     recoveryState.currentRun,
                     reason: recoveryState.recoveryReason
                 )
+                recoveryState.markRecoveryToken(recoveryToken)
             }
         }
 
@@ -690,10 +706,9 @@ extension CodexReviewStore {
 
     private func restartReviewAfterNetworkRestore(
         job: CodexReviewJob,
-        currentRun: BackendReviewRun,
         startRequest: BackendReviewStart,
         inputs: ReviewWorkerInputs,
-        reason: BackendCancellationReason
+        recoveryToken: BackendReviewRecoveryToken?
     ) async throws -> NetworkRestoreRestartResult {
         if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
             return .finished
@@ -707,10 +722,12 @@ extension CodexReviewStore {
         guard await inputs.networkStatusTracker.currentStatus() == .satisfied else {
             return .continueWaiting
         }
-        let recoveredRun = try await backend.recoverReview(
-            currentRun,
-            request: startRequest,
-            reason: reason
+        guard let recoveryToken else {
+            return .continueWaiting
+        }
+        let recoveredRun = try await backend.resumeReviewRecovery(
+            recoveryToken,
+            request: startRequest
         )
         if try await stopRecoveredRunIfJobShouldNotResume(recoveredRun, job: job) {
             return .finished
@@ -1043,13 +1060,6 @@ private extension BackendReviewEvent {
             false
         }
     }
-
-    var isCompletedReview: Bool {
-        guard case .completed = self else {
-            return false
-        }
-        return true
-    }
 }
 
 private extension CodexReviewJob {
@@ -1104,23 +1114,16 @@ private enum ReviewNetworkSnapshotEffect {
     case restartSettling
 }
 
-private struct ReviewEventSubscriptionCutover {
-    var previousRun: BackendReviewRun
-}
-
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: BackendReviewRun
     private(set) var isWaitingForNetworkRecovery = false
+    private(set) var recoveryToken: BackendReviewRecoveryToken?
     private var isSettlingForNetworkRecovery = false
-    private var pendingEvents: [BackendReviewEvent] = []
-    private var activeEventSubscriptionRun: BackendReviewRun
-    private var eventSubscriptionCutover: ReviewEventSubscriptionCutover?
     private var recoverySettleGeneration: Int?
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
 
     init(currentRun: BackendReviewRun) {
         self.currentRun = currentRun
-        self.activeEventSubscriptionRun = currentRun
     }
 
     mutating func markWaitingForNetworkRecovery() {
@@ -1129,61 +1132,31 @@ private struct ReviewNetworkRecoveryLoopState {
         recoverySettleGeneration = nil
     }
 
-    mutating func markRecovered(with run: BackendReviewRun) {
-        eventSubscriptionCutover = .init(previousRun: activeEventSubscriptionRun)
-        currentRun = run
-        isWaitingForNetworkRecovery = false
-        isSettlingForNetworkRecovery = false
-        recoverySettleGeneration = nil
-        markEventSubscription(to: run)
-        pendingEvents.removeAll(keepingCapacity: true)
+    mutating func markRecoveryToken(_ token: BackendReviewRecoveryToken) {
+        recoveryToken = token
     }
 
-    mutating func markEventSubscription(to run: BackendReviewRun) {
-        activeEventSubscriptionRun = run
+    mutating func markRecovered(with run: BackendReviewRun) {
+        currentRun = run
+        isWaitingForNetworkRecovery = false
+        recoveryToken = nil
+        isSettlingForNetworkRecovery = false
+        recoverySettleGeneration = nil
     }
 
     func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {
-        run != activeEventSubscriptionRun
+        isWaitingForNetworkRecovery || run.attemptID != currentRun.attemptID
     }
 
     func shouldRestartReviewAfterRecoverySettle(recoveryGeneration: Int) -> Bool {
         isWaitingForNetworkRecovery
             && isSettlingForNetworkRecovery
             && recoverySettleGeneration == recoveryGeneration
+            && recoveryToken != nil
     }
 
-    mutating func eventsToConsume(_ reviewEvent: ReviewWorkerReviewEvent) -> [BackendReviewEvent] {
-        if let eventSubscriptionCutover {
-            if reviewEvent.subscriptionRun == eventSubscriptionCutover.previousRun {
-                pendingEvents.removeAll(keepingCapacity: true)
-                return []
-            }
-            if reviewEvent.subscriptionRun == activeEventSubscriptionRun {
-                self.eventSubscriptionCutover = nil
-                pendingEvents.removeAll(keepingCapacity: true)
-            }
-        }
-
-        guard isWaitingForNetworkRecovery else {
-            return [reviewEvent.event]
-        }
-        return recoveryWindowEventsToConsume(reviewEvent.event)
-    }
-
-    private mutating func recoveryWindowEventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
-        if event.isCompletedReview {
-            defer {
-                pendingEvents.removeAll(keepingCapacity: true)
-            }
-            return pendingEvents + [event]
-        }
-        if event.completesReviewRun {
-            pendingEvents.removeAll(keepingCapacity: true)
-        } else {
-            pendingEvents.append(event)
-        }
-        return []
+    func shouldConsumeEvent(from run: BackendReviewRun) -> Bool {
+        isWaitingForNetworkRecovery == false && run.attemptID == currentRun.attemptID
     }
 
     mutating func networkSnapshotEffect(
@@ -1214,13 +1187,13 @@ private struct ReviewWorkerInputs {
     var eventSource: ReviewWorkerEventSource
 
     @MainActor
-    func subscribeRetainingExisting(to run: BackendReviewRun) async {
-        await eventSource.subscribe(to: run, retainingExisting: true)
+    func subscribe(to run: BackendReviewRun) async {
+        await eventSource.subscribe(to: run)
     }
 
     @MainActor
-    func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
-        await eventSource.subscribeIfInactive(to: run)
+    func cancelActiveEventSubscription() async {
+        eventSource.cancelActiveSubscription()
     }
 
     @MainActor
@@ -1245,13 +1218,11 @@ private final class ReviewWorkerEventSource {
         self.continuation = continuation
     }
 
-    func subscribe(to run: BackendReviewRun, retainingExisting: Bool) async {
+    func subscribe(to run: BackendReviewRun) async {
         subscriptionID += 1
         let subscriptionID = subscriptionID
         activeSubscriptionID = subscriptionID
-        if retainingExisting == false {
-            cancelEventTasks()
-        }
+        cancelEventTasks()
         guard continuation != nil else {
             return
         }
@@ -1277,12 +1248,10 @@ private final class ReviewWorkerEventSource {
         }
     }
 
-    func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
-        guard eventTasks.isEmpty else {
-            return false
-        }
-        await subscribe(to: run, retainingExisting: false)
-        return true
+    func cancelActiveSubscription() {
+        subscriptionID += 1
+        activeSubscriptionID = nil
+        cancelEventTasks()
     }
 
     func cancel() {
