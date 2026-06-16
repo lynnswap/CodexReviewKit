@@ -182,9 +182,23 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var recoverReviewGate: AsyncGate?
     private var recoverReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var eventContinuations: [String: EventContinuation] = [:]
+    private var eventContinuations: [EventContinuationKey: EventContinuation] = [:]
     private var eventRegistrationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var terminatedEventContinuationIDs: Set<UUID> = []
+
+    private struct EventContinuationKey: Hashable, Sendable {
+        var threadID: String
+        var turnID: String?
+        var reviewThreadID: String?
+        var model: String?
+
+        init(run: BackendReviewRun) {
+            self.threadID = run.threadID
+            self.turnID = run.turnID
+            self.reviewThreadID = run.reviewThreadID
+            self.model = run.model
+        }
+    }
 
     private struct EventContinuation: Sendable {
         var id: UUID
@@ -515,18 +529,21 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) async {
-        let key = run?.threadID ?? nextRun.threadID
-        eventContinuations[key]?.continuation.yield(event)
+        eventContinuation(for: run ?? nextRun)?.continuation.yield(event)
         await Task.yield()
     }
 
     package func finishEvents(for run: BackendReviewRun? = nil) {
-        let key = run?.threadID ?? nextRun.threadID
+        guard let key = eventContinuationKey(for: run ?? nextRun) else {
+            return
+        }
         eventContinuations.removeValue(forKey: key)?.continuation.finish()
     }
 
     package func finishEvents(throwing error: any Error, for run: BackendReviewRun? = nil) {
-        let key = run?.threadID ?? nextRun.threadID
+        guard let key = eventContinuationKey(for: run ?? nextRun) else {
+            return
+        }
         eventContinuations.removeValue(forKey: key)?.continuation.finish(throwing: error)
     }
 
@@ -580,7 +597,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             return
         }
         commands.append(.events(run))
-        eventContinuations[run.threadID] = .init(id: id, continuation: continuation)
+        eventContinuations[.init(run: run)] = .init(id: id, continuation: continuation)
         let waiters = Array(eventRegistrationWaiters.values)
         eventRegistrationWaiters.removeAll(keepingCapacity: false)
         for waiter in waiters {
@@ -588,15 +605,33 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    private func eventContinuation(for run: BackendReviewRun) -> EventContinuation? {
+        guard let key = eventContinuationKey(for: run) else {
+            return nil
+        }
+        return eventContinuations[key]
+    }
+
+    private func eventContinuationKey(for run: BackendReviewRun) -> EventContinuationKey? {
+        let exactKey = EventContinuationKey(run: run)
+        if eventContinuations[exactKey] != nil {
+            return exactKey
+        }
+        return eventContinuations.first { key, _ in
+            key.threadID == run.threadID
+        }?.key
+    }
+
     private func unregisterEventContinuation(id: UUID, run: BackendReviewRun) {
-        guard let registered = eventContinuations[run.threadID] else {
+        let key = EventContinuationKey(run: run)
+        guard let registered = eventContinuations[key] else {
             terminatedEventContinuationIDs.insert(id)
             return
         }
         guard registered.id == id else {
             return
         }
-        eventContinuations.removeValue(forKey: run.threadID)
+        eventContinuations.removeValue(forKey: key)
     }
 
     private func cancelStartReviewWaiter(id: UUID) {

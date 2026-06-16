@@ -261,7 +261,7 @@ extension CodexReviewStore {
             )
             let initialEventSubscriptionTask = Task { @MainActor in
                 eventSource.attach(continuation)
-                await eventSource.subscribe(to: run)
+                await eventSource.subscribe(to: run, retainingExisting: false)
             }
             let networkTask = Task {
                 for await snapshot in snapshots {
@@ -627,8 +627,8 @@ extension CodexReviewStore {
                     return recoveryState.currentRun
                 case .recovered(let recoveredRun):
                     applyBackendRun(recoveredRun, to: job)
-                    let didResubscribe = await inputs.subscribeIfInactive(to: recoveredRun)
-                    recoveryState.markRecovered(with: recoveredRun, didResubscribe: didResubscribe)
+                    recoveryState.markRecovered(with: recoveredRun)
+                    await inputs.subscribeRetainingExisting(to: recoveredRun)
                 }
             case .networkOutageConfirmed:
                 guard recoveryState.isWaitingForNetworkRecovery == false,
@@ -1080,8 +1080,13 @@ private extension CodexReviewJob {
     }
 }
 
+private struct ReviewWorkerReviewEvent {
+    var subscriptionRun: BackendReviewRun
+    var event: BackendReviewEvent
+}
+
 private enum ReviewWorkerInput {
-    case reviewEvent(BackendReviewEvent)
+    case reviewEvent(ReviewWorkerReviewEvent)
     case reviewEventsFinished(BackendReviewRun)
     case networkSnapshot(CodexReviewNetworkSnapshot, recoveryGeneration: Int)
     case networkOutageConfirmed
@@ -1099,13 +1104,17 @@ private enum ReviewNetworkSnapshotEffect {
     case restartSettling
 }
 
+private struct ReviewEventSubscriptionCutover {
+    var previousRun: BackendReviewRun
+}
+
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: BackendReviewRun
     private(set) var isWaitingForNetworkRecovery = false
     private var isSettlingForNetworkRecovery = false
     private var pendingEvents: [BackendReviewEvent] = []
     private var activeEventSubscriptionRun: BackendReviewRun
-    private var recoveredSinceEventSubscription = false
+    private var eventSubscriptionCutover: ReviewEventSubscriptionCutover?
     private var recoverySettleGeneration: Int?
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
 
@@ -1120,26 +1129,22 @@ private struct ReviewNetworkRecoveryLoopState {
         recoverySettleGeneration = nil
     }
 
-    mutating func markRecovered(with run: BackendReviewRun, didResubscribe: Bool) {
+    mutating func markRecovered(with run: BackendReviewRun) {
+        eventSubscriptionCutover = .init(previousRun: activeEventSubscriptionRun)
         currentRun = run
         isWaitingForNetworkRecovery = false
         isSettlingForNetworkRecovery = false
         recoverySettleGeneration = nil
-        if didResubscribe {
-            markEventSubscription(to: run)
-        } else {
-            recoveredSinceEventSubscription = true
-        }
+        markEventSubscription(to: run)
         pendingEvents.removeAll(keepingCapacity: true)
     }
 
     mutating func markEventSubscription(to run: BackendReviewRun) {
         activeEventSubscriptionRun = run
-        recoveredSinceEventSubscription = false
     }
 
     func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {
-        run != activeEventSubscriptionRun || recoveredSinceEventSubscription
+        run != activeEventSubscriptionRun
     }
 
     func shouldRestartReviewAfterRecoverySettle(recoveryGeneration: Int) -> Bool {
@@ -1148,10 +1153,24 @@ private struct ReviewNetworkRecoveryLoopState {
             && recoverySettleGeneration == recoveryGeneration
     }
 
-    mutating func eventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
-        guard isWaitingForNetworkRecovery else {
-            return [event]
+    mutating func eventsToConsume(_ reviewEvent: ReviewWorkerReviewEvent) -> [BackendReviewEvent] {
+        if let eventSubscriptionCutover {
+            if reviewEvent.subscriptionRun == eventSubscriptionCutover.previousRun {
+                return recoveryWindowEventsToConsume(reviewEvent.event)
+            }
+            if reviewEvent.subscriptionRun == activeEventSubscriptionRun {
+                self.eventSubscriptionCutover = nil
+                pendingEvents.removeAll(keepingCapacity: true)
+            }
         }
+
+        guard isWaitingForNetworkRecovery else {
+            return [reviewEvent.event]
+        }
+        return recoveryWindowEventsToConsume(reviewEvent.event)
+    }
+
+    private mutating func recoveryWindowEventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
         if event.isCompletedReview {
             defer {
                 pendingEvents.removeAll(keepingCapacity: true)
@@ -1194,6 +1213,11 @@ private struct ReviewWorkerInputs {
     var eventSource: ReviewWorkerEventSource
 
     @MainActor
+    func subscribeRetainingExisting(to run: BackendReviewRun) async {
+        await eventSource.subscribe(to: run, retainingExisting: true)
+    }
+
+    @MainActor
     func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
         await eventSource.subscribeIfInactive(to: run)
     }
@@ -1208,8 +1232,9 @@ private struct ReviewWorkerInputs {
 private final class ReviewWorkerEventSource {
     private let backend: any CodexReviewStoreBackend
     private var continuation: AsyncThrowingStream<ReviewWorkerInput, Error>.Continuation?
-    private var eventTask: Task<Void, Never>?
+    private var eventTasks: [Int: Task<Void, Never>] = [:]
     private var subscriptionID = 0
+    private var activeSubscriptionID: Int?
 
     init(backend: any CodexReviewStoreBackend) {
         self.backend = backend
@@ -1219,21 +1244,26 @@ private final class ReviewWorkerEventSource {
         self.continuation = continuation
     }
 
-    func subscribe(to run: BackendReviewRun) async {
+    func subscribe(to run: BackendReviewRun, retainingExisting: Bool) async {
         subscriptionID += 1
         let subscriptionID = subscriptionID
-        eventTask?.cancel()
-        guard let continuation else {
+        activeSubscriptionID = subscriptionID
+        if retainingExisting == false {
+            cancelEventTasks()
+        }
+        guard continuation != nil else {
             return
         }
         let events = await backend.events(for: run)
-        eventTask = Task {
+        eventTasks[subscriptionID] = Task {
             do {
                 for try await event in events {
                     guard Task.isCancelled == false else {
                         return
                     }
-                    continuation.yield(.reviewEvent(event))
+                    await MainActor.run {
+                        self.yieldReviewEvent(event, run: run, subscriptionID: subscriptionID)
+                    }
                 }
                 await MainActor.run {
                     self.yieldEventsFinished(run: run, subscriptionID: subscriptionID)
@@ -1247,36 +1277,58 @@ private final class ReviewWorkerEventSource {
     }
 
     func subscribeIfInactive(to run: BackendReviewRun) async -> Bool {
-        guard eventTask == nil else {
+        guard eventTasks.isEmpty else {
             return false
         }
-        await subscribe(to: run)
+        await subscribe(to: run, retainingExisting: false)
         return true
     }
 
     func cancel() {
         subscriptionID += 1
-        eventTask?.cancel()
-        eventTask = nil
+        activeSubscriptionID = nil
+        cancelEventTasks()
         continuation?.finish()
         continuation = nil
     }
 
+    private func cancelEventTasks() {
+        for task in eventTasks.values {
+            task.cancel()
+        }
+        eventTasks.removeAll(keepingCapacity: true)
+    }
+
+    private func yieldReviewEvent(
+        _ event: BackendReviewEvent,
+        run: BackendReviewRun,
+        subscriptionID: Int
+    ) {
+        guard eventTasks[subscriptionID] != nil else {
+            return
+        }
+        continuation?.yield(.reviewEvent(.init(
+            subscriptionRun: run,
+            event: event
+        )))
+    }
+
     private func yieldEventsFinished(run: BackendReviewRun, subscriptionID: Int) {
-        guard subscriptionID == self.subscriptionID else {
+        guard eventTasks.removeValue(forKey: subscriptionID) != nil else {
             return
         }
         continuation?.yield(.reviewEventsFinished(run))
-        eventTask = nil
     }
 
     private func finish(throwing error: any Error, subscriptionID: Int) {
-        guard subscriptionID == self.subscriptionID else {
+        guard eventTasks.removeValue(forKey: subscriptionID) != nil else {
+            return
+        }
+        guard activeSubscriptionID == subscriptionID else {
             return
         }
         continuation?.finish(throwing: error)
         continuation = nil
-        eventTask = nil
     }
 }
 
