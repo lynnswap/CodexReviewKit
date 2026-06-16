@@ -1316,7 +1316,6 @@ struct ReviewUITests {
         )
         let alphaWorkspace = CodexReviewWorkspace(cwd: alphaJob.cwd)
         let betaWorkspace = CodexReviewWorkspace(cwd: betaJob.cwd)
-        betaWorkspace.isExpanded = false
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -1328,6 +1327,8 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
+        sidebar.collapseWorkspaceInOutlineForTesting(betaWorkspace)
+        #expect(sidebar.workspaceIsExpandedForTesting(betaWorkspace) == false)
         #expect(sidebar.performWorkspaceDropForTesting(betaWorkspace, toIndex: 0))
         #expect(sidebar.workspaceIsExpandedForTesting(betaWorkspace) == false)
     }
@@ -2297,7 +2298,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectWorkspaceForTesting(workspace)
 
         _ = try await awaitTransportRender(transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceForTesting?.cwd == workspaceCWD)
+        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [workspaceCWD])
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
         #expect(transport.workspaceFindingsTextIsSelectableForTesting)
         #expect(transport.workspaceFindingsTextIsEditableForTesting == false)
@@ -2398,10 +2399,9 @@ struct ReviewUITests {
         sidebar.clickWorkspaceHeaderForTesting(firstWorkspace)
         _ = try await awaitTransportRender(transport)
 
-        let selectedGroup = try #require(sidebar.selectedWorkspaceGroupForTesting)
-        #expect(selectedGroup.title == "CodexReviewKit")
-        #expect(selectedGroup.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd])
-        #expect(sidebar.selectedWorkspaceForTesting == nil)
+        let selectedSection = try #require(sidebar.selectedWorkspaceSectionForTesting)
+        #expect(selectedSection.title == "CodexReviewKit")
+        #expect(selectedSection.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd])
         #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Keep first worktree visible"))
         #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Keep second worktree visible"))
         #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Sources/First.swift:1-1"))
@@ -2412,7 +2412,7 @@ struct ReviewUITests {
         }
     }
 
-    @Test func workspaceSelectionPromotesToGroupWhenLinkedWorktreeArrives() async throws {
+    @Test func workspaceSectionSelectionExpandsWhenLinkedWorktreeArrives() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -2443,7 +2443,7 @@ struct ReviewUITests {
         defer { window.close() }
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.selectWorkspaceForTesting(firstWorkspace)
-        #expect(sidebar.selectedWorkspaceForTesting?.cwd == firstWorkspace.cwd)
+        #expect(sidebar.selectedWorkspaceSectionForTesting?.workspaceCWDs == [firstWorkspace.cwd])
 
         store.loadForTesting(
             serverState: .running,
@@ -2457,15 +2457,14 @@ struct ReviewUITests {
             sidebar.displayedSectionTitlesForTesting
         }
         try await waitForCondition {
-            sidebar.selectedWorkspaceGroupForTesting?.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd]
+            sidebar.selectedWorkspaceSectionForTesting?.workspaceCWDs == [firstWorkspace.cwd, secondWorkspace.cwd]
         }
 
-        #expect(sidebar.selectedWorkspaceForTesting == nil)
         #expect(window.title == "CodexReviewKit")
         #expect(window.subtitle == "2 workspaces")
     }
 
-    @Test func groupSelectionDemotesToWorkspaceWhenLinkedWorktreeLeaves() async throws {
+    @Test func workspaceSectionSelectionShrinksWhenLinkedWorktreeLeaves() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -2496,7 +2495,7 @@ struct ReviewUITests {
         defer { window.close() }
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.clickWorkspaceHeaderForTesting(firstWorkspace)
-        #expect(sidebar.selectedWorkspaceGroupForTesting?.title == "CodexReviewKit")
+        #expect(sidebar.selectedWorkspaceSectionForTesting?.title == "CodexReviewKit")
 
         store.loadForTesting(
             serverState: .running,
@@ -2504,16 +2503,15 @@ struct ReviewUITests {
             jobs: [firstJob]
         )
         try await waitForCondition {
-            sidebar.selectedWorkspaceForTesting?.cwd == firstWorkspace.cwd
+            sidebar.selectedWorkspaceSectionForTesting?.workspaceCWDs == [firstWorkspace.cwd]
         }
 
-        #expect(sidebar.selectedWorkspaceGroupForTesting == nil)
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(window.title == firstWorkspace.displayTitle)
+        #expect(window.title == "CodexReviewKit")
         #expect(window.subtitle == firstWorkspace.cwd)
     }
 
-    @Test func workspaceDropAcrossGroupedRootUsesVisibleRootIndexes() async throws {
+    @Test func workspaceSectionDropAcrossSectionRootUsesVisibleRootIndexes() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -2560,7 +2558,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
-    @Test func workspaceGroupDropReordersGroupedRootAsBlock() async throws {
+    @Test func workspaceSectionDropReordersSectionRootAsBlock() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -2598,10 +2596,10 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "Standalone"])
-        #expect(sidebar.workspaceGroupCanStartDragForTesting(containing: firstWorkspace))
+        #expect(sidebar.workspaceSectionCanStartDragForTesting(containing: firstWorkspace))
 
         let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
-        #expect(sidebar.performWorkspaceGroupDropForTesting(
+        #expect(sidebar.performWorkspaceSectionDropForTesting(
             containing: firstWorkspace,
             toIndex: 2
         ))
@@ -2616,7 +2614,7 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
-    @Test func groupedJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
+    @Test func workspaceSectionJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -2658,13 +2656,13 @@ struct ReviewUITests {
 
         #expect(sidebar.performJobDropForTesting(
             secondWorkspaceFirstJob,
-            proposedWorkspaceGroupContaining: secondWorkspace,
+            proposedWorkspaceSectionContaining: secondWorkspace,
             childIndex: 0
         ) == false)
 
         #expect(sidebar.performJobDropForTesting(
             secondWorkspaceFirstJob,
-            proposedWorkspaceGroupContaining: secondWorkspace,
+            proposedWorkspaceSectionContaining: secondWorkspace,
             childIndex: 3
         ))
         await Task.yield()
@@ -2867,17 +2865,17 @@ struct ReviewUITests {
         )
         store.loadForTesting(serverState: .running, workspaces: [replacement], jobs: [replacementJob])
 
-        #expect(sidebar.selectedWorkspaceForTesting?.cwd == replacement.cwd)
+        #expect(sidebar.selectedWorkspaceSectionForTesting?.workspaceCWDs == [replacement.cwd])
         #expect(store.orderedJobs(in: replacement).first?.id == "job-workspace-selection-replacement")
 
         store.loadForTesting(serverState: .running, workspaces: [])
         try await waitForCondition {
-            sidebar.selectedWorkspaceForTesting == nil &&
+            sidebar.selectedWorkspaceSectionForTesting == nil &&
             sidebar.selectedJobForTesting == nil &&
             transport.isShowingEmptyStateForTesting
         }
 
-        #expect(sidebar.selectedWorkspaceForTesting == nil)
+        #expect(sidebar.selectedWorkspaceSectionForTesting == nil)
         #expect(sidebar.selectedJobForTesting == nil)
         #expect(transport.isShowingEmptyStateForTesting)
     }
@@ -3698,7 +3696,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(workspace)
 
         _ = try await awaitTransportRender(transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceForTesting?.cwd == workspace.cwd)
+        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [workspace.cwd])
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
         #expect(
             transport.workspaceFindingSnapshotForTesting == .init(

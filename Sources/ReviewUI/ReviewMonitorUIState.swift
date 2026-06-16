@@ -41,27 +41,15 @@ final class ReviewMonitorUIState {
         }
     }
 
-    var selectedWorkspaceEntry: CodexReviewWorkspace? {
+    var selectedWorkspaceSectionEntry: ReviewMonitorWorkspaceSectionSelection? {
         get {
-            guard case .workspace(let workspace) = selection else {
+            guard case .workspaceSection(let section) = selection else {
                 return nil
             }
-            return workspace
+            return section
         }
         set {
-            selection = newValue.map(ReviewMonitorSelection.workspace)
-        }
-    }
-
-    var selectedWorkspaceGroupEntry: ReviewMonitorWorkspaceGroupSelection? {
-        get {
-            guard case .workspaceGroup(let group) = selection else {
-                return nil
-            }
-            return group
-        }
-        set {
-            selection = newValue.map(ReviewMonitorSelection.workspaceGroup)
+            selection = newValue.map(ReviewMonitorSelection.workspaceSection)
         }
     }
 
@@ -75,8 +63,7 @@ final class ReviewMonitorUIState {
 
 @MainActor
 enum ReviewMonitorSelection {
-    case workspaceGroup(ReviewMonitorWorkspaceGroupSelection)
-    case workspace(CodexReviewWorkspace)
+    case workspaceSection(ReviewMonitorWorkspaceSectionSelection)
     case job(CodexReviewJob)
 }
 

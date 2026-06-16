@@ -216,15 +216,10 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         for selection: ReviewMonitorSelection?
     ) -> WindowTitlePresentation {
         switch selection {
-        case .workspaceGroup(let group):
+        case .workspaceSection(let section):
             WindowTitlePresentation(
-                title: group.title,
-                subtitle: group.subtitle
-            )
-        case .workspace(let workspace):
-            WindowTitlePresentation(
-                title: workspace.displayTitle,
-                subtitle: workspace.cwd
+                title: section.title,
+                subtitle: section.subtitle
             )
         case .job(let job):
             WindowTitlePresentation(

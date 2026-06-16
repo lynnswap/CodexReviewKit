@@ -1,6 +1,6 @@
 import Foundation
 
-struct ReviewMonitorWorkspaceGroupSelection: Hashable, Sendable {
+struct ReviewMonitorWorkspaceSectionSelection: Hashable, Sendable {
     var id: String
     var title: String
     var workspaceCWDs: [String]
@@ -10,16 +10,16 @@ struct ReviewMonitorWorkspaceGroupSelection: Hashable, Sendable {
     }
 }
 
-struct ReviewMonitorWorkspaceGroupIdentity: Hashable, Sendable {
+struct ReviewMonitorWorkspaceSectionIdentity: Hashable, Sendable {
     var id: String
     var title: String
 }
 
-enum ReviewMonitorWorkspaceGrouping {
-    static func identity(for cwd: String, fileManager: FileManager = .default) -> ReviewMonitorWorkspaceGroupIdentity {
+enum ReviewMonitorWorkspaceSectioning {
+    static func identity(for cwd: String, fileManager: FileManager = .default) -> ReviewMonitorWorkspaceSectionIdentity {
         let cwdURL = standardizedDirectoryURL(cwd)
         guard let gitMetadataURL = enclosingGitMetadataURL(startingAt: cwdURL, fileManager: fileManager) else {
-            return ReviewMonitorWorkspaceGroupIdentity(
+            return ReviewMonitorWorkspaceSectionIdentity(
                 id: "cwd:\(cwdURL.path)",
                 title: fallbackTitle(for: cwdURL)
             )
@@ -28,7 +28,7 @@ enum ReviewMonitorWorkspaceGrouping {
         var isDirectory: ObjCBool = false
         let gitMetadataPath = gitMetadataURL.path
         guard fileManager.fileExists(atPath: gitMetadataPath, isDirectory: &isDirectory) else {
-            return ReviewMonitorWorkspaceGroupIdentity(
+            return ReviewMonitorWorkspaceSectionIdentity(
                 id: "cwd:\(cwdURL.path)",
                 title: fallbackTitle(for: cwdURL)
             )
@@ -45,16 +45,16 @@ enum ReviewMonitorWorkspaceGrouping {
         }
 
         guard let commonDirURL else {
-            return ReviewMonitorWorkspaceGroupIdentity(
+            return ReviewMonitorWorkspaceSectionIdentity(
                 id: "cwd:\(cwdURL.path)",
                 title: fallbackTitle(for: cwdURL)
             )
         }
 
         let standardizedCommonDirURL = commonDirURL.standardizedFileURL.resolvingSymlinksInPath()
-        return ReviewMonitorWorkspaceGroupIdentity(
+        return ReviewMonitorWorkspaceSectionIdentity(
             id: "git-common:\(standardizedCommonDirURL.path)",
-            title: groupTitle(commonDirURL: standardizedCommonDirURL, gitRootURL: gitRootURL, fallbackURL: cwdURL)
+            title: sectionTitle(commonDirURL: standardizedCommonDirURL, gitRootURL: gitRootURL, fallbackURL: cwdURL)
         )
     }
 
@@ -116,7 +116,7 @@ enum ReviewMonitorWorkspaceGrouping {
         return url.standardizedFileURL.resolvingSymlinksInPath()
     }
 
-    private static func groupTitle(
+    private static func sectionTitle(
         commonDirURL: URL,
         gitRootURL: URL,
         fallbackURL: URL
