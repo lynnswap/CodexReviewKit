@@ -600,8 +600,17 @@ extension CodexReviewStore {
                 ) {
                     return recoveryState.currentRun
                 }
-            case .networkSnapshot(let snapshot):
-                guard recoveryState.shouldRestartReview(after: snapshot) else {
+            case .networkSnapshot(let snapshot, let recoveryGeneration):
+                switch recoveryState.networkSnapshotEffect(snapshot, recoveryGeneration: recoveryGeneration) {
+                case .none:
+                    continue
+                case .restartSettling:
+                    appendRecoveryProgress(networkRecoveryRestoredMessage, to: job)
+                }
+            case .networkRecoverySettled(let recoveryGeneration):
+                guard recoveryState.shouldRestartReviewAfterRecoverySettle(
+                    recoveryGeneration: recoveryGeneration
+                ) else {
                     continue
                 }
                 switch try await restartReviewAfterNetworkRestore(
@@ -612,6 +621,7 @@ extension CodexReviewStore {
                     reason: recoveryState.recoveryReason
                 ) {
                 case .continueWaiting:
+                    recoveryState.markWaitingForNetworkRecovery()
                     continue
                 case .finished:
                     return recoveryState.currentRun
@@ -688,8 +698,6 @@ extension CodexReviewStore {
         if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
             return .finished
         }
-        appendRecoveryProgress(networkRecoveryRestoredMessage, to: job)
-        try await networkRecoveryPolicy.sleep(networkRecoveryPolicy.recoverySettle)
         if Task.isCancelled {
             throw CancellationError()
         }
@@ -1075,8 +1083,9 @@ private extension CodexReviewJob {
 private enum ReviewWorkerInput {
     case reviewEvent(BackendReviewEvent)
     case reviewEventsFinished(BackendReviewRun)
-    case networkSnapshot(CodexReviewNetworkSnapshot)
+    case networkSnapshot(CodexReviewNetworkSnapshot, recoveryGeneration: Int)
     case networkOutageConfirmed
+    case networkRecoverySettled(recoveryGeneration: Int)
 }
 
 private enum NetworkRestoreRestartResult {
@@ -1085,12 +1094,19 @@ private enum NetworkRestoreRestartResult {
     case recovered(BackendReviewRun)
 }
 
+private enum ReviewNetworkSnapshotEffect {
+    case none
+    case restartSettling
+}
+
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: BackendReviewRun
     private(set) var isWaitingForNetworkRecovery = false
+    private var isSettlingForNetworkRecovery = false
     private var pendingEvents: [BackendReviewEvent] = []
     private var activeEventSubscriptionRun: BackendReviewRun
     private var recoveredSinceEventSubscription = false
+    private var recoverySettleGeneration: Int?
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
 
     init(currentRun: BackendReviewRun) {
@@ -1100,11 +1116,15 @@ private struct ReviewNetworkRecoveryLoopState {
 
     mutating func markWaitingForNetworkRecovery() {
         isWaitingForNetworkRecovery = true
+        isSettlingForNetworkRecovery = false
+        recoverySettleGeneration = nil
     }
 
     mutating func markRecovered(with run: BackendReviewRun, didResubscribe: Bool) {
         currentRun = run
         isWaitingForNetworkRecovery = false
+        isSettlingForNetworkRecovery = false
+        recoverySettleGeneration = nil
         if didResubscribe {
             markEventSubscription(to: run)
         } else {
@@ -1120,6 +1140,12 @@ private struct ReviewNetworkRecoveryLoopState {
 
     func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {
         run != activeEventSubscriptionRun || recoveredSinceEventSubscription
+    }
+
+    func shouldRestartReviewAfterRecoverySettle(recoveryGeneration: Int) -> Bool {
+        isWaitingForNetworkRecovery
+            && isSettlingForNetworkRecovery
+            && recoverySettleGeneration == recoveryGeneration
     }
 
     mutating func eventsToConsume(_ event: BackendReviewEvent) -> [BackendReviewEvent] {
@@ -1140,8 +1166,24 @@ private struct ReviewNetworkRecoveryLoopState {
         return []
     }
 
-    func shouldRestartReview(after snapshot: CodexReviewNetworkSnapshot) -> Bool {
-        isWaitingForNetworkRecovery && snapshot.status == .satisfied
+    mutating func networkSnapshotEffect(
+        _ snapshot: CodexReviewNetworkSnapshot,
+        recoveryGeneration: Int
+    ) -> ReviewNetworkSnapshotEffect {
+        guard isWaitingForNetworkRecovery else {
+            return .none
+        }
+        guard snapshot.status == .satisfied else {
+            isSettlingForNetworkRecovery = false
+            recoverySettleGeneration = nil
+            return .none
+        }
+        guard isSettlingForNetworkRecovery == false else {
+            return .none
+        }
+        isSettlingForNetworkRecovery = true
+        recoverySettleGeneration = recoveryGeneration
+        return .restartSettling
     }
 }
 
@@ -1259,6 +1301,8 @@ private actor ReviewNetworkSignalCoordinator {
     private let continuation: AsyncThrowingStream<ReviewWorkerInput, Error>.Continuation
     private var outageTask: Task<Void, Never>?
     private var outageGeneration = 0
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryGeneration = 0
 
     init(
         policy: CodexReviewNetworkRecoveryPolicy,
@@ -1277,9 +1321,16 @@ private actor ReviewNetworkSignalCoordinator {
             outageGeneration += 1
             outageTask?.cancel()
             outageTask = nil
-            continuation.yield(.networkSnapshot(snapshot))
+            recoveryGeneration += 1
+            let recoveryGeneration = recoveryGeneration
+            continuation.yield(.networkSnapshot(snapshot, recoveryGeneration: recoveryGeneration))
+            scheduleRecoveryConfirmationIfNeeded(generation: recoveryGeneration)
         case .unsatisfied, .requiresConnection:
-            continuation.yield(.networkSnapshot(snapshot))
+            recoveryGeneration += 1
+            let recoveryGeneration = recoveryGeneration
+            recoveryTask?.cancel()
+            recoveryTask = nil
+            continuation.yield(.networkSnapshot(snapshot, recoveryGeneration: recoveryGeneration))
             scheduleOutageConfirmationIfNeeded()
         }
     }
@@ -1287,6 +1338,8 @@ private actor ReviewNetworkSignalCoordinator {
     func cancel() {
         outageTask?.cancel()
         outageTask = nil
+        recoveryTask?.cancel()
+        recoveryTask = nil
     }
 
     private func scheduleOutageConfirmationIfNeeded() {
@@ -1315,5 +1368,32 @@ private actor ReviewNetworkSignalCoordinator {
             return
         }
         continuation.yield(.networkOutageConfirmed)
+    }
+
+    private func scheduleRecoveryConfirmationIfNeeded(generation: Int) {
+        guard recoveryTask == nil else {
+            return
+        }
+        let policy = policy
+        recoveryTask = Task {
+            do {
+                try await policy.sleep(policy.recoverySettle)
+            } catch {
+                return
+            }
+            await self.confirmRecoveryIfCurrent(generation: generation)
+        }
+    }
+
+    private func confirmRecoveryIfCurrent(generation: Int) async {
+        guard generation == recoveryGeneration else {
+            return
+        }
+        recoveryTask = nil
+        let latest = await tracker.latestSnapshot()
+        guard latest.status == .satisfied else {
+            return
+        }
+        continuation.yield(.networkRecoverySettled(recoveryGeneration: generation))
     }
 }
