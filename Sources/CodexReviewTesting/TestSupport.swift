@@ -880,14 +880,13 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
             maxActiveByMethod[request.method] ?? 0,
             activeByMethod[request.method] ?? 0
         )
+        let queuedResponse = dequeueResponse(for: request.method)
         if let gate = gatesByMethod[request.method] {
             await gate.wait()
         }
         activeByMethod[request.method, default: 1] -= 1
-        if var queued = responses[request.method], queued.isEmpty == false {
-            let response = queued.removeFirst()
-            responses[request.method] = queued
-            switch response {
+        if let queuedResponse {
+            switch queuedResponse {
             case .success(let data):
                 return data
             case .failure(let error):
@@ -895,6 +894,15 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
             }
         }
         return try JSONEncoder().encode(EmptyResponse())
+    }
+
+    private func dequeueResponse(for method: String) -> QueuedResponse? {
+        guard var queued = responses[method], queued.isEmpty == false else {
+            return nil
+        }
+        let response = queued.removeFirst()
+        responses[method] = queued
+        return response
     }
 
     package func notify(_ notification: JSONRPCNotification) async throws {

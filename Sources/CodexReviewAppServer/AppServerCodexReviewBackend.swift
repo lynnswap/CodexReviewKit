@@ -669,6 +669,68 @@ private struct AppServerRoutedReviewNotification: Sendable {
     var payload: TurnNotificationPayload
 }
 
+private struct AppServerReviewRecoveryInterruptionState {
+    private var interruptedTurnIDs: Set<String> = []
+    private var interruptionByTurnID: [String: AppServerReviewInterruption] = [:]
+    private var unknownTurnInterruption: AppServerReviewInterruption?
+    private var didInterruptUnknownTurn = false
+
+    mutating func noteRunUpdated() {
+        didInterruptUnknownTurn = false
+    }
+
+    mutating func begin(turnID: String?) -> Bool {
+        if let turnID = turnID?.nilIfEmpty {
+            return interruptedTurnIDs.insert(turnID).inserted
+        }
+        guard didInterruptUnknownTurn == false else {
+            return false
+        }
+        didInterruptUnknownTurn = true
+        return true
+    }
+
+    mutating func cancel(turnID: String?) {
+        if let turnID = turnID?.nilIfEmpty {
+            interruptedTurnIDs.remove(turnID)
+            interruptionByTurnID.removeValue(forKey: turnID)
+        } else {
+            didInterruptUnknownTurn = false
+            unknownTurnInterruption = nil
+        }
+    }
+
+    mutating func record(
+        requestedTurnID: String?,
+        interruption: AppServerReviewInterruption
+    ) {
+        if let requestedTurnID = requestedTurnID?.nilIfEmpty {
+            interruptedTurnIDs.insert(requestedTurnID)
+            interruptionByTurnID[requestedTurnID] = interruption
+        } else {
+            unknownTurnInterruption = interruption
+        }
+        if let interruptedTurnID = interruption.turnID.nilIfEmpty {
+            interruptedTurnIDs.insert(interruptedTurnID)
+            interruptionByTurnID[interruptedTurnID] = interruption
+        }
+    }
+
+    func interruption(turnID: String?) -> AppServerReviewInterruption? {
+        if let turnID = turnID?.nilIfEmpty {
+            return interruptionByTurnID[turnID]
+        }
+        return unknownTurnInterruption
+    }
+
+    func matchesNotification(turnID: String?) -> Bool {
+        guard let turnID else {
+            return didInterruptUnknownTurn
+        }
+        return interruptedTurnIDs.contains(turnID)
+    }
+}
+
 private struct DecodedReviewNotification {
     var events: [BackendReviewEvent]
     var turnID: String?
@@ -777,10 +839,7 @@ private actor AppServerReviewEventSession {
     private var streamedLogFlushTask: Task<Void, Never>?
     private var awaitingReviewExit = false
     private var cancellationRequestedMessage: String?
-    private var networkRecoveryInterruptedTurnIDs: Set<String> = []
-    private var networkRecoveryInterruptionByTurnID: [String: AppServerReviewInterruption] = [:]
-    private var unknownTurnNetworkRecoveryInterruption: AppServerReviewInterruption?
-    private var interruptedUnknownTurnForNetworkRecovery = false
+    private var recoveryInterruptionState = AppServerReviewRecoveryInterruptionState()
     private var buffersRecoveryRestartNotifications = false
     private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
@@ -803,7 +862,7 @@ private actor AppServerReviewEventSession {
             trackedTurnIDs.insert(turnID)
         }
         noteReviewThreadIDForCleanup(run.reviewThreadID)
-        interruptedUnknownTurnForNetworkRecovery = false
+        recoveryInterruptionState.noteRunUpdated()
     }
 
     func beginRecoveryRestartNotificationBuffering() {
@@ -843,47 +902,25 @@ private actor AppServerReviewEventSession {
     }
 
     func beginNetworkRecoveryInterruption(turnID: String?) -> Bool {
-        if let turnID = turnID?.nilIfEmpty {
-            return networkRecoveryInterruptedTurnIDs.insert(turnID).inserted
-        }
-        guard interruptedUnknownTurnForNetworkRecovery == false else {
-            return false
-        }
-        interruptedUnknownTurnForNetworkRecovery = true
-        return true
+        recoveryInterruptionState.begin(turnID: turnID)
     }
 
     func cancelNetworkRecoveryInterruption(turnID: String?) {
-        if let turnID = turnID?.nilIfEmpty {
-            networkRecoveryInterruptedTurnIDs.remove(turnID)
-            networkRecoveryInterruptionByTurnID.removeValue(forKey: turnID)
-        } else {
-            interruptedUnknownTurnForNetworkRecovery = false
-            unknownTurnNetworkRecoveryInterruption = nil
-        }
+        recoveryInterruptionState.cancel(turnID: turnID)
     }
 
     func recordNetworkRecoveryInterruption(
         requestedTurnID: String?,
         interruption: AppServerReviewInterruption
     ) {
-        if let requestedTurnID = requestedTurnID?.nilIfEmpty {
-            networkRecoveryInterruptedTurnIDs.insert(requestedTurnID)
-            networkRecoveryInterruptionByTurnID[requestedTurnID] = interruption
-        } else {
-            unknownTurnNetworkRecoveryInterruption = interruption
-        }
-        if let interruptedTurnID = interruption.turnID.nilIfEmpty {
-            networkRecoveryInterruptedTurnIDs.insert(interruptedTurnID)
-            networkRecoveryInterruptionByTurnID[interruptedTurnID] = interruption
-        }
+        recoveryInterruptionState.record(
+            requestedTurnID: requestedTurnID,
+            interruption: interruption
+        )
     }
 
     func networkRecoveryInterruption(turnID: String?) -> AppServerReviewInterruption? {
-        if let turnID = turnID?.nilIfEmpty {
-            return networkRecoveryInterruptionByTurnID[turnID]
-        }
-        return unknownTurnNetworkRecoveryInterruption
+        recoveryInterruptionState.interruption(turnID: turnID)
     }
 
     func events() -> AsyncThrowingStream<BackendReviewEvent, Error> {
@@ -1221,9 +1258,7 @@ private actor AppServerReviewEventSession {
         decoded: DecodedReviewNotification
     ) -> Bool {
         let turnID = decoded.turnID ?? notification.payload.resolvedTurnID
-        let matchesKnownTurn = turnID.map(networkRecoveryInterruptedTurnIDs.contains) ?? false
-        let matchesUnknownTurn = turnID == nil && interruptedUnknownTurnForNetworkRecovery
-        guard matchesKnownTurn || matchesUnknownTurn else {
+        guard recoveryInterruptionState.matchesNotification(turnID: turnID) else {
             return false
         }
         let isTerminalNotification = decoded.events.contains(where: \.isTerminal)
