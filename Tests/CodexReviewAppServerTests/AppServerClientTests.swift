@@ -1725,10 +1725,10 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
-        _ = try await backend.recoverReview(
+        let recoveredRun = try await backend.recoverReview(
             run,
             request: .init(
                 jobID: "job-1",
@@ -1750,6 +1750,8 @@ struct AppServerClientTests {
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
         )
 
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var iterator = recoveredEvents.makeAsyncIterator()
         #expect(try await iterator.next() == .started(
             turnID: "turn-2",
             reviewThreadID: "thread-1",
@@ -1770,8 +1772,8 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
         try await backend.interruptReviewForRecovery(
             run,
@@ -1808,6 +1810,8 @@ struct AppServerClientTests {
             "thread/rollback",
             "review/start",
         ])
+        let recoveredEvents = await backend.events(for: recovered)
+        var iterator = recoveredEvents.makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
@@ -2048,8 +2052,8 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.recoverReview(
             run,
@@ -2075,6 +2079,8 @@ struct AppServerClientTests {
         let recoveredRun = try await recovered
 
         #expect(recoveredRun.turnID == "turn-2")
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var iterator = recoveredEvents.makeAsyncIterator()
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
@@ -2093,8 +2099,8 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.recoverReview(
             run,
@@ -2126,6 +2132,8 @@ struct AppServerClientTests {
         await interruptGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var iterator = recoveredEvents.makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -2159,8 +2167,8 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.recoverReview(
             run,
@@ -2193,6 +2201,8 @@ struct AppServerClientTests {
         await rollbackGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var iterator = recoveredEvents.makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -2227,8 +2237,8 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
-        var iterator = events.makeAsyncIterator()
+        let initialEvents = await backend.events(for: run)
+        defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.recoverReview(
             run,
@@ -2257,6 +2267,8 @@ struct AppServerClientTests {
         await rollbackGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var iterator = recoveredEvents.makeAsyncIterator()
         let ignoredStaleNotification = await waitUntil {
             await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
         }
@@ -2351,12 +2363,18 @@ struct AppServerClientTests {
         let recoveredRun = try await recovered
 
         #expect(recoveredRun.turnID == "turn-2")
-        #expect(try await iterator.next() == .started(turnID: "turn-2", reviewThreadID: "thread-1", model: nil))
+        let recoveredEvents = await backend.events(for: recoveredRun)
+        var recoveredIterator = recoveredEvents.makeAsyncIterator()
+        #expect(try await recoveredIterator.next() == .started(
+            turnID: "turn-2",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
         try await transport.emitServerNotification(
             method: "turn/completed",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
         )
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await recoveredIterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
     @Test func backendCleanupDeletesAllRecoveryReviewThreads() async throws {

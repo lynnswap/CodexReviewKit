@@ -1156,7 +1156,8 @@ private struct ReviewNetworkRecoveryLoopState {
     mutating func eventsToConsume(_ reviewEvent: ReviewWorkerReviewEvent) -> [BackendReviewEvent] {
         if let eventSubscriptionCutover {
             if reviewEvent.subscriptionRun == eventSubscriptionCutover.previousRun {
-                return recoveryWindowEventsToConsume(reviewEvent.event)
+                pendingEvents.removeAll(keepingCapacity: true)
+                return []
             }
             if reviewEvent.subscriptionRun == activeEventSubscriptionRun {
                 self.eventSubscriptionCutover = nil

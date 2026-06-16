@@ -362,7 +362,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             turnThreadID: appServerTurnThreadID(for: recoveredRun),
             turnID: review.turnID
         )
-        await session.finishRecoveryRestartNotificationBuffering()
         await drainUnmatchedReviewNotifications(for: recoveredRun, to: session)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
@@ -1143,8 +1142,14 @@ private actor AppServerReviewEventSession {
             continuation.finish()
             return
         }
+        let previousContinuation = self.continuation
+        let previousSubscriptionID = activeStreamSubscriptionID
         self.continuation = continuation
         self.activeStreamSubscriptionID = subscriptionID
+        if previousSubscriptionID != nil,
+           previousSubscriptionID != subscriptionID {
+            previousContinuation?.finish()
+        }
         let notifications = bufferedNotifications
         bufferedNotifications.removeAll(keepingCapacity: true)
         for notification in notifications {
@@ -1153,6 +1158,7 @@ private actor AppServerReviewEventSession {
             }
             await process(notification)
         }
+        await finishRecoveryRestartNotificationBuffering()
     }
 
     func detach(subscriptionID: Int) {

@@ -1020,6 +1020,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             await settleGate.open()
             try await backend.waitForRecoverReview(timeout: .seconds(2))
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1079,6 +1080,7 @@ struct CodexReviewStoreCommandTests {
             _ = try await running
             networkMonitor.yield(.satisfied())
             try await backend.waitForRecoverReview(timeout: .seconds(2))
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
 
             let final = try await store.awaitReview(sessionID: "session-1", jobID: "job-1", timeout: .seconds(1))
@@ -1154,6 +1156,7 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(recoveredFromRuns.last?.turnID == "turn-actual")
 
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
 
@@ -1203,6 +1206,7 @@ struct CodexReviewStoreCommandTests {
                 }
                 return read.core.run.turnID == "turn-2"
             })
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1218,7 +1222,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func networkRecoveryPreservesEventsEmittedWhileRestarting() async throws {
+    @Test func networkRecoveryIgnoresStaleCompletionAfterRecoveredSubscriptionStarts() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -1233,8 +1237,6 @@ struct CodexReviewStoreCommandTests {
         )
         let backend = FakeCodexReviewBackend(nextRun: initialRun)
         await backend.setNextRecoveredRun(recoveredRun)
-        let recoverGate = AsyncGate()
-        await backend.holdRecoverReview(with: recoverGate)
         let networkMonitor = ManualCodexReviewNetworkMonitor()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1253,13 +1255,15 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
             networkMonitor.yield(.satisfied())
             try await backend.waitForRecoverReview(timeout: .seconds(2))
-            await backend.yield(.completed(summary: "Succeeded.", result: "queued recovered review"), for: recoveredRun)
-            await recoverGate.open()
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "stale review"), for: initialRun)
+            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
 
             let read = try await result
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
-            #expect(read.core.output.lastAgentMessage == "queued recovered review")
+            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -1300,17 +1304,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForRecoverReview(timeout: .seconds(2))
             await backend.yield(.cancelled("Network lost"), for: initialRun)
             await recoverGate.open()
-            let resubscribed = await waitUntil {
-                let commands = await backend.recordedCommands()
-                return commands.filter {
-                    if case .events = $0 {
-                        true
-                    } else {
-                        false
-                    }
-                }.count >= 2
-            }
-            try #require(resubscribed)
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1355,17 +1349,7 @@ struct CodexReviewStoreCommandTests {
             await backend.finishEvents(for: initialRun)
             networkMonitor.yield(.satisfied())
             try await backend.waitForRecoverReview(timeout: .seconds(2))
-            let resubscribed = await waitUntil {
-                let commands = await backend.recordedCommands()
-                return commands.filter {
-                    if case .events = $0 {
-                        true
-                    } else {
-                        false
-                    }
-                }.count >= 2
-            }
-            try #require(resubscribed)
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -2053,6 +2037,17 @@ private func waitUntil(
         try? await Task.sleep(for: .milliseconds(10))
     }
     return true
+}
+
+@MainActor
+private func waitForEventStreamRegistration(
+    backend: FakeCodexReviewBackend,
+    run: BackendReviewRun,
+    timeout: Duration = .seconds(2)
+) async -> Bool {
+    await waitUntil(timeout: timeout) {
+        await backend.recordedCommands().contains(.events(run))
+    }
 }
 
 @MainActor
