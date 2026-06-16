@@ -44,11 +44,11 @@ private func runRuntimeShutdownCleanup(
     operation: @escaping @Sendable () async -> Void
 ) async -> Bool {
     let race = RuntimeShutdownCleanupRace()
-    Task {
+    let operationTask = Task {
         await operation()
         await race.finish(true)
     }
-    Task {
+    let timeoutTask = Task {
         do {
             try await Task.sleep(for: timeout)
         } catch {
@@ -56,7 +56,13 @@ private func runRuntimeShutdownCleanup(
         }
         await race.finish(false)
     }
-    return await race.wait()
+    let result = await race.wait()
+    if result {
+        timeoutTask.cancel()
+    } else {
+        operationTask.cancel()
+    }
+    return result
 }
 
 private struct PendingLoginRuntimeCleanup {
