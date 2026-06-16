@@ -461,10 +461,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         logger.info("Stopping review runtime")
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
-            store.cancelActiveReviewsLocallyForRuntimeStop(reason: reason)
+            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+                reason: reason,
+                cancelWorkers: false
+            )
             let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
                 await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
             }
+            store.cancelReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             if didCleanUp == false {
                 logger.warning("Timed out cleaning active reviews before stopping runtime")
             }
@@ -1140,10 +1144,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: message)
-            store.cancelActiveReviewsLocallyForRuntimeStop(reason: reason)
+            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+                reason: reason,
+                cancelWorkers: false
+            )
             let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
                 await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
             }
+            store.cancelReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             if didCleanUp == false {
                 logger.warning("Timed out cleaning active reviews after runtime failure")
             }

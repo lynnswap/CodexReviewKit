@@ -94,14 +94,16 @@ extension CodexReviewStore {
         }
     }
 
+    @discardableResult
     package func cancelActiveReviewsLocallyForRuntimeStop(
-        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
-    ) {
+        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
+        cancelWorkers: Bool = true
+    ) -> [String] {
         let activeJobIDs = orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
         guard activeJobIDs.isEmpty == false else {
-            return
+            return []
         }
 
         for jobID in activeJobIDs {
@@ -112,6 +114,15 @@ extension CodexReviewStore {
                     cancellation: reason
                 )
             }
+            if cancelWorkers {
+                reviewWorkerTasks[jobID]?.cancel()
+            }
+        }
+        return activeJobIDs
+    }
+
+    package func cancelReviewWorkersForRuntimeStop(jobIDs: [String]) {
+        for jobID in jobIDs {
             reviewWorkerTasks[jobID]?.cancel()
         }
     }
