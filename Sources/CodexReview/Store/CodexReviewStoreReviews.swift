@@ -618,7 +618,8 @@ extension CodexReviewStore {
             case .networkOutageConfirmed:
                 guard recoveryState.isWaitingForNetworkRecovery == false,
                       job.isTerminal == false,
-                      job.cancellationRequested == false
+                      job.cancellationRequested == false,
+                      await inputs.networkStatusTracker.currentStatus() != .satisfied
                 else {
                     continue
                 }
@@ -1148,6 +1149,7 @@ private actor ReviewNetworkSignalCoordinator {
     private let tracker: ReviewNetworkStatusTracker
     private let continuation: AsyncThrowingStream<ReviewWorkerInput, Error>.Continuation
     private var outageTask: Task<Void, Never>?
+    private var outageGeneration = 0
 
     init(
         policy: CodexReviewNetworkRecoveryPolicy,
@@ -1161,12 +1163,14 @@ private actor ReviewNetworkSignalCoordinator {
 
     func observe(_ snapshot: CodexReviewNetworkSnapshot) async {
         await tracker.update(snapshot)
-        continuation.yield(.networkSnapshot(snapshot))
         switch snapshot.status {
         case .satisfied:
+            outageGeneration += 1
             outageTask?.cancel()
             outageTask = nil
+            continuation.yield(.networkSnapshot(snapshot))
         case .unsatisfied, .requiresConnection:
+            continuation.yield(.networkSnapshot(snapshot))
             scheduleOutageConfirmationIfNeeded()
         }
     }
@@ -1181,19 +1185,26 @@ private actor ReviewNetworkSignalCoordinator {
             return
         }
         let policy = policy
-        let tracker = tracker
-        let continuation = continuation
+        outageGeneration += 1
+        let generation = outageGeneration
         outageTask = Task {
             do {
                 try await policy.sleep(policy.outageDebounce)
             } catch {
                 return
             }
-            let latest = await tracker.latestSnapshot()
-            guard latest.status != .satisfied else {
-                return
-            }
-            continuation.yield(.networkOutageConfirmed)
+            await self.confirmOutageIfCurrent(generation: generation)
         }
+    }
+
+    private func confirmOutageIfCurrent(generation: Int) async {
+        guard generation == outageGeneration else {
+            return
+        }
+        let latest = await tracker.latestSnapshot()
+        guard latest.status != .satisfied else {
+            return
+        }
+        continuation.yield(.networkOutageConfirmed)
     }
 }
