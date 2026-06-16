@@ -139,6 +139,16 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func interruptReview(_: BackendReviewRun, reason _: BackendCancellationReason) async throws {}
 
+    package func interruptReviewForRecovery(_: BackendReviewRun, reason _: BackendCancellationReason) async throws {}
+
+    package func recoverReview(
+        _: BackendReviewRun,
+        request _: BackendReviewStart,
+        reason _: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        throw ReviewError.io(Self.previewUnavailableMessage)
+    }
+
     package func cleanupReview(_: BackendReviewRun) async {}
 
     package func events(for _: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {

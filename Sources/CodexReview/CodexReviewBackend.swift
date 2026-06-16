@@ -12,6 +12,12 @@ package protocol CodexReviewBackend: Sendable {
 
     func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun
     func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws
+    func interruptReviewForRecovery(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws
+    func recoverReview(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun
     func cleanupReview(_ run: BackendReviewRun) async
     func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error>
 }

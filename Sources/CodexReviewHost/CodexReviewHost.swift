@@ -244,6 +244,21 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.interruptReview(run, reason: reason)
     }
 
+    func interruptReviewForRecovery(
+        _ run: BackendReviewRun,
+        reason: BackendCancellationReason
+    ) async throws {
+        try await backend.interruptReviewForRecovery(run, reason: reason)
+    }
+
+    func recoverReview(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        try await backend.recoverReview(run, request: request, reason: reason)
+    }
+
     func cleanupReview(_ run: BackendReviewRun) async {
         await backend.cleanupReview(run)
     }

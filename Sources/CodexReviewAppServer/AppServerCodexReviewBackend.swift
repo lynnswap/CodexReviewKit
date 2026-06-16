@@ -218,7 +218,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         .init(
             cwd: request.request.cwd,
             model: request.model,
-            ephemeral: true,
+            ephemeral: false,
             approvalPolicy: "never",
             permissions: permissions,
             sessionStartSource: .startup,
@@ -230,7 +230,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         .init(
             cwd: request.request.cwd,
             model: request.model,
-            ephemeral: true,
+            ephemeral: false,
             approvalPolicy: "never",
             sandbox: "danger-full-access",
             sessionStartSource: .startup,
@@ -256,31 +256,75 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
         _ = try await client.initialize()
-        let session = reviewEventSession(forThreadID: run.threadID)
-        await session?.requestCancellation(message: reason.message)
+        let session = await reviewEventSession(for: run)
+        await session.requestCancellation(message: reason.message)
         do {
-            if let control = controlsByThreadID[run.threadID] {
-                if try await control.interrupt() {
-                    await finishReviewEventStream(
-                        threadID: run.threadID,
-                        cancellationMessage: reason.message,
-                        buffersMissingContinuation: true
-                    )
-                    return
-                }
-            }
-            let _: EmptyResponse = try await client.send(TurnInterruptRequest(
-                params: .init(threadID: run.threadID, turnID: run.turnID ?? "")
-            ))
+            try await sendTurnInterrupt(for: run)
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
                 buffersMissingContinuation: true
             )
         } catch {
-            await session?.clearCancellationRequest()
+            await session.clearCancellationRequest()
             throw error
         }
+    }
+
+    package func interruptReviewForRecovery(_ run: BackendReviewRun, reason _: BackendCancellationReason) async throws {
+        _ = try await client.initialize()
+        let session = await reviewEventSession(for: run)
+        guard await session.beginNetworkRecoveryInterruption(turnID: run.turnID) else {
+            return
+        }
+        do {
+            try await sendTurnInterrupt(for: run)
+        } catch {
+            await session.cancelNetworkRecoveryInterruption(turnID: run.turnID)
+            throw error
+        }
+    }
+
+    package func recoverReview(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        _ = try await client.initialize()
+        await ensureNotificationRouterStarted()
+        try await interruptReviewForRecovery(run, reason: reason)
+
+        let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
+            params: .init(threadID: run.threadID, numTurns: 1)
+        ))
+
+        let session = await reviewEventSession(for: run)
+        let review: ReviewStartResponse
+        reviewStartRequestsInFlight += 1
+        do {
+            review = try await client.send(ReviewStartRequest(
+                params: .init(threadID: run.threadID, target: request.request.target)
+            ))
+        } catch {
+            reviewStartRequestsInFlight -= 1
+            discardUnmatchedReviewNotificationsIfIdle()
+            throw error
+        }
+
+        let recoveredRun = BackendReviewRun(
+            threadID: run.threadID,
+            turnID: review.turnID,
+            reviewThreadID: review.reviewThreadID ?? run.reviewThreadID ?? run.threadID,
+            model: run.model ?? request.model
+        )
+        await session.updateRun(recoveredRun)
+        registerReviewEventSession(session, for: recoveredRun)
+        controlsByThreadID[run.threadID]?.recordReviewStarted(threadID: run.threadID, turnID: review.turnID)
+        await drainUnmatchedReviewNotifications(for: recoveredRun, to: session)
+        reviewStartRequestsInFlight -= 1
+        discardUnmatchedReviewNotificationsIfIdle()
+
+        return recoveredRun
     }
 
     package func cleanupReview(_ run: BackendReviewRun) async {
@@ -301,6 +345,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let _: ThreadUnsubscribeResponse? = try? await client.send(ThreadUnsubscribeRequest(
             params: .init(threadID: run.threadID)
         ))
+        for threadID in cleanupThreadIDs(for: run) {
+            let _: EmptyResponse? = try? await client.send(ThreadDeleteRequest(
+                params: .init(threadID: threadID)
+            ))
+        }
     }
 
     package func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
@@ -428,6 +477,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             cancellationMessage: cancellationMessage,
             buffersMissingContinuation: buffersMissingContinuation
         )
+    }
+
+    private func sendTurnInterrupt(for run: BackendReviewRun) async throws {
+        if let control = controlsByThreadID[run.threadID],
+           try await control.interrupt() {
+            return
+        }
+        let _: EmptyResponse = try await client.send(TurnInterruptRequest(
+            params: .init(threadID: run.threadID, turnID: run.turnID ?? "")
+        ))
+    }
+
+    private func cleanupThreadIDs(for run: BackendReviewRun) -> [String] {
+        var threadIDs: [String] = []
+        if let reviewThreadID = run.reviewThreadID,
+           reviewThreadID != run.threadID {
+            threadIDs.append(reviewThreadID)
+        }
+        threadIDs.append(run.threadID)
+        return threadIDs
     }
 
     private func ensureNotificationRouterStarted() async {
@@ -678,6 +747,8 @@ private actor AppServerReviewEventSession {
     private var streamedLogFlushTask: Task<Void, Never>?
     private var awaitingReviewExit = false
     private var cancellationRequestedMessage: String?
+    private var networkRecoveryInterruptedTurnIDs: Set<String> = []
+    private var interruptedUnknownTurnForNetworkRecovery = false
     private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
     private var finished = false
@@ -694,6 +765,7 @@ private actor AppServerReviewEventSession {
         if let turnID = run.turnID {
             trackedTurnIDs.insert(turnID)
         }
+        interruptedUnknownTurnForNetworkRecovery = false
     }
 
     func requestCancellation(message: String) {
@@ -702,6 +774,25 @@ private actor AppServerReviewEventSession {
 
     func clearCancellationRequest() {
         cancellationRequestedMessage = nil
+    }
+
+    func beginNetworkRecoveryInterruption(turnID: String?) -> Bool {
+        if let turnID = turnID?.nilIfEmpty {
+            return networkRecoveryInterruptedTurnIDs.insert(turnID).inserted
+        }
+        guard interruptedUnknownTurnForNetworkRecovery == false else {
+            return false
+        }
+        interruptedUnknownTurnForNetworkRecovery = true
+        return true
+    }
+
+    func cancelNetworkRecoveryInterruption(turnID: String?) {
+        if let turnID = turnID?.nilIfEmpty {
+            networkRecoveryInterruptedTurnIDs.remove(turnID)
+        } else {
+            interruptedUnknownTurnForNetworkRecovery = false
+        }
     }
 
     func events() -> AsyncThrowingStream<BackendReviewEvent, Error> {
@@ -875,6 +966,12 @@ private actor AppServerReviewEventSession {
         if decoded.startsReviewMode {
             awaitingReviewExit = true
         }
+        if suppressNetworkRecoveryInterruptedTerminal(
+            notification: notification,
+            decoded: decoded
+        ) {
+            return
+        }
 
         let shouldEmitNotification: Bool
         if decoded.events.count == 1,
@@ -1017,6 +1114,39 @@ private actor AppServerReviewEventSession {
                 return
             }
         }
+    }
+
+    private func suppressNetworkRecoveryInterruptedTerminal(
+        notification: AppServerRoutedReviewNotification,
+        decoded: DecodedReviewNotification
+    ) -> Bool {
+        let turnID = decoded.turnID ?? notification.payload.resolvedTurnID
+        let matchesKnownTurn = turnID.map(networkRecoveryInterruptedTurnIDs.contains) ?? false
+        let matchesUnknownTurn = turnID == nil && interruptedUnknownTurnForNetworkRecovery
+        guard matchesKnownTurn || matchesUnknownTurn else {
+            return false
+        }
+        let isTerminalNotification = decoded.events.contains(where: \.isTerminal)
+            || decoded.finishesReviewMode
+            || notification.method == "turn/completed"
+            || notification.method == "turn/cancelled"
+        guard isTerminalNotification else {
+            return false
+        }
+
+        if let turnID {
+            networkRecoveryInterruptedTurnIDs.remove(turnID)
+        } else {
+            interruptedUnknownTurnForNetworkRecovery = false
+        }
+        awaitingReviewExit = false
+        cancellationRequestedMessage = nil
+        completionCoordinator.cancelPendingCompletion()
+        commandLifecycleByItemID.removeAll(keepingCapacity: true)
+        _ = drainPendingStreamedLogEvents()
+        cancelPendingStreamedLogFlush()
+        metrics.ignored += 1
+        return true
     }
 
     private func emit(

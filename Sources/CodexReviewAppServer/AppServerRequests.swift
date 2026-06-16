@@ -326,6 +326,61 @@ package struct TurnInterruptRequest: AppServerRequest {
     }
 }
 
+package struct ThreadRollbackParams: Codable, Equatable, Sendable {
+    package var threadID: String
+    package var numTurns: Int
+
+    package enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case numTurns
+    }
+
+    package init(threadID: String, numTurns: Int) {
+        self.threadID = threadID
+        self.numTurns = numTurns
+    }
+}
+
+package struct ThreadRollbackRequest: AppServerRequest {
+    package typealias Response = EmptyResponse
+
+    package static let method = "thread/rollback"
+    package var params: ThreadRollbackParams
+    package var scope: AppServerRequestScope? {
+        .thread(params.threadID)
+    }
+
+    package init(params: ThreadRollbackParams) {
+        self.params = params
+    }
+}
+
+package struct ThreadDeleteParams: Codable, Equatable, Sendable {
+    package var threadID: String
+
+    package enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+    }
+
+    package init(threadID: String) {
+        self.threadID = threadID
+    }
+}
+
+package struct ThreadDeleteRequest: AppServerRequest {
+    package typealias Response = EmptyResponse
+
+    package static let method = "thread/delete"
+    package var params: ThreadDeleteParams
+    package var scope: AppServerRequestScope? {
+        .thread(params.threadID)
+    }
+
+    package init(params: ThreadDeleteParams) {
+        self.params = params
+    }
+}
+
 package struct ThreadUnsubscribeParams: Codable, Equatable, Sendable {
     package var threadID: String
 

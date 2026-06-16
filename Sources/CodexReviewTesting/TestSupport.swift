@@ -63,6 +63,50 @@ package actor ManualClock {
     }
 }
 
+package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: CodexReviewNetworkSnapshot?
+    private var continuations: [UUID: AsyncStream<CodexReviewNetworkSnapshot>.Continuation] = [:]
+
+    package init(initialSnapshot: CodexReviewNetworkSnapshot = .satisfied()) {
+        self.current = initialSnapshot
+    }
+
+    package func snapshots() -> AsyncStream<CodexReviewNetworkSnapshot> {
+        let continuationID = UUID()
+        return AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            let snapshot: CodexReviewNetworkSnapshot?
+            lock.lock()
+            continuations[continuationID] = continuation
+            snapshot = current
+            lock.unlock()
+            if let snapshot {
+                continuation.yield(snapshot)
+            }
+            continuation.onTermination = { [weak self] _ in
+                self?.removeContinuation(id: continuationID)
+            }
+        }
+    }
+
+    package func yield(_ snapshot: CodexReviewNetworkSnapshot) {
+        let continuations: [AsyncStream<CodexReviewNetworkSnapshot>.Continuation]
+        lock.lock()
+        current = snapshot
+        continuations = Array(self.continuations.values)
+        lock.unlock()
+        for continuation in continuations {
+            continuation.yield(snapshot)
+        }
+    }
+
+    private func removeContinuation(id: UUID) {
+        lock.lock()
+        continuations.removeValue(forKey: id)
+        lock.unlock()
+    }
+}
+
 package struct FakeCodexReviewBackendError: LocalizedError, Sendable {
     package var message: String
 
@@ -118,6 +162,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case logout(BackendAccountID)
         case startReview(BackendReviewStart)
         case interruptReview(BackendReviewRun, BackendCancellationReason)
+        case interruptReviewForRecovery(BackendReviewRun, BackendCancellationReason)
+        case recoverReview(BackendReviewRun, BackendReviewStart, BackendCancellationReason)
         case cleanupReview(BackendReviewRun)
         case events(BackendReviewRun)
     }
@@ -126,11 +172,16 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var auth: BackendAuthSnapshot
     private var commands: [Command] = []
     private var nextRun: BackendReviewRun
+    private var nextRecoveredRun: BackendReviewRun?
     private var interruptFailureMessage: String?
+    private var recoveryFailureMessage: String?
     private var interruptReviewGate: AsyncGate?
     private var interruptReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var interruptReviewForRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var startReviewGate: AsyncGate?
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var recoverReviewGate: AsyncGate?
+    private var recoverReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var eventContinuations: [String: EventContinuation] = [:]
     private var eventRegistrationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var terminatedEventContinuationIDs: Set<UUID> = []
@@ -162,8 +213,20 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         interruptFailureMessage = message
     }
 
+    package func failRecovery(message: String) {
+        recoveryFailureMessage = message
+    }
+
     package func holdInterruptReview(with gate: AsyncGate) {
         interruptReviewGate = gate
+    }
+
+    package func holdRecoverReview(with gate: AsyncGate) {
+        recoverReviewGate = gate
+    }
+
+    package func setNextRecoveredRun(_ run: BackendReviewRun) {
+        nextRecoveredRun = run
     }
 
     package func waitForStartReview() async {
@@ -242,6 +305,82 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    package func waitForInterruptReviewForRecovery() async {
+        if commands.contains(where: {
+            if case .interruptReviewForRecovery = $0 {
+                true
+            } else {
+                false
+            }
+        }) {
+            return
+        }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if commands.contains(where: {
+                    if case .interruptReviewForRecovery = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    continuation.resume()
+                } else {
+                    interruptReviewForRecoveryWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelInterruptReviewForRecoveryWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForInterruptReviewForRecovery(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "interruptReviewForRecovery", timeout: timeout) {
+            await self.waitForInterruptReviewForRecovery()
+        }
+    }
+
+    package func waitForRecoverReview() async {
+        if commands.contains(where: {
+            if case .recoverReview = $0 {
+                true
+            } else {
+                false
+            }
+        }) {
+            return
+        }
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if commands.contains(where: {
+                    if case .recoverReview = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    continuation.resume()
+                } else {
+                    recoverReviewWaiters[waiterID] = continuation
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelRecoverReviewWaiter(id: waiterID)
+            }
+        }
+    }
+
+    package func waitForRecoverReview(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "recoverReview", timeout: timeout) {
+            await self.waitForRecoverReview()
+        }
+    }
+
     package func readSettings() async throws -> BackendSettingsSnapshot {
         commands.append(.readSettings)
         return settings
@@ -314,6 +453,49 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    package func interruptReviewForRecovery(
+        _ run: BackendReviewRun,
+        reason: BackendCancellationReason
+    ) async throws {
+        commands.append(.interruptReviewForRecovery(run, reason))
+        let waiters = Array(interruptReviewForRecoveryWaiters.values)
+        interruptReviewForRecoveryWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let interruptReviewGate {
+            await interruptReviewGate.wait()
+        }
+        if let interruptFailureMessage {
+            throw FakeCodexReviewBackendError(message: interruptFailureMessage)
+        }
+    }
+
+    package func recoverReview(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        commands.append(.recoverReview(run, request, reason))
+        let waiters = Array(recoverReviewWaiters.values)
+        recoverReviewWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+        if let recoverReviewGate {
+            await recoverReviewGate.wait()
+        }
+        if let recoveryFailureMessage {
+            throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
+        }
+        return nextRecoveredRun ?? .init(
+            threadID: run.threadID,
+            turnID: "turn-recovered",
+            reviewThreadID: run.reviewThreadID,
+            model: run.model ?? request.model
+        )
+    }
+
     package func cleanupReview(_ run: BackendReviewRun) async {
         commands.append(.cleanupReview(run))
     }
@@ -332,9 +514,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) {
+    package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) async {
         let key = run?.threadID ?? nextRun.threadID
         eventContinuations[key]?.continuation.yield(event)
+        await Task.yield()
     }
 
     package func finishEvents(for run: BackendReviewRun? = nil) {
@@ -422,6 +605,14 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     private func cancelInterruptReviewWaiter(id: UUID) {
         interruptReviewWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func cancelInterruptReviewForRecoveryWaiter(id: UUID) {
+        interruptReviewForRecoveryWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func cancelRecoverReviewWaiter(id: UUID) {
+        recoverReviewWaiters.removeValue(forKey: id)?.resume()
     }
 
     private func cancelEventRegistrationWaiter(id: UUID) {
@@ -570,6 +761,21 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: BackendCancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(run, reason: reason)
+    }
+
+    package func interruptReviewForRecovery(
+        _ run: BackendReviewRun,
+        reason: BackendCancellationReason
+    ) async throws {
+        try await reviewBackend.interruptReviewForRecovery(run, reason: reason)
+    }
+
+    package func recoverReview(
+        _ run: BackendReviewRun,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRun {
+        try await reviewBackend.recoverReview(run, request: request, reason: reason)
     }
 
     package func cleanupReview(_ run: BackendReviewRun) async {

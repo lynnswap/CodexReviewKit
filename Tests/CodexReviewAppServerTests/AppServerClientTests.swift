@@ -818,7 +818,7 @@ struct AppServerClientTests {
         #expect(object["delivery"] as? String == "inline")
     }
 
-    @Test func backendStartsEphemeralReviewThreads() async throws {
+    @Test func backendStartsPersistentReviewThreads() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
         try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
@@ -834,7 +834,7 @@ struct AppServerClientTests {
         let threadStart = try #require(await transport.recordedRequests().first { $0.method == "thread/start" })
         let params = try JSONDecoder().decode(ThreadStartParams.self, from: threadStart.params)
         let object = try #require(JSONSerialization.jsonObject(with: threadStart.params) as? [String: Any])
-        #expect(params.ephemeral == true)
+        #expect(params.ephemeral == false)
         #expect(params.approvalPolicy == "never")
         #expect(params.permissions == .profileID(":danger-full-access"))
         #expect(params.sessionStartSource == .startup)
@@ -866,6 +866,7 @@ struct AppServerClientTests {
         #expect(threadStarts.count == 1)
         let request = try #require(threadStarts.first)
         let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
+        #expect(params["ephemeral"] as? Bool == false)
         #expect(params["sandbox"] as? String == "danger-full-access")
         #expect(params["permissions"] == nil)
         #expect(params["sessionStartSource"] as? String == "startup")
@@ -1494,6 +1495,99 @@ struct AppServerClientTests {
         var iterator = await backend.events(for: run).makeAsyncIterator()
         #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
+    }
+
+    @Test func backendRecoverReviewRollsBackAndRestartsSameThread() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+
+        let recovered = try await backend.recoverReview(
+            run,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+
+        #expect(recovered.threadID == "thread-1")
+        #expect(recovered.turnID == "turn-2")
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "initialize",
+            "turn/interrupt",
+            "thread/rollback",
+            "review/start",
+        ])
+        let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interrupt.params)
+        #expect(interruptParams.threadID == "thread-1")
+        #expect(interruptParams.turnID == "turn-1")
+        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
+        let rollbackParams = try JSONDecoder().decode(ThreadRollbackParams.self, from: rollback.params)
+        #expect(rollbackParams.threadID == "thread-1")
+        #expect(rollbackParams.numTurns == 1)
+        let restart = try #require(requests.first { $0.method == "review/start" })
+        let restartParams = try JSONDecoder().decode(ReviewStartParams.self, from: restart.params)
+        #expect(restartParams.threadID == "thread-1")
+        #expect(restartParams.target == .baseBranch("main"))
+    }
+
+    @Test func backendSuppressesRecoveryInterruptTerminalEvent() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        _ = try await backend.recoverReview(
+            run,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Network unavailable"))
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
+        )
+
+        #expect(try await iterator.next() == .started(
+            turnID: "turn-2",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
     }
 
     @Test func backendTracksActualStartedTurnAndStreamsReviewItems() async throws {
@@ -3864,6 +3958,7 @@ struct AppServerClientTests {
             "review/start",
             "thread/backgroundTerminals/clean",
             "thread/unsubscribe",
+            "thread/delete",
         ])
     }
 

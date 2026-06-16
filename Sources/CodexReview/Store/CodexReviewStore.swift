@@ -23,6 +23,8 @@ public final class CodexReviewStore {
     @ObservationIgnored package let diagnosticsURL: URL?
     @ObservationIgnored package let settingsService: CodexReviewSettingsService
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
+    @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
+    @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
@@ -39,9 +41,13 @@ public final class CodexReviewStore {
         settingsService: CodexReviewSettingsService? = nil,
         diagnosticsURL: URL? = nil,
         clock: CodexReviewClock = .init(),
-        idGenerator: CodexReviewIDGenerator = .init()
+        idGenerator: CodexReviewIDGenerator = .init(),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) {
         self.backend = backend
+        self.networkMonitor = networkMonitor
+        self.networkRecoveryPolicy = networkRecoveryPolicy
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
@@ -91,7 +97,8 @@ public final class CodexReviewStore {
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: PreviewCodexReviewStoreBackend(seed: seed),
-            diagnosticsURL: diagnosticsURL
+            diagnosticsURL: diagnosticsURL,
+            networkMonitor: StaticCodexReviewNetworkMonitor()
         )
     }
 
@@ -99,13 +106,17 @@ public final class CodexReviewStore {
         backend: any CodexReviewStoreBackend,
         diagnosticsURL: URL? = nil,
         clock: CodexReviewClock = .init(),
-        idGenerator: CodexReviewIDGenerator = .init()
+        idGenerator: CodexReviewIDGenerator = .init(),
+        networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
             diagnosticsURL: diagnosticsURL,
             clock: clock,
-            idGenerator: idGenerator
+            idGenerator: idGenerator,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy
         )
     }
 
