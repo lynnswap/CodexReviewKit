@@ -1857,6 +1857,54 @@ struct AppServerClientTests {
         #expect(interruptRequests.count == 1)
     }
 
+    @Test func backendCancelDuringFailingRecoveryInterruptStillInterruptsTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(code: -32000, message: "network unavailable"),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let interruptGate = AsyncGate()
+        await transport.hold(method: "turn/interrupt", gate: interruptGate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        async let recovery: Void = backend.interruptReviewForRecovery(
+            run,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        let recoveryInterruptRequested = await waitUntil {
+            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 1
+        }
+        #expect(recoveryInterruptRequested)
+
+        async let cancellation: Void = backend.interruptReview(run, reason: .init(message: "Stop"))
+        let cancellationInterruptRequested = await waitUntil {
+            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 2
+        }
+        #expect(cancellationInterruptRequested)
+
+        await interruptGate.open()
+        do {
+            try await recovery
+            Issue.record("Expected recovery interrupt to fail.")
+        } catch {}
+        try await cancellation
+
+        #expect(try await iterator.next() == .cancelled("Stop"))
+        #expect(try await iterator.next() == nil)
+        let interruptRequests = await transport.recordedRequests().filter { $0.method == "turn/interrupt" }
+        #expect(interruptRequests.count == 2)
+    }
+
     @Test func backendSuppressesRecoveryInterruptRetriedToActiveTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
