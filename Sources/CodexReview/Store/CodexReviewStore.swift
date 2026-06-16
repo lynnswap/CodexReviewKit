@@ -140,8 +140,8 @@ public final class CodexReviewStore {
     }
 
     public func stop() async {
-        await cancelActiveReviewsForRuntimeStop()
         await backend.stop(store: self)
+        cancelActiveReviewsLocallyForRuntimeStop()
         transitionToStopped()
     }
 

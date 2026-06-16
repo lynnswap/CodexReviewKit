@@ -1222,6 +1222,45 @@ struct CodexReviewHostTests {
         #expect(methods.contains("thread/delete"))
     }
 
+    @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
+        let homeURL = try temporaryHome()
+        let interruptGate = AsyncGate()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
+        try await transport.enqueue(InitializeResponse(), for: "initialize")
+        try await transport.enqueue(AccountReadResponse(), for: "account/read")
+        try await transport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-1"), for: "review/start")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .milliseconds(20),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        async let reviewRead = store.startReview(
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        )
+        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+
+        let startedAt = Date()
+        await store.stop()
+        let elapsed = Date().timeIntervalSince(startedAt)
+        await interruptGate.open()
+        let result = try await reviewRead
+
+        #expect(elapsed < 1)
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
+    }
+
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
