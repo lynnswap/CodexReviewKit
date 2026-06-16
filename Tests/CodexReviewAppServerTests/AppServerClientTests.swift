@@ -1590,6 +1590,68 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendRecoverReviewDoesNotReinterruptPreviouslyInterruptedTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        try await backend.interruptReviewForRecovery(
+            run,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-1", status: "interrupted", error: .init(message: "Network unavailable"))
+            )
+        )
+        let suppressedTerminal = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        }
+        #expect(suppressedTerminal)
+
+        let recovered = try await backend.recoverReview(
+            run,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+
+        #expect(recovered.turnID == "turn-2")
+        let requests = await transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "initialize",
+            "turn/interrupt",
+            "thread/rollback",
+            "review/start",
+        ])
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
+        )
+        #expect(try await iterator.next() == .started(
+            turnID: "turn-2",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
+    }
+
     @Test func backendTracksActualStartedTurnAndStreamsReviewItems() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

@@ -144,30 +144,20 @@ extension CodexReviewStore {
                 )
             }
 
-            var currentRun = backendRun
-            while job.isTerminal == false {
-                switch try await consumeReviewEvents(
-                    for: currentRun,
-                    job: job,
-                    startRequest: startRequest
-                ) {
-                case .finished:
-                    break
-                case .recovered(let recoveredRun):
-                    currentRun = recoveredRun
-                    run = recoveredRun
-                    continue
-                }
-                break
-            }
+            let currentRun = try await consumeReviewEvents(
+                for: backendRun,
+                job: job,
+                startRequest: startRequest
+            )
+            run = currentRun
             await backend.cleanupReview(currentRun)
             activeRuns.removeValue(forKey: jobID)
         } catch let error where error is CancellationError || Task.isCancelled {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
-            if let run {
-                await interruptReviewAfterTaskCancellation(run, job: job)
-                await backend.cleanupReview(run)
+            if let cleanupRun = activeRuns[jobID] ?? run {
+                await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
+                await backend.cleanupReview(cleanupRun)
             } else if job.isTerminal == false || startupCancellation != nil {
                 try? completeCancellationLocally(
                     jobID: job.id,
@@ -179,8 +169,8 @@ extension CodexReviewStore {
         } catch {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
-            if let run {
-                await backend.cleanupReview(run)
+            if let cleanupRun = activeRuns[jobID] ?? run {
+                await backend.cleanupReview(cleanupRun)
             }
             activeRuns.removeValue(forKey: jobID)
             if job.isTerminal == false, let startupCancellation {
@@ -564,28 +554,35 @@ extension CodexReviewStore {
     }
 
     private func consumeReviewEvents(
-        for run: BackendReviewRun,
+        for initialRun: BackendReviewRun,
         job: CodexReviewJob,
         startRequest: BackendReviewStart
-    ) async throws -> ReviewAttemptOutcome {
-        let inputs = await reviewWorkerInputs(for: run)
+    ) async throws -> BackendReviewRun {
+        let inputs = await reviewWorkerInputs(for: initialRun)
+        var currentRun = initialRun
         var waitingForNetworkRecovery = false
         let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
         for try await input in inputs.stream {
             if job.isTerminal {
-                return .finished
+                return currentRun
             }
             switch input {
             case .reviewEvent(let event):
-                if waitingForNetworkRecovery, event.completesReviewRun {
+                if waitingForNetworkRecovery {
                     continue
                 }
                 handleReviewEvent(event, job: job)
                 if job.isTerminal {
-                    return .finished
+                    return currentRun
                 }
             case .reviewEventsFinished:
                 if waitingForNetworkRecovery {
+                    if Task.isCancelled {
+                        throw CancellationError()
+                    }
+                    if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+                        return currentRun
+                    }
                     continue
                 }
                 if Task.isCancelled {
@@ -593,7 +590,7 @@ extension CodexReviewStore {
                 }
                 if job.isTerminal == false {
                     if completePendingCancellationIfNeeded(for: job) {
-                        return .finished
+                        return currentRun
                     }
                     completeReview(
                         job,
@@ -601,29 +598,35 @@ extension CodexReviewStore {
                         result: job.core.output.lastAgentMessage
                     )
                 }
-                return .finished
+                return currentRun
             case .networkSnapshot(let snapshot):
                 guard waitingForNetworkRecovery,
-                      snapshot.status == .satisfied,
-                      job.cancellationRequested == false
+                      snapshot.status == .satisfied
                 else {
                     continue
+                }
+                if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+                    return currentRun
                 }
                 appendRecoveryProgress(networkRecoveryRestoredMessage, to: job)
                 try await networkRecoveryPolicy.sleep(networkRecoveryPolicy.recoverySettle)
-                guard job.isTerminal == false,
-                      job.cancellationRequested == false,
-                      await inputs.networkStatusTracker.currentStatus() == .satisfied
-                else {
+                if Task.isCancelled {
+                    throw CancellationError()
+                }
+                if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+                    return currentRun
+                }
+                guard await inputs.networkStatusTracker.currentStatus() == .satisfied else {
                     continue
                 }
                 let recoveredRun = try await backend.recoverReview(
-                    run,
+                    currentRun,
                     request: startRequest,
                     reason: recoveryReason
                 )
                 applyBackendRun(recoveredRun, to: job)
-                return .recovered(recoveredRun)
+                currentRun = recoveredRun
+                waitingForNetworkRecovery = false
             case .networkOutageConfirmed:
                 guard waitingForNetworkRecovery == false,
                       job.isTerminal == false,
@@ -633,7 +636,7 @@ extension CodexReviewStore {
                 }
                 waitingForNetworkRecovery = true
                 appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
-                try await backend.interruptReviewForRecovery(run, reason: recoveryReason)
+                try await backend.interruptReviewForRecovery(currentRun, reason: recoveryReason)
             }
         }
 
@@ -642,7 +645,7 @@ extension CodexReviewStore {
         }
         if job.isTerminal == false {
             if completePendingCancellationIfNeeded(for: job) {
-                return .finished
+                return currentRun
             }
             completeReview(
                 job,
@@ -650,7 +653,7 @@ extension CodexReviewStore {
                 result: job.core.output.lastAgentMessage
             )
         }
-        return .finished
+        return currentRun
     }
 
     private func handleReviewEvent(_ event: BackendReviewEvent, job: CodexReviewJob) {
@@ -953,11 +956,6 @@ private extension CodexReviewJob {
         agentMessagesByItemID[itemID] = text
         completedAgentMessageItemIDs.insert(itemID)
     }
-}
-
-private enum ReviewAttemptOutcome {
-    case finished
-    case recovered(BackendReviewRun)
 }
 
 private enum ReviewWorkerInput {

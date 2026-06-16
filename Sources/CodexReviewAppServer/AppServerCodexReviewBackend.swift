@@ -966,7 +966,7 @@ private actor AppServerReviewEventSession {
         if decoded.startsReviewMode {
             awaitingReviewExit = true
         }
-        if suppressNetworkRecoveryInterruptedTerminal(
+        if suppressNetworkRecoveryInterruptedNotification(
             notification: notification,
             decoded: decoded
         ) {
@@ -1116,7 +1116,7 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func suppressNetworkRecoveryInterruptedTerminal(
+    private func suppressNetworkRecoveryInterruptedNotification(
         notification: AppServerRoutedReviewNotification,
         decoded: DecodedReviewNotification
     ) -> Bool {
@@ -1130,21 +1130,14 @@ private actor AppServerReviewEventSession {
             || decoded.finishesReviewMode
             || notification.method == "turn/completed"
             || notification.method == "turn/cancelled"
-        guard isTerminalNotification else {
-            return false
+        if isTerminalNotification {
+            awaitingReviewExit = false
+            cancellationRequestedMessage = nil
+            completionCoordinator.cancelPendingCompletion()
+            commandLifecycleByItemID.removeAll(keepingCapacity: true)
+            _ = drainPendingStreamedLogEvents()
+            cancelPendingStreamedLogFlush()
         }
-
-        if let turnID {
-            networkRecoveryInterruptedTurnIDs.remove(turnID)
-        } else {
-            interruptedUnknownTurnForNetworkRecovery = false
-        }
-        awaitingReviewExit = false
-        cancellationRequestedMessage = nil
-        completionCoordinator.cancelPendingCompletion()
-        commandLifecycleByItemID.removeAll(keepingCapacity: true)
-        _ = drainPendingStreamedLogEvents()
-        cancelPendingStreamedLogFlush()
         metrics.ignored += 1
         return true
     }
