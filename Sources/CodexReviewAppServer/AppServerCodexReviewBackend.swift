@@ -317,9 +317,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ) async throws -> BackendReviewRun {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
-        let recoveryInterruption = try await interruptReviewForRecoveryInterruption(run, reason: reason)
         let session = await reviewEventSession(for: run)
         await session.beginRecoveryRestartNotificationBuffering()
+        let recoveryInterruption: AppServerReviewInterruption?
+
+        do {
+            recoveryInterruption = try await interruptReviewForRecoveryInterruption(run, reason: reason)
+        } catch {
+            await session.cancelRecoveryRestartNotificationBuffering()
+            throw error
+        }
 
         do {
             let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
@@ -975,6 +982,15 @@ private actor AppServerReviewEventSession {
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
     }
 
+    private func noteRecoveryRestartSuppressedTurnID(_ turnID: String?) {
+        guard buffersRecoveryRestartNotifications,
+              let turnID = turnID?.nilIfEmpty
+        else {
+            return
+        }
+        recoveryRestartSuppressedTurnIDs.insert(turnID)
+    }
+
     func cleanupThreadIDs() -> [String] {
         var threadIDs = reviewThreadIDsForCleanup.filter { $0 != run.threadID }
         threadIDs.append(run.threadID)
@@ -1005,6 +1021,7 @@ private actor AppServerReviewEventSession {
             requestedTurnID: requestedTurnID,
             interruption: interruption
         )
+        noteRecoveryRestartSuppressedTurnID(interruption.turnID)
     }
 
     func noteNetworkRecoveryInterruptionInFlight(
@@ -1015,6 +1032,7 @@ private actor AppServerReviewEventSession {
             requestedTurnID: requestedTurnID,
             interruption: interruption
         )
+        noteRecoveryRestartSuppressedTurnID(interruption.turnID)
     }
 
     func networkRecoveryInterruption(turnID: String?) -> AppServerReviewInterruption? {
