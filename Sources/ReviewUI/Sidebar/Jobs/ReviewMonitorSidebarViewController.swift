@@ -93,6 +93,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let jobs: [CodexReviewJob]
     }
 
+    private struct SidebarJobDropDestination {
+        let workspace: CodexReviewWorkspace
+        let childIndex: Int
+    }
+
     private final class SidebarWorkspaceGroup: Hashable {
         let id: String
         var title: String
@@ -1442,7 +1447,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         guard let destination = resolvedJobDropDestination(
             proposedItem: proposedItem,
-            proposedChildIndex: index
+            proposedChildIndex: index,
+            sourceCWD: cwd
         ),
         destination.workspace.cwd == cwd
         else {
@@ -1481,10 +1487,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 storeIndex: clampedStoreDestinationIndex,
                 displayIndex: clampedDisplayDestinationIndex
             )
+        let dropPresentation = jobDropPresentation(
+            for: destination.workspace,
+            childIndex: visibleInsertionIndex
+        )
         return SidebarResolvedDrop(
             operation: operation,
-            dropItem: destination.workspace,
-            dropChildIndex: visibleInsertionIndex
+            dropItem: dropPresentation.item,
+            dropChildIndex: dropPresentation.childIndex
         )
     }
 
@@ -1507,12 +1517,23 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func resolvedJobDropDestination(
         proposedItem: Any?,
-        proposedChildIndex index: Int
-    ) -> (workspace: CodexReviewWorkspace, childIndex: Int)? {
+        proposedChildIndex index: Int,
+        sourceCWD: String
+    ) -> SidebarJobDropDestination? {
         if let workspace = workspace(from: proposedItem),
            index != NSOutlineViewDropOnItemIndex
         {
-            return (workspace, index)
+            return SidebarJobDropDestination(workspace: workspace, childIndex: index)
+        }
+
+        if let group = workspaceGroup(from: proposedItem),
+           index != NSOutlineViewDropOnItemIndex
+        {
+            return resolvedJobDropDestination(
+                in: group,
+                sourceCWD: sourceCWD,
+                proposedRootChildIndex: index
+            )
         }
 
         guard let job = job(from: proposedItem),
@@ -1522,7 +1543,48 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         else {
             return nil
         }
-        return (workspace, jobIndex)
+        return SidebarJobDropDestination(workspace: workspace, childIndex: jobIndex)
+    }
+
+    private func resolvedJobDropDestination(
+        in group: SidebarWorkspaceGroup,
+        sourceCWD: String,
+        proposedRootChildIndex index: Int
+    ) -> SidebarJobDropDestination? {
+        guard let workspace = group.workspaces.first(where: { $0.cwd == sourceCWD }),
+              let workspaceRootStartIndex = group.jobs.firstIndex(where: { $0.cwd == sourceCWD })
+        else {
+            return nil
+        }
+
+        let workspaceJobCount = visibleJobs(in: workspace).count
+        let workspaceRootEndIndex = workspaceRootStartIndex + workspaceJobCount
+        let rootInsertionIndex = max(0, min(index, group.jobs.count))
+        guard rootInsertionIndex >= workspaceRootStartIndex,
+              rootInsertionIndex <= workspaceRootEndIndex
+        else {
+            return nil
+        }
+
+        return SidebarJobDropDestination(
+            workspace: workspace,
+            childIndex: rootInsertionIndex - workspaceRootStartIndex
+        )
+    }
+
+    private func jobDropPresentation(
+        for workspace: CodexReviewWorkspace,
+        childIndex: Int
+    ) -> (item: Any?, childIndex: Int) {
+        guard let rootItem = rootItem(containing: workspace),
+              let group = workspaceGroup(from: rootItem),
+              let workspaceRootStartIndex = group.jobs.firstIndex(where: { $0.cwd == workspace.cwd })
+        else {
+            return (workspace, childIndex)
+        }
+
+        let rootChildIndex = workspaceRootStartIndex + childIndex
+        return (group, max(0, min(rootChildIndex, group.jobs.count)))
     }
 
     @discardableResult
@@ -2174,6 +2236,24 @@ extension ReviewMonitorSidebarViewController {
             proposedItem: proposedWorkspace,
             proposedChildIndex: childIndex
         ) else {
+            return false
+        }
+        return applyResolvedDrop(resolvedDrop)
+    }
+
+    @discardableResult
+    func performJobDropForTesting(
+        _ job: CodexReviewJob,
+        proposedWorkspaceGroupContaining workspace: CodexReviewWorkspace,
+        childIndex: Int
+    ) -> Bool {
+        guard let group = rootItem(containing: workspace).flatMap({ workspaceGroup(from: $0) }),
+              let resolvedDrop = resolvedDrop(
+                for: .job(id: job.id, cwd: job.cwd),
+                proposedItem: group,
+                proposedChildIndex: childIndex
+              )
+        else {
             return false
         }
         return applyResolvedDrop(resolvedDrop)

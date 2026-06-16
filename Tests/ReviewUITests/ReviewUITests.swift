@@ -2555,8 +2555,14 @@ struct ReviewUITests {
 
         #expect(sidebar.performJobDropForTesting(
             secondWorkspaceFirstJob,
-            proposedWorkspace: secondWorkspace,
-            childIndex: 2
+            proposedWorkspaceGroupContaining: secondWorkspace,
+            childIndex: 0
+        ) == false)
+
+        #expect(sidebar.performJobDropForTesting(
+            secondWorkspaceFirstJob,
+            proposedWorkspaceGroupContaining: secondWorkspace,
+            childIndex: 3
         ))
         await Task.yield()
 
