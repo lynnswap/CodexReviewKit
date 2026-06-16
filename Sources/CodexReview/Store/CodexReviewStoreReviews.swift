@@ -574,7 +574,9 @@ extension CodexReviewStore {
             switch input {
             case .reviewEvent(let event):
                 if waitingForNetworkRecovery {
-                    continue
+                    guard case .completed = event else {
+                        continue
+                    }
                 }
                 currentRun = handleReviewEvent(event, job: job, currentRun: currentRun)
                 if job.isTerminal {

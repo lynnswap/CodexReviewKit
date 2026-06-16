@@ -869,6 +869,57 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func networkRecoveryWaitPreservesTerminalCompletion() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            _ = try await running
+
+            await backend.yield(.message("stale aborted output"), for: initialRun)
+            await backend.yield(.completed(summary: "Succeeded.", result: "review text"), for: initialRun)
+            let final = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
+
+            #expect(final.core.lifecycle.status == .succeeded)
+            #expect(final.core.run.turnID == "turn-1")
+            #expect(final.core.output.lastAgentMessage == "review text")
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains { command in
+                if case .recoverReview = command {
+                    true
+                } else {
+                    false
+                }
+            } == false)
+            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            #expect(logText.contains("stale aborted output") == false)
+        }
+    }
+
     @Test func networkRecoveryUsesActualStartedTurn() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
