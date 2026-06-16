@@ -1482,6 +1482,17 @@ struct CodexReviewStoreCommandTests {
                 .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
                 .init(message: "Stop")
             )))
+            #expect(commands.contains(.cleanupReview(.init(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                reviewThreadID: "review-thread-1"
+            ))))
+            #expect(commands.contains {
+                if case .events = $0 {
+                    return true
+                }
+                return false
+            } == false)
         }
     }
 

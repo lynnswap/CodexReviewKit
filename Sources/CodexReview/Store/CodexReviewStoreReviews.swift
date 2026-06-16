@@ -144,14 +144,19 @@ extension CodexReviewStore {
                 )
             }
 
-            let currentRun = try await consumeReviewEvents(
-                for: backendRun,
-                job: job,
-                startRequest: startRequest
-            )
-            run = currentRun
-            await backend.cleanupReview(currentRun)
-            activeRuns.removeValue(forKey: jobID)
+            if job.isTerminal {
+                await backend.cleanupReview(backendRun)
+                activeRuns.removeValue(forKey: jobID)
+            } else {
+                let currentRun = try await consumeReviewEvents(
+                    for: backendRun,
+                    job: job,
+                    startRequest: startRequest
+                )
+                run = currentRun
+                await backend.cleanupReview(currentRun)
+                activeRuns.removeValue(forKey: jobID)
+            }
         } catch let error where error is CancellationError || Task.isCancelled {
             startingJobIDs.remove(jobID)
             let startupCancellation = startupCancellations.removeValue(forKey: jobID)
