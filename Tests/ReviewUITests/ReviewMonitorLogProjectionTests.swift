@@ -810,6 +810,56 @@ struct ReviewMonitorLogProjectionTests {
         #expect(view.activeNumericTransitionCountForTesting == 0)
     }
 
+    @Test func commandTimerAttachmentViewResyncPreservesActiveTransition() {
+        let documentView = ReviewMonitorLogDocumentView()
+        documentView.reduceMotionOverrideForTesting = false
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            startedAt: Date(timeIntervalSince1970: 100),
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        documentView.addSubview(view)
+        defer { view.removeFromSuperview() }
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
+        #expect(view.activeNumericTransitionCountForTesting > 0)
+
+        view.configure(attachment: attachment)
+
+        #expect(view.activeNumericTransitionCountForTesting > 0)
+    }
+
+    @Test func commandTimerAttachmentViewStopsActiveTransitionWhenReconfiguredDisabled() {
+        let documentView = ReviewMonitorLogDocumentView()
+        documentView.reduceMotionOverrideForTesting = false
+        let blockID = ReviewMonitorLogBlockID("commandOutput:cmd-1")
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let attachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: blockID,
+            startedAt: startedAt,
+            font: .systemFont(ofSize: 13)
+        )
+        let view = ReviewMonitorCommandOutputTimerAttachmentView(attachment: attachment)
+        documentView.addSubview(view)
+        defer { view.removeFromSuperview() }
+
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 103), animated: false)
+        view.updateText(referenceDate: Date(timeIntervalSince1970: 104))
+        #expect(view.activeNumericTransitionCountForTesting > 0)
+        let disabledAttachment = ReviewMonitorCommandOutputTimerAttachment(
+            blockID: blockID,
+            startedAt: startedAt,
+            font: .systemFont(ofSize: 13),
+            animatesNumericTransition: false
+        )
+
+        view.configure(attachment: disabledAttachment)
+
+        #expect(view.activeNumericTransitionCountForTesting == 0)
+    }
+
     @Test func commandTimerAttachmentViewKeepsWidthWhenDigitsGrow() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
             blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),

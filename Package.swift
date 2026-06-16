@@ -20,6 +20,10 @@ let package = Package(
             name: "ReviewUI",
             targets: ["ReviewUI"]
         ),
+        .library(
+            name: "TextTransitions",
+            targets: ["TextTransitions"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
@@ -83,8 +87,15 @@ let package = Package(
             name: "ReviewUI",
             dependencies: [
                 "CodexReview",
+                "TextTransitions",
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "TextTransitions",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -127,6 +138,15 @@ let package = Package(
                 "CodexReview",
                 "CodexReviewTesting",
                 "ReviewUI",
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
+            name: "TextTransitionsTests",
+            dependencies: [
+                "TextTransitions",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
