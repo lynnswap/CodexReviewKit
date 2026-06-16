@@ -169,6 +169,61 @@ struct TextTransitionViewTests {
         #expect(view?.text.string == "1")
     }
 
+    @Test func attachmentViewProviderTracksAttachmentBounds() {
+        let attachment = TextTransitionAttachment(
+            text: attributed("1"),
+            contentTransition: .numericText(),
+            motionPolicy: .enabled
+        )
+        let provider = TextTransitionAttachmentViewProvider(
+            textAttachment: attachment,
+            parentView: nil,
+            textLayoutManager: nil,
+            location: TestTextLocation(0)
+        )
+
+        #expect(provider.tracksTextAttachmentViewBounds)
+    }
+
+    @Test func attachmentBoundsPreserveTextFontDescender() {
+        let font = NSFont.systemFont(ofSize: 17)
+        let attachment = TextTransitionAttachment(
+            text: attributed("1", font: font),
+            contentTransition: .numericText(),
+            motionPolicy: .enabled
+        )
+
+        let rect = attachment.attachmentBounds(
+            for: [:],
+            location: TestTextLocation(0),
+            textContainer: nil,
+            proposedLineFragment: .zero,
+            position: .zero
+        )
+
+        #expect(attachment.bounds.origin.y == floor(font.descender))
+        #expect(rect.origin.y == floor(font.descender))
+    }
+
+    @Test func attachmentBoundsUseContextFontDescenderWhenTextHasNoFont() {
+        let font = NSFont.systemFont(ofSize: 17)
+        let attachment = TextTransitionAttachment(
+            text: NSAttributedString(string: "1"),
+            contentTransition: .numericText(),
+            motionPolicy: .enabled
+        )
+
+        let rect = attachment.attachmentBounds(
+            for: [.font: font],
+            location: TestTextLocation(0),
+            textContainer: nil,
+            proposedLineFragment: .zero,
+            position: .zero
+        )
+
+        #expect(rect.origin.y == floor(font.descender))
+    }
+
     @Test func attachmentSetTextUpdatesLoadedTransitionView() {
         let attachment = TextTransitionAttachment(
             text: attributed("1"),
@@ -218,11 +273,14 @@ struct TextTransitionViewTests {
         #expect(view?.activeTransitionCountForTesting == 0)
     }
 
-    private func attributed(_ string: String) -> NSAttributedString {
+    private func attributed(
+        _ string: String,
+        font: NSFont = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+    ) -> NSAttributedString {
         NSAttributedString(
             string: string,
             attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular),
+                .font: font,
                 .foregroundColor: NSColor.labelColor,
             ]
         )

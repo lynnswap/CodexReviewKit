@@ -707,6 +707,22 @@ private func textTransitionSize(for text: NSAttributedString) -> NSSize {
     return NSSize(width: width, height: ceil(size.height))
 }
 
+func textTransitionFontDescender(in text: NSAttributedString) -> CGFloat? {
+    let fullRange = NSRange(location: 0, length: text.length)
+    guard fullRange.length > 0 else {
+        return nil
+    }
+
+    var descender: CGFloat?
+    text.enumerateAttribute(.font, in: fullRange) { value, _, _ in
+        guard let font = value as? NSFont else {
+            return
+        }
+        descender = min(descender ?? font.descender, font.descender)
+    }
+    return descender
+}
+
 #if DEBUG
 extension TextTransitionView {
     public var activeTransitionCountForTesting: Int {

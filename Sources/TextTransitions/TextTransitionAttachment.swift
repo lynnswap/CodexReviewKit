@@ -69,7 +69,7 @@ public final class TextTransitionAttachment: NSTextAttachment {
         proposedLineFragment lineFrag: CGRect,
         position: CGPoint
     ) -> CGRect {
-        bounds
+        bounds(for: attributes)
     }
 
     override public func viewProvider(
@@ -96,7 +96,27 @@ public final class TextTransitionAttachment: NSTextAttachment {
 
     private func updateBounds() {
         let size = textTransitionPreferredSize(for: text, widthReservation: widthReservation)
-        bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)
+        bounds = CGRect(
+            x: 0,
+            y: baselineOffset(),
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    private func bounds(for attributes: [NSAttributedString.Key: Any]) -> CGRect {
+        var rect = bounds
+        if textTransitionFontDescender(in: text) == nil {
+            rect.origin.y = baselineOffset(attributes: attributes)
+        }
+        return rect
+    }
+
+    private func baselineOffset(attributes: [NSAttributedString.Key: Any] = [:]) -> CGFloat {
+        let descender = textTransitionFontDescender(in: text) ??
+            (attributes[.font] as? NSFont)?.descender ??
+            0
+        return floor(descender)
     }
 
     @MainActor
@@ -130,6 +150,21 @@ public final class TextTransitionAttachment: NSTextAttachment {
 @MainActor
 public final class TextTransitionAttachmentViewProvider: NSTextAttachmentViewProvider {
     private var transitionView: TextTransitionView?
+
+    override public init(
+        textAttachment: NSTextAttachment,
+        parentView: NSView?,
+        textLayoutManager: NSTextLayoutManager?,
+        location: any NSTextLocation
+    ) {
+        super.init(
+            textAttachment: textAttachment,
+            parentView: parentView,
+            textLayoutManager: textLayoutManager,
+            location: location
+        )
+        tracksTextAttachmentViewBounds = true
+    }
 
     override public func loadView() {
         nonisolated(unsafe) let provider = self
