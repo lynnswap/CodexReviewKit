@@ -261,9 +261,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
         _ = try await client.initialize()
         let session = await reviewEventSession(for: run)
+        let recoveryInterruptAlreadyRequested = await session
+            .hasNetworkRecoveryInterruptionRequest(turnID: run.turnID)
         await session.requestCancellation(message: reason.message)
         do {
-            _ = try await sendTurnInterrupt(for: run)
+            if recoveryInterruptAlreadyRequested == false {
+                _ = try await sendTurnInterrupt(for: run)
+            }
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
@@ -880,6 +884,13 @@ private actor AppServerReviewEventSession {
             return networkRecoveryInterruptionByTurnID[turnID]
         }
         return unknownTurnNetworkRecoveryInterruption
+    }
+
+    func hasNetworkRecoveryInterruptionRequest(turnID: String?) -> Bool {
+        if let turnID = turnID?.nilIfEmpty {
+            return networkRecoveryInterruptedTurnIDs.contains(turnID)
+        }
+        return interruptedUnknownTurnForNetworkRecovery
     }
 
     func events() -> AsyncThrowingStream<BackendReviewEvent, Error> {
