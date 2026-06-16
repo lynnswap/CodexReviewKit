@@ -2089,6 +2089,14 @@ struct AppServerClientTests {
         )
         await transport.waitForRequestCount(4)
         try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "enteredReviewMode", id: "stale-review", review: "stale changes")
+            )
+        )
+        try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
         )

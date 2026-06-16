@@ -851,6 +851,7 @@ private actor AppServerReviewEventSession {
     private var cancellationRequestedMessage: String?
     private var recoveryInterruptionState = AppServerReviewRecoveryInterruptionState()
     private var buffersRecoveryRestartNotifications = false
+    private var recoveryRestartSuppressedTurnIDs: Set<String> = []
     private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
     private var finished = false
@@ -877,6 +878,7 @@ private actor AppServerReviewEventSession {
 
     func beginRecoveryRestartNotificationBuffering() {
         clearInterruptedTurnProjectionState()
+        recoveryRestartSuppressedTurnIDs.formUnion(trackedTurnIDs)
         buffersRecoveryRestartNotifications = true
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
     }
@@ -996,6 +998,7 @@ private actor AppServerReviewEventSession {
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         bufferedNotifications.removeAll(keepingCapacity: true)
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+        recoveryRestartSuppressedTurnIDs.removeAll(keepingCapacity: true)
         buffersRecoveryRestartNotifications = false
         if let continuation {
             emitPrecedingEvents(precedingEvents, to: continuation)
@@ -1068,6 +1071,7 @@ private actor AppServerReviewEventSession {
         cancelPendingStreamedLogFlush()
         bufferedNotifications.removeAll(keepingCapacity: true)
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+        recoveryRestartSuppressedTurnIDs.removeAll(keepingCapacity: true)
         buffersRecoveryRestartNotifications = false
         guard let continuation else {
             if buffersMissingContinuation {
@@ -1118,6 +1122,10 @@ private actor AppServerReviewEventSession {
             notification: notification,
             decoded: decoded
         ) {
+            return
+        }
+        if shouldSuppressRecoveryRestartNotification(decoded) {
+            metrics.ignored += 1
             return
         }
 
@@ -1278,6 +1286,13 @@ private actor AppServerReviewEventSession {
         clearInterruptedTurnProjectionState()
         metrics.ignored += 1
         return true
+    }
+
+    private func shouldSuppressRecoveryRestartNotification(_ decoded: DecodedReviewNotification) -> Bool {
+        guard let turnID = decoded.turnID else {
+            return false
+        }
+        return recoveryRestartSuppressedTurnIDs.contains(turnID)
     }
 
     private func clearInterruptedTurnProjectionState() {
