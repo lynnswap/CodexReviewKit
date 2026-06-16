@@ -299,6 +299,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         ))
 
         let session = await reviewEventSession(for: run)
+        await session.beginRecoveryRestartNotificationBuffering()
         let review: ReviewStartResponse
         reviewStartRequestsInFlight += 1
         do {
@@ -306,6 +307,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 params: .init(threadID: run.threadID, target: request.request.target)
             ))
         } catch {
+            await session.cancelRecoveryRestartNotificationBuffering()
             reviewStartRequestsInFlight -= 1
             discardUnmatchedReviewNotificationsIfIdle()
             throw error
@@ -320,6 +322,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await session.updateRun(recoveredRun)
         registerReviewEventSession(session, for: recoveredRun)
         controlsByThreadID[run.threadID]?.recordReviewStarted(threadID: run.threadID, turnID: review.turnID)
+        await session.finishRecoveryRestartNotificationBuffering()
         await drainUnmatchedReviewNotifications(for: recoveredRun, to: session)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
@@ -330,13 +333,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func cleanupReview(_ run: BackendReviewRun) async {
         _ = try? await client.initialize()
         controlsByThreadID.removeValue(forKey: run.threadID)
+        var cleanupThreadIDs = cleanupThreadIDs(for: run)
         if let session = unregisterReviewEventSession(for: run) {
             await session.finish(cancellationMessage: nil)
             let metrics = await session.metricsSnapshot()
-            completedReviewEventSessionMetricsByThreadID[run.threadID] = metrics
-            if let reviewThreadID = run.reviewThreadID,
-               reviewThreadID != run.threadID {
-                completedReviewEventSessionMetricsByThreadID[reviewThreadID] = metrics
+            cleanupThreadIDs = await session.cleanupThreadIDs()
+            for threadID in cleanupThreadIDs {
+                completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
         let _: EmptyResponse? = try? await client.send(BackgroundTerminalsCleanRequest(
@@ -345,7 +348,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let _: ThreadUnsubscribeResponse? = try? await client.send(ThreadUnsubscribeRequest(
             params: .init(threadID: run.threadID)
         ))
-        for threadID in cleanupThreadIDs(for: run) {
+        for threadID in cleanupThreadIDs {
             let _: EmptyResponse? = try? await client.send(ThreadDeleteRequest(
                 params: .init(threadID: threadID)
             ))
@@ -739,8 +742,10 @@ private actor AppServerReviewEventSession {
     private var nextStreamSubscriptionID = 0
     private var pendingFinish: PendingReviewEventStreamFinish?
     private var bufferedNotifications: [AppServerRoutedReviewNotification] = []
+    private var recoveryRestartBufferedNotifications: [AppServerRoutedReviewNotification] = []
     private var trackedTurnIDs: Set<String>
     private var emittedStartedTurnIDs: Set<String> = []
+    private var reviewThreadIDsForCleanup: [String] = []
     private var commandLifecycleByItemID: [String: AppServerCommandLifecycle] = [:]
     private var pendingStreamedLogEntries: [PendingStreamedLogEntry] = []
     private var pendingStreamedLogIndexByKey: [PendingStreamedLogEntry.Key: Int] = [:]
@@ -749,6 +754,7 @@ private actor AppServerReviewEventSession {
     private var cancellationRequestedMessage: String?
     private var networkRecoveryInterruptedTurnIDs: Set<String> = []
     private var interruptedUnknownTurnForNetworkRecovery = false
+    private var buffersRecoveryRestartNotifications = false
     private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
     private var finished = false
@@ -758,6 +764,10 @@ private actor AppServerReviewEventSession {
         self.run = run
         self.control = control
         self.trackedTurnIDs = Set(run.turnID.map { [$0] } ?? [])
+        if let reviewThreadID = run.reviewThreadID?.nilIfEmpty,
+           reviewThreadID != run.threadID {
+            self.reviewThreadIDsForCleanup.append(reviewThreadID)
+        }
     }
 
     func updateRun(_ run: BackendReviewRun) {
@@ -765,7 +775,36 @@ private actor AppServerReviewEventSession {
         if let turnID = run.turnID {
             trackedTurnIDs.insert(turnID)
         }
+        noteReviewThreadIDForCleanup(run.reviewThreadID)
         interruptedUnknownTurnForNetworkRecovery = false
+    }
+
+    func beginRecoveryRestartNotificationBuffering() {
+        buffersRecoveryRestartNotifications = true
+        recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+    }
+
+    func finishRecoveryRestartNotificationBuffering() async {
+        buffersRecoveryRestartNotifications = false
+        let notifications = recoveryRestartBufferedNotifications
+        recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+        for notification in notifications {
+            guard finished == false else {
+                break
+            }
+            await process(notification)
+        }
+    }
+
+    func cancelRecoveryRestartNotificationBuffering() {
+        buffersRecoveryRestartNotifications = false
+        recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+    }
+
+    func cleanupThreadIDs() -> [String] {
+        var threadIDs = reviewThreadIDsForCleanup.filter { $0 != run.threadID }
+        threadIDs.append(run.threadID)
+        return threadIDs
     }
 
     func requestCancellation(message: String) {
@@ -856,6 +895,8 @@ private actor AppServerReviewEventSession {
         cancelPendingStreamedLogFlush()
         commandLifecycleByItemID.removeAll(keepingCapacity: true)
         bufferedNotifications.removeAll(keepingCapacity: true)
+        recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+        buffersRecoveryRestartNotifications = false
         if let continuation {
             emitPrecedingEvents(precedingEvents, to: continuation)
             if let error {
@@ -926,6 +967,8 @@ private actor AppServerReviewEventSession {
         completionCoordinator.cancelPendingCompletion()
         cancelPendingStreamedLogFlush()
         bufferedNotifications.removeAll(keepingCapacity: true)
+        recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
+        buffersRecoveryRestartNotifications = false
         guard let continuation else {
             if buffersMissingContinuation {
                 self.pendingFinish = pendingFinish
@@ -945,6 +988,11 @@ private actor AppServerReviewEventSession {
         guard let continuation else {
             metrics.buffered += 1
             bufferedNotifications.append(notification)
+            return
+        }
+        if buffersRecoveryRestartNotifications {
+            metrics.buffered += 1
+            recoveryRestartBufferedNotifications.append(notification)
             return
         }
 
@@ -1140,6 +1188,16 @@ private actor AppServerReviewEventSession {
         }
         metrics.ignored += 1
         return true
+    }
+
+    private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
+        guard let reviewThreadID = reviewThreadID?.nilIfEmpty,
+              reviewThreadID != run.threadID,
+              reviewThreadIDsForCleanup.contains(reviewThreadID) == false
+        else {
+            return
+        }
+        reviewThreadIDsForCleanup.append(reviewThreadID)
     }
 
     private func emit(
