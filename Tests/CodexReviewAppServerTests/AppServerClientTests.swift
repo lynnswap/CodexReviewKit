@@ -1982,6 +1982,57 @@ struct AppServerClientTests {
         _ = events
     }
 
+    @Test func backendSuppressesActiveTurnTerminalWhileRecoveryRetryInterruptIsInFlight() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-active"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let firstInterruptGate = AsyncGate()
+        await firstInterruptGate.open()
+        let retryInterruptGate = AsyncGate()
+        await transport.holdNext(method: "turn/interrupt", gate: firstInterruptGate)
+        await transport.holdNext(method: "turn/interrupt", gate: retryInterruptGate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-old",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+
+        async let recovery: Void = backend.interruptReviewForRecovery(
+            run,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        let retryInterruptRequested = await waitUntil {
+            await transport.recordedRequests().filter { $0.method == "turn/interrupt" }.count == 2
+        }
+        #expect(retryInterruptRequested)
+
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
+            )
+        )
+        let suppressedTerminal = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        }
+        #expect(suppressedTerminal)
+
+        await retryInterruptGate.open()
+        try await recovery
+        _ = events
+    }
+
     @Test func backendRecoveryBuffersFastTerminalNotificationUntilRecoveredRunIsTracked() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

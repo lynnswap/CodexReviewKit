@@ -293,7 +293,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return await session.networkRecoveryInterruption(turnID: run.turnID)
         }
         do {
-            let interruption = try await sendTurnInterrupt(for: run)
+            let interruption = try await sendTurnInterrupt(for: run) { retryInterruption in
+                await session.noteNetworkRecoveryInterruptionInFlight(
+                    requestedTurnID: run.turnID,
+                    interruption: retryInterruption
+                )
+            }
             await session.recordNetworkRecoveryInterruption(
                 requestedTurnID: run.turnID,
                 interruption: interruption
@@ -505,9 +510,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    private func sendTurnInterrupt(for run: BackendReviewRun) async throws -> AppServerReviewInterruption {
+    private func sendTurnInterrupt(
+        for run: BackendReviewRun,
+        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
+    ) async throws -> AppServerReviewInterruption {
         if let control = controlsByThreadID[run.threadID],
-           let interruption = try await control.interrupt() {
+           let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) {
             return interruption
         }
         let threadID = appServerTurnThreadID(for: run)
@@ -671,6 +679,9 @@ private struct AppServerRoutedReviewNotification: Sendable {
 
 private struct AppServerReviewRecoveryInterruptionState {
     private var interruptedTurnIDs: Set<String> = []
+    private var inFlightInterruptedTurnIDs: Set<String> = []
+    private var inFlightTurnIDsByRequestedTurnID: [String: Set<String>] = [:]
+    private var unknownInFlightTurnIDs: Set<String> = []
     private var interruptionByTurnID: [String: AppServerReviewInterruption] = [:]
     private var unknownTurnInterruption: AppServerReviewInterruption?
     private var didInterruptUnknownTurn = false
@@ -694,9 +705,32 @@ private struct AppServerReviewRecoveryInterruptionState {
         if let turnID = turnID?.nilIfEmpty {
             interruptedTurnIDs.remove(turnID)
             interruptionByTurnID.removeValue(forKey: turnID)
+            let inFlightTurnIDs = inFlightTurnIDsByRequestedTurnID.removeValue(forKey: turnID) ?? []
+            for inFlightTurnID in inFlightTurnIDs {
+                inFlightInterruptedTurnIDs.remove(inFlightTurnID)
+            }
         } else {
             didInterruptUnknownTurn = false
             unknownTurnInterruption = nil
+            for inFlightTurnID in unknownInFlightTurnIDs {
+                inFlightInterruptedTurnIDs.remove(inFlightTurnID)
+            }
+            unknownInFlightTurnIDs.removeAll(keepingCapacity: true)
+        }
+    }
+
+    mutating func noteInFlight(
+        requestedTurnID: String?,
+        interruption: AppServerReviewInterruption
+    ) {
+        guard let interruptedTurnID = interruption.turnID.nilIfEmpty else {
+            return
+        }
+        inFlightInterruptedTurnIDs.insert(interruptedTurnID)
+        if let requestedTurnID = requestedTurnID?.nilIfEmpty {
+            inFlightTurnIDsByRequestedTurnID[requestedTurnID, default: []].insert(interruptedTurnID)
+        } else {
+            unknownInFlightTurnIDs.insert(interruptedTurnID)
         }
     }
 
@@ -711,6 +745,12 @@ private struct AppServerReviewRecoveryInterruptionState {
             unknownTurnInterruption = interruption
         }
         if let interruptedTurnID = interruption.turnID.nilIfEmpty {
+            inFlightInterruptedTurnIDs.remove(interruptedTurnID)
+            if let requestedTurnID = requestedTurnID?.nilIfEmpty {
+                inFlightTurnIDsByRequestedTurnID[requestedTurnID]?.remove(interruptedTurnID)
+            } else {
+                unknownInFlightTurnIDs.remove(interruptedTurnID)
+            }
             interruptedTurnIDs.insert(interruptedTurnID)
             interruptionByTurnID[interruptedTurnID] = interruption
         }
@@ -727,7 +767,7 @@ private struct AppServerReviewRecoveryInterruptionState {
         guard let turnID else {
             return didInterruptUnknownTurn
         }
-        return interruptedTurnIDs.contains(turnID)
+        return interruptedTurnIDs.contains(turnID) || inFlightInterruptedTurnIDs.contains(turnID)
     }
 }
 
@@ -927,6 +967,16 @@ private actor AppServerReviewEventSession {
         interruption: AppServerReviewInterruption
     ) {
         recoveryInterruptionState.record(
+            requestedTurnID: requestedTurnID,
+            interruption: interruption
+        )
+    }
+
+    func noteNetworkRecoveryInterruptionInFlight(
+        requestedTurnID: String?,
+        interruption: AppServerReviewInterruption
+    ) {
+        recoveryInterruptionState.noteInFlight(
             requestedTurnID: requestedTurnID,
             interruption: interruption
         )

@@ -841,6 +841,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
     private var activeByMethod: [String: Int] = [:]
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: AsyncGate] = [:]
+    private var oneShotGatesByMethod: [String: [AsyncGate]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closed = false
@@ -869,6 +870,10 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         gatesByMethod[method] = gate
     }
 
+    package func holdNext(method: String, gate: AsyncGate) {
+        oneShotGatesByMethod[method, default: []].append(gate)
+    }
+
     package func send(_ request: JSONRPCRequest) async throws -> Data {
         guard closed == false else {
             throw JSONRPCError.closed
@@ -881,7 +886,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
             activeByMethod[request.method] ?? 0
         )
         let queuedResponse = dequeueResponse(for: request.method)
-        if let gate = gatesByMethod[request.method] {
+        if let gate = dequeueOneShotGate(for: request.method) ?? gatesByMethod[request.method] {
             await gate.wait()
         }
         activeByMethod[request.method, default: 1] -= 1
@@ -903,6 +908,15 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         let response = queued.removeFirst()
         responses[method] = queued
         return response
+    }
+
+    private func dequeueOneShotGate(for method: String) -> AsyncGate? {
+        guard var gates = oneShotGatesByMethod[method], gates.isEmpty == false else {
+            return nil
+        }
+        let gate = gates.removeFirst()
+        oneShotGatesByMethod[method] = gates
+        return gate
     }
 
     package func notify(_ notification: JSONRPCNotification) async throws {

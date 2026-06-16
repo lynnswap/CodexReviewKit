@@ -49,15 +49,25 @@ package final class AppServerReviewControl: @unchecked Sendable {
     }
 
     @discardableResult
-    package func interrupt() async throws -> AppServerReviewInterruption? {
+    package func interrupt(
+        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
+    ) async throws -> AppServerReviewInterruption? {
         let currentPhase = phaseSnapshot()
         switch currentPhase {
         case .preparing, .finished:
             return nil
         case .threadStarted(let threadID):
-            return try await sendInterrupt(threadID: threadID, turnID: "")
+            return try await sendInterrupt(
+                threadID: threadID,
+                turnID: "",
+                willInterruptActiveTurn: willInterruptActiveTurn
+            )
         case .reviewStarted(let turnThreadID, let turnID):
-            return try await sendInterrupt(threadID: turnThreadID, turnID: turnID)
+            return try await sendInterrupt(
+                threadID: turnThreadID,
+                turnID: turnID,
+                willInterruptActiveTurn: willInterruptActiveTurn
+            )
         }
     }
 
@@ -73,7 +83,11 @@ package final class AppServerReviewControl: @unchecked Sendable {
         return phase
     }
 
-    private func sendInterrupt(threadID: String, turnID: String) async throws -> AppServerReviewInterruption {
+    private func sendInterrupt(
+        threadID: String,
+        turnID: String,
+        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
+    ) async throws -> AppServerReviewInterruption {
         do {
             let _: EmptyResponse = try await client.send(TurnInterruptRequest(
                 params: .init(threadID: threadID, turnID: turnID)
@@ -85,11 +99,15 @@ package final class AppServerReviewControl: @unchecked Sendable {
             else {
                 throw error
             }
+            let activeInterruption = AppServerReviewInterruption(threadID: threadID, turnID: activeTurnID)
+            if let willInterruptActiveTurn {
+                await willInterruptActiveTurn(activeInterruption)
+            }
             let _: EmptyResponse = try await client.send(TurnInterruptRequest(
                 params: .init(threadID: threadID, turnID: activeTurnID)
             ))
             setPhase(.reviewStarted(turnThreadID: threadID, turnID: activeTurnID))
-            return .init(threadID: threadID, turnID: activeTurnID)
+            return activeInterruption
         }
     }
 
