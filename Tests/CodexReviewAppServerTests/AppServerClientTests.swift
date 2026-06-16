@@ -177,11 +177,16 @@ struct AppServerClientTests {
 
     @Test func processTransportConfigurationUsesDedicatedCodexHome() throws {
         let configuration = AppServerProcessTransport.Configuration(
-            environment: ["PATH": "/usr/bin", "HOME": "/tmp/review-home"]
+            environment: [
+                "PATH": "/usr/bin",
+                "HOME": "/tmp/review-home",
+                "CODEX_SQLITE_HOME": "/tmp/main-codex-sqlite",
+            ]
         )
 
         #expect(configuration.codexHomeURL.path == "/tmp/review-home/.codex_review")
         #expect(configuration.environment["CODEX_HOME"] == "/tmp/review-home/.codex_review")
+        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/review-home/.codex_review/sqlite")
     }
 
     @Test func processTransportConfigurationUsesExplicitCodexHome() throws {
@@ -190,11 +195,29 @@ struct AppServerClientTests {
                 "PATH": "/usr/bin",
                 "HOME": "/tmp/review-home",
                 "CODEX_HOME": "/tmp/custom-codex-review",
+                "CODEX_SQLITE_HOME": "/tmp/main-codex-sqlite",
             ]
         )
 
         #expect(configuration.codexHomeURL.path == "/tmp/custom-codex-review")
         #expect(configuration.environment["CODEX_HOME"] == "/tmp/custom-codex-review")
+        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/custom-codex-review/sqlite")
+    }
+
+    @Test func processTransportScaffoldsDedicatedSqliteHome() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-review-home-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        try AppServerCodexHome.ensureScaffold(at: directory)
+
+        #expect(FileManager.default.fileExists(atPath: directory.appending(path: "config.toml").path))
+        #expect(FileManager.default.fileExists(atPath: directory.appending(path: "AGENTS.md").path))
+        #expect(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("sqlite", isDirectory: true).path
+        ))
     }
 
     @Test func processTransportCloseTerminatesSpawnedProcessGroup() async throws {

@@ -1228,6 +1228,12 @@ private final class ReviewWorkerEventSource {
             return
         }
         let events = await backend.events(for: run)
+        guard activeSubscriptionID == subscriptionID,
+              continuation != nil,
+              Task.isCancelled == false
+        else {
+            return
+        }
         eventTasks[subscriptionID] = Task {
             do {
                 for try await event in events {

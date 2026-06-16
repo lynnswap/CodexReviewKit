@@ -182,6 +182,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
     private var resumeReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var eventsGate: AsyncGate?
+    private let eventStreamRequestGate = AsyncGate()
+    private let eventStreamReturnGate = AsyncGate()
     private var eventContinuations: [EventContinuationKey: EventContinuation] = [:]
     private var eventRegistrationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var terminatedEventContinuationIDs: Set<UUID> = []
@@ -239,6 +242,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
         resumeReviewRecoveryGate = gate
+    }
+
+    package func holdEvents(with gate: AsyncGate) {
+        eventsGate = gate
     }
 
     package func setNextRecoveredRun(_ run: BackendReviewRun) {
@@ -397,6 +404,26 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    package func waitForEventsRequest() async {
+        await eventStreamRequestGate.wait()
+    }
+
+    package func waitForEventsRequest(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "events request", timeout: timeout) {
+            await self.waitForEventsRequest()
+        }
+    }
+
+    package func waitForEventsReturn() async {
+        await eventStreamReturnGate.wait()
+    }
+
+    package func waitForEventsReturn(timeout: Duration = .seconds(2)) async throws {
+        try await withFakeBackendTimeout(operation: "events return", timeout: timeout) {
+            await self.waitForEventsReturn()
+        }
+    }
+
     package func readSettings() async throws -> BackendSettingsSnapshot {
         commands.append(.readSettings)
         return settings
@@ -519,6 +546,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package nonisolated func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
+        let gate = await noteEventsRequest()
+        if let gate {
+            await gate.wait()
+        }
+        await noteEventsReturn()
         let continuationID = UUID()
         return AsyncThrowingStream<BackendReviewEvent, Error>(bufferingPolicy: .unbounded) { continuation in
             continuation.onTermination = { @Sendable _ in
@@ -530,6 +562,10 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
                 await self.register(continuation: continuation, id: continuationID, run: run)
             }
         }
+    }
+
+    package func hasEventContinuation(for run: BackendReviewRun) -> Bool {
+        eventContinuation(for: run) != nil
     }
 
     package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) async {
@@ -654,6 +690,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     private func cancelEventRegistrationWaiter(id: UUID) {
         eventRegistrationWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func noteEventsRequest() async -> AsyncGate? {
+        await eventStreamRequestGate.open()
+        return eventsGate
+    }
+
+    private func noteEventsReturn() async {
+        await eventStreamReturnGate.open()
     }
 }
 

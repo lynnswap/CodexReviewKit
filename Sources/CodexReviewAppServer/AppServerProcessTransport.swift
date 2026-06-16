@@ -834,12 +834,21 @@ package enum AppServerCodexHome {
     ) -> [String: String] {
         var effectiveEnvironment = environment
         effectiveEnvironment["CODEX_HOME"] = codexHomeURL.path
+        effectiveEnvironment["CODEX_SQLITE_HOME"] = sqliteHomeURL(for: codexHomeURL).path
         return effectiveEnvironment
+    }
+
+    package static func sqliteHomeURL(for codexHomeURL: URL) -> URL {
+        codexHomeURL.appendingPathComponent("sqlite", isDirectory: true)
     }
 
     package static func ensureScaffold(at codexHomeURL: URL) throws {
         try FileManager.default.createDirectory(
             at: codexHomeURL,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: sqliteHomeURL(for: codexHomeURL),
             withIntermediateDirectories: true
         )
         try createEmptyFileIfMissing(at: codexHomeURL.appendingPathComponent("config.toml"))

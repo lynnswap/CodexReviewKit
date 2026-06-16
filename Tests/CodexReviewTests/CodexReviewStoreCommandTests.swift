@@ -1632,6 +1632,59 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func networkRecoveryDropsSubscriptionCancelledWhileBackendEventsIsSuspended() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = BackendReviewRun(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let eventsGate = AsyncGate()
+        await backend.holdEvents(with: eventsGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventsRequest(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            await eventsGate.open()
+            try await backend.waitForEventsReturn(timeout: .seconds(2))
+            let staleSubscriptionDetached = await waitUntil {
+                await backend.hasEventContinuation(for: initialRun) == false
+            }
+
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
+            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            let read = try await result
+
+            #expect(staleSubscriptionDetached)
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.run.turnID == "turn-2")
+            #expect(read.core.output.lastAgentMessage == "recovered review")
+        }
+    }
+
     @Test func userCancellationWinsOverPendingNetworkRecovery() async throws {
         let backend = FakeCodexReviewBackend()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
