@@ -2139,6 +2139,74 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendSuppressesRetriedActiveTurnNotificationsBufferedDuringRollback() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-active"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "thread-1"), for: "review/start")
+        let rollbackGate = AsyncGate()
+        await transport.holdNext(method: "thread/rollback", gate: rollbackGate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-old",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+        var iterator = events.makeAsyncIterator()
+
+        async let recovered = backend.recoverReview(
+            run,
+            request: BackendReviewStart(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        let rollbackRequested = await waitUntil {
+            await transport.recordedRequests().contains { $0.method == "thread/rollback" }
+        }
+        #expect(rollbackRequested)
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-active"))
+        )
+        let bufferedStaleNotification = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
+        }
+        #expect(bufferedStaleNotification)
+
+        await rollbackGate.open()
+        let recoveredRun = try await recovered
+        #expect(recoveredRun.turnID == "turn-2")
+        let ignoredStaleNotification = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        }
+        #expect(ignoredStaleNotification)
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
+        )
+        #expect(try await iterator.next() == .started(
+            turnID: "turn-2",
+            reviewThreadID: "thread-1",
+            model: nil
+        ))
+    }
+
     @Test func backendRecoveryClearsInterruptedCommandStateBeforeReplayingRecoveredTurn() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)

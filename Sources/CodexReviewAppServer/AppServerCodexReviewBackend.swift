@@ -774,6 +774,10 @@ private struct AppServerReviewRecoveryInterruptionState {
         }
         return interruptedTurnIDs.contains(turnID) || inFlightInterruptedTurnIDs.contains(turnID)
     }
+
+    var turnIDsForRestartSuppression: Set<String> {
+        interruptedTurnIDs.union(inFlightInterruptedTurnIDs)
+    }
 }
 
 private struct DecodedReviewNotification {
@@ -924,6 +928,7 @@ private actor AppServerReviewEventSession {
     func beginRecoveryRestartNotificationBuffering() {
         clearInterruptedTurnProjectionState()
         recoveryRestartSuppressedTurnIDs.formUnion(trackedTurnIDs)
+        recoveryRestartSuppressedTurnIDs.formUnion(recoveryInterruptionState.turnIDsForRestartSuppression)
         buffersRecoveryRestartNotifications = true
         recoveryRestartBufferedNotifications.removeAll(keepingCapacity: true)
     }
