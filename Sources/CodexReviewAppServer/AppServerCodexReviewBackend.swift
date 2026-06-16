@@ -318,13 +318,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let recoveryInterruption = try await interruptReviewForRecoveryInterruption(run, reason: reason)
-
-        let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
-            params: .init(threadID: recoveryInterruption?.threadID ?? run.threadID, numTurns: 1)
-        ))
-
         let session = await reviewEventSession(for: run)
         await session.beginRecoveryRestartNotificationBuffering()
+
+        do {
+            let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
+                params: .init(threadID: recoveryInterruption?.threadID ?? run.threadID, numTurns: 1)
+            ))
+        } catch {
+            await session.cancelRecoveryRestartNotificationBuffering()
+            throw error
+        }
+
         let review: ReviewStartResponse
         reviewStartRequestsInFlight += 1
         do {
