@@ -316,7 +316,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let recoveredRun = BackendReviewRun(
             threadID: run.threadID,
             turnID: review.turnID,
-            reviewThreadID: review.reviewThreadID ?? run.reviewThreadID ?? run.threadID,
+            reviewThreadID: review.reviewThreadID ?? run.threadID,
             model: run.model ?? request.model
         )
         await session.updateRun(recoveredRun)

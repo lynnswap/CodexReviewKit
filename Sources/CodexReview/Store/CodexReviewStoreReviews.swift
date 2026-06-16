@@ -571,7 +571,7 @@ extension CodexReviewStore {
                 if waitingForNetworkRecovery {
                     continue
                 }
-                handleReviewEvent(event, job: job)
+                currentRun = handleReviewEvent(event, job: job, currentRun: currentRun)
                 if job.isTerminal {
                     return currentRun
                 }
@@ -656,25 +656,28 @@ extension CodexReviewStore {
         return currentRun
     }
 
-    private func handleReviewEvent(_ event: BackendReviewEvent, job: CodexReviewJob) {
+    private func handleReviewEvent(
+        _ event: BackendReviewEvent,
+        job: CodexReviewJob,
+        currentRun: BackendReviewRun
+    ) -> BackendReviewRun {
         guard job.isTerminal == false else {
-            return
+            return currentRun
         }
         if event.completesReviewRun, completePendingCancellationIfNeeded(for: job) {
             writeDiagnosticsIfNeeded()
-            return
+            return currentRun
         }
+        var updatedRun = currentRun
         switch event {
         case .started(let turnID, let reviewThreadID, let model):
             job.core.run.turnID = turnID
             job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
             job.core.run.model = model ?? job.core.run.model
-            if var activeRun = activeRuns[job.id] {
-                activeRun.turnID = turnID
-                activeRun.reviewThreadID = reviewThreadID ?? activeRun.reviewThreadID
-                activeRun.model = model ?? activeRun.model
-                activeRuns[job.id] = activeRun
-            }
+            updatedRun.turnID = turnID
+            updatedRun.reviewThreadID = reviewThreadID ?? updatedRun.reviewThreadID
+            updatedRun.model = model ?? updatedRun.model
+            activeRuns[job.id] = updatedRun
             job.core.output.summary = "Review started."
         case .message(let text):
             job.core.output.lastAgentMessage = text
@@ -682,7 +685,7 @@ extension CodexReviewStore {
             job.appendLogEntry(.init(kind: .agentMessage, text: text, timestamp: clock.now()))
         case .messageDelta(let text, let itemID):
             guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
-                return
+                return updatedRun
             }
             job.core.output.lastAgentMessage = updatedMessage
             job.core.output.summary = updatedMessage
@@ -723,6 +726,7 @@ extension CodexReviewStore {
             )
         }
         writeDiagnosticsIfNeeded()
+        return updatedRun
     }
 
     private func completePendingCancellationIfNeeded(for job: CodexReviewJob) -> Bool {

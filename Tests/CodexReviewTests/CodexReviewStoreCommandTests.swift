@@ -869,6 +869,74 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func networkRecoveryUsesActualStartedTurn() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-response",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-recovered",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            await backend.yield(.started(
+                turnID: "turn-actual",
+                reviewThreadID: "review-thread-1",
+                model: "gpt-5"
+            ), for: initialRun)
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.run.turnID == "turn-actual"
+            })
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            let commandsAfterInterrupt = await backend.recordedCommands()
+            let interruptedRuns = commandsAfterInterrupt.compactMap { command -> BackendReviewRun? in
+                if case .interruptReviewForRecovery(let run, _) = command {
+                    return run
+                }
+                return nil
+            }
+            #expect(interruptedRuns.last?.turnID == "turn-actual")
+
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForRecoverReview(timeout: .seconds(2))
+            let commandsAfterRecovery = await backend.recordedCommands()
+            let recoveredFromRuns = commandsAfterRecovery.compactMap { command -> BackendReviewRun? in
+                if case .recoverReview(let run, _, _) = command {
+                    return run
+                }
+                return nil
+            }
+            #expect(recoveredFromRuns.last?.turnID == "turn-actual")
+
+            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .succeeded)
+            #expect(read.core.run.turnID == "turn-recovered")
+        }
+    }
+
     @Test func networkRecoveryRestartsReviewOnSameJobAndSucceeds() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",

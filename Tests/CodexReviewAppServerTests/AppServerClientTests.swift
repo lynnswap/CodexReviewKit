@@ -1545,6 +1545,36 @@ struct AppServerClientTests {
         #expect(restartParams.target == .baseBranch("main"))
     }
 
+    @Test func backendRecoverReviewDefaultsMissingReviewThreadToActiveThread() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+
+        let recovered = try await backend.recoverReview(
+            run,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+
+        #expect(recovered.threadID == "thread-1")
+        #expect(recovered.turnID == "turn-2")
+        #expect(recovered.reviewThreadID == "thread-1")
+    }
+
     @Test func backendSuppressesRecoveryInterruptTerminalEvent() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
