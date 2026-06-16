@@ -34,6 +34,30 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
+    package func reorderWorkspaceGroup(cwds: [String], toIndex: Int) {
+        let cwdSet = Set(cwds)
+        let ordered = orderedWorkspaces
+        let moving = ordered.filter { cwdSet.contains($0.cwd) }
+        guard moving.isEmpty == false else {
+            return
+        }
+
+        let remaining = ordered.filter { cwdSet.contains($0.cwd) == false }
+        let destinationIndex = max(0, min(toIndex, remaining.count))
+        var reordered = remaining
+        reordered.insert(contentsOf: moving, at: destinationIndex)
+        guard reordered.count == ordered.count,
+              zip(reordered, ordered).contains(where: { pair in pair.0 !== pair.1 })
+        else {
+            return
+        }
+
+        for (index, workspace) in reordered.enumerated() {
+            workspace.sortOrder = Double(reordered.count - index - 1)
+        }
+        writeDiagnosticsIfNeeded()
+    }
+
     package func reorderJob(
         id: String,
         inWorkspace cwd: String,

@@ -2560,6 +2560,62 @@ struct ReviewUITests {
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
+    @Test func workspaceGroupDropReordersGroupedRootAsBlock() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        let standaloneURL = fixture.rootURL.appendingPathComponent("Standalone", isDirectory: true)
+        try FileManager.default.createDirectory(at: standaloneURL, withIntermediateDirectories: true)
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let standaloneWorkspace = CodexReviewWorkspace(cwd: standaloneURL.path)
+        let firstJob = makeJob(
+            id: "job-draggable-group-first-workspace",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "First workspace"
+        )
+        let secondJob = makeJob(
+            id: "job-draggable-group-second-workspace",
+            cwd: secondWorkspace.cwd,
+            status: .running,
+            targetSummary: "Second workspace"
+        )
+        let standaloneJob = makeJob(
+            id: "job-draggable-group-standalone",
+            cwd: standaloneWorkspace.cwd,
+            status: .queued,
+            targetSummary: "Standalone workspace"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace, standaloneWorkspace],
+            jobs: [firstJob, secondJob, standaloneJob]
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "Standalone"])
+        #expect(sidebar.workspaceGroupCanStartDragForTesting(containing: firstWorkspace))
+
+        let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
+        #expect(sidebar.performWorkspaceGroupDropForTesting(
+            containing: firstWorkspace,
+            toIndex: 2
+        ))
+        await Task.yield()
+
+        #expect(sidebar.displayedSectionTitlesForTesting == ["Standalone", "CodexReviewKit"])
+        #expect(store.orderedWorkspaces.map(\.cwd) == [
+            standaloneWorkspace.cwd,
+            firstWorkspace.cwd,
+            secondWorkspace.cwd,
+        ])
+        #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
+    }
+
     @Test func groupedJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
