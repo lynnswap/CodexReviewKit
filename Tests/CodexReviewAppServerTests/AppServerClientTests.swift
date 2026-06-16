@@ -484,7 +484,7 @@ struct AppServerClientTests {
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
-        control.recordReviewStarted(threadID: "thread-1", turnID: "turn-1")
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-1")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-1"))
 
@@ -506,7 +506,7 @@ struct AppServerClientTests {
         let client = AppServerClient(transport: transport)
         let control = AppServerReviewControl(client: client)
 
-        control.recordReviewStarted(threadID: "thread-1", turnID: "turn-old")
+        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-new"))
 
@@ -1088,6 +1088,28 @@ struct AppServerClientTests {
         #expect(params.turnID == "turn-new")
     }
 
+    @Test func backendInterruptUsesDetachedReviewThreadBeforeStartedNotification() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+
+        let request = try #require(await transport.recordedRequests().last)
+        #expect(request.method == "turn/interrupt")
+        let params = try JSONDecoder().decode(TurnInterruptParams.self, from: request.params)
+        #expect(params.threadID == "review-thread")
+        #expect(params.turnID == "turn-old")
+    }
+
     @Test func backendPreservesDetachedReviewThreadIDWhenReviewItemOmitsIt() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -1545,6 +1567,50 @@ struct AppServerClientTests {
         let restart = try #require(requests.first { $0.method == "review/start" })
         let restartParams = try JSONDecoder().decode(ReviewStartParams.self, from: restart.params)
         #expect(restartParams.threadID == "thread-1")
+        #expect(restartParams.target == .baseBranch("main"))
+    }
+
+    @Test func backendRecoverReviewUsesDetachedReviewThreadBeforeStartedNotification() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-old", reviewThreadID: "review-thread"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/rollback")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-2", reviewThreadID: "review-thread"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+
+        let recovered = try await backend.recoverReview(
+            run,
+            request: .init(
+                jobID: "job-1",
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                model: "gpt-5"
+            ),
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+
+        #expect(recovered.threadID == "parent-thread")
+        #expect(recovered.turnID == "turn-2")
+        #expect(recovered.reviewThreadID == "review-thread")
+        let requests = await transport.recordedRequests()
+        let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interrupt.params)
+        #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-old")
+        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
+        let rollbackParams = try JSONDecoder().decode(ThreadRollbackParams.self, from: rollback.params)
+        #expect(rollbackParams.threadID == "review-thread")
+        #expect(rollbackParams.numTurns == 1)
+        let restart = try #require(requests.last { $0.method == "review/start" })
+        let restartParams = try JSONDecoder().decode(ReviewStartParams.self, from: restart.params)
+        #expect(restartParams.threadID == "parent-thread")
         #expect(restartParams.target == .baseBranch("main"))
     }
 

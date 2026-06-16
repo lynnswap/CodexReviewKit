@@ -7,6 +7,10 @@ private let appServerBackendLogger = Logger(
     category: "app-server-backend"
 )
 
+private func appServerTurnThreadID(for run: BackendReviewRun) -> String {
+    run.reviewThreadID?.nilIfEmpty ?? run.threadID
+}
+
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
@@ -148,7 +152,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
-        control.recordReviewStarted(threadID: thread.threadID, turnID: review.turnID)
+        control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: review.turnID)
         await drainUnmatchedReviewNotifications(for: run, to: session)
         reviewStartRequestsInFlight -= 1
         discardUnmatchedReviewNotificationsIfIdle()
@@ -333,7 +337,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(recoveredRun)
         registerReviewEventSession(session, for: recoveredRun)
-        controlsByThreadID[run.threadID]?.recordReviewStarted(threadID: run.threadID, turnID: review.turnID)
+        controlsByThreadID[run.threadID]?.recordReviewStarted(
+            turnThreadID: appServerTurnThreadID(for: recoveredRun),
+            turnID: review.turnID
+        )
         await session.finishRecoveryRestartNotificationBuffering()
         await drainUnmatchedReviewNotifications(for: recoveredRun, to: session)
         reviewStartRequestsInFlight -= 1
@@ -413,7 +420,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let control = controlsByThreadID[run.threadID] ?? AppServerReviewControl(client: client)
         controlsByThreadID[run.threadID] = control
         if let turnID = run.turnID {
-            control.recordReviewStarted(threadID: run.threadID, turnID: turnID)
+            control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: turnID)
         } else {
             control.recordThreadStarted(threadID: run.threadID)
         }
@@ -499,10 +506,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
            let interruption = try await control.interrupt() {
             return interruption
         }
+        let threadID = appServerTurnThreadID(for: run)
         let _: EmptyResponse = try await client.send(TurnInterruptRequest(
-            params: .init(threadID: run.threadID, turnID: run.turnID ?? "")
+            params: .init(threadID: threadID, turnID: run.turnID ?? "")
         ))
-        return .init(threadID: run.threadID, turnID: run.turnID ?? "")
+        return .init(threadID: threadID, turnID: run.turnID ?? "")
     }
 
     private func cleanupThreadIDs(for run: BackendReviewRun) -> [String] {
@@ -1413,7 +1421,7 @@ private actor AppServerReviewEventSession {
     private func recordReviewEvent(_ event: BackendReviewEvent, controlThreadID: String? = nil) {
         switch event {
         case .started(let turnID, _, _):
-            control.recordTurnStarted(threadID: controlThreadID ?? run.threadID, turnID: turnID)
+            control.recordTurnStarted(turnThreadID: controlThreadID ?? appServerTurnThreadID(for: run), turnID: turnID)
         case .completed, .failed, .cancelled:
             control.finish()
             appServerBackendLogger.debug(

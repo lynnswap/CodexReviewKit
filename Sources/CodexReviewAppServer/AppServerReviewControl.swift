@@ -15,7 +15,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
     private enum Phase: Equatable {
         case preparing
         case threadStarted(threadID: String)
-        case reviewStarted(threadID: String, turnID: String)
+        case reviewStarted(turnThreadID: String, turnID: String)
         case finished
     }
 
@@ -36,16 +36,16 @@ package final class AppServerReviewControl: @unchecked Sendable {
         phase = .threadStarted(threadID: threadID)
     }
 
-    package func recordReviewStarted(threadID: String, turnID: String) {
+    package func recordReviewStarted(turnThreadID: String, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(threadID: threadID, turnID: turnID)
+        phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
     }
 
-    package func recordTurnStarted(threadID: String, turnID: String) {
+    package func recordTurnStarted(turnThreadID: String, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(threadID: threadID, turnID: turnID)
+        phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
     }
 
     @discardableResult
@@ -56,8 +56,8 @@ package final class AppServerReviewControl: @unchecked Sendable {
             return nil
         case .threadStarted(let threadID):
             return try await sendInterrupt(threadID: threadID, turnID: "")
-        case .reviewStarted(let threadID, let turnID):
-            return try await sendInterrupt(threadID: threadID, turnID: turnID)
+        case .reviewStarted(let turnThreadID, let turnID):
+            return try await sendInterrupt(threadID: turnThreadID, turnID: turnID)
         }
     }
 
@@ -88,7 +88,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
             let _: EmptyResponse = try await client.send(TurnInterruptRequest(
                 params: .init(threadID: threadID, turnID: activeTurnID)
             ))
-            setPhase(.reviewStarted(threadID: threadID, turnID: activeTurnID))
+            setPhase(.reviewStarted(turnThreadID: threadID, turnID: activeTurnID))
             return .init(threadID: threadID, turnID: activeTurnID)
         }
     }
