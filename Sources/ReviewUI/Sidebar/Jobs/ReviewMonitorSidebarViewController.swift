@@ -72,14 +72,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private enum SidebarDragPayload: Codable, Equatable {
-        case workspace(cwd: String)
+        case workspaceSection(id: String)
         case job(id: String, cwd: String)
     }
 
     private struct SidebarResolvedDrop {
         enum Operation {
             case none
-            case reorderWorkspace(cwd: String, toIndex: Int)
+            case reorderWorkspaceSection(id: String, cwds: [String], storeIndex: Int, displayIndex: Int)
             case reorderJob(id: String, cwd: String, storeIndex: Int, displayIndex: Int)
         }
 
@@ -90,6 +90,59 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private struct SidebarWorkspaceTopology {
         let workspace: CodexReviewWorkspace
+        let jobs: [CodexReviewJob]
+    }
+
+    private struct SidebarWorkspaceDropDestination {
+        let storeInsertionIndex: Int
+        let rootInsertionIndex: Int
+    }
+
+    private struct SidebarJobDropDestination {
+        let workspace: CodexReviewWorkspace
+        let childIndex: Int
+    }
+
+    private final class SidebarWorkspaceSection: Hashable {
+        let id: String
+        var title: String
+        var workspaces: [CodexReviewWorkspace]
+        var jobs: [CodexReviewJob]
+        var isExpanded: Bool
+
+        init(
+            id: String,
+            title: String,
+            workspaces: [CodexReviewWorkspace],
+            jobs: [CodexReviewJob]
+        ) {
+            self.id = id
+            self.title = title
+            self.workspaces = workspaces
+            self.jobs = jobs
+            self.isExpanded = true
+        }
+
+        var selection: ReviewMonitorWorkspaceSectionSelection {
+            ReviewMonitorWorkspaceSectionSelection(
+                id: id,
+                title: title,
+                workspaceCWDs: workspaces.map(\.cwd)
+            )
+        }
+
+        static func == (lhs: SidebarWorkspaceSection, rhs: SidebarWorkspaceSection) -> Bool {
+            lhs.id == rhs.id
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(id)
+        }
+    }
+
+    private struct SidebarRootTopology {
+        let item: AnyObject
+        let workspaces: [CodexReviewWorkspace]
         let jobs: [CodexReviewJob]
     }
 
@@ -111,6 +164,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarKindObservation: PortableObservationTracking.Token?
     private var sidebarTopologyObservation: PortableObservationTracking.Token?
     private var sidebarFilterObservation: PortableObservationTracking.Token?
+    private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
+    private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
+    private var currentRootTopologies: [SidebarRootTopology] = []
     private var isReconcilingSelection = false
 #if DEBUG
     private var fullReloadCountForTesting = 0
@@ -286,9 +342,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 return
             }
             let workspaceTopologies = self.sidebarWorkspaceTopologies(filter: filter)
+            let rootTopologies = self.sidebarRootTopologies(from: workspaceTopologies)
             let animated = event.kind == .initial ? animatedInitialDelivery : true
             self.applySidebarTopology(
-                workspaceTopologies,
+                rootTopologies,
                 animated: animated
             )
         }
@@ -331,16 +388,88 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
+    private func sidebarRootTopologies(
+        from workspaceTopologies: [SidebarWorkspaceTopology]
+    ) -> [SidebarRootTopology] {
+        var topologiesBySectionID: [String: [SidebarWorkspaceTopology]] = [:]
+        var sectionIdentityByID: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
+        var sectionOrder: [String] = []
+
+        for topology in workspaceTopologies {
+            let identity = workspaceSectionIdentity(for: topology.workspace)
+            if topologiesBySectionID[identity.id] == nil {
+                sectionOrder.append(identity.id)
+            }
+            sectionIdentityByID[identity.id] = identity
+            topologiesBySectionID[identity.id, default: []].append(topology)
+        }
+
+        var renderedSectionIDs: Set<String> = []
+        let rootTopologies = sectionOrder.compactMap { sectionID -> SidebarRootTopology? in
+            guard let topologies = topologiesBySectionID[sectionID],
+                  let identity = sectionIdentityByID[sectionID]
+            else {
+                return nil
+            }
+
+            renderedSectionIDs.insert(identity.id)
+            let section = workspaceSection(
+                identity: identity,
+                workspaces: topologies.map(\.workspace),
+                jobs: topologies.flatMap(\.jobs)
+            )
+            return SidebarRootTopology(
+                item: section,
+                workspaces: section.workspaces,
+                jobs: section.jobs
+            )
+        }
+        workspaceSectionsByID = workspaceSectionsByID.filter { renderedSectionIDs.contains($0.key) }
+        return rootTopologies
+    }
+
+    private func workspaceSectionIdentity(for workspace: CodexReviewWorkspace) -> ReviewMonitorWorkspaceSectionIdentity {
+        if let identity = workspaceSectionIdentitiesByCWD[workspace.cwd] {
+            return identity
+        }
+        let identity = ReviewMonitorWorkspaceSectioning.identity(for: workspace.cwd)
+        workspaceSectionIdentitiesByCWD[workspace.cwd] = identity
+        return identity
+    }
+
+    private func workspaceSection(
+        identity: ReviewMonitorWorkspaceSectionIdentity,
+        workspaces: [CodexReviewWorkspace],
+        jobs: [CodexReviewJob]
+    ) -> SidebarWorkspaceSection {
+        if let section = workspaceSectionsByID[identity.id] {
+            section.title = identity.title
+            section.workspaces = workspaces
+            section.jobs = jobs
+            return section
+        }
+
+        let section = SidebarWorkspaceSection(
+            id: identity.id,
+            title: identity.title,
+            workspaces: workspaces,
+            jobs: jobs
+        )
+        workspaceSectionsByID[identity.id] = section
+        return section
+    }
+
     private func applySidebarTopology(
-        _ workspaceTopologies: [SidebarWorkspaceTopology],
+        _ rootTopologies: [SidebarRootTopology],
         animated: Bool
     ) {
         let shouldAnimate = animated && shouldAnimateSidebarMutations
-        applyWorkspaceMembershipChange(
-            workspaceTopologies.map(\.workspace),
+        currentRootTopologies = rootTopologies
+        applyRootMembershipChange(
+            rootTopologies.map(\.item),
             animated: shouldAnimate
         )
-        applyJobMembershipChange(workspaceTopologies, animated: shouldAnimate)
+        applyJobMembershipChange(rootTopologies, animated: shouldAnimate)
         scheduleOutlineSelectionReconciliation()
     }
 
@@ -348,83 +477,94 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         view.window != nil && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
     }
 
-    private func applyWorkspaceMembershipChange(
-        _ workspaces: [CodexReviewWorkspace],
+    private func applyRootMembershipChange(
+        _ rootItems: [AnyObject],
         animated: Bool
     ) {
-        let currentWorkspaces = displayedWorkspaces()
-        let insertedWorkspaces = applyMembershipChange(
-            currentItems: currentWorkspaces,
-            targetItems: workspaces,
+        let currentRootItems = displayedRootItems()
+        let insertedRootItems = applyMembershipChange(
+            currentItems: currentRootItems,
+            targetItems: rootItems,
             parent: nil,
             animated: animated
         )
-        applyStoredExpansionState(for: insertedWorkspaces)
+        applyStoredExpansionState(for: insertedRootItems)
     }
 
     private func applyJobMembershipChange(
-        _ workspaceTopologies: [SidebarWorkspaceTopology],
+        _ rootTopologies: [SidebarRootTopology],
         animated: Bool
     ) {
-        let workspaces = workspaceTopologies.map(\.workspace)
-        for workspace in displayedWorkspaces() {
-            guard let topology = workspaceTopologies.first(where: { $0.workspace === workspace }) else {
+        let rootItems = rootTopologies.map(\.item)
+        for rootItem in displayedRootItems() {
+            guard let topology = rootTopologies.first(where: { $0.item === rootItem }) else {
                 continue
             }
-            let displayedJobs = displayedJobs(in: workspace)
+            let displayedJobs = displayedJobs(inRootItem: rootItem)
             let targetJobs = topology.jobs
             guard hasSameIdentityOrder(displayedJobs, targetJobs) == false else {
                 continue
             }
-            if outlineView.isItemExpanded(workspace) {
+            if outlineView.isItemExpanded(rootItem) {
                 applyMembershipChange(
                     currentItems: displayedJobs,
                     targetItems: targetJobs,
-                    parent: workspace,
+                    parent: rootItem,
                     animated: animated
                 )
                 continue
             }
-            reloadWorkspace(workspace, allWorkspaces: workspaces)
+            reloadRootItem(rootItem, allRootItems: rootItems)
         }
     }
 
-    private func reloadOutline(workspaces: [CodexReviewWorkspace]) {
-        clearSelectionIfNeeded(for: workspaces)
+    private func reloadOutline(rootItems: [AnyObject]) {
+        clearSelectionIfNeeded(for: workspaces())
 
 #if DEBUG
         fullReloadCountForTesting += 1
 #endif
         isReconcilingSelection = true
         outlineView.reloadData()
-        applyStoredExpansionState(for: workspaces)
+        applyStoredExpansionState(for: rootItems)
         reconcileOutlineSelection()
         isReconcilingSelection = false
     }
 
-    private func applyStoredExpansionState(for workspaces: [CodexReviewWorkspace]) {
-        for workspace in workspaces {
-            setWorkspace(workspace, expanded: workspace.isExpanded)
+    private func applyStoredExpansionState(for rootItems: [AnyObject]) {
+        for rootItem in rootItems {
+            setRootItem(rootItem, expanded: rootItemIsExpanded(rootItem))
         }
     }
 
     private func setWorkspace(_ workspace: CodexReviewWorkspace, expanded: Bool) {
-        guard row(for: workspace) != nil else {
+        guard let rootItem = rootItem(containing: workspace) else {
             return
         }
-        let outlineIsExpanded = outlineView.isItemExpanded(workspace)
+        setRootItem(rootItem, expanded: expanded)
+    }
+
+    private func setRootItem(_ rootItem: AnyObject, expanded: Bool) {
+        guard row(forRootItem: rootItem) != nil else {
+            return
+        }
+        let outlineIsExpanded = outlineView.isItemExpanded(rootItem)
         if expanded && outlineIsExpanded == false {
-            outlineView.expandItem(workspace)
+            outlineView.expandItem(rootItem)
         } else if expanded == false && outlineIsExpanded {
-            outlineView.collapseItem(workspace)
+            outlineView.collapseItem(rootItem)
         }
     }
 
-    private func reloadWorkspace(
-        _ workspace: CodexReviewWorkspace,
-        allWorkspaces: [CodexReviewWorkspace]
+    private func rootItemIsExpanded(_ rootItem: AnyObject) -> Bool {
+        workspaceSection(from: rootItem)?.isExpanded ?? true
+    }
+
+    private func reloadRootItem(
+        _ rootItem: AnyObject,
+        allRootItems: [AnyObject]
     ) {
-        guard let workspace = allWorkspaces.first(where: { $0 === workspace })
+        guard let rootItem = allRootItems.first(where: { $0 === rootItem })
         else {
             return
         }
@@ -433,8 +573,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         workspaceReloadCountForTesting += 1
 #endif
         isReconcilingSelection = true
-        outlineView.reloadItem(workspace, reloadChildren: true)
-        setWorkspace(workspace, expanded: workspace.isExpanded)
+        outlineView.reloadItem(rootItem, reloadChildren: true)
+        setRootItem(rootItem, expanded: rootItemIsExpanded(rootItem))
         isReconcilingSelection = false
     }
 
@@ -485,18 +625,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         switch selection {
-        case .workspace(let selectedWorkspace):
-            guard let currentWorkspace = workspace(cwd: selectedWorkspace.cwd) else {
+        case .workspaceSection(let selectedSection):
+            guard let currentSection = workspaceSection(id: selectedSection.id) else {
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
                 return
             }
 
-            if currentWorkspace !== selectedWorkspace {
-                uiState.selection = .workspace(currentWorkspace)
+            if currentSection.selection != selectedSection {
+                uiState.selection = .workspaceSection(currentSection.selection)
             }
 
-            guard let row = row(for: currentWorkspace) else {
+            guard let row = row(forRootItem: currentSection) else {
                 return
             }
             guard outlineView.selectedRow != row else {
@@ -538,8 +678,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return
         }
         let item = outlineView.item(atRow: outlineView.selectedRow)
-        if let workspace = workspace(from: item) {
-            uiState.selection = .workspace(workspace)
+        if let section = workspaceSection(from: item) {
+            uiState.selection = .workspaceSection(section.selection)
         } else if let job = job(from: item) {
             uiState.selection = .job(job)
         } else {
@@ -557,20 +697,23 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func toggleWorkspaceExpansion(_ workspace: CodexReviewWorkspace) {
-        setWorkspace(workspace, expanded: outlineView.isItemExpanded(workspace) == false)
+        guard let rootItem = rootItem(containing: workspace) else {
+            return
+        }
+        setRootItem(rootItem, expanded: outlineView.isItemExpanded(rootItem) == false)
     }
 
-    private func restoreSelectedJobRowAfterExpansion(of workspace: CodexReviewWorkspace) {
+    private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
         guard let selectedJob = uiState.selectedJobEntry,
-              selectedJob.cwd == workspace.cwd
+              section.workspaces.contains(where: { $0.cwd == selectedJob.cwd })
         else {
             return
         }
         let selectedJobID = selectedJob.id
-        DispatchQueue.main.async { [weak self, weak workspace] in
+        DispatchQueue.main.async { [weak self, weak section] in
             guard let self,
-                  let workspace,
-                  workspace.isExpanded,
+                  let section,
+                  section.isExpanded,
                   self.uiState.selectedJobEntry?.id == selectedJobID,
                   let row = self.row(forJobID: selectedJobID),
                   self.outlineView.selectedRow != row
@@ -755,9 +898,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { $0 === $1 }
     }
 
-    private func moveWorkspaceInOutline(cwd: String, toIndex destinationIndex: Int) {
-        let currentWorkspaces = displayedWorkspaces()
-        guard let sourceIndex = currentWorkspaces.firstIndex(where: { $0.cwd == cwd }),
+    private func moveWorkspaceSectionInOutline(id: String, toRootIndex destinationIndex: Int) {
+        guard let section = workspaceSection(id: id) else {
+            return
+        }
+        moveRootItemInOutline(section, toRootIndex: destinationIndex)
+    }
+
+    private func moveRootItemInOutline(_ rootItem: AnyObject, toRootIndex destinationIndex: Int) {
+        let currentRootItems = displayedRootItems()
+        guard let sourceIndex = currentRootItems.firstIndex(where: { $0 === rootItem }),
               sourceIndex != destinationIndex
         else {
             return
@@ -768,11 +918,23 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func moveJobInOutline(id: String, in workspace: CodexReviewWorkspace, toIndex destinationIndex: Int) {
         let currentJobs = displayedJobs(in: workspace)
         guard let sourceIndex = currentJobs.firstIndex(where: { $0.id == id }),
-              sourceIndex != destinationIndex
+              let parentItem = rootItem(containing: workspace)
         else {
             return
         }
-        moveOutlineItem(from: sourceIndex, to: destinationIndex, parent: workspace)
+        let rootJobs = displayedJobs(inRootItem: parentItem)
+        guard let sourceRootIndex = rootJobs.firstIndex(where: { $0.id == id }),
+              let workspaceRootStartIndex = rootJobs.firstIndex(where: { $0.cwd == workspace.cwd })
+        else {
+            return
+        }
+        let destinationRootIndex = workspaceRootStartIndex + destinationIndex
+        guard sourceIndex != destinationIndex,
+              sourceRootIndex != destinationRootIndex
+        else {
+            return
+        }
+        moveOutlineItem(from: sourceRootIndex, to: destinationRootIndex, parent: parentItem)
     }
 
     private func moveOutlineItem(from sourceIndex: Int, to destinationIndex: Int, parent: Any?) {
@@ -796,9 +958,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         reconcileSelectionAfterOutlineMutation()
     }
 
-    private func displayedWorkspaces() -> [CodexReviewWorkspace] {
+    private func displayedRootItems() -> [AnyObject] {
         (0..<outlineView.numberOfRows).compactMap { row in
-            workspace(from: outlineView.item(atRow: row))
+            let item = outlineView.item(atRow: row)
+            if let section = workspaceSection(from: item), outlineView.parent(forItem: item) == nil {
+                return section
+            }
+            return nil
         }
     }
 
@@ -806,8 +972,20 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         (0..<outlineView.numberOfRows).compactMap { row in
             let item = outlineView.item(atRow: row)
             guard let job = job(from: item),
-                  let parentWorkspace = outlineView.parent(forItem: item) as? CodexReviewWorkspace,
-                  parentWorkspace === workspace
+                  job.cwd == workspace.cwd
+            else {
+                return nil
+            }
+            return job
+        }
+    }
+
+    private func displayedJobs(inRootItem rootItem: AnyObject) -> [CodexReviewJob] {
+        (0..<outlineView.numberOfRows).compactMap { row in
+            let item = outlineView.item(atRow: row)
+            guard let job = job(from: item),
+                  let parentItem = outlineView.parent(forItem: item) as? AnyObject,
+                  parentItem === rootItem
             else {
                 return nil
             }
@@ -859,8 +1037,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return latestJob
     }
 
-    private func workspace(from item: Any?) -> CodexReviewWorkspace? {
-        item as? CodexReviewWorkspace
+    private func workspaceSection(from item: Any?) -> SidebarWorkspaceSection? {
+        item as? SidebarWorkspaceSection
     }
 
     private func job(from item: Any?) -> CodexReviewJob? {
@@ -868,7 +1046,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func shouldAllowSelection(of item: Any?) -> Bool {
-        workspace(from: item) != nil || job(from: item) != nil
+        workspaceSection(from: item) != nil || job(from: item) != nil
     }
 
     private func workspaces() -> [CodexReviewWorkspace] {
@@ -889,12 +1067,41 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func row(for workspace: CodexReviewWorkspace) -> Int? {
-        let row = outlineView.row(forItem: workspace)
+        guard let rootItem = rootItem(containing: workspace) else {
+            return nil
+        }
+        let row = outlineView.row(forItem: rootItem)
+        return row == -1 ? nil : row
+    }
+
+    private func row(forRootItem rootItem: AnyObject) -> Int? {
+        let row = outlineView.row(forItem: rootItem)
         return row == -1 ? nil : row
     }
 
     private func workspace(cwd: String) -> CodexReviewWorkspace? {
         store.workspace(cwd: cwd)
+    }
+
+    private func workspaceSection(id: String) -> SidebarWorkspaceSection? {
+        workspaceSectionsByID[id]
+    }
+
+    private func workspaceSection(containing workspace: CodexReviewWorkspace) -> SidebarWorkspaceSection? {
+        rootItem(containing: workspace).flatMap { workspaceSection(from: $0) }
+    }
+
+    private func rootItem(containing workspace: CodexReviewWorkspace) -> AnyObject? {
+        workspaceSectionsByID.values.first { section in
+            section.workspaces.contains(where: { $0.cwd == workspace.cwd })
+        }
+    }
+
+    private func rootItem(containing job: CodexReviewJob) -> AnyObject? {
+        guard let workspace = workspace(containing: job) else {
+            return nil
+        }
+        return rootItem(containing: workspace)
     }
 
     private func row(forJobID jobID: String) -> Int? {
@@ -925,8 +1132,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return true
         }
         switch selection {
-        case .workspace(let workspace):
-            return workspaces.contains(where: { $0.cwd == workspace.cwd })
+        case .workspaceSection(let section):
+            return workspaceSectionsByID[section.id] != nil
+                || section.workspaceCWDs.contains { cwd in
+                    workspaces.contains(where: { $0.cwd == cwd })
+                }
         case .job(let job):
             return containsJob(id: job.id, in: workspaces)
         }
@@ -954,8 +1164,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
-        if let workspace = workspace(from: item) {
-            return .workspace(cwd: workspace.cwd)
+        if let section = workspaceSection(from: item) {
+            return .workspaceSection(id: section.id)
         }
         if let job = job(from: item) {
             return .job(id: job.id, cwd: job.cwd)
@@ -993,9 +1203,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
         switch payload {
-        case .workspace(let cwd):
-            resolvedWorkspaceDrop(
-                cwd: cwd,
+        case .workspaceSection(let id):
+            resolvedWorkspaceSectionDrop(
+                id: id,
                 draggingInfo: draggingInfo,
                 proposedItem: proposedItem,
                 proposedChildIndex: index
@@ -1010,14 +1220,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func resolvedWorkspaceDrop(
-        cwd: String,
+    private func resolvedWorkspaceSectionDrop(
+        id: String,
         draggingInfo: (any NSDraggingInfo)?,
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
-        guard let sourceIndex = workspaceIndex(cwd: cwd),
-              let insertionIndex = resolvedWorkspaceInsertionIndex(
+        guard let section = workspaceSection(id: id),
+              let sourceRootIndex = rootIndex(forRootItem: section),
+              let sourceStoreIndex = section.workspaces.compactMap({ workspaceIndex(cwd: $0.cwd) }).min(),
+              let destination = resolvedWorkspaceDropDestination(
                 draggingInfo: draggingInfo,
                 proposedItem: proposedItem,
                 proposedChildIndex: index
@@ -1026,30 +1238,71 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
 
-        let destinationIndex = insertionIndex > sourceIndex
-            ? insertionIndex - 1
-            : insertionIndex
-        let clampedDestinationIndex = max(0, min(destinationIndex, workspaces().count - 1))
-        let operation: SidebarResolvedDrop.Operation = clampedDestinationIndex == sourceIndex
+        let storeDestinationIndex = destination.storeInsertionIndex > sourceStoreIndex
+            ? destination.storeInsertionIndex - section.workspaces.count
+            : destination.storeInsertionIndex
+        let remainingWorkspaceCount = max(0, workspaces().count - section.workspaces.count)
+        let clampedStoreDestinationIndex = max(0, min(storeDestinationIndex, remainingWorkspaceCount))
+        let displayDestinationIndex = destination.rootInsertionIndex > sourceRootIndex
+            ? destination.rootInsertionIndex - 1
+            : destination.rootInsertionIndex
+        let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, currentRootTopologies.count - 1))
+        let operation: SidebarResolvedDrop.Operation = clampedStoreDestinationIndex == sourceStoreIndex
+            && clampedDisplayDestinationIndex == sourceRootIndex
             ? .none
-            : .reorderWorkspace(cwd: cwd, toIndex: clampedDestinationIndex)
+            : .reorderWorkspaceSection(
+                id: section.id,
+                cwds: section.workspaces.map(\.cwd),
+                storeIndex: clampedStoreDestinationIndex,
+                displayIndex: clampedDisplayDestinationIndex
+            )
         return SidebarResolvedDrop(
             operation: operation,
             dropItem: nil,
-            dropChildIndex: insertionIndex
+            dropChildIndex: destination.rootInsertionIndex
         )
     }
 
-    private func resolvedWorkspaceInsertionIndex(
+    private func resolvedWorkspaceDropDestination(
         draggingInfo: (any NSDraggingInfo)?,
         proposedItem: Any?,
         proposedChildIndex index: Int
-    ) -> Int? {
-        resolvedWorkspaceInsertionIndex(
+    ) -> SidebarWorkspaceDropDestination? {
+        resolvedWorkspaceDropDestination(
             draggingLocation: draggingInfo.map { outlineView.convert($0.draggingLocation, from: nil) },
             proposedItem: proposedItem,
             proposedChildIndex: index
         )
+    }
+
+    private func resolvedWorkspaceDropDestination(
+        draggingLocation: NSPoint?,
+        proposedItem: Any?,
+        proposedChildIndex index: Int
+    ) -> SidebarWorkspaceDropDestination? {
+        if proposedItem == nil,
+           index != NSOutlineViewDropOnItemIndex
+        {
+            return workspaceRootDropDestination(rootInsertionIndex: index)
+        }
+
+        if let blankAreaDestination = blankAreaWorkspaceDropDestination(draggingLocation: draggingLocation) {
+            return blankAreaDestination
+        }
+
+        if let targetSection = workspaceSection(from: proposedItem),
+           let targetRootIndex = rootIndex(forRootItem: targetSection)
+        {
+            return workspaceRootDropDestination(
+                rootInsertionIndex: workspaceRootInsertionIndex(
+                    aroundRootItem: targetSection,
+                    defaultIndex: targetRootIndex,
+                    draggingLocation: draggingLocation
+                )
+            )
+        }
+
+        return nil
     }
 
     private func resolvedWorkspaceInsertionIndex(
@@ -1057,32 +1310,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> Int? {
-        if proposedItem == nil,
-           index != NSOutlineViewDropOnItemIndex
-        {
-            return max(0, min(index, workspaces().count))
-        }
-
-        if let blankAreaInsertionIndex = blankAreaWorkspaceInsertionIndex(draggingLocation: draggingLocation) {
-            return blankAreaInsertionIndex
-        }
-
-        guard let targetWorkspace = workspace(from: proposedItem),
-              let workspaceIndex = workspaceIndex(cwd: targetWorkspace.cwd)
-        else {
-            return nil
-        }
-
-        return workspaceInsertionIndex(
-            aroundWorkspace: targetWorkspace,
-            defaultIndex: workspaceIndex,
-            draggingLocation: draggingLocation
-        )
+        resolvedWorkspaceDropDestination(
+            draggingLocation: draggingLocation,
+            proposedItem: proposedItem,
+            proposedChildIndex: index
+        )?.storeInsertionIndex
     }
 
-    private func blankAreaWorkspaceInsertionIndex(
+    private func blankAreaWorkspaceDropDestination(
         draggingLocation: NSPoint?
-    ) -> Int? {
+    ) -> SidebarWorkspaceDropDestination? {
         guard let draggingLocation,
               outlineView.numberOfRows > 0
         else {
@@ -1091,42 +1328,79 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         let firstRowRect = outlineView.rect(ofRow: 0)
         if draggingLocation.y < firstRowRect.minY {
-            return 0
+            return workspaceRootDropDestination(rootInsertionIndex: 0)
         }
 
         let lastRowRect = outlineView.rect(ofRow: outlineView.numberOfRows - 1)
         if draggingLocation.y > lastRowRect.maxY {
-            return workspaces().count
+            return workspaceRootDropDestination(rootInsertionIndex: currentRootTopologies.count)
         }
 
         return nil
     }
 
-    private func workspaceInsertionIndex(
-        aroundWorkspace workspace: CodexReviewWorkspace,
+    private func workspaceRootInsertionIndex(
+        aroundRootItem rootItem: AnyObject,
         defaultIndex: Int,
         draggingLocation: NSPoint?
     ) -> Int {
         guard let draggingLocation,
-              let sectionRect = workspaceSectionRect(for: workspace)
+              let sectionRect = rootSectionRect(forRootItem: rootItem)
         else {
-            return max(0, min(defaultIndex, workspaces().count))
+            return max(0, min(defaultIndex, currentRootTopologies.count))
         }
 
         let insertionIndex = draggingLocation.y < sectionRect.midY
-            ? (workspaceIndex(cwd: workspace.cwd) ?? defaultIndex)
-            : workspaceIndex(cwd: workspace.cwd).map { $0 + 1 } ?? defaultIndex
-        return max(0, min(insertionIndex, workspaces().count))
+            ? defaultIndex
+            : defaultIndex + 1
+        return max(0, min(insertionIndex, currentRootTopologies.count))
+    }
+
+    private func workspaceRootDropDestination(rootInsertionIndex index: Int) -> SidebarWorkspaceDropDestination {
+        let rootInsertionIndex = max(0, min(index, currentRootTopologies.count))
+        return SidebarWorkspaceDropDestination(
+            storeInsertionIndex: workspaceStoreInsertionIndex(forRootInsertionIndex: rootInsertionIndex),
+            rootInsertionIndex: rootInsertionIndex
+        )
+    }
+
+    private func workspaceStoreInsertionIndex(forRootInsertionIndex rootInsertionIndex: Int) -> Int {
+        guard rootInsertionIndex < currentRootTopologies.count,
+              let firstWorkspace = currentRootTopologies[rootInsertionIndex].workspaces.first,
+              let storeInsertionIndex = workspaceIndex(cwd: firstWorkspace.cwd)
+        else {
+            return workspaces().count
+        }
+        return storeInsertionIndex
+    }
+
+    private func rootIndex(containing workspace: CodexReviewWorkspace) -> Int? {
+        guard let rootItem = rootItem(containing: workspace) else {
+            return nil
+        }
+        return rootIndex(forRootItem: rootItem)
+    }
+
+    private func rootIndex(forRootItem rootItem: AnyObject) -> Int? {
+        currentRootTopologies.firstIndex { $0.item === rootItem }
     }
 
     private func workspaceSectionRect(for workspace: CodexReviewWorkspace) -> NSRect? {
-        guard let workspaceRow = row(for: workspace) else {
+        guard let rootItem = rootItem(containing: workspace) else {
+            return nil
+        }
+        return rootSectionRect(forRootItem: rootItem)
+    }
+
+    private func rootSectionRect(forRootItem rootItem: AnyObject) -> NSRect? {
+        guard let rootRow = row(forRootItem: rootItem) else {
             return nil
         }
 
-        var sectionRect = outlineView.rect(ofRow: workspaceRow)
-        guard workspace.isExpanded,
-              let lastJob = visibleJobs(in: workspace).last,
+        var sectionRect = outlineView.rect(ofRow: rootRow)
+        let isExpanded = workspaceSection(from: rootItem)?.isExpanded ?? false
+        guard isExpanded,
+              let lastJob = displayedJobs(inRootItem: rootItem).last,
               let lastJobRow = row(forJobID: lastJob.id)
         else {
             return sectionRect
@@ -1147,7 +1421,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         guard let destination = resolvedJobDropDestination(
             proposedItem: proposedItem,
-            proposedChildIndex: index
+            proposedChildIndex: index,
+            sourceCWD: cwd
         ),
         destination.workspace.cwd == cwd
         else {
@@ -1186,10 +1461,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 storeIndex: clampedStoreDestinationIndex,
                 displayIndex: clampedDisplayDestinationIndex
             )
+        let dropPresentation = jobDropPresentation(
+            for: destination.workspace,
+            childIndex: visibleInsertionIndex
+        )
         return SidebarResolvedDrop(
             operation: operation,
-            dropItem: destination.workspace,
-            dropChildIndex: visibleInsertionIndex
+            dropItem: dropPresentation.item,
+            dropChildIndex: dropPresentation.childIndex
         )
     }
 
@@ -1212,12 +1491,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func resolvedJobDropDestination(
         proposedItem: Any?,
-        proposedChildIndex index: Int
-    ) -> (workspace: CodexReviewWorkspace, childIndex: Int)? {
-        if let workspace = workspace(from: proposedItem),
+        proposedChildIndex index: Int,
+        sourceCWD: String
+    ) -> SidebarJobDropDestination? {
+        if let section = workspaceSection(from: proposedItem),
            index != NSOutlineViewDropOnItemIndex
         {
-            return (workspace, index)
+            return resolvedJobDropDestination(
+                in: section,
+                sourceCWD: sourceCWD,
+                proposedRootChildIndex: index
+            )
         }
 
         guard let job = job(from: proposedItem),
@@ -1227,7 +1511,48 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         else {
             return nil
         }
-        return (workspace, jobIndex)
+        return SidebarJobDropDestination(workspace: workspace, childIndex: jobIndex)
+    }
+
+    private func resolvedJobDropDestination(
+        in section: SidebarWorkspaceSection,
+        sourceCWD: String,
+        proposedRootChildIndex index: Int
+    ) -> SidebarJobDropDestination? {
+        guard let workspace = section.workspaces.first(where: { $0.cwd == sourceCWD }),
+              let workspaceRootStartIndex = section.jobs.firstIndex(where: { $0.cwd == sourceCWD })
+        else {
+            return nil
+        }
+
+        let workspaceJobCount = visibleJobs(in: workspace).count
+        let workspaceRootEndIndex = workspaceRootStartIndex + workspaceJobCount
+        let rootInsertionIndex = max(0, min(index, section.jobs.count))
+        guard rootInsertionIndex >= workspaceRootStartIndex,
+              rootInsertionIndex <= workspaceRootEndIndex
+        else {
+            return nil
+        }
+
+        return SidebarJobDropDestination(
+            workspace: workspace,
+            childIndex: rootInsertionIndex - workspaceRootStartIndex
+        )
+    }
+
+    private func jobDropPresentation(
+        for workspace: CodexReviewWorkspace,
+        childIndex: Int
+    ) -> (item: Any?, childIndex: Int) {
+        guard let rootItem = rootItem(containing: workspace),
+              let section = workspaceSection(from: rootItem),
+              let workspaceRootStartIndex = section.jobs.firstIndex(where: { $0.cwd == workspace.cwd })
+        else {
+            return (workspace, childIndex)
+        }
+
+        let rootChildIndex = workspaceRootStartIndex + childIndex
+        return (section, max(0, min(rootChildIndex, section.jobs.count)))
     }
 
     @discardableResult
@@ -1235,9 +1560,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         switch resolvedDrop.operation {
         case .none:
             return true
-        case .reorderWorkspace(let cwd, let toIndex):
-            store.reorderWorkspace(cwd: cwd, toIndex: toIndex)
-            moveWorkspaceInOutline(cwd: cwd, toIndex: toIndex)
+        case .reorderWorkspaceSection(let id, let cwds, let storeIndex, let displayIndex):
+            store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex)
+            moveWorkspaceSectionInOutline(id: id, toRootIndex: displayIndex)
             return true
         case .reorderJob(let id, let cwd, let storeIndex, let displayIndex):
             let workspace = workspace(cwd: cwd)
@@ -1251,26 +1576,26 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         guard let item else {
-            return workspaces().count
+            return currentRootTopologies.count
         }
-        guard let workspace = workspace(from: item) else {
-            return 0
+        if let section = workspaceSection(from: item) {
+            return section.jobs.count
         }
-        return filteredJobCount(in: workspace)
+        return 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         guard let item else {
-            return workspaces()[index]
+            return currentRootTopologies[index].item
         }
-        guard let workspace = workspace(from: item) else {
-            fatalError("Unsupported sidebar item.")
+        if let section = workspaceSection(from: item) {
+            return section.jobs[index]
         }
-        return visibleJobs(in: workspace)[index]
+        fatalError("Unsupported sidebar item.")
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        workspace(from: item) != nil
+        workspaceSection(from: item) != nil
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
@@ -1278,7 +1603,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        if workspace(from: item) != nil {
+        if workspaceSection(from: item) != nil {
             return rowHeights.workspace
         }
         if job(from: item) != nil {
@@ -1359,26 +1684,26 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
-        guard let workspace = workspace(from: notification.userInfo?["NSObject"]) else {
-            return
+        let item = notification.userInfo?["NSObject"]
+        if let section = workspaceSection(from: item) {
+            if section.isExpanded == false {
+                section.isExpanded = true
+            }
+            restoreSelectedJobRowAfterExpansion(of: section)
         }
-        if workspace.isExpanded == false {
-            workspace.isExpanded = true
-        }
-        restoreSelectedJobRowAfterExpansion(of: workspace)
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
-        guard let workspace = workspace(from: notification.userInfo?["NSObject"]) else {
-            return
-        }
-        if workspace.isExpanded {
-            workspace.isExpanded = false
+        let item = notification.userInfo?["NSObject"]
+        if let section = workspaceSection(from: item) {
+            if section.isExpanded {
+                section.isExpanded = false
+            }
         }
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        if workspace(from: item) != nil {
+        if workspaceSection(from: item) != nil {
             return ReviewMonitorWorkspaceRowView()
         }
         if job(from: item) != nil {
@@ -1392,11 +1717,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         viewFor tableColumn: NSTableColumn?,
         item: Any
     ) -> NSView? {
-        if let workspace = workspace(from: item) {
+        if let section = workspaceSection(from: item) {
             let view = (outlineView.makeView(withIdentifier: Identifier.workspaceCell, owner: self) as? ReviewMonitorWorkspaceCellView)
                 ?? ReviewMonitorWorkspaceCellView()
             view.identifier = Identifier.workspaceCell
-            view.configure(workspace)
+            view.objectValue = section
+            view.configure(title: section.title, toolTip: section.selection.subtitle)
             return view
         }
 
@@ -1439,10 +1765,11 @@ extension ReviewMonitorSidebarViewController {
     var displayedSectionTitlesForTesting: [String] {
         var titles: [String] = []
         for row in 0..<outlineView.numberOfRows {
-            guard let workspace = workspace(from: outlineView.item(atRow: row)) else {
+            let item = outlineView.item(atRow: row)
+            if let section = workspaceSection(from: item) {
+                titles.append(section.title)
                 continue
             }
-            titles.append(workspace.displayTitle)
         }
         return titles
     }
@@ -1451,8 +1778,8 @@ extension ReviewMonitorSidebarViewController {
         uiState.selectedJobEntry
     }
 
-    var selectedWorkspaceForTesting: CodexReviewWorkspace? {
-        uiState.selectedWorkspaceEntry
+    var selectedWorkspaceSectionForTesting: ReviewMonitorWorkspaceSectionSelection? {
+        uiState.selectedWorkspaceSectionEntry
     }
 
     var sidebarFullReloadCountForTesting: Int {
@@ -1495,11 +1822,16 @@ extension ReviewMonitorSidebarViewController {
     }
 
     var allWorkspaceRowsExpandedForTesting: Bool {
-        workspaces().allSatisfy { $0.isExpanded && outlineView.isItemExpanded($0) }
+        currentRootTopologies.allSatisfy { topology in
+            guard let section = workspaceSection(from: topology.item) else {
+                return false
+            }
+            return section.isExpanded && outlineView.isItemExpanded(section)
+        }
     }
 
     func workspaceIsSelectableForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-        shouldAllowSelection(of: workspace)
+        workspaceSection(containing: workspace).map(shouldAllowSelection(of:)) ?? false
     }
 
     func displayedJobIDsForTesting(in workspace: CodexReviewWorkspace) -> [String] {
@@ -1662,11 +1994,14 @@ extension ReviewMonitorSidebarViewController {
     }
 
     func workspaceIsExpandedForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-        workspace.isExpanded
+        workspaceSection(containing: workspace)?.isExpanded ?? false
     }
 
     func workspaceOutlineIsExpandedForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-        outlineView.isItemExpanded(workspace)
+        guard let rootItem = rootItem(containing: workspace) else {
+            return false
+        }
+        return outlineView.isItemExpanded(rootItem)
     }
 
     var selectedOutlineJobIDForTesting: String? {
@@ -1684,17 +2019,21 @@ extension ReviewMonitorSidebarViewController {
     }
 
     func collapseWorkspaceInOutlineForTesting(_ workspace: CodexReviewWorkspace) {
-        guard row(for: workspace) != nil else {
+        guard let rootItem = rootItem(containing: workspace),
+              row(for: workspace) != nil
+        else {
             preconditionFailure("Workspace row is not visible.")
         }
-        outlineView.collapseItem(workspace)
+        outlineView.collapseItem(rootItem)
     }
 
     func expandWorkspaceInOutlineForTesting(_ workspace: CodexReviewWorkspace) {
-        guard row(for: workspace) != nil else {
+        guard let rootItem = rootItem(containing: workspace),
+              row(for: workspace) != nil
+        else {
             preconditionFailure("Workspace row is not visible.")
         }
-        outlineView.expandItem(workspace)
+        outlineView.expandItem(rootItem)
     }
 
     func workspaceRowIsFloatingForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
@@ -1763,8 +2102,9 @@ extension ReviewMonitorSidebarViewController {
         _ workspace: CodexReviewWorkspace,
         toIndex index: Int
     ) -> Bool {
-        guard let resolvedDrop = resolvedDrop(
-            for: .workspace(cwd: workspace.cwd),
+        guard let section = workspaceSection(containing: workspace),
+              let resolvedDrop = resolvedDrop(
+            for: .workspaceSection(id: section.id),
             proposedItem: nil,
             proposedChildIndex: index
         ) else {
@@ -1778,9 +2118,11 @@ extension ReviewMonitorSidebarViewController {
         _ workspace: CodexReviewWorkspace,
         proposedWorkspace targetWorkspace: CodexReviewWorkspace
     ) -> Bool {
-        guard let resolvedDrop = resolvedDrop(
-            for: .workspace(cwd: workspace.cwd),
-            proposedItem: targetWorkspace,
+        guard let section = workspaceSection(containing: workspace),
+              let targetSection = workspaceSection(containing: targetWorkspace),
+              let resolvedDrop = resolvedDrop(
+            for: .workspaceSection(id: section.id),
+            proposedItem: targetSection,
             proposedChildIndex: NSOutlineViewDropOnItemIndex
         ) else {
             return false
@@ -1792,11 +2134,38 @@ extension ReviewMonitorSidebarViewController {
         _ workspace: CodexReviewWorkspace,
         proposedJob targetJob: CodexReviewJob
     ) -> Bool {
-        resolvedDrop(
-            for: .workspace(cwd: workspace.cwd),
+        guard let section = workspaceSection(containing: workspace) else {
+            return true
+        }
+        return resolvedDrop(
+            for: .workspaceSection(id: section.id),
             proposedItem: targetJob,
             proposedChildIndex: NSOutlineViewDropOnItemIndex
         ) == nil
+    }
+
+    func workspaceSectionCanStartDragForTesting(containing workspace: CodexReviewWorkspace) -> Bool {
+        guard let section = workspaceSection(containing: workspace) else {
+            return false
+        }
+        return dragPayload(for: section) != nil
+    }
+
+    @discardableResult
+    func performWorkspaceSectionDropForTesting(
+        containing workspace: CodexReviewWorkspace,
+        toIndex index: Int
+    ) -> Bool {
+        guard let section = workspaceSection(containing: workspace),
+              let resolvedDrop = resolvedDrop(
+                for: .workspaceSection(id: section.id),
+                proposedItem: nil,
+                proposedChildIndex: index
+              )
+        else {
+            return false
+        }
+        return applyResolvedDrop(resolvedDrop)
     }
 
     func workspaceInsertionIndexForTesting(
@@ -1812,7 +2181,7 @@ extension ReviewMonitorSidebarViewController {
         )
         return resolvedWorkspaceInsertionIndex(
             draggingLocation: point,
-            proposedItem: workspace,
+            proposedItem: workspaceSection(containing: workspace),
             proposedChildIndex: NSOutlineViewDropOnItemIndex
         )
     }
@@ -1839,11 +2208,30 @@ extension ReviewMonitorSidebarViewController {
         proposedWorkspace: CodexReviewWorkspace,
         childIndex: Int
     ) -> Bool {
-        guard let resolvedDrop = resolvedDrop(
+        guard let section = workspaceSection(containing: proposedWorkspace),
+              let resolvedDrop = resolvedDrop(
             for: .job(id: job.id, cwd: job.cwd),
-            proposedItem: proposedWorkspace,
+            proposedItem: section,
             proposedChildIndex: childIndex
         ) else {
+            return false
+        }
+        return applyResolvedDrop(resolvedDrop)
+    }
+
+    @discardableResult
+    func performJobDropForTesting(
+        _ job: CodexReviewJob,
+        proposedWorkspaceSectionContaining workspace: CodexReviewWorkspace,
+        childIndex: Int
+    ) -> Bool {
+        guard let section = workspaceSection(containing: workspace),
+              let resolvedDrop = resolvedDrop(
+                for: .job(id: job.id, cwd: job.cwd),
+                proposedItem: section,
+                proposedChildIndex: childIndex
+              )
+        else {
             return false
         }
         return applyResolvedDrop(resolvedDrop)
@@ -2193,9 +2581,13 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
 
     func configure(_ workspace: CodexReviewWorkspace) {
         objectValue = workspace
+        configure(title: workspace.displayTitle, toolTip: workspace.cwd)
+    }
+
+    func configure(title: String, toolTip: String) {
         iconView.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
-        titleLabel.stringValue = workspace.displayTitle
-        toolTip = workspace.cwd
+        titleLabel.stringValue = title
+        self.toolTip = toolTip
     }
 
     private func configureHierarchy() {

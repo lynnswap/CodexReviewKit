@@ -6,7 +6,6 @@ import Observation
 public final class CodexReviewWorkspace: Hashable {
     public nonisolated let cwd: String
     public package(set) var sortOrder: Double
-    package var isExpanded: Bool
 
     public nonisolated var displayTitle: String {
         let title = URL(fileURLWithPath: cwd).lastPathComponent
@@ -16,7 +15,6 @@ public final class CodexReviewWorkspace: Hashable {
     public init(cwd: String, sortOrder: Double = 0) {
         self.cwd = cwd
         self.sortOrder = sortOrder
-        self.isExpanded = true
     }
 
     public nonisolated static func == (lhs: CodexReviewWorkspace, rhs: CodexReviewWorkspace) -> Bool {

@@ -1,36 +1,25 @@
 extension CodexReviewStore {
-    package func reorderWorkspace(cwd: String, toIndex: Int) {
+    package func reorderWorkspaces(cwds: [String], toIndex: Int) {
+        let cwdSet = Set(cwds)
         let ordered = orderedWorkspaces
-        guard let workspace = ordered.first(where: { $0.cwd == cwd }),
-              let sourceIndex = ordered.firstIndex(where: { $0 === workspace })
+        let moving = ordered.filter { cwdSet.contains($0.cwd) }
+        guard moving.isEmpty == false else {
+            return
+        }
+
+        let remaining = ordered.filter { cwdSet.contains($0.cwd) == false }
+        let destinationIndex = max(0, min(toIndex, remaining.count))
+        var reordered = remaining
+        reordered.insert(contentsOf: moving, at: destinationIndex)
+        guard reordered.count == ordered.count,
+              zip(reordered, ordered).contains(where: { pair in pair.0 !== pair.1 })
         else {
             return
         }
 
-        let destinationIndex = max(0, min(toIndex, ordered.count - 1))
-        guard sourceIndex != destinationIndex else {
-            return
+        for (index, workspace) in reordered.enumerated() {
+            workspace.sortOrder = Double(reordered.count - index - 1)
         }
-
-        var sortOrder = reorderedSortOrder(
-            moving: workspace,
-            toIndex: destinationIndex,
-            in: ordered,
-            sortOrder: \.sortOrder
-        )
-        if sortOrder == nil {
-            normalizeWorkspaceSortOrders()
-            sortOrder = reorderedSortOrder(
-                moving: workspace,
-                toIndex: destinationIndex,
-                in: orderedWorkspaces,
-                sortOrder: \.sortOrder
-            )
-        }
-        guard let sortOrder else {
-            return
-        }
-        workspace.sortOrder = sortOrder
         writeDiagnosticsIfNeeded()
     }
 

@@ -6,7 +6,7 @@ import CodexReview
 final class ReviewMonitorTransportViewController: NSViewController {
     private enum DisplayedSelection: Equatable {
         case job(String)
-        case workspace(String)
+        case workspaceSection(String)
     }
 
     private struct LogEntryRenderSignature: Equatable, Sendable {
@@ -28,7 +28,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var selectedJobObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var boundJob: CodexReviewJob?
-    private var boundWorkspace: CodexReviewWorkspace?
+    private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
     private var displayedSelection: DisplayedSelection?
     private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
     private var logRenderTask: Task<Void, Never>?
@@ -123,8 +123,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch selection {
         case .job(let selectedJob):
             return boundJob !== selectedJob || displayedSelection != .job(selectedJob.id)
-        case .workspace(let selectedWorkspace):
-            return boundWorkspace !== selectedWorkspace || displayedSelection != .workspace(selectedWorkspace.cwd)
+        case .workspaceSection(let selectedSection):
+            return boundWorkspaceSection != selectedSection || displayedSelection != .workspaceSection(selectedSection.id)
         case nil:
             return displayedSelection != nil
         }
@@ -140,11 +140,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
             workspaceFindingsView.isHidden = true
             displayedSelection = .job(selectedJob.id)
 
-        case .workspace(let selectedWorkspace):
+        case .workspaceSection(let selectedSection):
             clearDisplayedJob()
-            displayWorkspace(selectedWorkspace)
+            displayWorkspaceSection(selectedSection)
             logScrollView.isHidden = true
-            displayedSelection = .workspace(selectedWorkspace.cwd)
+            displayedSelection = .workspaceSection(selectedSection.id)
 
         case nil:
             clearDisplayedJob()
@@ -194,32 +194,31 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logScrollView.clear()
     }
 
-    private func displayWorkspace(_ workspace: CodexReviewWorkspace) {
-        if boundWorkspace !== workspace {
+    private func displayWorkspaceSection(_ section: ReviewMonitorWorkspaceSectionSelection) {
+        if boundWorkspaceSection != section {
             selectedWorkspaceFindingsObservation?.cancel()
             selectedWorkspaceFindingsObservation = nil
-            boundWorkspace = workspace
-            bindWorkspaceObservation(workspace)
+            boundWorkspaceSection = section
+            bindWorkspaceSectionObservation(section)
         }
     }
 
     private func clearDisplayedWorkspace() {
         selectedWorkspaceFindingsObservation?.cancel()
         selectedWorkspaceFindingsObservation = nil
-        boundWorkspace = nil
+        boundWorkspaceSection = nil
         workspaceFindingsView.clear()
         workspaceFindingsView.isHidden = true
     }
 
-    private func bindWorkspaceObservation(_ workspace: CodexReviewWorkspace) {
-        selectedWorkspaceFindingsObservation = withPortableContinuousObservation { [weak self, weak workspace] _ in
+    private func bindWorkspaceSectionObservation(_ section: ReviewMonitorWorkspaceSectionSelection) {
+        selectedWorkspaceFindingsObservation = withPortableContinuousObservation { [weak self] _ in
             guard let self,
-                  let workspace,
-                  self.boundWorkspace === workspace
+                  self.boundWorkspaceSection?.id == section.id
             else {
                 return
             }
-            let entries = self.workspaceFindingEntries(for: workspace)
+            let entries = self.workspaceFindingEntries(for: self.currentWorkspaces(for: section))
             self.renderWorkspaceFindings(entries: entries)
         }
     }
@@ -261,7 +260,15 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func workspaceFindingEntries(
-        for workspace: CodexReviewWorkspace
+        for workspaces: [CodexReviewWorkspace]
+    ) -> [ReviewMonitorWorkspaceFindingsView.Entry] {
+        workspaces.flatMap { workspace in
+            workspaceFindingEntries(in: workspace)
+        }
+    }
+
+    private func workspaceFindingEntries(
+        in workspace: CodexReviewWorkspace
     ) -> [ReviewMonitorWorkspaceFindingsView.Entry] {
         store.orderedJobs(in: workspace).flatMap { job -> [ReviewMonitorWorkspaceFindingsView.Entry] in
             guard let result = job.core.output.reviewResult,
@@ -281,6 +288,15 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 )
             }
         }
+    }
+
+    private func currentWorkspaces(
+        for section: ReviewMonitorWorkspaceSectionSelection
+    ) -> [CodexReviewWorkspace] {
+        let workspacesByCWD = Dictionary(
+            uniqueKeysWithValues: store.orderedWorkspaces.map { ($0.cwd, $0) }
+        )
+        return section.workspaceCWDs.compactMap { workspacesByCWD[$0] }
     }
 
     private func locationText(
@@ -509,7 +525,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .job:
             return logScrollView.performDisplayedTextFinderAction(sender)
-        case .workspace:
+        case .workspaceSection:
             return workspaceFindingsView.performDisplayedTextFinderAction(sender)
         case nil:
             return false
@@ -520,7 +536,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .job:
             return logScrollView.validateDisplayedTextFinderAction(item)
-        case .workspace:
+        case .workspaceSection:
             return workspaceFindingsView.validateDisplayedTextFinderAction(item)
         case nil:
             return false
@@ -547,7 +563,7 @@ extension ReviewMonitorTransportViewController {
 
     enum DisplayedSelectionForTesting: Sendable, Equatable {
         case job(String)
-        case workspace(String)
+        case workspaceSection(String)
     }
 
     struct RenderedStateForTesting: Sendable, Equatable {
@@ -575,7 +591,7 @@ extension ReviewMonitorTransportViewController {
         switch expectedSelection {
         case .job:
             return selectedJobObservation ?? selectionObservation
-        case .workspace:
+        case .workspaceSection:
             return selectedWorkspaceFindingsObservation ?? selectionObservation
         case nil:
             return selectionObservation
@@ -948,7 +964,7 @@ extension ReviewMonitorTransportViewController {
                 }(),
                 isShowingEmptyState: false
             )
-        case .workspace:
+        case .workspaceSection:
             .init(
                 title: nil,
                 summary: nil,
@@ -976,8 +992,8 @@ extension ReviewMonitorTransportViewController {
         switch displayedSelection {
         case .job(let id):
             .job(id)
-        case .workspace(let cwd):
-            .workspace(cwd)
+        case .workspaceSection(let id):
+            .workspaceSection(id)
         case nil:
             nil
         }
@@ -987,8 +1003,8 @@ extension ReviewMonitorTransportViewController {
         switch uiState.selection {
         case .job(let job):
             .job(job.id)
-        case .workspace(let workspace):
-            .workspace(workspace.cwd)
+        case .workspaceSection(let section):
+            .workspaceSection(section.id)
         case nil:
             nil
         }
