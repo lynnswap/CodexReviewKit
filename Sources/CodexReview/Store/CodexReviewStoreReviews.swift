@@ -624,6 +624,9 @@ extension CodexReviewStore {
                     request: startRequest,
                     reason: recoveryReason
                 )
+                if try await stopRecoveredRunIfJobShouldNotResume(recoveredRun, job: job) {
+                    return currentRun
+                }
                 applyBackendRun(recoveredRun, to: job)
                 currentRun = recoveredRun
                 waitingForNetworkRecovery = false
@@ -654,6 +657,55 @@ extension CodexReviewStore {
             )
         }
         return currentRun
+    }
+
+    private func stopRecoveredRunIfJobShouldNotResume(
+        _ recoveredRun: BackendReviewRun,
+        job: CodexReviewJob
+    ) async throws -> Bool {
+        if Task.isCancelled {
+            try? await backend.interruptReview(
+                recoveredRun,
+                reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+            )
+            await backend.cleanupReview(recoveredRun)
+            throw CancellationError()
+        }
+
+        if job.isTerminal {
+            if job.core.lifecycle.status == .cancelled {
+                try? await backend.interruptReview(
+                    recoveredRun,
+                    reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+                )
+            }
+            await backend.cleanupReview(recoveredRun)
+            return true
+        }
+
+        guard job.cancellationRequested else {
+            return false
+        }
+
+        let cancellation = job.core.lifecycle.cancellation ?? .system()
+        do {
+            try await backend.interruptReview(recoveredRun, reason: .init(message: cancellation.message))
+            try completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: cancellation
+            )
+        } catch {
+            await backend.cleanupReview(recoveredRun)
+            try? recordCancellationFailure(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                message: error.localizedDescription
+            )
+            throw error
+        }
+        await backend.cleanupReview(recoveredRun)
+        return true
     }
 
     private func handleReviewEvent(

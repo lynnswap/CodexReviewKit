@@ -1038,6 +1038,63 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func cancellationWhileRecoveryRestartIsInFlightStopsRecoveredRun() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let recoverGate = AsyncGate()
+        await backend.holdRecoverReview(with: recoverGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForRecoverReview(timeout: .seconds(2))
+
+            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            #expect(cancel.cancelled)
+            await recoverGate.open()
+
+            let read = try await result
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.run.turnID == "turn-1")
+
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                initialRun,
+                .init(message: "Stop")
+            )))
+            #expect(commands.contains(.interruptReview(
+                recoveredRun,
+                .init(message: "Stop")
+            )))
+            #expect(commands.contains(.cleanupReview(recoveredRun)))
+        }
+    }
+
     @Test func cancellationDuringNetworkRecoveryStopsWhenEventStreamFinishes() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
