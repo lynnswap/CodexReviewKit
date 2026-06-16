@@ -1217,7 +1217,9 @@ struct CodexReviewHostTests {
         let result = try await reviewRead
 
         #expect(result.core.lifecycle.status == .cancelled)
-        #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.contains("turn/interrupt"))
+        #expect(methods.contains("thread/delete"))
     }
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {

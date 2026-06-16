@@ -94,6 +94,48 @@ extension CodexReviewStore {
         }
     }
 
+    package func cancelActiveReviewsForRuntimeStop(
+        reason: ReviewCancellation = .system(message: "Review runtime stopped.")
+    ) async {
+        let activeJobIDs = orderedJobs
+            .filter { $0.isTerminal == false }
+            .map(\.id)
+        guard activeJobIDs.isEmpty == false else {
+            return
+        }
+
+        for jobID in activeJobIDs {
+            do {
+                _ = try await cancelReview(jobID: jobID, cancellation: reason)
+            } catch {
+                if let job = job(id: jobID) {
+                    try? recordCancellationFailure(
+                        jobID: job.id,
+                        sessionID: job.sessionID,
+                        message: error.localizedDescription
+                    )
+                }
+            }
+            reviewWorkerTasks[jobID]?.cancel()
+        }
+
+        let tasks = activeJobIDs.compactMap { reviewWorkerTasks[$0] }
+        for task in tasks {
+            await task.value
+        }
+
+        for jobID in activeJobIDs {
+            guard let job = job(id: jobID), job.isTerminal == false else {
+                continue
+            }
+            try? completeCancellationLocally(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cancellation: reason
+            )
+        }
+    }
+
     package func terminateAllRunningJobsLocally(
         reason: String = "Cancellation requested.",
         failureMessage: String

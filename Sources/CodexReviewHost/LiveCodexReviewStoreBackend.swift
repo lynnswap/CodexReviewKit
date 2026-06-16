@@ -395,8 +395,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return message
     }
 
-    func stop(store _: CodexReviewStore) async {
+    func stop(store: CodexReviewStore) async {
         let client = client
+        let appServerBackend = appServerBackend
         let mcpHTTPServer = mcpHTTPServer
         let hasRuntimeState = client != nil || appServerBackend != nil || mcpHTTPServer != nil
         let loginCleanup = takeLoginRuntimeForCleanup()
@@ -404,12 +405,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         logger.info("Stopping review runtime")
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+            await store.cancelActiveReviewsForRuntimeStop(reason: reason)
+            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+        }
         self.client = nil
         self.mcpHTTPServer = nil
         authNotificationTask?.cancel()
         authNotificationTask = nil
         await mcpHTTPServer?.stop()
-        appServerBackend = nil
+        self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
         await client?.close()
         logger.info("Review runtime stopped")
@@ -1072,13 +1078,19 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
             return
         }
+        let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: message)
+            await store.cancelActiveReviewsForRuntimeStop(reason: reason)
+            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+        }
         let failedClient = client
         let failedMCPHTTPServer = mcpHTTPServer
         client = nil
         appServerBackend = nil
         mcpHTTPServer = nil
         authNotificationTask = nil
-        store.transitionToFailed("Review runtime stopped unexpectedly: \(error.localizedDescription)")
+        store.transitionToFailed(message)
         await failedMCPHTTPServer?.stop()
         await cleanupLoginRuntime(loginCleanup)
         await failedClient?.close()

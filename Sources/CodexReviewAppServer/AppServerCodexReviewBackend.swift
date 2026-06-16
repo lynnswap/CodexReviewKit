@@ -388,6 +388,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
+    package func cleanupActiveReviewsForShutdown(reason: BackendCancellationReason) async {
+        let runs = await activeReviewRunsForShutdown()
+        guard runs.isEmpty == false else {
+            return
+        }
+        for run in runs {
+            try? await interruptReview(run, reason: reason)
+            await cleanupReview(run)
+        }
+    }
+
     package func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
         let session = await reviewEventSession(for: run)
         return await session.events()
@@ -467,6 +478,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: reviewThreadID)
         }
         return reviewEventSessionsByThreadID.removeValue(forKey: run.threadID)
+    }
+
+    private func activeReviewRunsForShutdown() async -> [BackendReviewRun] {
+        let sessions = Array(reviewEventSessionsByThreadID.values)
+        var runsByThreadID: [String: BackendReviewRun] = [:]
+        for session in sessions {
+            let run = await session.currentRun()
+            runsByThreadID[run.threadID] = run
+        }
+        return Array(runsByThreadID.values)
     }
 
     private func bufferUnmatchedReviewNotification(_ notification: AppServerRoutedReviewNotification) -> Bool {
@@ -923,6 +944,10 @@ private actor AppServerReviewEventSession {
         }
         noteReviewThreadIDForCleanup(run.reviewThreadID)
         recoveryInterruptionState.noteRunUpdated()
+    }
+
+    func currentRun() -> BackendReviewRun {
+        run
     }
 
     func beginRecoveryRestartNotificationBuffering() {
