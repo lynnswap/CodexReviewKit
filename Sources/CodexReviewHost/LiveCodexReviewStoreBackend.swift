@@ -465,10 +465,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             reason: reason,
             cancelWorkers: false
         )
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
         let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
             await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
         }
-        await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
         if didCleanUp == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }

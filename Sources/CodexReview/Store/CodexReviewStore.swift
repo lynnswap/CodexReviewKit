@@ -33,6 +33,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
@@ -78,6 +79,9 @@ public final class CodexReviewStore {
     isolated deinit {
         accountRateLimitAutoRefreshDriver?.cancel()
         for task in reviewWorkerTasks.values {
+            task.cancel()
+        }
+        for task in runtimeStopDetachedReviewWorkerTasks.values {
             task.cancel()
         }
         for waiters in reviewTerminalWaiters.values {

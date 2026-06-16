@@ -121,19 +121,16 @@ extension CodexReviewStore {
         return activeJobIDs
     }
 
-    package func cancelReviewWorkersForRuntimeStop(jobIDs: [String]) {
+    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
         for jobID in jobIDs {
-            reviewWorkerTasks[jobID]?.cancel()
-        }
-    }
-
-    package func cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: [String]) async {
-        let tasks = jobIDs.compactMap { reviewWorkerTasks[$0] }
-        for task in tasks {
-            task.cancel()
-        }
-        for task in tasks {
-            await task.value
+            if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
+                task.cancel()
+                runtimeStopDetachedReviewWorkerTasks[jobID] = task
+            }
+            activeRuns.removeValue(forKey: jobID)
+            reviewRecoveryWaitingJobIDs.remove(jobID)
+            startingJobIDs.remove(jobID)
+            startupCancellations.removeValue(forKey: jobID)
         }
     }
 

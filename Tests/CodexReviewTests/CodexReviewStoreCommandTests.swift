@@ -1488,7 +1488,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func runtimeStopLocalCancellationCanDeferWorkerCancellation() async throws {
+    @Test func runtimeStopLocalCancellationDetachesWorker() async throws {
         let run = BackendReviewRun(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -1520,17 +1520,14 @@ struct CodexReviewStoreCommandTests {
             #expect(store.reviewWorkerTasks["job-1"] != nil)
             #expect(store.activeRuns["job-1"] == run)
 
-            store.cancelReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-            let cleanedUp = await waitUntil {
-                store.reviewWorkerTasks["job-1"] == nil && store.activeRuns["job-1"] == nil
-            }
+            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
 
-            #expect(cleanedUp)
-            #expect(await backend.recordedCommands().contains(.cleanupReview(run)))
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.activeRuns["job-1"] == nil)
         }
     }
 
-    @Test func runtimeStopDrainsNetworkRecoveryWaitingWorker() async throws {
+    @Test func runtimeStopDetachesNetworkRecoveryWaitingWorker() async throws {
         let run = BackendReviewRun(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -1561,12 +1558,44 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
 
             #expect(store.reviewWorkerTasks["job-1"] == nil)
             #expect(store.activeRuns["job-1"] == nil)
             #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
-            #expect(await backend.recordedCommands().contains(.cleanupReview(run)))
+        }
+    }
+
+    @Test func runtimeStopDetachLetsStartReviewReturnWhenBackendStartIsStuck() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startReviewGate = AsyncGate()
+        await backend.holdStartReview(with: startReviewGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let running = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+                )
+            }
+            try await backend.waitForStartReview(timeout: .seconds(2))
+
+            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+                reason: .system(message: "Review runtime stopped."),
+                cancelWorkers: false
+            )
+            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+            let resultBeforeStartReviewUnblocked = try await waitForTaskValue(running, timeout: .seconds(1))
+            await startReviewGate.open()
+            let result = try #require(resultBeforeStartReviewUnblocked)
+
+            #expect(locallyCancelledJobIDs == ["job-1"])
+            #expect(result.core.lifecycle.status == .cancelled)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.activeRuns["job-1"] == nil)
         }
     }
 
@@ -2158,6 +2187,24 @@ private func waitForEventStreamRegistration(
 ) async -> Bool {
     await waitUntil(timeout: timeout) {
         await backend.recordedCommands().contains(.events(run))
+    }
+}
+
+private func waitForTaskValue<T: Sendable>(
+    _ task: Task<T, any Error>,
+    timeout: Duration
+) async throws -> T? {
+    try await withThrowingTaskGroup(of: T?.self) { group in
+        group.addTask {
+            try await task.value
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            return nil
+        }
+        let result = try await group.next() ?? nil
+        group.cancelAll()
+        return result
     }
 }
 

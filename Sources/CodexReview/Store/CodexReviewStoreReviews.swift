@@ -116,10 +116,10 @@ extension CodexReviewStore {
             let backendRun = try await backend.startReview(startRequest)
             startingJobIDs.remove(jobID)
             run = backendRun
-            applyBackendRun(backendRun, to: job)
             if Task.isCancelled {
                 throw CancellationError()
             }
+            applyBackendRun(backendRun, to: job)
             if let startupCancellation = startupCancellations.removeValue(forKey: jobID) {
                 try? await backend.interruptReview(
                     backendRun,
@@ -193,6 +193,7 @@ extension CodexReviewStore {
             }
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
+        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
         if job.isTerminal {
             resumeReviewWaiters(for: jobID)
         }
