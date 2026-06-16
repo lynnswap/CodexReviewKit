@@ -1527,6 +1527,49 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func stopInterruptsActiveReviewBeforeMarkingJobStopped() async throws {
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            await store.start()
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            _ = try await running
+
+            let stopTask = Task { @MainActor in
+                await store.stop()
+            }
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+            let inFlight = try store.readReview(jobID: "job-1")
+
+            #expect(inFlight.core.lifecycle.status == .running)
+            await interruptGate.open()
+            await stopTask.value
+
+            let stopped = try store.readReview(jobID: "job-1")
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(run, .init(message: "Review runtime stopped."))))
+            #expect(stopped.core.lifecycle.status == .cancelled)
+            #expect(store.activeRuns["job-1"] == nil)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+        }
+    }
+
     @Test func runtimeStopDetachesNetworkRecoveryWaitingWorker() async throws {
         let run = BackendReviewRun(
             threadID: "thread-1",

@@ -262,6 +262,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         client != nil
     }
 
+    var handlesActiveReviewStopCleanup: Bool {
+        true
+    }
+
     var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
         settingsSnapshot
     }

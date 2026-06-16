@@ -27,6 +27,7 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
+    var handlesActiveReviewStopCleanup: Bool { get }
 
     func attachStore(_ store: CodexReviewStore)
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
@@ -55,4 +56,10 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     ) async throws -> BackendReviewRun
     func cleanupReview(_ run: BackendReviewRun) async
     func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error>
+}
+
+extension CodexReviewStoreBackend {
+    package var handlesActiveReviewStopCleanup: Bool {
+        false
+    }
 }

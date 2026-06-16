@@ -545,23 +545,23 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         commands.append(.cleanupReview(run))
     }
 
-    package nonisolated func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
+    package func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
         let gate = await noteEventsRequest()
         if let gate {
             await gate.wait()
         }
         await noteEventsReturn()
         let continuationID = UUID()
-        return AsyncThrowingStream<BackendReviewEvent, Error>(bufferingPolicy: .unbounded) { continuation in
-            continuation.onTermination = { @Sendable _ in
-                Task {
-                    await self.unregisterEventContinuation(id: continuationID, run: run)
-                }
-            }
+        let (stream, continuation) = AsyncThrowingStream<BackendReviewEvent, Error>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        continuation.onTermination = { @Sendable _ in
             Task {
-                await self.register(continuation: continuation, id: continuationID, run: run)
+                await self.unregisterEventContinuation(id: continuationID, run: run)
             }
         }
+        register(continuation: continuation, id: continuationID, run: run)
+        return stream
     }
 
     package func hasEventContinuation(for run: BackendReviewRun) -> Bool {
