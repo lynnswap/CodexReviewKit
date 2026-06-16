@@ -1,6 +1,16 @@
 import Foundation
 import CodexReview
 
+package struct AppServerReviewInterruption: Equatable, Sendable {
+    package var threadID: String
+    package var turnID: String
+
+    package init(threadID: String, turnID: String) {
+        self.threadID = threadID
+        self.turnID = turnID
+    }
+}
+
 package final class AppServerReviewControl: @unchecked Sendable {
     private enum Phase: Equatable {
         case preparing
@@ -39,11 +49,11 @@ package final class AppServerReviewControl: @unchecked Sendable {
     }
 
     @discardableResult
-    package func interrupt() async throws -> Bool {
+    package func interrupt() async throws -> AppServerReviewInterruption? {
         let currentPhase = phaseSnapshot()
         switch currentPhase {
         case .preparing, .finished:
-            return false
+            return nil
         case .threadStarted(let threadID):
             return try await sendInterrupt(threadID: threadID, turnID: "")
         case .reviewStarted(let threadID, let turnID):
@@ -63,12 +73,12 @@ package final class AppServerReviewControl: @unchecked Sendable {
         return phase
     }
 
-    private func sendInterrupt(threadID: String, turnID: String) async throws -> Bool {
+    private func sendInterrupt(threadID: String, turnID: String) async throws -> AppServerReviewInterruption {
         do {
             let _: EmptyResponse = try await client.send(TurnInterruptRequest(
                 params: .init(threadID: threadID, turnID: turnID)
             ))
-            return true
+            return .init(threadID: threadID, turnID: turnID)
         } catch {
             guard let activeTurnID = Self.activeTurnID(from: error),
                   activeTurnID != turnID
@@ -79,7 +89,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
                 params: .init(threadID: threadID, turnID: activeTurnID)
             ))
             setPhase(.reviewStarted(threadID: threadID, turnID: activeTurnID))
-            return true
+            return .init(threadID: threadID, turnID: activeTurnID)
         }
     }
 

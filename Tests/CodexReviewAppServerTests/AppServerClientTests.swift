@@ -468,7 +468,8 @@ struct AppServerClientTests {
         let control = AppServerReviewControl(client: client)
 
         control.recordThreadStarted(threadID: "thread-1")
-        #expect(try await control.interrupt())
+        let interruption = try await control.interrupt()
+        #expect(interruption == .init(threadID: "thread-1", turnID: ""))
 
         let request = try #require(await transport.recordedRequests().last)
         #expect(request.method == "turn/interrupt")
@@ -484,7 +485,8 @@ struct AppServerClientTests {
         let control = AppServerReviewControl(client: client)
 
         control.recordReviewStarted(threadID: "thread-1", turnID: "turn-1")
-        #expect(try await control.interrupt())
+        let interruption = try await control.interrupt()
+        #expect(interruption == .init(threadID: "thread-1", turnID: "turn-1"))
 
         let request = try #require(await transport.recordedRequests().last)
         let params = try JSONDecoder().decode(TurnInterruptParams.self, from: request.params)
@@ -505,7 +507,8 @@ struct AppServerClientTests {
         let control = AppServerReviewControl(client: client)
 
         control.recordReviewStarted(threadID: "thread-1", turnID: "turn-old")
-        #expect(try await control.interrupt())
+        let interruption = try await control.interrupt()
+        #expect(interruption == .init(threadID: "thread-1", turnID: "turn-new"))
 
         let requests = await transport.recordedRequests()
         #expect(requests.map(\.method) == ["turn/interrupt", "turn/interrupt"])
@@ -1680,6 +1683,51 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: nil
         ))
+    }
+
+    @Test func backendSuppressesRecoveryInterruptRetriedToActiveTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        await transport.enqueueFailure(
+            .responseError(
+                code: -32602,
+                message: "expected active turn id turn-old but found turn-active"
+            ),
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-old",
+            reviewThreadID: "thread-1",
+            model: "gpt-5"
+        )
+        let events = await backend.events(for: run)
+
+        try await backend.interruptReviewForRecovery(
+            run,
+            reason: .init(message: "Network unavailable; waiting to reconnect.")
+        )
+        let requests = await transport.recordedRequests()
+        let interruptRequests = requests.filter { $0.method == "turn/interrupt" }
+        let interruptTurnIDs = try interruptRequests.map { request in
+            try JSONDecoder().decode(TurnInterruptParams.self, from: request.params).turnID
+        }
+        #expect(interruptTurnIDs == ["turn-old", "turn-active"])
+
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-active", status: "interrupted", error: .init(message: "Network unavailable"))
+            )
+        )
+        let suppressedTerminal = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.ignored == 1
+        }
+        #expect(suppressedTerminal)
+        _ = events
     }
 
     @Test func backendRecoveryBuffersFastTerminalNotificationUntilRecoveredRunIsTracked() async throws {
