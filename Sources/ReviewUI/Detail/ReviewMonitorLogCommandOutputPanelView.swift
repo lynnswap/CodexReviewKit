@@ -1,4 +1,5 @@
 import AppKit
+import TextTransitions
 
 @MainActor
 class ReviewMonitorLogTiledContentView: NSView {
@@ -265,8 +266,6 @@ final class ReviewMonitorCommandOutputTimerAttachmentViewProvider: NSTextAttachm
 
 @MainActor
 final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
-    private nonisolated static let transitionDuration: CFTimeInterval = 0.22
-    private nonisolated static let fadeTransitionDuration: CFTimeInterval = 0.14
     private nonisolated static let minimumTimerInterval: TimeInterval = 0.05
 
     private(set) var blockID: ReviewMonitorLogBlockID
@@ -276,10 +275,7 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
     private var animatesNumericTransition: Bool
     private var updateTimer: Timer?
     private var displayedText = ""
-    private var characterSlotLayers: [CALayer] = []
-    private var activeTransitionOverlays: [CALayer] = []
-    private var hiddenFinalLayers: [CALayer] = []
-    private var transitionGeneration = 0
+    private let textTransitionView: TextTransitionView
 
     override var isFlipped: Bool {
         true
@@ -294,12 +290,20 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         )
         self.attachmentSize = attachment.bounds.size
         self.animatesNumericTransition = attachment.animatesNumericTransition
+        self.textTransitionView = TextTransitionView(
+            text: NSAttributedString(string: ""),
+            contentTransition: .numericText(countsDown: false),
+            widthReservation: .fixed(attachment.bounds.size),
+            motionPolicy: .enabled
+        )
         super.init(frame: .zero)
 
         wantsLayer = true
         layer?.masksToBounds = true
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
+        textTransitionView.setAccessibilityElement(false)
+        addSubview(textTransitionView)
         configure(attachment: attachment)
     }
 
@@ -316,32 +320,52 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         attachmentSize
     }
 
+    override func layout() {
+        super.layout()
+        textTransitionView.frame = bounds
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        renderText(displayedText, previousText: nil, animated: false)
+        textTransitionView.setText(attributedString(for: displayedText), animated: false)
     }
 
     func configure(attachment: ReviewMonitorCommandOutputTimerAttachment) {
-        let identityChanged = blockID != attachment.blockID ||
-            startedAt != attachment.startedAt ||
-            timerFont.pointSize != attachment.fontPointSize ||
-            animatesNumericTransition != attachment.animatesNumericTransition
-        blockID = attachment.blockID
-        startedAt = attachment.startedAt
-        timerFont = .monospacedDigitSystemFont(
+        let nextFont = NSFont.monospacedDigitSystemFont(
             ofSize: attachment.fontPointSize,
             weight: .regular
         )
-        attachmentSize = attachment.bounds.size
+        let nextAttachmentSize = attachment.bounds.size
+        let identityChanged = blockID != attachment.blockID ||
+            startedAt != attachment.startedAt
+        let numericTransitionDisabled = animatesNumericTransition &&
+            attachment.animatesNumericTransition == false
+        let viewConfigurationChanged = timerFont.pointSize != nextFont.pointSize ||
+            attachmentSize != nextAttachmentSize ||
+            animatesNumericTransition != attachment.animatesNumericTransition
+        blockID = attachment.blockID
+        startedAt = attachment.startedAt
+        timerFont = nextFont
+        attachmentSize = nextAttachmentSize
         animatesNumericTransition = attachment.animatesNumericTransition
         if identityChanged {
             stopTimer()
             completeNumericTransitions()
             displayedText = ""
         }
+        if numericTransitionDisabled {
+            completeNumericTransitions()
+        }
+        if identityChanged || viewConfigurationChanged {
+            textTransitionView.contentTransition = .numericText(countsDown: false)
+            textTransitionView.widthReservation = .fixed(attachmentSize)
+            textTransitionView.motionPolicy = .enabled
+        }
         invalidateIntrinsicContentSize()
         if displayedText.isEmpty {
             updateText(animated: false)
+        } else if identityChanged || viewConfigurationChanged {
+            textTransitionView.setText(attributedString(for: displayedText), animated: false)
         }
         if superview != nil {
             scheduleNextTickIfNeeded()
@@ -401,9 +425,8 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         let previousText = displayedText.isEmpty ? nil : displayedText
         displayedText = nextText
         updateAccessibilityText()
-        renderText(
-            nextText,
-            previousText: previousText,
+        textTransitionView.setText(
+            attributedString(for: nextText),
             animated: animated && shouldAnimateNumericTransition && previousText != nil
         )
     }
@@ -438,62 +461,9 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         return remainingMinutes == 0 ? "\(hours)h" : "\(hours)h \(remainingMinutes)m"
     }
 
-    private func renderText(
-        _ text: String,
-        previousText: String?,
-        animated: Bool
-    ) {
-        completeNumericTransitions()
-
-        guard let layer else {
-            return
-        }
-
-        let oldCharacters = previousText.map(Self.characterStrings(in:)) ?? []
-        let newCharacters = Self.characterStrings(in: text)
-        let layout = characterLayout(for: newCharacters)
-        var renderedSlots: [(index: Int, layer: CALayer, character: String, frame: CGRect)] = []
-        performWithoutImplicitLayerActions {
-            characterSlotLayers.forEach { $0.removeFromSuperlayer() }
-            characterSlotLayers.removeAll(keepingCapacity: true)
-            for (index, item) in layout.enumerated() {
-                let slotLayer = makeSlotLayer(character: item.character, frame: item.frame)
-                layer.addSublayer(slotLayer)
-                characterSlotLayers.append(slotLayer)
-                renderedSlots.append((
-                    index: index,
-                    layer: slotLayer,
-                    character: item.character,
-                    frame: item.frame
-                ))
-            }
-        }
-        guard animated else {
-            return
-        }
-
-        transitionGeneration += 1
-        for slot in renderedSlots {
-            let oldCharacter = oldCharacters.indices.contains(slot.index) ? oldCharacters[slot.index] : nil
-            animateSlotIfNeeded(
-                finalSlotLayer: slot.layer,
-                oldCharacter: oldCharacter,
-                newCharacter: slot.character,
-                frame: slot.frame
-            )
-        }
-    }
-
-    private func performWithoutImplicitLayerActions(_ body: () -> Void) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        body()
-        CATransaction.commit()
-    }
-
-    private func attributedString(for character: String) -> NSAttributedString {
+    private func attributedString(for text: String) -> NSAttributedString {
         NSAttributedString(
-            string: character,
+            string: text,
             attributes: [
                 .font: timerFont,
                 .foregroundColor: NSColor.secondaryLabelColor,
@@ -501,299 +471,8 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
         )
     }
 
-    private func resolvedContentsScale() -> CGFloat {
-        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-    }
-
-    private func transitionTimingFunction() -> CAMediaTimingFunction {
-        CAMediaTimingFunction(name: .easeInEaseOut)
-    }
-
-    private func textWidth(for character: String) -> CGFloat {
-        ceil(attributedString(for: character).size().width)
-    }
-
-    private func textLayer(for character: String) -> CATextLayer {
-        let textLayer = CATextLayer()
-        textLayer.string = attributedString(for: character)
-        textLayer.contentsScale = resolvedContentsScale()
-        textLayer.alignmentMode = .left
-        textLayer.isWrapped = false
-        textLayer.truncationMode = .none
-        return textLayer
-    }
-
-    private func updateContentsScale() {
-        let scale = resolvedContentsScale()
-        for slotLayer in characterSlotLayers {
-            for sublayer in slotLayer.sublayers ?? [] {
-                sublayer.contentsScale = scale
-            }
-        }
-        for overlayLayer in activeTransitionOverlays {
-            for sublayer in overlayLayer.sublayers ?? [] {
-                sublayer.contentsScale = scale
-            }
-        }
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        updateContentsScale()
-    }
-
-    private func renderTextLayer(_ textLayer: CATextLayer, in bounds: CGRect) {
-        textLayer.frame = bounds
-        textLayer.contentsScale = resolvedContentsScale()
-    }
-
-    private func configureTextLayer(_ textLayer: CATextLayer, character: String) {
-        textLayer.string = attributedString(for: character)
-        textLayer.contentsScale = resolvedContentsScale()
-    }
-
-    private func configureOverlayLayers(
-        oldLayer: CATextLayer,
-        newLayer: CATextLayer,
-        oldCharacter: String,
-        newCharacter: String,
-        bounds: CGRect
-    ) {
-        configureTextLayer(oldLayer, character: oldCharacter)
-        configureTextLayer(newLayer, character: newCharacter)
-        renderTextLayer(oldLayer, in: bounds)
-        renderTextLayer(newLayer, in: bounds)
-    }
-
-    private func addTransitionAnimations(
-        oldLayer: CATextLayer,
-        newLayer: CATextLayer,
-        lineHeight: CGFloat,
-        overlayLayer: CALayer,
-        finalSlotLayer: CALayer,
-        generation: Int
-    ) {
-        let oldTranslation = CABasicAnimation(keyPath: "transform.translation.y")
-        oldTranslation.fromValue = 0
-        oldTranslation.toValue = lineHeight
-        oldTranslation.duration = Self.transitionDuration
-        oldTranslation.timingFunction = transitionTimingFunction()
-
-        let oldOpacity = CABasicAnimation(keyPath: "opacity")
-        oldOpacity.fromValue = 1
-        oldOpacity.toValue = 0
-        oldOpacity.duration = Self.transitionDuration
-        oldOpacity.timingFunction = transitionTimingFunction()
-
-        let newTranslation = CABasicAnimation(keyPath: "transform.translation.y")
-        newTranslation.fromValue = -lineHeight
-        newTranslation.toValue = 0
-        newTranslation.duration = Self.transitionDuration
-        newTranslation.timingFunction = transitionTimingFunction()
-
-        let newOpacity = CABasicAnimation(keyPath: "opacity")
-        newOpacity.fromValue = 0
-        newOpacity.toValue = 1
-        newOpacity.duration = Self.transitionDuration
-        newOpacity.timingFunction = transitionTimingFunction()
-
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak self, weak overlayLayer, weak finalSlotLayer] in
-            Task { @MainActor [weak self, weak overlayLayer, weak finalSlotLayer] in
-                self?.finishTransition(
-                    overlayLayer: overlayLayer,
-                    finalSlotLayer: finalSlotLayer,
-                    generation: generation
-                )
-            }
-        }
-        oldLayer.add(oldTranslation, forKey: "oldDigitTranslation")
-        oldLayer.add(oldOpacity, forKey: "oldDigitOpacity")
-        newLayer.add(newTranslation, forKey: "newDigitTranslation")
-        newLayer.add(newOpacity, forKey: "newDigitOpacity")
-        CATransaction.commit()
-    }
-
-    private func makeFadeAnimation() -> CABasicAnimation {
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0
-        fade.toValue = 1
-        fade.duration = Self.fadeTransitionDuration
-        fade.timingFunction = transitionTimingFunction()
-        return fade
-    }
-
-    private func makeOverlayLayer(frame: CGRect) -> CALayer {
-        let overlayLayer = CALayer()
-        overlayLayer.frame = frame
-        overlayLayer.masksToBounds = true
-        return overlayLayer
-    }
-
-    private func addOverlayLayer(_ overlayLayer: CALayer) {
-        layer?.addSublayer(overlayLayer)
-        activeTransitionOverlays.append(overlayLayer)
-    }
-
-    private func hideFinalSlotLayer(_ finalSlotLayer: CALayer) {
-        finalSlotLayer.opacity = 0
-        hiddenFinalLayers.append(finalSlotLayer)
-    }
-
-    private func setupDigitTransitionLayers(
-        finalSlotLayer: CALayer,
-        oldCharacter: String,
-        newCharacter: String,
-        frame: CGRect
-    ) -> (overlayLayer: CALayer, oldLayer: CATextLayer, newLayer: CATextLayer)? {
-        guard layer != nil else {
-            return nil
-        }
-
-        let overlayLayer = makeOverlayLayer(frame: frame)
-        let oldLayer = textLayer(for: oldCharacter)
-        let newLayer = textLayer(for: newCharacter)
-        performWithoutImplicitLayerActions {
-            hideFinalSlotLayer(finalSlotLayer)
-            addOverlayLayer(overlayLayer)
-            configureOverlayLayers(
-                oldLayer: oldLayer,
-                newLayer: newLayer,
-                oldCharacter: oldCharacter,
-                newCharacter: newCharacter,
-                bounds: overlayLayer.bounds
-            )
-            oldLayer.opacity = 0
-            newLayer.opacity = 1
-            overlayLayer.addSublayer(oldLayer)
-            overlayLayer.addSublayer(newLayer)
-        }
-        return (overlayLayer, oldLayer, newLayer)
-    }
-
-    private func currentTransitionGeneration() -> Int {
-        transitionGeneration
-    }
-
-    private func animationLineHeight(for frame: CGRect) -> CGFloat {
-        max(1, frame.height)
-    }
-
-    private func animateSlotIfNeeded(
-        finalSlotLayer: CALayer,
-        oldCharacter: String?,
-        newCharacter: String,
-        frame: CGRect
-    ) {
-        let oldIsDigit = oldCharacter?.first?.isNumber == true
-        let newIsDigit = newCharacter.first?.isNumber == true
-        guard oldCharacter != newCharacter,
-              oldIsDigit || newIsDigit
-        else {
-            return
-        }
-
-        if oldIsDigit, newIsDigit {
-            animateDigitTransition(
-                finalSlotLayer: finalSlotLayer,
-                oldCharacter: oldCharacter ?? "",
-                newCharacter: newCharacter,
-                frame: frame
-            )
-        } else {
-            animateFadeTransition(finalSlotLayer: finalSlotLayer)
-        }
-    }
-
-    private func animateDigitTransition(
-        finalSlotLayer: CALayer,
-        oldCharacter: String,
-        newCharacter: String,
-        frame: CGRect
-    ) {
-        guard let layers = setupDigitTransitionLayers(
-            finalSlotLayer: finalSlotLayer,
-            oldCharacter: oldCharacter,
-            newCharacter: newCharacter,
-            frame: frame
-        ) else {
-            return
-        }
-
-        addTransitionAnimations(
-            oldLayer: layers.oldLayer,
-            newLayer: layers.newLayer,
-            lineHeight: animationLineHeight(for: frame),
-            overlayLayer: layers.overlayLayer,
-            finalSlotLayer: finalSlotLayer,
-            generation: currentTransitionGeneration()
-        )
-    }
-
-    private func animateFadeTransition(finalSlotLayer: CALayer) {
-        finalSlotLayer.add(makeFadeAnimation(), forKey: "timerFade")
-    }
-
-    private func finishTransition(
-        overlayLayer: CALayer?,
-        finalSlotLayer: CALayer?,
-        generation: Int
-    ) {
-        guard generation == transitionGeneration else {
-            return
-        }
-        performWithoutImplicitLayerActions {
-            finalSlotLayer?.opacity = 1
-            overlayLayer?.removeFromSuperlayer()
-            if let overlayLayer {
-                activeTransitionOverlays.removeAll { $0 === overlayLayer }
-            }
-            if let finalSlotLayer {
-                hiddenFinalLayers.removeAll { $0 === finalSlotLayer }
-            }
-        }
-    }
-
     private func completeNumericTransitions() {
-        transitionGeneration += 1
-        performWithoutImplicitLayerActions {
-            for finalLayer in hiddenFinalLayers {
-                finalLayer.opacity = 1
-            }
-            hiddenFinalLayers.removeAll(keepingCapacity: true)
-            for overlay in activeTransitionOverlays {
-                overlay.removeAllAnimations()
-                overlay.removeFromSuperlayer()
-            }
-            activeTransitionOverlays.removeAll(keepingCapacity: true)
-        }
-    }
-
-    private func makeSlotLayer(character: String, frame: CGRect) -> CALayer {
-        let slotLayer = CALayer()
-        slotLayer.frame = frame
-        slotLayer.masksToBounds = true
-        let textLayer = textLayer(for: character)
-        textLayer.frame = slotLayer.bounds
-        slotLayer.addSublayer(textLayer)
-        return slotLayer
-    }
-
-    private func characterLayout(for characters: [String]) -> [(character: String, frame: CGRect)] {
-        let lineHeight = max(1, attachmentSize.height)
-        var x: CGFloat = 0
-        return characters.map { character in
-            let width = textWidth(for: character)
-            defer { x += width }
-            return (
-                character,
-                CGRect(x: x, y: 0, width: width, height: lineHeight)
-            )
-        }
-    }
-
-    private static func characterStrings(in text: String) -> [String] {
-        text.map { String($0) }
+        textTransitionView.completeTransitions()
     }
 
 #if DEBUG
@@ -802,13 +481,11 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
     }
 
     var renderedTextWidthForTesting: CGFloat {
-        characterLayout(for: Self.characterStrings(in: displayedText)).reduce(0) { partialResult, item in
-            partialResult + item.frame.width
-        }
+        textTransitionView.renderedTextWidthForTesting
     }
 
     var activeNumericTransitionCountForTesting: Int {
-        activeTransitionOverlays.count
+        textTransitionView.activeTransitionCountForTesting
     }
 
     func completeNumericTransitionsForTesting() {
