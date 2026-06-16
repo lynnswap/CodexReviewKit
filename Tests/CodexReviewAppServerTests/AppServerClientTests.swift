@@ -2106,6 +2106,11 @@ struct AppServerClientTests {
 
         #expect(recoveredRun.turnID == "turn-2")
         #expect(try await iterator.next() == .started(turnID: "turn-2", reviewThreadID: "thread-1", model: nil))
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
+        )
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
     @Test func backendCleanupDeletesAllRecoveryReviewThreads() async throws {

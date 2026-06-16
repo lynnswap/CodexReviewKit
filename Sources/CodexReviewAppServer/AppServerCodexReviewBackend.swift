@@ -1115,9 +1115,6 @@ private actor AppServerReviewEventSession {
             metrics.ignored += 1
             return
         }
-        if decoded.startsReviewMode {
-            awaitingReviewExit = true
-        }
         if suppressNetworkRecoveryInterruptedNotification(
             notification: notification,
             decoded: decoded
@@ -1127,6 +1124,9 @@ private actor AppServerReviewEventSession {
         if shouldSuppressRecoveryRestartNotification(decoded) {
             metrics.ignored += 1
             return
+        }
+        if decoded.startsReviewMode {
+            awaitingReviewExit = true
         }
 
         let shouldEmitNotification: Bool

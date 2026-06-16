@@ -920,6 +920,70 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func networkRecoveryClosesActiveCommandsAsCanceled() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+            await backend.yield(.logEntry(
+                kind: .command,
+                text: "$ git diff",
+                groupID: "cmd-1",
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "inProgress",
+                    itemID: "cmd-1",
+                    command: "git diff",
+                    startedAt: Date(timeIntervalSince1970: 1),
+                    commandStatus: "inProgress"
+                )
+            ), for: initialRun)
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            _ = try await running
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForRecoverReview(timeout: .seconds(2))
+            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+
+            let final = try await store.awaitReview(sessionID: "session-1", jobID: "job-1", timeout: .seconds(1))
+            let commandLogs = try #require(store.job(id: "job-1"))
+                .logEntries
+                .filter { $0.kind == .command && $0.groupID == "cmd-1" }
+            let closed = try #require(commandLogs.last)
+
+            #expect(final.core.lifecycle.status == .succeeded)
+            #expect(commandLogs.count == 2)
+            #expect(closed.metadata?.status == "canceled")
+            #expect(closed.metadata?.commandStatus == "canceled")
+        }
+    }
+
     @Test func networkRecoveryUsesActualStartedTurn() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
@@ -1143,6 +1207,48 @@ struct CodexReviewStoreCommandTests {
                 .init(message: "Stop")
             )))
             #expect(commands.contains(.cleanupReview(recoveredRun)))
+        }
+    }
+
+    @Test func cancellationAfterRecoveryEventStreamFinishesWakesWorker() async throws {
+        let initialRun = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForInterruptReviewForRecovery(timeout: .seconds(2))
+            _ = try await running
+            await backend.finishEvents(for: initialRun)
+            await Task.yield()
+
+            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let cleanedUp = await waitUntil {
+                store.reviewWorkerTasks["job-1"] == nil && store.activeRuns["job-1"] == nil
+            }
+            let read = try store.readReview(jobID: "job-1")
+
+            #expect(cancel.cancelled)
+            #expect(cleanedUp)
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation?.message == "Stop")
         }
     }
 

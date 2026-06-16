@@ -240,6 +240,12 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
+    private func markReviewWaitingForNetworkRecovery(_ job: CodexReviewJob) {
+        let now = clock.now()
+        job.closeActiveCommandLogEntries(status: "canceled", completedAt: now)
+        appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
+    }
+
     private func reviewWorkerInputs(for run: BackendReviewRun) async -> ReviewWorkerInputs {
         let backend = self.backend
         let networkMonitor = self.networkMonitor
@@ -420,6 +426,7 @@ extension CodexReviewStore {
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
+                reviewWorkerTasks[jobID]?.cancel()
             } catch {
                 try recordCancellationFailure(
                     jobID: job.id,
@@ -439,6 +446,7 @@ extension CodexReviewStore {
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
+                reviewWorkerTasks[jobID]?.cancel()
             } catch {
                 try recordCancellationFailure(
                     jobID: job.id,
@@ -615,7 +623,7 @@ extension CodexReviewStore {
                     continue
                 }
                 recoveryState.markWaitingForNetworkRecovery()
-                appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
+                markReviewWaitingForNetworkRecovery(job)
                 try await backend.interruptReviewForRecovery(
                     recoveryState.currentRun,
                     reason: recoveryState.recoveryReason
