@@ -1530,6 +1530,46 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func runtimeStopDrainsNetworkRecoveryWaitingWorker() async throws {
+        let run = BackendReviewRun(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+            try await backend.waitForEventStream(timeout: .seconds(2))
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
+            _ = try await running
+
+            let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+                reason: .system(message: "Review runtime stopped."),
+                cancelWorkers: false
+            )
+            await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.activeRuns["job-1"] == nil)
+            #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
+            #expect(await backend.recordedCommands().contains(.cleanupReview(run)))
+        }
+    }
+
     @Test func cancellationDuringNetworkRecoveryStopsWhenEventStreamFinishes() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",

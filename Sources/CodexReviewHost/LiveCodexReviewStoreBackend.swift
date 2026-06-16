@@ -467,8 +467,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
                 await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+                await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             }
-            store.cancelReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             if didCleanUp == false {
                 logger.warning("Timed out cleaning active reviews before stopping runtime")
             }
@@ -1152,8 +1152,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
                 await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+                await store.cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             }
-            store.cancelReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
             if didCleanUp == false {
                 logger.warning("Timed out cleaning active reviews after runtime failure")
             }

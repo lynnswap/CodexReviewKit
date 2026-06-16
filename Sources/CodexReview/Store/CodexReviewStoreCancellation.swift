@@ -127,6 +127,16 @@ extension CodexReviewStore {
         }
     }
 
+    package func cancelAndDrainReviewWorkersForRuntimeStop(jobIDs: [String]) async {
+        let tasks = jobIDs.compactMap { reviewWorkerTasks[$0] }
+        for task in tasks {
+            task.cancel()
+        }
+        for task in tasks {
+            await task.value
+        }
+    }
+
     package func terminateAllRunningJobsLocally(
         reason: String = "Cancellation requested.",
         failureMessage: String
