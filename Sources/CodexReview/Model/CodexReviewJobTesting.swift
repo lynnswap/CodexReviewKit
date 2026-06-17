@@ -54,4 +54,28 @@ extension CodexReviewJob {
             logEntries: logEntries
         )
     }
+
+    @_spi(Testing)
+    public func updateStateForTesting(
+        targetSummary: String? = nil,
+        status: ReviewJobState? = nil,
+        endedAt: Date? = nil,
+        clearEndedAt: Bool = false,
+        summary: String? = nil
+    ) {
+        if let targetSummary {
+            self.targetSummary = targetSummary
+        }
+        if let status {
+            core.lifecycle.status = status
+        }
+        if let endedAt {
+            core.lifecycle.endedAt = endedAt
+        } else if clearEndedAt {
+            core.lifecycle.endedAt = nil
+        }
+        if let summary {
+            core.output.summary = summary
+        }
+    }
 }

@@ -781,24 +781,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func handleCancellationFailure(_ error: Error, for job: CodexReviewJob) {
         let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = description.isEmpty ? "Failed to cancel review." : description
-        do {
-            try store.recordCancellationFailure(
-                jobID: job.id,
-                sessionID: job.sessionID,
-                message: message
-            )
-        } catch {
-            applyCancellationFailure(message: message, to: job)
-        }
-    }
-
-    private func applyCancellationFailure(message: String, to job: CodexReviewJob) {
-        if message == "Failed to cancel review." {
-            job.core.output.summary = message
-        } else {
-            job.core.output.summary = "Failed to cancel review: \(message)"
-        }
-        job.core.lifecycle.errorMessage = message
+        try? store.recordCancellationFailure(
+            jobID: job.id,
+            sessionID: job.sessionID,
+            message: message
+        )
     }
 
     private func clearSelectionIfNeeded(for workspaces: [CodexReviewWorkspace]) {

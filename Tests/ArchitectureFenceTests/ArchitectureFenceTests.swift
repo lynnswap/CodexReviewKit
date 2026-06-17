@@ -66,4 +66,45 @@ struct ArchitectureFenceTests {
 
         #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
     }
+
+    @Test func reviewUIDoesNotMutateStoreOwnedJobStateDirectly() throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let checkedRoots = [
+            repo.appending(path: "Sources/ReviewUI"),
+            repo.appending(path: "Tests/ReviewUITests"),
+        ]
+        let forbiddenAssignments = try [
+            NSRegularExpression(pattern: #"\.core(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*=(?!=)"#),
+            NSRegularExpression(pattern: #"\.targetSummary\s*=(?!=)"#),
+            NSRegularExpression(pattern: #"\.cancellationRequested\s*=(?!=)"#),
+            NSRegularExpression(pattern: #"\.sortOrder\s*=(?!=)"#),
+        ]
+
+        var violations: [String] = []
+        for root in checkedRoots {
+            let files = try FileManager.default
+                .subpathsOfDirectory(atPath: root.path)
+                .filter { $0.hasSuffix(".swift") }
+            for file in files {
+                let url = root.appending(path: file)
+                let text = try String(contentsOf: url, encoding: .utf8)
+                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                    let lineText = String(line)
+                    guard forbiddenAssignments.contains(where: {
+                        let range = NSRange(lineText.startIndex..<lineText.endIndex, in: lineText)
+                        return $0.firstMatch(in: lineText, range: range) != nil
+                    }) else {
+                        continue
+                    }
+                    let relativePath = url.path.replacingOccurrences(of: repo.path + "/", with: "")
+                    violations.append("\(relativePath):\(offset + 1): \(lineText.trimmingCharacters(in: .whitespaces))")
+                }
+            }
+        }
+
+        #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
+    }
 }
