@@ -77,9 +77,10 @@ struct ArchitectureFenceTests {
             repo.appending(path: "Tests/ReviewUITests"),
         ]
         let forbiddenAssignments = try [
-            NSRegularExpression(pattern: #"\.core(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*=(?!=)"#),
+            NSRegularExpression(pattern: #"\.core(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*=(?!=)"#),
             NSRegularExpression(pattern: #"\.targetSummary\s*=(?!=)"#),
             NSRegularExpression(pattern: #"\.cancellationRequested\s*=(?!=)"#),
+            NSRegularExpression(pattern: #"\.sortOrder\s*=(?!=)"#),
         ]
 
         var violations: [String] = []
