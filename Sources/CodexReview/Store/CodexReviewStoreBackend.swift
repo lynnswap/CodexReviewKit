@@ -27,6 +27,7 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
+    var handlesActiveReviewStopCleanup: Bool { get }
 
     func attachStore(_ store: CodexReviewStore)
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
@@ -43,8 +44,21 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun
+    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt
     func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws
+    func beginReviewRecovery(
+        _ run: BackendReviewRun,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRecoveryToken
+    func resumeReviewRecovery(
+        _ token: BackendReviewRecoveryToken,
+        request: BackendReviewStart
+    ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: BackendReviewRun) async
-    func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error>
+}
+
+extension CodexReviewStoreBackend {
+    package var handlesActiveReviewStopCleanup: Bool {
+        false
+    }
 }

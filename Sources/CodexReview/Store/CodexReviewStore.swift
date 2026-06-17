@@ -23,13 +23,17 @@ public final class CodexReviewStore {
     @ObservationIgnored package let diagnosticsURL: URL?
     @ObservationIgnored package let settingsService: CodexReviewSettingsService
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
+    @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
+    @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored package var activeRuns: [String: BackendReviewRun] = [:]
+    @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
@@ -39,9 +43,13 @@ public final class CodexReviewStore {
         settingsService: CodexReviewSettingsService? = nil,
         diagnosticsURL: URL? = nil,
         clock: CodexReviewClock = .init(),
-        idGenerator: CodexReviewIDGenerator = .init()
+        idGenerator: CodexReviewIDGenerator = .init(),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) {
         self.backend = backend
+        self.networkMonitor = networkMonitor
+        self.networkRecoveryPolicy = networkRecoveryPolicy
         self.diagnosticsURL = diagnosticsURL
         self.clock = clock
         self.idGenerator = idGenerator
@@ -73,6 +81,9 @@ public final class CodexReviewStore {
         for task in reviewWorkerTasks.values {
             task.cancel()
         }
+        for task in runtimeStopDetachedReviewWorkerTasks.values {
+            task.cancel()
+        }
         for waiters in reviewTerminalWaiters.values {
             for waiter in waiters {
                 waiter.timeoutTask?.cancel()
@@ -91,7 +102,8 @@ public final class CodexReviewStore {
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: PreviewCodexReviewStoreBackend(seed: seed),
-            diagnosticsURL: diagnosticsURL
+            diagnosticsURL: diagnosticsURL,
+            networkMonitor: StaticCodexReviewNetworkMonitor()
         )
     }
 
@@ -99,13 +111,17 @@ public final class CodexReviewStore {
         backend: any CodexReviewStoreBackend,
         diagnosticsURL: URL? = nil,
         clock: CodexReviewClock = .init(),
-        idGenerator: CodexReviewIDGenerator = .init()
+        idGenerator: CodexReviewIDGenerator = .init(),
+        networkMonitor: any CodexReviewNetworkMonitoring = StaticCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: backend,
             diagnosticsURL: diagnosticsURL,
             clock: clock,
-            idGenerator: idGenerator
+            idGenerator: idGenerator,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy
         )
     }
 
@@ -129,7 +145,17 @@ public final class CodexReviewStore {
     }
 
     public func stop() async {
+        let locallyCancelledJobIDs: [String]
+        if backend.handlesActiveReviewStopCleanup {
+            locallyCancelledJobIDs = []
+        } else {
+            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()
+        }
         await backend.stop(store: self)
+        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
+        cancelAndDetachReviewWorkersForRuntimeStop(
+            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
+        )
         transitionToStopped()
     }
 

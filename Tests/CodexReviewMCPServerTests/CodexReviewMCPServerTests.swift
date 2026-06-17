@@ -35,7 +35,6 @@ struct CodexReviewMCPServerTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
             waitTimeout: nil
         ))
-        await backend.waitForEventStream()
         await backend.yield(.completed(summary: "Done", result: "review"))
         let resolved = try await response
 

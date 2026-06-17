@@ -133,19 +133,27 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_: BackendReviewStart) async throws -> BackendReviewRun {
+    package func startReview(_: BackendReviewStart) async throws -> BackendReviewAttempt {
         throw ReviewError.io(Self.previewUnavailableMessage)
     }
 
     package func interruptReview(_: BackendReviewRun, reason _: BackendCancellationReason) async throws {}
 
-    package func cleanupReview(_: BackendReviewRun) async {}
-
-    package func events(for _: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        AsyncThrowingStream { continuation in
-            continuation.finish()
-        }
+    package func beginReviewRecovery(
+        _: BackendReviewRun,
+        reason _: BackendCancellationReason
+    ) async throws -> BackendReviewRecoveryToken {
+        throw ReviewError.io(Self.previewUnavailableMessage)
     }
+
+    package func resumeReviewRecovery(
+        _: BackendReviewRecoveryToken,
+        request _: BackendReviewStart
+    ) async throws -> BackendReviewAttempt {
+        throw ReviewError.io(Self.previewUnavailableMessage)
+    }
+
+    package func cleanupReview(_: BackendReviewRun) async {}
 
     fileprivate static let previewUnavailableMessage = "Embedded server is unavailable in preview mode."
     fileprivate static let previewAuthenticationFailureMessage = "Authentication is unavailable in preview mode."

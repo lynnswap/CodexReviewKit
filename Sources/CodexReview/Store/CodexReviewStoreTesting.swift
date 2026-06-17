@@ -84,7 +84,7 @@ extension CodexReviewStore {
     }
 
     package func cancelAndDrainReviewWorkersForTesting() async {
-        let tasks = Array(reviewWorkerTasks.values)
+        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
         for task in tasks {
             task.cancel()
         }
@@ -93,9 +93,11 @@ extension CodexReviewStore {
         }
 
         reviewWorkerTasks.removeAll(keepingCapacity: false)
+        runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
         startingJobIDs.removeAll(keepingCapacity: false)
         startupCancellations.removeAll(keepingCapacity: false)
         activeRuns.removeAll(keepingCapacity: false)
+        reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
 
         let waiters = reviewTerminalWaiters.values.flatMap { $0 }
         reviewTerminalWaiters.removeAll(keepingCapacity: false)

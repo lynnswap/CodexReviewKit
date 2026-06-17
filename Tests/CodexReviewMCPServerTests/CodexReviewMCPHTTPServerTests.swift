@@ -154,7 +154,6 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.waitForEventStream()
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
@@ -205,7 +204,6 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.waitForEventStream()
             let running = try decodeSSEJSON(from: try await responseData)
 
             #expect(running.value(for: ["result", "isError"]) as? Bool == false)
@@ -269,7 +267,6 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.waitForEventStream()
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
@@ -310,7 +307,6 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.waitForEventStream()
             await backend.yield(.failed("Backend failed"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
@@ -878,7 +874,6 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.waitForStartReview()
             await server.runSessionCleanupForTesting(now: .distantFuture)
             await gate.open()
-            await backend.waitForEventStream()
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 

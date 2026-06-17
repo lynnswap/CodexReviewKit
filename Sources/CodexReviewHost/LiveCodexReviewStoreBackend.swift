@@ -12,6 +12,59 @@ private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
 }
 
+private actor RuntimeShutdownCleanupRace {
+    private var result: Bool?
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func finish(_ value: Bool) {
+        guard result == nil else {
+            return
+        }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait() async -> Bool {
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            if let result {
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+}
+
+private func runRuntimeShutdownCleanup(
+    timeout: Duration,
+    operation: @escaping @Sendable () async -> Void
+) async -> Bool {
+    let race = RuntimeShutdownCleanupRace()
+    let operationTask = Task {
+        await operation()
+        await race.finish(true)
+    }
+    let timeoutTask = Task {
+        do {
+            try await Task.sleep(for: timeout)
+        } catch {
+            return
+        }
+        await race.finish(false)
+    }
+    let result = await race.wait()
+    if result {
+        timeoutTask.cancel()
+    } else {
+        operationTask.cancel()
+    }
+    return result
+}
+
 private struct PendingLoginRuntimeCleanup {
     var client: AppServerClient?
     var codexHomeURL: URL?
@@ -71,6 +124,9 @@ public extension CodexReviewStore {
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         transport: any JSONRPCTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -81,6 +137,9 @@ public extension CodexReviewStore {
             externalURLOpener: externalURLOpener,
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
             transportFactory: { _ in transport }
         )
     }
@@ -97,25 +156,33 @@ public extension CodexReviewStore {
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPCTransport
     ) -> CodexReviewStore {
-        CodexReviewStore(backend: LiveCodexReviewStoreBackend(
-            environment: environment,
-            runtimePreferences: runtimePreferences,
-            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
-            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
-            externalURLOpener: externalURLOpener,
-            mcpHTTPServerFactory: mcpHTTPServerFactory,
-            mcpPortOwnerResolver: mcpPortOwnerResolver,
-            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-            appServerRuntimeFactory: { codexHomeURL in
-                let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
-                return .init(
-                    client: client,
-                    backend: AppServerCodexReviewBackend(client: client)
-                )
-            }
-        ))
+        CodexReviewStore(
+            backend: LiveCodexReviewStoreBackend(
+                environment: environment,
+                runtimePreferences: runtimePreferences,
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+                externalURLOpener: externalURLOpener,
+                mcpHTTPServerFactory: mcpHTTPServerFactory,
+                mcpPortOwnerResolver: mcpPortOwnerResolver,
+                mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+                shutdownCleanupTimeout: shutdownCleanupTimeout,
+                appServerRuntimeFactory: { codexHomeURL in
+                    let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
+                    return .init(
+                        client: client,
+                        backend: AppServerCodexReviewBackend(client: client)
+                    )
+                }
+            ),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy
+        )
     }
 }
 
@@ -151,6 +218,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
+    private let shutdownCleanupTimeout: Duration
     private weak var attachedStore: CodexReviewStore?
 
     init(
@@ -167,6 +235,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         },
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
@@ -185,6 +254,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpHTTPServerFactory = mcpHTTPServerFactory
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
+        self.shutdownCleanupTimeout = shutdownCleanupTimeout
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
         )
@@ -200,6 +270,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     var isActive: Bool {
         client != nil
+    }
+
+    var handlesActiveReviewStopCleanup: Bool {
+        true
     }
 
     var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
@@ -395,8 +469,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return message
     }
 
-    func stop(store _: CodexReviewStore) async {
+    private func cancelActiveReviewsForRuntimeTeardown(
+        store: CodexReviewStore,
+        appServerBackend: AppServerCodexReviewBackend,
+        reason: ReviewCancellation,
+        timeoutWarning: String
+    ) async {
+        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+        }
+        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
+            reason: reason,
+            cancelWorkers: false
+        )
+        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+            timeout: shutdownCleanupTimeout
+        )
+        if didInterrupt == false || didDrainReviewWorkers == false {
+            logger.warning("\(timeoutWarning, privacy: .public)")
+        }
+    }
+
+    func stop(store: CodexReviewStore) async {
         let client = client
+        let appServerBackend = appServerBackend
         let mcpHTTPServer = mcpHTTPServer
         let hasRuntimeState = client != nil || appServerBackend != nil || mcpHTTPServer != nil
         let loginCleanup = takeLoginRuntimeForCleanup()
@@ -404,12 +501,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         logger.info("Stopping review runtime")
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+            await cancelActiveReviewsForRuntimeTeardown(
+                store: store,
+                appServerBackend: appServerBackend,
+                reason: reason,
+                timeoutWarning: "Timed out cleaning active reviews before stopping runtime"
+            )
+        }
         self.client = nil
         self.mcpHTTPServer = nil
         authNotificationTask?.cancel()
         authNotificationTask = nil
         await mcpHTTPServer?.stop()
-        appServerBackend = nil
+        self.appServerBackend = nil
         await cleanupLoginRuntime(loginCleanup)
         await client?.close()
         logger.info("Review runtime stopped")
@@ -926,7 +1032,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
+    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
             throw ReviewError.io("Review runtime is not running.")
         }
@@ -940,20 +1046,31 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await appServerBackend.interruptReview(run, reason: reason)
     }
 
+    func beginReviewRecovery(
+        _ run: BackendReviewRun,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRecoveryToken {
+        guard let appServerBackend else {
+            throw ReviewError.io("Review runtime is not running.")
+        }
+        return try await appServerBackend.beginReviewRecovery(run, reason: reason)
+    }
+
+    func resumeReviewRecovery(
+        _ token: BackendReviewRecoveryToken,
+        request: BackendReviewStart
+    ) async throws -> BackendReviewAttempt {
+        guard let appServerBackend else {
+            throw ReviewError.io("Review runtime is not running.")
+        }
+        return try await appServerBackend.resumeReviewRecovery(token, request: request)
+    }
+
     func cleanupReview(_ run: BackendReviewRun) async {
         guard let appServerBackend else {
             return
         }
         await appServerBackend.cleanupReview(run)
-    }
-
-    func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        guard let appServerBackend else {
-            return AsyncThrowingStream { continuation in
-                continuation.finish()
-            }
-        }
-        return await appServerBackend.events(for: run)
     }
 
     @discardableResult
@@ -1054,13 +1171,23 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard client != nil || appServerBackend != nil || mcpHTTPServer != nil || loginCleanup.isEmpty == false else {
             return
         }
+        let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
+        if let appServerBackend {
+            let reason = ReviewCancellation.system(message: message)
+            await cancelActiveReviewsForRuntimeTeardown(
+                store: store,
+                appServerBackend: appServerBackend,
+                reason: reason,
+                timeoutWarning: "Timed out cleaning active reviews after runtime failure"
+            )
+        }
         let failedClient = client
         let failedMCPHTTPServer = mcpHTTPServer
         client = nil
         appServerBackend = nil
         mcpHTTPServer = nil
         authNotificationTask = nil
-        store.transitionToFailed("Review runtime stopped unexpectedly: \(error.localizedDescription)")
+        store.transitionToFailed(message)
         await failedMCPHTTPServer?.stop()
         await cleanupLoginRuntime(loginCleanup)
         await failedClient?.close()
