@@ -165,7 +165,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case beginReviewRecovery(BackendReviewRun, BackendCancellationReason)
         case resumeReviewRecovery(BackendReviewRecoveryToken, BackendReviewStart)
         case cleanupReview(BackendReviewRun)
-        case events(BackendReviewRun)
     }
 
     private var settings: BackendSettingsSnapshot
@@ -182,14 +181,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     private var startReviewWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var resumeReviewRecoveryGate: AsyncGate?
     private var resumeReviewRecoveryWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var eventsGate: AsyncGate?
-    private let eventStreamRequestGate = AsyncGate()
-    private let eventStreamReturnGate = AsyncGate()
-    private var eventContinuations: [EventContinuationKey: EventContinuation] = [:]
-    private var eventRegistrationWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
-    private var terminatedEventContinuationIDs: Set<UUID> = []
+    private var eventMailboxes: [EventMailboxKey: BackendReviewEventMailbox] = [:]
 
-    private struct EventContinuationKey: Hashable, Sendable {
+    private struct EventMailboxKey: Hashable, Sendable {
         var attemptID: String
         var threadID: String
         var turnID: String?
@@ -203,11 +197,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             self.reviewThreadID = run.reviewThreadID
             self.model = run.model
         }
-    }
-
-    private struct EventContinuation: Sendable {
-        var id: UUID
-        var continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation
     }
 
     package init(
@@ -242,10 +231,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func holdResumeReviewRecovery(with gate: AsyncGate) {
         resumeReviewRecoveryGate = gate
-    }
-
-    package func holdEvents(with gate: AsyncGate) {
-        eventsGate = gate
     }
 
     package func setNextRecoveredRun(_ run: BackendReviewRun) {
@@ -404,26 +389,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func waitForEventsRequest() async {
-        await eventStreamRequestGate.wait()
-    }
-
-    package func waitForEventsRequest(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "events request", timeout: timeout) {
-            await self.waitForEventsRequest()
-        }
-    }
-
-    package func waitForEventsReturn() async {
-        await eventStreamReturnGate.wait()
-    }
-
-    package func waitForEventsReturn(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "events return", timeout: timeout) {
-            await self.waitForEventsReturn()
-        }
-    }
-
     package func readSettings() async throws -> BackendSettingsSnapshot {
         commands.append(.readSettings)
         return settings
@@ -468,7 +433,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return auth
     }
 
-    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
+    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
@@ -478,7 +443,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         if let startReviewGate {
             await startReviewGate.wait()
         }
-        return nextRun
+        return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
     package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
@@ -518,7 +483,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func resumeReviewRecovery(
         _ token: BackendReviewRecoveryToken,
         request: BackendReviewStart
-    ) async throws -> BackendReviewRun {
+    ) async throws -> BackendReviewAttempt {
         commands.append(.resumeReviewRecovery(token, request))
         let waiters = Array(resumeReviewRecoveryWaiters.values)
         resumeReviewRecoveryWaiters.removeAll(keepingCapacity: false)
@@ -532,144 +497,52 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
         let run = token.interruptedRun
-        return nextRecoveredRun ?? .init(
+        let recoveredRun = nextRecoveredRun ?? .init(
             attemptID: "attempt-recovered",
             threadID: run.threadID,
             turnID: "turn-recovered",
             reviewThreadID: run.reviewThreadID,
             model: run.model ?? request.model
         )
+        return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
     package func cleanupReview(_ run: BackendReviewRun) async {
         commands.append(.cleanupReview(run))
     }
 
-    package func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        let gate = await noteEventsRequest()
-        if let gate {
-            await gate.wait()
-        }
-        await noteEventsReturn()
-        let continuationID = UUID()
-        let (stream, continuation) = AsyncThrowingStream<BackendReviewEvent, Error>.makeStream(
-            bufferingPolicy: .unbounded
-        )
-        continuation.onTermination = { @Sendable _ in
-            Task {
-                await self.unregisterEventContinuation(id: continuationID, run: run)
-            }
-        }
-        register(continuation: continuation, id: continuationID, run: run)
-        return stream
-    }
-
-    package func hasEventContinuation(for run: BackendReviewRun) -> Bool {
-        eventContinuation(for: run) != nil
-    }
-
     package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) async {
-        eventContinuation(for: run ?? nextRun)?.continuation.yield(event)
-        await Task.yield()
+        await eventMailbox(for: run ?? nextRun).append(event)
     }
 
-    package func finishEvents(for run: BackendReviewRun? = nil) {
-        guard let key = eventContinuationKey(for: run ?? nextRun) else {
-            return
-        }
-        eventContinuations.removeValue(forKey: key)?.continuation.finish()
+    package func finishEvents(for run: BackendReviewRun? = nil) async {
+        await eventMailbox(for: run ?? nextRun).finish()
     }
 
-    package func finishEvents(throwing error: any Error, for run: BackendReviewRun? = nil) {
-        guard let key = eventContinuationKey(for: run ?? nextRun) else {
-            return
-        }
-        eventContinuations.removeValue(forKey: key)?.continuation.finish(throwing: error)
+    package func finishEvents(throwing error: any Error, for run: BackendReviewRun? = nil) async {
+        await eventMailbox(for: run ?? nextRun).fail(error)
     }
 
-    package func finishAllEvents() {
-        let continuations = eventContinuations.values.map(\.continuation)
-        eventContinuations.removeAll(keepingCapacity: false)
-        terminatedEventContinuationIDs.removeAll(keepingCapacity: false)
-        for continuation in continuations {
-            continuation.finish()
-        }
-        let waiters = Array(eventRegistrationWaiters.values)
-        eventRegistrationWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
+    package func finishEventMailboxes() async {
+        let mailboxes = Array(eventMailboxes.values)
+        eventMailboxes.removeAll(keepingCapacity: false)
+        for mailbox in mailboxes {
+            await mailbox.finish()
         }
     }
 
-    package func waitForEventStream() async {
-        if eventContinuations.isEmpty == false {
-            return
-        }
-        let waiterID = UUID()
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if eventContinuations.isEmpty == false {
-                    continuation.resume()
-                } else {
-                    eventRegistrationWaiters[waiterID] = continuation
-                }
-            }
-        } onCancel: {
-            Task {
-                await self.cancelEventRegistrationWaiter(id: waiterID)
-            }
-        }
+    package func hasEventMailbox(for run: BackendReviewRun) -> Bool {
+        eventMailboxes[.init(run: run)] != nil
     }
 
-    package func waitForEventStream(timeout: Duration = .seconds(2)) async throws {
-        try await withFakeBackendTimeout(operation: "event stream registration", timeout: timeout) {
-            await self.waitForEventStream()
+    private func eventMailbox(for run: BackendReviewRun) -> BackendReviewEventMailbox {
+        let key = EventMailboxKey(run: run)
+        if let mailbox = eventMailboxes[key] {
+            return mailbox
         }
-    }
-
-    private func register(
-        continuation: AsyncThrowingStream<BackendReviewEvent, Error>.Continuation,
-        id: UUID,
-        run: BackendReviewRun
-    ) {
-        guard terminatedEventContinuationIDs.remove(id) == nil else {
-            continuation.finish()
-            return
-        }
-        commands.append(.events(run))
-        eventContinuations[.init(run: run)] = .init(id: id, continuation: continuation)
-        let waiters = Array(eventRegistrationWaiters.values)
-        eventRegistrationWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.resume()
-        }
-    }
-
-    private func eventContinuation(for run: BackendReviewRun) -> EventContinuation? {
-        guard let key = eventContinuationKey(for: run) else {
-            return nil
-        }
-        return eventContinuations[key]
-    }
-
-    private func eventContinuationKey(for run: BackendReviewRun) -> EventContinuationKey? {
-        let exactKey = EventContinuationKey(run: run)
-        if eventContinuations[exactKey] != nil {
-            return exactKey
-        }
-        return nil
-    }
-
-    private func unregisterEventContinuation(id: UUID, run: BackendReviewRun) {
-        let key = EventContinuationKey(run: run)
-        guard let registered = eventContinuations[key] else {
-            terminatedEventContinuationIDs.insert(id)
-            return
-        }
-        guard registered.id == id else {
-            return
-        }
-        eventContinuations.removeValue(forKey: key)
+        let mailbox = BackendReviewEventMailbox()
+        eventMailboxes[key] = mailbox
+        return mailbox
     }
 
     private func cancelStartReviewWaiter(id: UUID) {
@@ -688,18 +561,111 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         resumeReviewRecoveryWaiters.removeValue(forKey: id)?.resume()
     }
 
-    private func cancelEventRegistrationWaiter(id: UUID) {
-        eventRegistrationWaiters.removeValue(forKey: id)?.resume()
+}
+
+@MainActor
+package final class StoreSnapshotProbe {
+    private let store: CodexReviewStore
+
+    package init(store: CodexReviewStore) {
+        self.store = store
     }
 
-    private func noteEventsRequest() async -> AsyncGate? {
-        await eventStreamRequestGate.open()
-        return eventsGate
+    package func snapshot() -> StoreSnapshot {
+        let jobs = store.jobs
+            .sorted { lhs, rhs in
+                if lhs.sortOrder == rhs.sortOrder {
+                    return lhs.id < rhs.id
+                }
+                return lhs.sortOrder > rhs.sortOrder
+            }
+            .map { job in
+                StoreJobSnapshot(
+                    jobID: job.id,
+                    status: job.core.lifecycle.status,
+                    summary: job.core.output.summary,
+                    lastAgentMessage: job.core.output.lastAgentMessage,
+                    logs: job.logEntries,
+                    run: job.core.run,
+                    activeRun: store.activeRuns[job.id],
+                    cancellationRequested: job.cancellationRequested
+                )
+            }
+        return StoreSnapshot(jobs: jobs)
     }
 
-    private func noteEventsReturn() async {
-        await eventStreamReturnGate.open()
+    package func waitUntilJobStatus(
+        _ status: ReviewJobState,
+        jobID: String? = nil,
+        timeout: Duration = .seconds(2)
+    ) async -> StoreSnapshot? {
+        await waitUntil(timeout: timeout) { snapshot in
+            snapshot.job(jobID)?.status == status
+        }
     }
+
+    package func waitUntilLogs(
+        jobID: String? = nil,
+        timeout: Duration = .seconds(2),
+        matching predicate: @escaping @MainActor (Array<ReviewLogEntry>) -> Bool
+    ) async -> StoreSnapshot? {
+        await waitUntil(timeout: timeout) { snapshot in
+            guard let job = snapshot.job(jobID) else {
+                return false
+            }
+            return predicate(job.logs)
+        }
+    }
+
+    package func waitUntilRunAttempt(
+        _ attemptID: String,
+        jobID: String? = nil,
+        timeout: Duration = .seconds(2)
+    ) async -> StoreSnapshot? {
+        await waitUntil(timeout: timeout) { snapshot in
+            snapshot.job(jobID)?.activeRun?.attemptID == attemptID
+        }
+    }
+
+    package func waitUntil(
+        timeout: Duration = .seconds(2),
+        matching predicate: @escaping @MainActor (StoreSnapshot) -> Bool
+    ) async -> StoreSnapshot? {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while true {
+            let current = snapshot()
+            if predicate(current) {
+                return current
+            }
+            if clock.now >= deadline {
+                return nil
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+package struct StoreSnapshot: Sendable {
+    package var jobs: [StoreJobSnapshot]
+
+    package func job(_ jobID: String? = nil) -> StoreJobSnapshot? {
+        guard let jobID else {
+            return jobs.first
+        }
+        return jobs.first { $0.jobID == jobID }
+    }
+}
+
+package struct StoreJobSnapshot: Sendable {
+    package var jobID: String
+    package var status: ReviewJobState
+    package var summary: String
+    package var lastAgentMessage: String?
+    package var logs: [ReviewLogEntry]
+    package var run: ReviewRunMetadata
+    package var activeRun: BackendReviewRun?
+    package var cancellationRequested: Bool
 }
 
 @MainActor
@@ -834,7 +800,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
+    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
         try await reviewBackend.startReview(request)
     }
 
@@ -855,16 +821,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func resumeReviewRecovery(
         _ token: BackendReviewRecoveryToken,
         request: BackendReviewStart
-    ) async throws -> BackendReviewRun {
+    ) async throws -> BackendReviewAttempt {
         try await reviewBackend.resumeReviewRecovery(token, request: request)
     }
 
     package func cleanupReview(_ run: BackendReviewRun) async {
         await reviewBackend.cleanupReview(run)
-    }
-
-    package func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        await reviewBackend.events(for: run)
     }
 
     package func refreshSettings() async throws -> CodexReviewSettingsSnapshot {

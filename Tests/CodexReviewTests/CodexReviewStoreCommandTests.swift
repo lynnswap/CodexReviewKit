@@ -18,7 +18,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.log("started"))
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
@@ -49,7 +48,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             let running = try await result
 
             #expect(running.jobID == "job-1")
@@ -80,7 +78,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             _ = try await start
 
             async let awaited = store.awaitReview(
@@ -108,7 +105,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             _ = try await start
 
             async let awaited = store.awaitReview(
@@ -154,7 +150,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             _ = try await result
 
@@ -180,7 +175,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.started(turnID: "turn-actual", reviewThreadID: "review-thread-1", model: "gpt-5.5"))
             await backend.yield(.messageDelta("hello", itemID: "message-1"))
             await backend.yield(.messageDelta(" world", itemID: "message-1"))
@@ -216,7 +210,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
@@ -239,7 +232,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: "final review text",
@@ -269,7 +261,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.logEntry(
                 kind: .rawReasoning,
                 text: initialText,
@@ -575,7 +566,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: """
             Full review comments:
             - [P2] Add parser tests — Sources/Parser.swift:12-15
@@ -600,7 +590,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/old-project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "first"))
             _ = try await first
             await backend.finishEvents()
@@ -609,7 +598,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "second"))
             _ = try await second
 
@@ -633,7 +621,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "new"))
             _ = try await result
 
@@ -651,7 +638,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "first"))
             _ = try await first
             await backend.finishEvents()
@@ -660,7 +646,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "second"))
             _ = try await second
 
@@ -684,7 +669,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             clock.current = Date(timeIntervalSince1970: 13)
 
             #expect(try store.readReview(jobID: "job-1").elapsedSeconds == 12)
@@ -718,7 +703,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "new"))
             _ = try await result
 
@@ -737,7 +721,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             let cancel = try await store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
@@ -769,7 +753,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.logEntry(
                 kind: .rawReasoning,
                 text: initialText,
@@ -819,13 +802,22 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             networkMonitor.yield(.satisfied())
             await debounceGate.open()
-            await Task.yield()
 
+            let attemptedRecovery = await waitUntil(timeout: .milliseconds(100)) {
+                let commands = await backend.recordedCommands()
+                return commands.contains { command in
+                    if case .beginReviewRecovery = command {
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            #expect(attemptedRecovery == false)
             let commands = await backend.recordedCommands()
             #expect(commands.contains { command in
                 if case .beginReviewRecovery = command {
@@ -855,7 +847,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -898,7 +889,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -908,7 +898,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let final = try await store.awaitReview(sessionID: "session-1", jobID: "job-1", timeout: .seconds(1))
 
@@ -962,7 +952,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -976,7 +965,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
             await settleGate.open()
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
 
@@ -1030,7 +1019,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1042,7 +1030,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             await settleGate.open()
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1082,7 +1070,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.logEntry(
                 kind: .command,
                 text: "$ git diff",
@@ -1103,7 +1090,7 @@ struct CodexReviewStoreCommandTests {
             _ = try await running
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
 
             let final = try await store.awaitReview(sessionID: "session-1", jobID: "job-1", timeout: .seconds(1))
@@ -1147,7 +1134,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             await backend.yield(.started(
                 turnID: "turn-actual",
@@ -1180,7 +1166,7 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(recoveredFromRuns.last?.turnID == "turn-actual")
 
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
 
@@ -1217,7 +1203,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1231,7 +1216,7 @@ struct CodexReviewStoreCommandTests {
                 }
                 return read.core.run.turnID == "turn-2"
             })
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1275,13 +1260,12 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "stale review"), for: initialRun)
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
@@ -1323,7 +1307,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1331,7 +1314,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             await backend.yield(.cancelled("Network lost"), for: initialRun)
             await recoverGate.open()
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1370,14 +1353,13 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
             await backend.finishEvents(for: initialRun)
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
@@ -1418,7 +1400,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1467,13 +1448,11 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
             _ = try await running
             await backend.finishEvents(for: initialRun)
-            await Task.yield()
 
             let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
             let cleanedUp = await waitUntil {
@@ -1506,7 +1485,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             _ = try await running
 
             let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
@@ -1548,7 +1526,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             _ = try await running
 
             let stopTask = Task { @MainActor in
@@ -1591,7 +1568,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1662,7 +1638,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1675,7 +1650,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func networkRecoveryDropsSubscriptionCancelledWhileBackendEventsIsSuspended() async throws {
+    @Test func networkRecoveryIgnoresOldAttemptEventsAfterRecoveryBegins() async throws {
         let initialRun = BackendReviewRun(
             threadID: "thread-1",
             turnID: "turn-1",
@@ -1691,8 +1666,6 @@ struct CodexReviewStoreCommandTests {
         )
         let backend = FakeCodexReviewBackend(nextRun: initialRun)
         await backend.setNextRecoveredRun(recoveredRun)
-        let eventsGate = AsyncGate()
-        await backend.holdEvents(with: eventsGate)
         let networkMonitor = ManualCodexReviewNetworkMonitor()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1705,26 +1678,23 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventsRequest(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
-            await eventsGate.open()
-            try await backend.waitForEventsReturn(timeout: .seconds(2))
-            let staleSubscriptionDetached = await waitUntil {
-                await backend.hasEventContinuation(for: initialRun) == false
-            }
+            await backend.yield(.message("stale old attempt output"), for: initialRun)
+            await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
 
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
-            try #require(await waitForEventStreamRegistration(backend: backend, run: recoveredRun))
+            try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
             let read = try await result
 
-            #expect(staleSubscriptionDetached)
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.output.lastAgentMessage == "recovered review")
+            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            #expect(logText.contains("stale old attempt output") == false)
         }
     }
 
@@ -1743,7 +1713,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
             _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
@@ -1785,7 +1755,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             networkMonitor.yield(.init(status: .requiresConnection))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
@@ -1874,7 +1843,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
 
             await #expect(throws: (any Error).self) {
                 try await store.cancelReview(
@@ -1909,7 +1877,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             _ = try await store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
@@ -1919,6 +1887,28 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.output.summary == "Stop")
+        }
+    }
+
+    @Test func failedReviewPreservesBufferedEventsBeforeStreamError() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            await backend.yield(.message("partial review"))
+            await backend.finishEvents(throwing: StreamClosedError())
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.output.lastAgentMessage == "partial review")
+            #expect(read.logs.map(\.text).contains("partial review"))
         }
     }
 
@@ -1933,7 +1923,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result
 
@@ -1959,7 +1949,6 @@ struct CodexReviewStoreCommandTests {
                     request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
                 )
             }
-            try await backend.waitForEventStream(timeout: .seconds(2))
             task.cancel()
             let read = try await task.value
 
@@ -1984,7 +1973,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             await #expect(throws: FakeCodexReviewBackendError.self) {
                 try await store.cancelReview(
                     jobID: "job-1",
@@ -2013,7 +2002,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
+            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
             _ = try await store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
@@ -2040,7 +2029,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             async let cancel = store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
@@ -2087,12 +2075,6 @@ struct CodexReviewStoreCommandTests {
                 turnID: "turn-1",
                 reviewThreadID: "review-thread-1"
             ))))
-            #expect(commands.contains {
-                if case .events = $0 {
-                    return true
-                }
-                return false
-            } == false)
         }
     }
 
@@ -2141,7 +2123,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try await backend.waitForEventStream(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
 
@@ -2276,14 +2257,13 @@ private func waitUntil(
 }
 
 @MainActor
-private func waitForEventStreamRegistration(
-    backend: FakeCodexReviewBackend,
+private func waitForRunAttemptActivation(
+    store: CodexReviewStore,
     run: BackendReviewRun,
     timeout: Duration = .seconds(2)
 ) async -> Bool {
-    await waitUntil(timeout: timeout) {
-        await backend.recordedCommands().contains(.events(run))
-    }
+    await StoreSnapshotProbe(store: store)
+        .waitUntilRunAttempt(run.attemptID, timeout: timeout) != nil
 }
 
 private func waitForTaskValue<T: Sendable>(
@@ -2324,9 +2304,9 @@ private func cleanupStoreCommandTest(
     backend: FakeCodexReviewBackend,
     store: CodexReviewStore
 ) async {
-    await backend.finishAllEvents()
+    await backend.finishEventMailboxes()
     await store.cancelAndDrainReviewWorkersForTesting()
-    await backend.finishAllEvents()
+    await backend.finishEventMailboxes()
 }
 
 private struct StreamClosedError: Error {}

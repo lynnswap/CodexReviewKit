@@ -1019,7 +1019,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
+    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
             throw ReviewError.io("Review runtime is not running.")
         }
@@ -1046,7 +1046,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func resumeReviewRecovery(
         _ token: BackendReviewRecoveryToken,
         request: BackendReviewStart
-    ) async throws -> BackendReviewRun {
+    ) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
             throw ReviewError.io("Review runtime is not running.")
         }
@@ -1058,15 +1058,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         await appServerBackend.cleanupReview(run)
-    }
-
-    func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        guard let appServerBackend else {
-            return AsyncThrowingStream { continuation in
-                continuation.finish()
-            }
-        }
-        return await appServerBackend.events(for: run)
     }
 
     @discardableResult

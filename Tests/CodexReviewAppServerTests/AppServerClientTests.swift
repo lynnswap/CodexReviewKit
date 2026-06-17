@@ -10,10 +10,74 @@ private extension AppServerCodexReviewBackend {
         _ run: BackendReviewRun,
         request: BackendReviewStart,
         reason: BackendCancellationReason
-    ) async throws -> BackendReviewRun {
+    ) async throws -> BackendReviewAttempt {
         let token = try await beginReviewRecovery(run, reason: reason)
         return try await resumeReviewRecovery(token, request: request)
     }
+
+    func resumeReviewRecovery(
+        _ attempt: BackendReviewAttempt,
+        request: BackendReviewStart,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewAttempt {
+        try await resumeReviewRecovery(attempt.run, request: request, reason: reason)
+    }
+
+    func interruptReview(_ attempt: BackendReviewAttempt, reason: BackendCancellationReason) async throws {
+        try await interruptReview(attempt.run, reason: reason)
+    }
+
+    func beginReviewRecovery(
+        _ attempt: BackendReviewAttempt,
+        reason: BackendCancellationReason
+    ) async throws -> BackendReviewRecoveryToken {
+        try await beginReviewRecovery(attempt.run, reason: reason)
+    }
+
+    func cleanupReview(_ attempt: BackendReviewAttempt) async {
+        await cleanupReview(attempt.run)
+    }
+}
+
+private extension BackendReviewAttempt {
+    var attemptID: String { run.attemptID }
+    var threadID: String { run.threadID }
+    var turnID: String? { run.turnID }
+    var reviewThreadID: String? { run.reviewThreadID }
+    var model: String? { run.model }
+}
+
+private struct BackendReviewEventSequence: AsyncSequence {
+    typealias Element = BackendReviewEvent
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        var mailbox: BackendReviewEventMailbox
+
+        mutating func next() async throws -> BackendReviewEvent? {
+            try await mailbox.next()
+        }
+    }
+
+    var mailbox: BackendReviewEventMailbox
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(mailbox: mailbox)
+    }
+}
+
+private func eventSequence(
+    _ backend: AppServerCodexReviewBackend,
+    _ attempt: BackendReviewAttempt
+) async -> BackendReviewEventSequence {
+    BackendReviewEventSequence(mailbox: attempt.events)
+}
+
+private func eventSequence(
+    _ backend: AppServerCodexReviewBackend,
+    _ run: BackendReviewRun
+) async -> BackendReviewEventSequence {
+    let attempt = await backend.reviewAttemptForTesting(run)
+    return BackendReviewEventSequence(mailbox: attempt.events)
 }
 
 @Suite("app-server client")
@@ -1098,7 +1162,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         #expect(run.threadID == "parent-thread")
         #expect(run.reviewThreadID == "review-thread")
@@ -1156,7 +1220,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -1190,7 +1254,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        var iterator = await backend.events(for: run).makeAsyncIterator()
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -1222,36 +1286,11 @@ struct AppServerClientTests {
         #expect(interruptParams.turnID == "turn-new")
     }
 
-    @Test func backendIgnoresStaleEventStreamDetachAfterResubscribe() async throws {
+    @Test func backendBuffersNotificationsBeforeAttemptMailboxRead() async throws {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let firstEvents = await backend.events(for: run)
-        _ = firstEvents
-
-        let firstAttached = await waitUntil {
-            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != nil
-        }
-        #expect(firstAttached)
-        let firstSubscriptionID = try #require(
-            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
-        )
-
-        let secondEvents = await backend.events(for: run)
-        var secondIterator = secondEvents.makeAsyncIterator()
-        let secondAttached = await waitUntil {
-            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") != firstSubscriptionID
-        }
-        #expect(secondAttached)
-        let secondSubscriptionID = try #require(
-            await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1")
-        )
-
-        await backend.detachReviewEventStreamForTesting(
-            threadID: "thread-1",
-            subscriptionID: firstSubscriptionID
-        )
-        #expect(await backend.activeReviewEventStreamSubscriptionIDForTesting(threadID: "thread-1") == secondSubscriptionID)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/agentMessage/delta",
@@ -1263,8 +1302,9 @@ struct AppServerClientTests {
             )
         )
 
-        #expect(try await secondIterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
-        #expect(try await secondIterator.next() == .messageDelta("review text", itemID: "message-1"))
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .messageDelta("review text", itemID: "message-1"))
     }
 
     @Test func backendPreservesNotificationStreamErrorForLateEventStreamSubscriber() async throws {
@@ -1287,11 +1327,36 @@ struct AppServerClientTests {
         }
         #expect(routerStopped)
 
-        var iterator = await backend.events(for: run).makeAsyncIterator()
-        await #expect(throws: JSONRPCError.closed) {
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+        await #expect(throws: BackendReviewEventMailboxError.self) {
             _ = try await iterator.next()
         }
         await transport.close()
+    }
+
+    @Test func backendPreservesBufferedEventsBeforeNotificationStreamError() async throws {
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
+        let events = await eventSequence(backend, run)
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "message-1",
+                delta: "partial review"
+            )
+        )
+        await transport.finishNotificationStreams(throwing: JSONRPCError.closed)
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .messageDelta("partial review", itemID: "message-1"))
+        await #expect(throws: BackendReviewEventMailboxError.self) {
+            _ = try await iterator.next()
+        }
     }
 
     @Test func backendTracksSyntheticDetachedReviewThreadStartsForInterrupt() async throws {
@@ -1299,7 +1364,7 @@ struct AppServerClientTests {
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = BackendReviewRun(threadID: "parent-thread", reviewThreadID: "review-thread")
-        var iterator = await backend.events(for: run).makeAsyncIterator()
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "item/agentMessage/delta",
@@ -1353,7 +1418,7 @@ struct AppServerClientTests {
 
         await gate.open()
         let run = try await started
-        var iterator = await backend.events(for: run).makeAsyncIterator()
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
 
         #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "review-thread", model: nil))
         #expect(await backend.reviewEventSessionMetricsForTesting(threadID: "review-thread")?.routed == 1)
@@ -1362,6 +1427,48 @@ struct AppServerClientTests {
         #expect(interruptRequest.method == "turn/interrupt")
         let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
         #expect(interruptParams.threadID == "review-thread")
+        #expect(interruptParams.turnID == "turn-new")
+    }
+
+    @Test func backendBuffersParentThreadNotificationsDuringReviewStartUntilRunIsFinalized() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(ThreadStartResponse(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(ReviewStartResponse(turnID: "turn-response", reviewThreadID: "thread-1"), for: "review/start")
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let gate = AsyncGate()
+        await transport.hold(method: "review/start", gate: gate)
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        async let started = backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        await transport.waitForRequestCount(3)
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-new"),
+                reviewThreadID: "thread-1"
+            )
+        )
+        let bufferedParentNotification = await waitUntil {
+            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
+        }
+        #expect(bufferedParentNotification)
+
+        await gate.open()
+        let run = try await started
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
+
+        #expect(try await iterator.next() == .started(turnID: "turn-new", reviewThreadID: "thread-1", model: nil))
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+        let interruptRequest = try #require(await transport.recordedRequests().last)
+        #expect(interruptRequest.method == "turn/interrupt")
+        let interruptParams = try JSONDecoder().decode(TurnInterruptParams.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "thread-1")
         #expect(interruptParams.turnID == "turn-new")
     }
 
@@ -1409,8 +1516,8 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
         ))
-        let firstEvents = await backend.events(for: firstRun)
-        let secondEvents = await backend.events(for: secondRun)
+        let firstEvents = await eventSequence(backend, firstRun)
+        let secondEvents = await eventSequence(backend, secondRun)
         var firstIterator = firstEvents.makeAsyncIterator()
         var secondIterator = secondEvents.makeAsyncIterator()
 
@@ -1456,8 +1563,8 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
         ))
-        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
-        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+        var firstIterator = await eventSequence(backend, firstRun).makeAsyncIterator()
+        var secondIterator = await eventSequence(backend, secondRun).makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "warning",
@@ -1495,8 +1602,8 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project-2", target: .uncommittedChanges)
         ))
-        var firstIterator = await backend.events(for: firstRun).makeAsyncIterator()
-        var secondIterator = await backend.events(for: secondRun).makeAsyncIterator()
+        var firstIterator = await eventSequence(backend, firstRun).makeAsyncIterator()
+        var secondIterator = await eventSequence(backend, secondRun).makeAsyncIterator()
 
         try await transport.emitServerNotification(
             method: "error",
@@ -1531,7 +1638,7 @@ struct AppServerClientTests {
         await gate.open()
         let run = try await started
 
-        var iterator = await backend.events(for: run).makeAsyncIterator()
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
 
@@ -1551,7 +1658,7 @@ struct AppServerClientTests {
 
         try await backend.interruptReview(run, reason: .init(message: "Stop"))
 
-        var iterator = await backend.events(for: run).makeAsyncIterator()
+        var iterator = await eventSequence(backend, run).makeAsyncIterator()
         #expect(try await iterator.next() == .cancelled("Stop"))
         #expect(try await iterator.next() == nil)
     }
@@ -1662,7 +1769,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        var iterator = await backend.events(for: startedRun).makeAsyncIterator()
+        var iterator = await eventSequence(backend, startedRun).makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
             params: TestTurnNotification(
@@ -1758,7 +1865,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         let recoveredRun = try await backend.resumeReviewRecovery(
@@ -1783,7 +1890,7 @@ struct AppServerClientTests {
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2"))
         )
 
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
         #expect(try await iterator.next() == .started(
             turnID: "turn-2",
@@ -1805,7 +1912,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         let token = try await backend.beginReviewRecovery(
@@ -1842,7 +1949,7 @@ struct AppServerClientTests {
             "thread/rollback",
             "review/start",
         ])
-        let recoveredEvents = await backend.events(for: recovered)
+        let recoveredEvents = await eventSequence(backend, recovered)
         var iterator = recoveredEvents.makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -1866,7 +1973,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
         _ = try await backend.beginReviewRecovery(
@@ -1903,7 +2010,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
         _ = try await backend.beginReviewRecovery(
@@ -1943,7 +2050,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
         async let recovery: BackendReviewRecoveryToken = backend.beginReviewRecovery(
@@ -1992,7 +2099,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         _ = try await backend.beginReviewRecovery(
             run,
@@ -2042,7 +2149,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         async let recovery: BackendReviewRecoveryToken = backend.beginReviewRecovery(
             run,
@@ -2085,7 +2192,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.resumeReviewRecovery(
@@ -2103,16 +2210,11 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-2", status: "completed"))
         )
-        let bufferedFastTerminal = await waitUntil {
-            await backend.reviewEventSessionMetricsForTesting(threadID: "thread-1")?.buffered == 1
-        }
-        #expect(bufferedFastTerminal)
-
         await reviewStartGate.open()
         let recoveredRun = try await recovered
 
         #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
     }
@@ -2132,7 +2234,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.resumeReviewRecovery(
@@ -2165,7 +2267,7 @@ struct AppServerClientTests {
         await interruptGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
 
         try await transport.emitServerNotification(
@@ -2200,7 +2302,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.resumeReviewRecovery(
@@ -2234,7 +2336,7 @@ struct AppServerClientTests {
         await rollbackGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
 
         try await transport.emitServerNotification(
@@ -2270,7 +2372,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let initialEvents = await backend.events(for: run)
+        let initialEvents = await eventSequence(backend, run)
         defer { withExtendedLifetime(initialEvents) {} }
 
         async let recovered = backend.resumeReviewRecovery(
@@ -2300,7 +2402,7 @@ struct AppServerClientTests {
         await rollbackGate.open()
         let recoveredRun = try await recovered
         #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var iterator = recoveredEvents.makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -2328,7 +2430,7 @@ struct AppServerClientTests {
             reviewThreadID: "thread-1",
             model: "gpt-5"
         )
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
 
         try await transport.emitServerNotification(
@@ -2391,7 +2493,7 @@ struct AppServerClientTests {
         let recoveredRun = try await recovered
 
         #expect(recoveredRun.turnID == "turn-2")
-        let recoveredEvents = await backend.events(for: recoveredRun)
+        let recoveredEvents = await eventSequence(backend, recoveredRun)
         var recoveredIterator = recoveredEvents.makeAsyncIterator()
         #expect(try await recoveredIterator.next() == .started(
             turnID: "turn-2",
@@ -2455,7 +2557,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -2512,7 +2614,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -2576,7 +2678,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -2629,7 +2731,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-current")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -2661,7 +2763,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "thread/status/changed",
@@ -2685,7 +2787,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "thread/status/changed",
@@ -2724,7 +2826,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "thread/closed",
@@ -2749,7 +2851,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -2777,7 +2879,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
         let startedAtMs: Int64 = 1_700_000_000_000
         let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
@@ -2843,7 +2945,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
         let startedAtMs: Int64 = 1_700_000_000_000
         let startedAt = Date(timeIntervalSince1970: TimeInterval(startedAtMs) / 1_000)
@@ -2924,7 +3026,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         try await transport.emitServerNotification(
             method: "item/reasoning/summaryTextDelta",
             params: TestDeltaNotification(
@@ -2976,7 +3078,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "turn/started",
@@ -3020,7 +3122,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -3081,7 +3183,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -3149,7 +3251,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -3205,7 +3307,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "turn/plan/updated",
@@ -3571,7 +3673,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/completed",
@@ -3601,7 +3703,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         let startedAtMs: Int64 = 1_700_000_000_000
         let completedAtMs: Int64 = startedAtMs + 3_456
 
@@ -3705,7 +3807,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         let startedAtMs: Int64 = 1_700_000_000_000
         let completedAtMs: Int64 = startedAtMs + 10_007
 
@@ -3798,7 +3900,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         let startedAtMs: Int64 = 1_700_000_000_000
         let completedAtMs: Int64 = startedAtMs + 2_000
 
@@ -3855,7 +3957,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         let completedAtMs: Int64 = 1_700_000_002_000
 
         try await transport.emitServerNotification(
@@ -3895,7 +3997,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "thread/compacted",
@@ -3917,7 +4019,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -3976,7 +4078,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4069,7 +4171,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4123,7 +4225,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         let startedAtMs: Int64 = 2_000
         let startedAt = Date(timeIntervalSince1970: 2)
@@ -4239,7 +4341,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         let startedAt = Date(timeIntervalSince1970: 2)
         try await transport.emitServerNotification(
@@ -4345,7 +4447,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4408,7 +4510,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4510,7 +4612,7 @@ struct AppServerClientTests {
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/completed",
@@ -4586,7 +4688,7 @@ struct AppServerClientTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "item/started",
@@ -4660,7 +4762,7 @@ struct AppServerClientTests {
             params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1", status: "completed"))
         )
 
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
@@ -4683,7 +4785,7 @@ struct AppServerClientTests {
         let failedRun = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
         let failedTransport = FakeJSONRPCTransport()
         let failedBackend = AppServerCodexReviewBackend(client: .init(transport: failedTransport))
-        let failedEvents = await failedBackend.events(for: failedRun)
+        let failedEvents = await eventSequence(failedBackend, failedRun)
 
         try await failedTransport.emitServerNotification(
             method: "turn/completed",
@@ -4699,7 +4801,7 @@ struct AppServerClientTests {
         let cancelledRun = BackendReviewRun(threadID: "thread-2", turnID: "turn-2")
         let cancelledTransport = FakeJSONRPCTransport()
         let cancelledBackend = AppServerCodexReviewBackend(client: .init(transport: cancelledTransport))
-        let cancelledEvents = await cancelledBackend.events(for: cancelledRun)
+        let cancelledEvents = await eventSequence(cancelledBackend, cancelledRun)
 
         try await cancelledTransport.emitServerNotification(
             method: "turn/completed",
@@ -4715,7 +4817,7 @@ struct AppServerClientTests {
         let failedWithoutMessageRun = BackendReviewRun(threadID: "thread-4", turnID: "turn-4")
         let failedWithoutMessageTransport = FakeJSONRPCTransport()
         let failedWithoutMessageBackend = AppServerCodexReviewBackend(client: .init(transport: failedWithoutMessageTransport))
-        let failedWithoutMessageEvents = await failedWithoutMessageBackend.events(for: failedWithoutMessageRun)
+        let failedWithoutMessageEvents = await eventSequence(failedWithoutMessageBackend, failedWithoutMessageRun)
 
         try await failedWithoutMessageTransport.emitServerNotification(
             method: "turn/completed",
@@ -4731,7 +4833,7 @@ struct AppServerClientTests {
         let cancelledWithoutMessageRun = BackendReviewRun(threadID: "thread-5", turnID: "turn-5")
         let cancelledWithoutMessageTransport = FakeJSONRPCTransport()
         let cancelledWithoutMessageBackend = AppServerCodexReviewBackend(client: .init(transport: cancelledWithoutMessageTransport))
-        let cancelledWithoutMessageEvents = await cancelledWithoutMessageBackend.events(for: cancelledWithoutMessageRun)
+        let cancelledWithoutMessageEvents = await eventSequence(cancelledWithoutMessageBackend, cancelledWithoutMessageRun)
 
         try await cancelledWithoutMessageTransport.emitServerNotification(
             method: "turn/completed",
@@ -4747,7 +4849,7 @@ struct AppServerClientTests {
         let retryingRun = BackendReviewRun(threadID: "thread-3", turnID: "turn-3")
         let retryingTransport = FakeJSONRPCTransport()
         let retryingBackend = AppServerCodexReviewBackend(client: .init(transport: retryingTransport))
-        let retryingEvents = await retryingBackend.events(for: retryingRun)
+        let retryingEvents = await eventSequence(retryingBackend, retryingRun)
 
         try await retryingTransport.emitServerNotification(
             method: "error",
@@ -4773,7 +4875,7 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
         let run = BackendReviewRun(threadID: "thread-1", turnID: "turn-1")
-        let events = await backend.events(for: run)
+        let events = await eventSequence(backend, run)
 
         try await transport.emitServerNotification(
             method: "account/updated",

@@ -44,7 +44,7 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun
+    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt
     func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws
     func beginReviewRecovery(
         _ run: BackendReviewRun,
@@ -53,9 +53,8 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func resumeReviewRecovery(
         _ token: BackendReviewRecoveryToken,
         request: BackendReviewStart
-    ) async throws -> BackendReviewRun
+    ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: BackendReviewRun) async
-    func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error>
 }
 
 extension CodexReviewStoreBackend {

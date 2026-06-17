@@ -233,7 +233,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewRun {
+    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
         try await backend.startReview(request)
     }
 
@@ -254,16 +254,12 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     func resumeReviewRecovery(
         _ token: BackendReviewRecoveryToken,
         request: BackendReviewStart
-    ) async throws -> BackendReviewRun {
+    ) async throws -> BackendReviewAttempt {
         try await backend.resumeReviewRecovery(token, request: request)
     }
 
     func cleanupReview(_ run: BackendReviewRun) async {
         await backend.cleanupReview(run)
-    }
-
-    func events(for run: BackendReviewRun) async -> AsyncThrowingStream<BackendReviewEvent, Error> {
-        await backend.events(for: run)
     }
 
     private static func monitorSettings(

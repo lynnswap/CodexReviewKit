@@ -38,7 +38,6 @@ struct CodexReviewHostTests {
             )
         }
         await backend.waitForStartReview()
-        await backend.waitForEventStream()
 
         let commands = await backend.recordedCommands()
         #expect(commands.first == .readSettings)
