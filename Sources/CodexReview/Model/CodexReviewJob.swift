@@ -425,10 +425,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
     public nonisolated let id: String
     public let sessionID: String
     public let cwd: String
-    public package(set) var sortOrder: Double
-    public var targetSummary: String
-    public var core: ReviewJobCore
-    public var cancellationRequested: Bool
+    public internal(set) var sortOrder: Double
+    public internal(set) var targetSummary: String
+    public internal(set) var core: ReviewJobCore
+    public internal(set) var cancellationRequested: Bool
     @ObservationIgnored
     package var agentMessagesByItemID: [String: String]
     @ObservationIgnored

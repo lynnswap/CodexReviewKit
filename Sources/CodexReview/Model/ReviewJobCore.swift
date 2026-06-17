@@ -2,10 +2,10 @@ import Foundation
 
 public struct ReviewJobCore: Codable, Sendable, Hashable {
     public struct Run: Codable, Sendable, Hashable {
-        public var reviewThreadID: String?
-        public var threadID: String?
-        public var turnID: String?
-        public var model: String?
+        public internal(set) var reviewThreadID: String?
+        public internal(set) var threadID: String?
+        public internal(set) var turnID: String?
+        public internal(set) var model: String?
 
         public init(
             reviewThreadID: String? = nil,
@@ -21,12 +21,12 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
     }
 
     public struct Lifecycle: Codable, Sendable, Hashable {
-        public var status: ReviewJobState
-        public var exitCode: Int?
-        public var startedAt: Date?
-        public var endedAt: Date?
-        public var cancellation: ReviewCancellation?
-        public var errorMessage: String?
+        public internal(set) var status: ReviewJobState
+        public internal(set) var exitCode: Int?
+        public internal(set) var startedAt: Date?
+        public internal(set) var endedAt: Date?
+        public internal(set) var cancellation: ReviewCancellation?
+        public internal(set) var errorMessage: String?
 
         public init(
             status: ReviewJobState,
@@ -46,10 +46,10 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
     }
 
     public struct Output: Codable, Sendable, Hashable {
-        public var summary: String
-        public var hasFinalReview: Bool
-        public var lastAgentMessage: String?
-        public var reviewResult: ParsedReviewResult?
+        public internal(set) var summary: String
+        public internal(set) var hasFinalReview: Bool
+        public internal(set) var lastAgentMessage: String?
+        public internal(set) var reviewResult: ParsedReviewResult?
 
         public init(
             summary: String,
@@ -64,9 +64,9 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
         }
     }
 
-    public var run: Run
-    public var lifecycle: Lifecycle
-    public var output: Output
+    public internal(set) var run: Run
+    public internal(set) var lifecycle: Lifecycle
+    public internal(set) var output: Output
 
     public init(
         run: Run = .init(),

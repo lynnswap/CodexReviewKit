@@ -467,8 +467,10 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-filter-state"])
 
-        runningJob.core.lifecycle.status = .succeeded
-        runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 201)
+        runningJob.updateStateForTesting(
+            status: .succeeded,
+            endedAt: Date(timeIntervalSince1970: 201)
+        )
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             [String]()
@@ -476,8 +478,7 @@ struct ReviewUITests {
             sidebar.displayedJobIDsForTesting(in: workspace)
         }
 
-        runningJob.core.lifecycle.status = .running
-        runningJob.core.lifecycle.endedAt = nil
+        runningJob.updateStateForTesting(status: .running, clearEndedAt: true)
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-filter-state"]
@@ -562,7 +563,7 @@ struct ReviewUITests {
             status: .failed,
             targetSummary: "Failed alpha"
         )
-        alphaFailedJob.core.lifecycle.endedAt = nil
+        alphaFailedJob.updateStateForTesting(clearEndedAt: true)
         let betaCancelledJob = makeJob(
             id: "job-beta-cancelled",
             cwd: "/tmp/workspace-beta",
@@ -656,7 +657,7 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-second"])
 
-        firstJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 400)
+        firstJob.updateStateForTesting(endedAt: Date(timeIntervalSince1970: 400))
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-finished-first"]
@@ -664,8 +665,10 @@ struct ReviewUITests {
             sidebar.displayedJobIDsForTesting(in: workspace)
         }
 
-        runningJob.core.lifecycle.status = .cancelled
-        runningJob.core.lifecycle.endedAt = Date(timeIntervalSince1970: 500)
+        runningJob.updateStateForTesting(
+            status: .cancelled,
+            endedAt: Date(timeIntervalSince1970: 500)
+        )
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-running"]
@@ -2213,13 +2216,13 @@ struct ReviewUITests {
         viewController.performTextFinderAction(findItem)
         #expect(transport.logFindBarVisibleForTesting)
 
-        recentJob.targetSummary = "Commit: def456"
+        recentJob.updateStateForTesting(targetSummary: "Commit: def456")
         try await waitForCondition {
             window.title == "Commit: def456"
         }
         #expect(window.title == "Commit: def456")
         #expect(window.subtitle == recentJob.cwd)
-        activeJob.core.output.summary = "Old selection should not render."
+        activeJob.updateStateForTesting(summary: "Old selection should not render.")
         activeJob.replaceLogEntries([.init(kind: .agentMessage, text: "Old selection log")])
         recentJob.appendLogEntry(.init(kind: .progress, text: "Current selection log after stale mutation"))
 
@@ -3809,7 +3812,7 @@ struct ReviewUITests {
         #expect(emptySnapshot.log.isEmpty)
         #expect(window.title == "")
         #expect(window.subtitle == "")
-        job.core.output.summary = "Deselected summary"
+        job.updateStateForTesting(summary: "Deselected summary")
         job.replaceLogEntries([.init(kind: .agentMessage, text: "Deselected log")])
 
         #expect(contentPane.selectedJobObservationForTesting == nil)
@@ -3837,8 +3840,10 @@ struct ReviewUITests {
         let selectedSnapshot = try await awaitTransportRender(transport)
         #expect(selectedSnapshot.title == nil)
         #expect(selectedSnapshot.summary == nil)
-        job.core.lifecycle.status = .succeeded
-        job.core.output.summary = "Review completed successfully."
+        job.updateStateForTesting(
+            status: .succeeded,
+            summary: "Review completed successfully."
+        )
         job.replaceLogEntries([.init(kind: .agentMessage, text: "Updated log")])
 
         let updatedSnapshot = try await awaitTransportRender(transport)
@@ -4344,7 +4349,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        job.core.output.summary = "Updated summary."
+        job.updateStateForTesting(summary: "Updated summary.")
 
         #expect(transport.displayedLogForTesting == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount)
