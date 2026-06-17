@@ -272,7 +272,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         accountKey: String? = nil,
         email: String = "review@example.com",
         lastFetchAt: Date?,
-        capabilities: BackendAccountCapabilities = .supportsCodexRateLimits,
+        capabilities: CodexReviewBackendModel.Account.Capabilities = .supportsCodexRateLimits,
         rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)] = []
     ) -> CodexAccount {
         let account = CodexAccount(

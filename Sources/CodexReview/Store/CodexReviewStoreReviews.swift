@@ -13,8 +13,8 @@ extension CodexReviewStore {
     @discardableResult
     package func startReview(
         sessionID: String,
-        request: ReviewStartRequest
-    ) async throws -> ReviewReadResult {
+        request: CodexReviewAPI.Start.Request
+    ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
         return try await withTaskCancellationHandler {
             _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
@@ -30,9 +30,9 @@ extension CodexReviewStore {
     @discardableResult
     package func startReview(
         sessionID: String,
-        request: ReviewStartRequest,
+        request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration
-    ) async throws -> ReviewReadResult {
+    ) async throws -> CodexReviewAPI.Read.Result {
         let jobID = try beginReview(sessionID: sessionID, request: request)
         return try await awaitReview(sessionID: sessionID, jobID: jobID, timeout: waitTimeout)
     }
@@ -41,10 +41,10 @@ extension CodexReviewStore {
         sessionID: String?,
         jobID: String,
         timeout: Duration? = nil
-    ) async throws -> ReviewReadResult {
+    ) async throws -> CodexReviewAPI.Read.Result {
         let job = try job(jobID: jobID)
         if let sessionID, job.sessionID != sessionID {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         if job.isTerminal == false {
             await waitForReviewTerminal(jobID: jobID, timeout: timeout)
@@ -55,10 +55,10 @@ extension CodexReviewStore {
     @discardableResult
     private func beginReview(
         sessionID: String,
-        request: ReviewStartRequest
+        request: CodexReviewAPI.Start.Request
     ) throws -> String {
         guard closedSessions.contains(sessionID) == false else {
-            throw ReviewError.invalidArguments("Review session \(sessionID) is closed.")
+            throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }
 
         let validatedRequest = try request.validated()
@@ -86,7 +86,7 @@ extension CodexReviewStore {
     private func launchReviewWorker(
         jobID: String,
         sessionID: String,
-        request: ReviewStartRequest
+        request: CodexReviewAPI.Start.Request
     ) {
         reviewWorkerTasks[jobID]?.cancel()
         reviewWorkerTasks[jobID] = Task { [weak self] in
@@ -97,7 +97,7 @@ extension CodexReviewStore {
     private func runReviewWorker(
         jobID: String,
         sessionID: String,
-        request validatedRequest: ReviewStartRequest
+        request validatedRequest: CodexReviewAPI.Start.Request
     ) async {
         guard let job = job(id: jobID) else {
             startingJobIDs.remove(jobID)
@@ -105,13 +105,13 @@ extension CodexReviewStore {
             resumeReviewWaiters(for: jobID)
             return
         }
-        let startRequest = BackendReviewStart(
+        let startRequest = CodexReviewBackendModel.Review.Start(
             jobID: jobID,
             sessionID: sessionID,
             request: validatedRequest,
             model: settings.effectiveModel
         )
-        var run: BackendReviewRun?
+        var run: CodexReviewBackendModel.Review.Run?
         do {
             let backendAttempt = try await backend.startReview(startRequest)
             let backendRun = backendAttempt.run
@@ -200,7 +200,7 @@ extension CodexReviewStore {
         }
     }
 
-    private func interruptReviewAfterTaskCancellation(_ run: BackendReviewRun, job: CodexReviewJob) async {
+    private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
         guard job.isTerminal == false else {
             return
         }
@@ -228,7 +228,7 @@ extension CodexReviewStore {
         }
     }
 
-    private func applyBackendRun(_ backendRun: BackendReviewRun, to job: CodexReviewJob) {
+    private func applyBackendRun(_ backendRun: CodexReviewBackendModel.Review.Run, to job: CodexReviewJob) {
         activeRuns[job.id] = backendRun
         job.core.run = .init(
             reviewThreadID: backendRun.reviewThreadID,
@@ -283,26 +283,26 @@ extension CodexReviewStore {
 
     package func readReview(
         jobID: String,
-        logFilter: ReviewLogFilter = .defaultSetting,
-        logPage: ReviewLogPageRequest = .default
-    ) throws -> ReviewReadResult {
+        logFilter: CodexReviewAPI.Log.Filter = .defaultSetting,
+        logPage: CodexReviewAPI.Log.PageRequest = .default
+    ) throws -> CodexReviewAPI.Read.Result {
         try readReview(sessionID: nil, jobID: jobID, logFilter: logFilter, logPage: logPage)
     }
 
     package func readReview(
         sessionID: String?,
         jobID: String,
-        logFilter: ReviewLogFilter = .defaultSetting,
-        logPage: ReviewLogPageRequest = .default
-    ) throws -> ReviewReadResult {
+        logFilter: CodexReviewAPI.Log.Filter = .defaultSetting,
+        logPage: CodexReviewAPI.Log.PageRequest = .default
+    ) throws -> CodexReviewAPI.Read.Result {
         let job = try job(jobID: jobID)
         if let sessionID, job.sessionID != sessionID {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         let pageRequest = try logPage.validated()
         let filteredLogs = projectedLogsForReviewRead(job.logEntries).filter(logFilter.includes)
         let page = pageRequest.page(total: filteredLogs.count)
-        return ReviewReadResult(
+        return CodexReviewAPI.Read.Result(
             jobID: job.id,
             core: job.core,
             elapsedSeconds: elapsedSeconds(for: job),
@@ -317,10 +317,10 @@ extension CodexReviewStore {
         cwd: String? = nil,
         statuses: [ReviewJobState]? = nil,
         limit: Int? = nil
-    ) -> ReviewListResult {
+    ) -> CodexReviewAPI.List.Result {
         let filtered = filteredJobs(cwd: cwd, statuses: statuses)
         let clampedLimit = min(max(limit ?? 20, 1), 100)
-        return ReviewListResult(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
+        return CodexReviewAPI.List.Result(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
     }
 
     package func listReviews(
@@ -328,7 +328,7 @@ extension CodexReviewStore {
         cwd: String? = nil,
         statuses: [ReviewJobState]? = nil,
         limit: Int? = nil
-    ) -> ReviewListResult {
+    ) -> CodexReviewAPI.List.Result {
         let statusSet = statuses.map(Set.init)
         let filtered = orderedJobs.filter { job in
             if let sessionID, job.sessionID != sessionID {
@@ -343,14 +343,14 @@ extension CodexReviewStore {
             return true
         }
         let clampedLimit = min(max(limit ?? 20, 1), 100)
-        return ReviewListResult(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
+        return CodexReviewAPI.List.Result(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
     }
 
-    package func resolveJob(selector: ReviewJobSelector) throws -> CodexReviewJob {
+    package func resolveJob(selector: CodexReviewAPI.Job.Selector) throws -> CodexReviewJob {
         try resolveJob(sessionID: nil, selector: selector)
     }
 
-    package func resolveJob(sessionID: String?, selector: ReviewJobSelector) throws -> CodexReviewJob {
+    package func resolveJob(sessionID: String?, selector: CodexReviewAPI.Job.Selector) throws -> CodexReviewJob {
         let statusSet = selector.statuses.map(Set.init)
         let matches = orderedJobs.filter { job in
             if let sessionID, job.sessionID != sessionID {
@@ -371,18 +371,18 @@ extension CodexReviewStore {
             return job
         }
         if matches.isEmpty {
-            throw ReviewError.jobNotFound("No review job matched the selector.")
+            throw CodexReviewAPI.Error.jobNotFound("No review job matched the selector.")
         }
-        throw ReviewJobSelectionError.ambiguous(matches.map(makeListItem))
+        throw CodexReviewAPI.Job.SelectionError.ambiguous(matches.map(makeListItem))
     }
 
     package func cancelReview(
         jobID: String,
         sessionID: String,
         cancellation: ReviewCancellation = .system()
-    ) async throws -> ReviewCancelOutcome {
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
         guard let job = job(id: jobID), job.sessionID == sessionID else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         return try await cancelReview(jobID: jobID, cancellation: cancellation)
     }
@@ -391,7 +391,7 @@ extension CodexReviewStore {
     package func cancelReview(
         jobID: String,
         cancellation: ReviewCancellation = .system()
-    ) async throws -> ReviewCancelOutcome {
+    ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let job = try job(jobID: jobID)
         guard job.isTerminal == false else {
             return .init(jobID: job.id, cancelled: false, core: job.core)
@@ -500,7 +500,7 @@ extension CodexReviewStore {
 
     private func job(jobID: String) throws -> CodexReviewJob {
         guard let job = job(id: jobID) else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         return job
     }
@@ -518,8 +518,8 @@ extension CodexReviewStore {
         }
     }
 
-    private func makeListItem(_ job: CodexReviewJob) -> ReviewJobListItem {
-        ReviewJobListItem(
+    private func makeListItem(_ job: CodexReviewJob) -> CodexReviewAPI.Job.ListItem {
+        CodexReviewAPI.Job.ListItem(
             jobID: job.id,
             cwd: job.cwd,
             targetSummary: job.targetSummary,
@@ -575,8 +575,8 @@ extension CodexReviewStore {
     private func consumeReviewEvents(
         for initialAttempt: BackendReviewAttempt,
         job: CodexReviewJob,
-        startRequest: BackendReviewStart
-    ) async throws -> BackendReviewRun {
+        startRequest: CodexReviewBackendModel.Review.Start
+    ) async throws -> CodexReviewBackendModel.Review.Run {
         let inputs = await reviewWorkerInputs(for: initialAttempt)
         defer {
             inputs.cancel()
@@ -741,9 +741,9 @@ extension CodexReviewStore {
 
     private func restartReviewAfterNetworkRestore(
         job: CodexReviewJob,
-        startRequest: BackendReviewStart,
+        startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
-        recoveryToken: BackendReviewRecoveryToken?
+        recoveryToken: CodexReviewBackendModel.Review.RecoveryToken?
     ) async throws -> NetworkRestoreRestartResult {
         if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
             return .finished
@@ -772,7 +772,7 @@ extension CodexReviewStore {
     }
 
     private func stopRecoveredRunIfJobShouldNotResume(
-        _ recoveredRun: BackendReviewRun,
+        _ recoveredRun: CodexReviewBackendModel.Review.Run,
         job: CodexReviewJob
     ) async throws -> Bool {
         if Task.isCancelled {
@@ -821,10 +821,10 @@ extension CodexReviewStore {
     }
 
     private func handleReviewEvent(
-        _ event: BackendReviewEvent,
+        _ event: CodexReviewBackendModel.Review.Event,
         job: CodexReviewJob,
-        currentRun: BackendReviewRun
-    ) -> BackendReviewRun {
+        currentRun: CodexReviewBackendModel.Review.Run
+    ) -> CodexReviewBackendModel.Review.Run {
         guard job.isTerminal == false else {
             return currentRun
         }
@@ -1087,7 +1087,7 @@ private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bo
     }
 }
 
-private extension BackendReviewEvent {
+private extension CodexReviewBackendModel.Review.Event {
     var completesReviewRun: Bool {
         switch self {
         case .completed, .failed, .cancelled:
@@ -1099,7 +1099,7 @@ private extension BackendReviewEvent {
 }
 
 private extension CodexReviewJob {
-    var backendRun: BackendReviewRun? {
+    var backendRun: CodexReviewBackendModel.Review.Run? {
         guard let threadID = core.run.threadID else {
             return nil
         }
@@ -1137,18 +1137,18 @@ private extension CodexReviewJob {
 
 private struct ReviewWorkerReviewEvent: Sendable {
     var subscriptionID: Int
-    var subscriptionRun: BackendReviewRun
-    var event: BackendReviewEvent
+    var subscriptionRun: CodexReviewBackendModel.Review.Run
+    var event: CodexReviewBackendModel.Review.Event
 }
 
 private struct ReviewWorkerEventStreamFinished: Sendable {
     var subscriptionID: Int
-    var run: BackendReviewRun
+    var run: CodexReviewBackendModel.Review.Run
 }
 
 private struct ReviewWorkerEventStreamFailed: Sendable {
     var subscriptionID: Int
-    var run: BackendReviewRun
+    var run: CodexReviewBackendModel.Review.Run
     var failure: ReviewWorkerEventStreamFailure
 }
 
@@ -1187,15 +1187,15 @@ private enum ReviewNetworkSnapshotEffect {
 }
 
 private struct ReviewNetworkRecoveryLoopState {
-    var currentRun: BackendReviewRun
+    var currentRun: CodexReviewBackendModel.Review.Run
     private(set) var isWaitingForNetworkRecovery = false
-    private(set) var recoveryToken: BackendReviewRecoveryToken?
+    private(set) var recoveryToken: CodexReviewBackendModel.Review.RecoveryToken?
     private var isSettlingForNetworkRecovery = false
     private var recoverySettleGeneration: Int?
     private var pendingOutageStreamFailure: ReviewWorkerEventStreamFailure?
-    let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
+    let recoveryReason = CodexReviewBackendModel.CancellationReason(message: networkRecoveryUnavailableMessage)
 
-    init(currentRun: BackendReviewRun) {
+    init(currentRun: CodexReviewBackendModel.Review.Run) {
         self.currentRun = currentRun
     }
 
@@ -1206,11 +1206,11 @@ private struct ReviewNetworkRecoveryLoopState {
         pendingOutageStreamFailure = nil
     }
 
-    mutating func markRecoveryToken(_ token: BackendReviewRecoveryToken) {
+    mutating func markRecoveryToken(_ token: CodexReviewBackendModel.Review.RecoveryToken) {
         recoveryToken = token
     }
 
-    mutating func markRecovered(with run: BackendReviewRun) {
+    mutating func markRecovered(with run: CodexReviewBackendModel.Review.Run) {
         currentRun = run
         isWaitingForNetworkRecovery = false
         recoveryToken = nil
@@ -1237,7 +1237,7 @@ private struct ReviewNetworkRecoveryLoopState {
         return pendingOutageStreamFailure
     }
 
-    func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {
+    func shouldIgnoreFinishedEvent(for run: CodexReviewBackendModel.Review.Run) -> Bool {
         isWaitingForNetworkRecovery || run.attemptID != currentRun.attemptID
     }
 
@@ -1248,7 +1248,7 @@ private struct ReviewNetworkRecoveryLoopState {
             && recoveryToken != nil
     }
 
-    func shouldConsumeEvent(from run: BackendReviewRun) -> Bool {
+    func shouldConsumeEvent(from run: CodexReviewBackendModel.Review.Run) -> Bool {
         isWaitingForNetworkRecovery == false && run.attemptID == currentRun.attemptID
     }
 
@@ -1449,8 +1449,8 @@ private actor ReviewWorkerEventSource {
     }
 
     private func yieldReviewEvent(
-        _ event: BackendReviewEvent,
-        run: BackendReviewRun,
+        _ event: CodexReviewBackendModel.Review.Event,
+        run: CodexReviewBackendModel.Review.Run,
         subscriptionID: Int
     ) async {
         guard activeSubscriptionID == subscriptionID,
@@ -1465,7 +1465,7 @@ private actor ReviewWorkerEventSource {
         )))
     }
 
-    private func yieldEventsFinished(run: BackendReviewRun, subscriptionID: Int) async {
+    private func yieldEventsFinished(run: CodexReviewBackendModel.Review.Run, subscriptionID: Int) async {
         guard activeSubscriptionID == subscriptionID,
               eventTasks.removeValue(forKey: subscriptionID) != nil
         else {
@@ -1479,7 +1479,7 @@ private actor ReviewWorkerEventSource {
 
     private func yieldEventsFailed(
         _ error: any Error,
-        run: BackendReviewRun,
+        run: CodexReviewBackendModel.Review.Run,
         subscriptionID: Int
     ) async {
         guard eventTasks.removeValue(forKey: subscriptionID) != nil else {

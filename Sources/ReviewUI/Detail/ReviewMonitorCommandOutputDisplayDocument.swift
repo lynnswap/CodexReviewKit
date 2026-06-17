@@ -35,11 +35,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     static func make(
-        from source: ReviewMonitorLogDocument,
-        expandedBlockIDs: Set<ReviewMonitorLogBlockID> = [],
-        previousDisplay: ReviewMonitorLogDocument? = nil,
+        from source: ReviewMonitorLog.Document,
+        expandedBlockIDs: Set<ReviewMonitorLog.BlockID> = [],
+        previousDisplay: ReviewMonitorLog.Document? = nil,
         currentDate: Date = Date()
-    ) -> ReviewMonitorLogDocument {
+    ) -> ReviewMonitorLog.Document {
         guard source.blocks.contains(where: { $0.kind == .command || $0.kind == .commandOutput }) else {
             return source
         }
@@ -47,11 +47,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         let sourceString = source.text as NSString
         var text = ""
         var textUTF16Length = 0
-        var blocks: [ReviewMonitorLogBlock] = []
-        var styleRuns: [ReviewMonitorLogTextRun] = []
-        var decorations: [ReviewMonitorLogDecoration] = []
-        var panels: [ReviewMonitorLogCommandOutputPanel] = []
-        var usedPanelBlockIDs: Set<ReviewMonitorLogBlockID> = []
+        var blocks: [ReviewMonitorLog.Block] = []
+        var styleRuns: [ReviewMonitorLog.TextRun] = []
+        var decorations: [ReviewMonitorLog.Decoration] = []
+        var panels: [ReviewMonitorLog.CommandOutputPanel] = []
+        var usedPanelBlockIDs: Set<ReviewMonitorLog.BlockID> = []
         var cursor = 0
 
         func appendText(_ segment: String) -> NSRange {
@@ -201,9 +201,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private struct CommandPanelSource {
-        var anchor: ReviewMonitorLogBlock
-        var command: ReviewMonitorLogBlock?
-        var output: ReviewMonitorLogBlock?
+        var anchor: ReviewMonitorLog.Block
+        var command: ReviewMonitorLog.Block?
+        var output: ReviewMonitorLog.Block?
     }
 
     private static func commandPanelMetadata(for source: CommandPanelSource) -> ReviewLogEntry.Metadata? {
@@ -272,10 +272,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func firstBlocksByGroupID(
-        in blocks: [ReviewMonitorLogBlock],
+        in blocks: [ReviewMonitorLog.Block],
         kind: ReviewLogEntry.Kind
-    ) -> [String: ReviewMonitorLogBlock] {
-        var result: [String: ReviewMonitorLogBlock] = [:]
+    ) -> [String: ReviewMonitorLog.Block] {
+        var result: [String: ReviewMonitorLog.Block] = [:]
         for block in blocks where block.kind == kind {
             guard let groupID = block.groupID,
                   result[groupID] == nil
@@ -288,9 +288,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandPanelSource(
-        for block: ReviewMonitorLogBlock,
-        commandBlocksByGroupID: [String: ReviewMonitorLogBlock],
-        commandOutputBlocksByGroupID: [String: ReviewMonitorLogBlock]
+        for block: ReviewMonitorLog.Block,
+        commandBlocksByGroupID: [String: ReviewMonitorLog.Block],
+        commandOutputBlocksByGroupID: [String: ReviewMonitorLog.Block]
     ) -> CommandPanelSource? {
         switch block.kind {
         case .command:
@@ -314,9 +314,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func shouldSkipBlockAndLeadingGap(
-        _ block: ReviewMonitorLogBlock,
-        commandBlocksByGroupID: [String: ReviewMonitorLogBlock],
-        commandOutputBlocksByGroupID: [String: ReviewMonitorLogBlock]
+        _ block: ReviewMonitorLog.Block,
+        commandBlocksByGroupID: [String: ReviewMonitorLog.Block],
+        commandOutputBlocksByGroupID: [String: ReviewMonitorLog.Block]
     ) -> Bool {
         guard let groupID = block.groupID,
               let command = commandBlocksByGroupID[groupID],
@@ -329,17 +329,17 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return block.id != anchor.id && (block.kind == .command || block.kind == .commandOutput)
     }
 
-    private static func commandPanelBlockID(for block: ReviewMonitorLogBlock) -> ReviewMonitorLogBlockID {
+    private static func commandPanelBlockID(for block: ReviewMonitorLog.Block) -> ReviewMonitorLog.BlockID {
         if let groupID = block.groupID {
-            return ReviewMonitorLogBlockID("commandOutput:\(groupID)")
+            return ReviewMonitorLog.BlockID("commandOutput:\(groupID)")
         }
         return block.id
     }
 
     private static func uniqueCommandPanelBlockID(
-        for block: ReviewMonitorLogBlock,
-        usedBlockIDs: inout Set<ReviewMonitorLogBlockID>
-    ) -> ReviewMonitorLogBlockID {
+        for block: ReviewMonitorLog.Block,
+        usedBlockIDs: inout Set<ReviewMonitorLog.BlockID>
+    ) -> ReviewMonitorLog.BlockID {
         let preferredBlockID = commandPanelBlockID(for: block)
         if usedBlockIDs.insert(preferredBlockID).inserted {
             return preferredBlockID
@@ -351,7 +351,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
         var suffix = 2
         while true {
-            let candidate = ReviewMonitorLogBlockID("\(block.id.rawValue):\(suffix)")
+            let candidate = ReviewMonitorLog.BlockID("\(block.id.rawValue):\(suffix)")
             if usedBlockIDs.insert(candidate).inserted {
                 return candidate
             }
@@ -373,11 +373,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func appendPresentationRuns(
-        from source: ReviewMonitorLogDocument,
+        from source: ReviewMonitorLog.Document,
         sourceRange: NSRange,
         displayRange: NSRange,
-        styleRuns: inout [ReviewMonitorLogTextRun],
-        decorations: inout [ReviewMonitorLogDecoration]
+        styleRuns: inout [ReviewMonitorLog.TextRun],
+        decorations: inout [ReviewMonitorLog.Decoration]
     ) {
         for styleRun in source.styleRuns {
             let intersection = NSIntersectionRange(styleRun.range, sourceRange)
@@ -445,7 +445,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let output = panelSource.output else {
             return 0
         }
-        return ReviewMonitorLogLineCounter.lineCount(in: sourceString, range: output.range)
+        return ReviewMonitorLog.LineCounter.lineCount(in: sourceString, range: output.range)
     }
 
     private static func commandOutputText(
@@ -737,7 +737,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputCommandTextByGroupID(
-        in blocks: [ReviewMonitorLogBlock],
+        in blocks: [ReviewMonitorLog.Block],
         sourceString: NSString
     ) -> [String: String] {
         var commandTextByGroupID: [String: String] = [:]
@@ -765,12 +765,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func mappedLastChange(
-        _ change: ReviewMonitorLogChange,
-        sourceBlocks: [ReviewMonitorLogBlock],
-        displayBlocks: [ReviewMonitorLogBlock],
-        previousDisplay: ReviewMonitorLogDocument?,
+        _ change: ReviewMonitorLog.Change,
+        sourceBlocks: [ReviewMonitorLog.Block],
+        displayBlocks: [ReviewMonitorLog.Block],
+        previousDisplay: ReviewMonitorLog.Document?,
         displayText: String
-    ) -> ReviewMonitorLogChange {
+    ) -> ReviewMonitorLog.Change {
         switch change {
         case .append(let append):
             guard let mappedRange = mappedChangeRange(
@@ -832,12 +832,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func mappedCommandPanelMutation(
         sourceRange: NSRange,
-        blockID: ReviewMonitorLogBlockID,
-        sourceBlocks: [ReviewMonitorLogBlock],
-        displayBlocks: [ReviewMonitorLogBlock],
-        previousDisplay: ReviewMonitorLogDocument?,
+        blockID: ReviewMonitorLog.BlockID,
+        sourceBlocks: [ReviewMonitorLog.Block],
+        displayBlocks: [ReviewMonitorLog.Block],
+        previousDisplay: ReviewMonitorLog.Document?,
         displayText: String
-    ) -> ReviewMonitorLogChange? {
+    ) -> ReviewMonitorLog.Change? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
               sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
               NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
@@ -878,10 +878,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func mappedNewCommandPanelAppend(
-        displayBlock: ReviewMonitorLogBlock,
+        displayBlock: ReviewMonitorLog.Block,
         displayText: String,
-        previousDisplay: ReviewMonitorLogDocument?
-    ) -> ReviewMonitorLogAppend? {
+        previousDisplay: ReviewMonitorLog.Document?
+    ) -> ReviewMonitorLog.Append? {
         guard let previousDisplay else {
             return nil
         }
@@ -915,9 +915,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandPanelDisplayBlock(
-        for sourceBlock: ReviewMonitorLogBlock,
-        displayBlocks: [ReviewMonitorLogBlock]
-    ) -> ReviewMonitorLogBlock? {
+        for sourceBlock: ReviewMonitorLog.Block,
+        displayBlocks: [ReviewMonitorLog.Block]
+    ) -> ReviewMonitorLog.Block? {
         if let groupID = sourceBlock.groupID {
             return displayBlocks.first {
                 $0.kind == .commandOutput && $0.groupID == groupID
@@ -930,9 +930,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func mappedChangeRange(
         _ range: NSRange,
-        blockID: ReviewMonitorLogBlockID,
-        sourceBlocks: [ReviewMonitorLogBlock],
-        displayBlocks: [ReviewMonitorLogBlock]
+        blockID: ReviewMonitorLog.BlockID,
+        sourceBlocks: [ReviewMonitorLog.Block],
+        displayBlocks: [ReviewMonitorLog.Block]
     ) -> NSRange? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
               sourceBlock.kind != .command,

@@ -300,7 +300,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func locationText(
-        for location: ParsedReviewFindingLocation?,
+        for location: ParsedReviewResult.Finding.Location?,
         in workspace: CodexReviewWorkspace
     ) -> String? {
         guard let location else {
@@ -712,7 +712,7 @@ extension ReviewMonitorTransportViewController {
         logScrollView.commandOutputPanelTerminalTextForTesting
     }
 
-    func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLogBlockID) -> String? {
+    func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
         logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
     }
 
@@ -786,7 +786,7 @@ extension ReviewMonitorTransportViewController {
     }
 
     @discardableResult
-    func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLogBlockID) -> Bool {
+    func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
         logScrollView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
     }
 
@@ -958,7 +958,7 @@ extension ReviewMonitorTransportViewController {
                 title: nil,
                 summary: nil,
                 log: {
-                    var projection = ReviewMonitorLogProjection()
+                    var projection = ReviewMonitorLog.Projection()
                     let document = projection.render(entries: job.logEntries)
                     return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),

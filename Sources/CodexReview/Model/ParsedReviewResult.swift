@@ -1,65 +1,65 @@
 import Foundation
 
-public enum ParsedReviewResultState: String, Codable, Sendable, Hashable {
-    case hasFindings
-    case noFindings
-    case unknown
-}
-
-public enum ParsedReviewResultSource: String, Codable, Sendable, Hashable {
-    case parsedFinalReviewText
-    case unrecognizedFindingBlock
-    case notAvailable
-}
-
-public struct ParsedReviewFindingLocation: Codable, Sendable, Hashable {
-    public var path: String
-    public var startLine: Int
-    public var endLine: Int
-
-    public init(path: String, startLine: Int, endLine: Int) {
-        self.path = path
-        self.startLine = startLine
-        self.endLine = endLine
-    }
-}
-
-public struct ParsedReviewFinding: Codable, Sendable, Hashable {
-    public var title: String
-    public var body: String
-    public var priority: Int?
-    public var location: ParsedReviewFindingLocation?
-    public var rawText: String
-
-    public init(
-        title: String,
-        body: String,
-        priority: Int? = nil,
-        location: ParsedReviewFindingLocation? = nil,
-        rawText: String
-    ) {
-        self.title = title
-        self.body = body
-        self.priority = priority
-        self.location = location
-        self.rawText = rawText
-    }
-}
-
 public struct ParsedReviewResult: Codable, Sendable, Hashable {
+    public enum State: String, Codable, Sendable, Hashable {
+        case hasFindings
+        case noFindings
+        case unknown
+    }
+
+    public enum Source: String, Codable, Sendable, Hashable {
+        case parsedFinalReviewText
+        case unrecognizedFindingBlock
+        case notAvailable
+    }
+
+    public struct Finding: Codable, Sendable, Hashable {
+        public struct Location: Codable, Sendable, Hashable {
+            public var path: String
+            public var startLine: Int
+            public var endLine: Int
+
+            public init(path: String, startLine: Int, endLine: Int) {
+                self.path = path
+                self.startLine = startLine
+                self.endLine = endLine
+            }
+        }
+
+        public var title: String
+        public var body: String
+        public var priority: Int?
+        public var location: Location?
+        public var rawText: String
+
+        public init(
+            title: String,
+            body: String,
+            priority: Int? = nil,
+            location: Location? = nil,
+            rawText: String
+        ) {
+            self.title = title
+            self.body = body
+            self.priority = priority
+            self.location = location
+            self.rawText = rawText
+        }
+    }
+
     public static let currentParserVersion = 1
 
-    public var state: ParsedReviewResultState
+    public var state: State
     public var findingCount: Int?
-    public var findings: [ParsedReviewFinding]
-    public var source: ParsedReviewResultSource
+    public var findings: [Finding]
+    public var source: Source
     public var parserVersion: Int
 
     public init(
-        state: ParsedReviewResultState,
+        state: State,
         findingCount: Int?,
-        findings: [ParsedReviewFinding],
-        source: ParsedReviewResultSource,
+        findings: [Finding],
+        source: Source,
         parserVersion: Int = Self.currentParserVersion
     ) {
         self.state = state
@@ -95,7 +95,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             )
         }
 
-        var findings: [ParsedReviewFinding] = []
+        var findings: [ParsedReviewResult.Finding] = []
         var current: FindingBuilder?
         var malformed = false
 
@@ -174,7 +174,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
         )
     }
 
-    private static func parseLocation(_ text: String) -> ParsedReviewFindingLocation? {
+    private static func parseLocation(_ text: String) -> ParsedReviewResult.Finding.Location? {
         guard let colonIndex = text.lastIndex(of: ":") else {
             return nil
         }
@@ -191,7 +191,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
             return nil
         }
 
-        return ParsedReviewFindingLocation(
+        return ParsedReviewResult.Finding.Location(
             path: path,
             startLine: startLine,
             endLine: endLine
@@ -220,7 +220,7 @@ public struct ParsedReviewResult: Codable, Sendable, Hashable {
 private struct ParsedFindingLine {
     var title: String
     var priority: Int?
-    var location: ParsedReviewFindingLocation
+    var location: ParsedReviewResult.Finding.Location
 }
 
 private struct FindingBuilder {
@@ -232,11 +232,11 @@ private struct FindingBuilder {
         bodyLines.append(line)
     }
 
-    func build() -> ParsedReviewFinding {
+    func build() -> ParsedReviewResult.Finding {
         let body = bodyLines.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let rawLines = [findingLine] + bodyLines.map { "  \($0)" }
-        return ParsedReviewFinding(
+        return ParsedReviewResult.Finding(
             title: finding.title,
             body: body,
             priority: finding.priority,

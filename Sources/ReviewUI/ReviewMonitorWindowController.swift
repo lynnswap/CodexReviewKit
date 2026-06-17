@@ -101,15 +101,18 @@ public final class ReviewMonitorWindowController: NSWindowController {
         }
         return ReviewMonitorUIState(
             auth: auth,
-            sidebarJobFilter: ReviewMonitorSidebarJobFilterPersistence.load(from: sidebarJobFilterDefaults),
+            sidebarJobFilter: ReviewMonitorSidebar.JobFilterPersistence.load(from: sidebarJobFilterDefaults),
             persistSidebarJobFilter: { filter in
-                ReviewMonitorSidebarJobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
+                ReviewMonitorSidebar.JobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
             }
         )
     }
 }
 
-enum ReviewMonitorSidebarJobFilterPersistence {
+enum ReviewMonitorSidebar {}
+
+extension ReviewMonitorSidebar {
+enum JobFilterPersistence {
     static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
 
     static func load(from defaults: UserDefaults) -> SidebarJobFilter {
@@ -124,4 +127,5 @@ enum ReviewMonitorSidebarJobFilterPersistence {
     static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
         defaults.set(filter.persistedValue, forKey: defaultsKey)
     }
+}
 }

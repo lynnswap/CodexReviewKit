@@ -6,8 +6,8 @@ import Observation
 package final class SettingsStore {
     package struct Selection: Equatable {
         let model: String?
-        let reasoningEffort: CodexReviewReasoningEffort?
-        let serviceTier: CodexReviewServiceTier?
+        let reasoningEffort: CodexReviewSettings.ReasoningEffort?
+        let serviceTier: CodexReviewSettings.ServiceTier?
     }
 
     package enum SelectionTrigger {
@@ -17,14 +17,14 @@ package final class SettingsStore {
     }
 
     package private(set) var selectedModel: String?
-    package private(set) var selectedReasoningEffort: CodexReviewReasoningEffort?
-    package private(set) var selectedServiceTier: CodexReviewServiceTier?
+    package private(set) var selectedReasoningEffort: CodexReviewSettings.ReasoningEffort?
+    package private(set) var selectedServiceTier: CodexReviewSettings.ServiceTier?
     package private(set) var fallbackModel: String?
-    package private(set) var models: [CodexReviewModelCatalogItem]
+    package private(set) var models: [CodexReviewSettings.ModelCatalogItem]
     package private(set) var isLoading = false
     package private(set) var lastErrorMessage: String?
 
-    package init(snapshot: CodexReviewSettingsSnapshot) {
+    package init(snapshot: CodexReviewSettings.Snapshot) {
         selectedModel = snapshot.model
         fallbackModel = snapshot.fallbackModel
         selectedReasoningEffort = snapshot.reasoningEffort
@@ -42,7 +42,7 @@ package final class SettingsStore {
         )
     }
 
-    package var displayedModels: [CodexReviewModelCatalogItem] {
+    package var displayedModels: [CodexReviewSettings.ModelCatalogItem] {
         var displayedModels = models.filter { modelItem in
             modelItem.hidden == false || modelItem.model == effectiveModel
         }
@@ -68,23 +68,23 @@ package final class SettingsStore {
         selectedModel ?? fallbackModel
     }
 
-    package var effectiveModelItem: CodexReviewModelCatalogItem? {
+    package var effectiveModelItem: CodexReviewSettings.ModelCatalogItem? {
         models.first(where: { $0.model == effectiveModel })
     }
 
-    package var availableReasoningOptions: [CodexReviewReasoningOption] {
+    package var availableReasoningOptions: [CodexReviewSettings.ReasoningOption] {
         effectiveModelItem?.supportedReasoningEfforts ?? []
     }
 
-    package var availableServiceTiers: [CodexReviewServiceTier] {
+    package var availableServiceTiers: [CodexReviewSettings.ServiceTier] {
         effectiveModelItem?.supportedServiceTiers ?? []
     }
 
-    package var effectiveReasoningEffort: CodexReviewReasoningEffort? {
+    package var effectiveReasoningEffort: CodexReviewSettings.ReasoningEffort? {
         selectedReasoningEffort ?? effectiveModelItem?.defaultReasoningEffort
     }
 
-    package func loadForTesting(snapshot: CodexReviewSettingsSnapshot) {
+    package func loadForTesting(snapshot: CodexReviewSettings.Snapshot) {
         apply(snapshot: snapshot)
         lastErrorMessage = nil
         isLoading = false
@@ -99,7 +99,7 @@ package final class SettingsStore {
         isLoading = false
     }
 
-    package func apply(snapshot: CodexReviewSettingsSnapshot) {
+    package func apply(snapshot: CodexReviewSettings.Snapshot) {
         fallbackModel = snapshot.fallbackModel
         models = snapshot.models
         applyNormalizedSelection(
@@ -122,11 +122,11 @@ package final class SettingsStore {
         )
     }
 
-    package func snapshot() -> CodexReviewSettingsSnapshot {
+    package func snapshot() -> CodexReviewSettings.Snapshot {
         snapshot(selection: currentSelection())
     }
 
-    package func snapshot(selection: Selection) -> CodexReviewSettingsSnapshot {
+    package func snapshot(selection: Selection) -> CodexReviewSettings.Snapshot {
         .init(
             model: selection.model,
             fallbackModel: fallbackModel,
@@ -138,9 +138,9 @@ package final class SettingsStore {
 
     package func normalizeSelection(
         model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
-        serviceTier: CodexReviewServiceTier?,
-        catalog: [CodexReviewModelCatalogItem],
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
+        catalog: [CodexReviewSettings.ModelCatalogItem],
         clearIncompatibleOverrides: Bool
     ) -> Selection {
         let effectiveModel = model ?? fallbackModel
@@ -155,7 +155,7 @@ package final class SettingsStore {
         }
 
         let supportedReasoningEfforts = selectedModel.supportedReasoningEfforts.map(\.reasoningEffort)
-        let resolvedReasoningEffort: CodexReviewReasoningEffort? = if supportedReasoningEfforts.isEmpty {
+        let resolvedReasoningEffort: CodexReviewSettings.ReasoningEffort? = if supportedReasoningEfforts.isEmpty {
             clearIncompatibleOverrides ? nil : reasoningEffort
         } else if let reasoningEffort, supportedReasoningEfforts.contains(reasoningEffort) {
             reasoningEffort
@@ -165,7 +165,7 @@ package final class SettingsStore {
             reasoningEffort
         }
 
-        let resolvedServiceTier: CodexReviewServiceTier? = if let serviceTier,
+        let resolvedServiceTier: CodexReviewSettings.ServiceTier? = if let serviceTier,
             selectedModel.supportedServiceTiers.contains(serviceTier)
         {
             serviceTier
@@ -184,7 +184,7 @@ package final class SettingsStore {
 
     package func applyNormalizedSelection(
         _ selection: Selection,
-        catalog: [CodexReviewModelCatalogItem]
+        catalog: [CodexReviewSettings.ModelCatalogItem]
     ) {
         models = catalog
         selectedModel = selection.model

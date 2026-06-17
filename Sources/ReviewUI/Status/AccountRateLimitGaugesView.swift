@@ -4,22 +4,22 @@ import CodexReview
 struct AccountRateLimitGaugesView: View {
     var account: CodexAccount?
 
-    private static let placeholderRateLimits: [CodexRateLimitWindow] = [
-        CodexRateLimitWindow(
+    private static let placeholderRateLimits: [CodexAccount.RateLimitWindow] = [
+        CodexAccount.RateLimitWindow(
             windowDurationMinutes: 1,
             usedPercent: 0
         ),
-        CodexRateLimitWindow(
+        CodexAccount.RateLimitWindow(
             windowDurationMinutes: 2,
             usedPercent: 0
         ),
     ]
 
-    private var rateLimits: [CodexRateLimitWindow] {
+    private var rateLimits: [CodexAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
-    private var displayedRateLimits: [CodexRateLimitWindow] {
+    private var displayedRateLimits: [CodexAccount.RateLimitWindow] {
         rateLimits.isEmpty ? Self.placeholderRateLimits : rateLimits
     }
 
@@ -44,7 +44,7 @@ struct AccountRateLimitGaugesView: View {
 }
 
 private struct RateLimitWindowGaugeView: View {
-    var window: CodexRateLimitWindow
+    var window: CodexAccount.RateLimitWindow
 
     var body: some View {
         let remainingPercent = window.remainingPercent
@@ -70,7 +70,7 @@ private struct RateLimitWindowGaugeView: View {
     }
 }
 
-extension CodexRateLimitWindow {
+extension CodexAccount.RateLimitWindow {
     var limitResetDate: Date? {
         guard usedPercent >= 100 else {
             return nil

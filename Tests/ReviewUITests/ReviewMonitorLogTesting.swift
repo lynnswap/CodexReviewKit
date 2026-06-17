@@ -3,6 +3,6 @@ import CodexReview
 
 @MainActor
 func reviewMonitorLogText(for job: CodexReviewJob) -> String {
-    var projection = ReviewMonitorLogProjection()
+    var projection = ReviewMonitorLog.Projection()
     return projection.render(entries: job.logEntries).text
 }

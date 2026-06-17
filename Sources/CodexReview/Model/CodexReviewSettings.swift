@@ -1,6 +1,9 @@
 import Foundation
 
-package enum CodexReviewReasoningEffort: String, CaseIterable, Codable, Sendable {
+package enum CodexReviewSettings {}
+
+package extension CodexReviewSettings {
+enum ReasoningEffort: String, CaseIterable, Codable, Sendable {
     case none
     case minimal
     case low
@@ -25,8 +28,11 @@ package enum CodexReviewReasoningEffort: String, CaseIterable, Codable, Sendable
         }
     }
 }
+}
 
-package enum CodexReviewServiceTier: String, CaseIterable, Codable, Sendable {
+
+package extension CodexReviewSettings {
+enum ServiceTier: String, CaseIterable, Codable, Sendable {
     case fast
     case flex
 
@@ -39,9 +45,12 @@ package enum CodexReviewServiceTier: String, CaseIterable, Codable, Sendable {
         }
     }
 }
+}
 
-package struct CodexReviewReasoningOption: Codable, Identifiable, Equatable, Sendable {
-    package let reasoningEffort: CodexReviewReasoningEffort
+
+package extension CodexReviewSettings {
+struct ReasoningOption: Codable, Identifiable, Equatable, Sendable {
+    package let reasoningEffort: CodexReviewSettings.ReasoningEffort
     package let description: String
 
     package var id: String {
@@ -49,22 +58,25 @@ package struct CodexReviewReasoningOption: Codable, Identifiable, Equatable, Sen
     }
 
     package init(
-        reasoningEffort: CodexReviewReasoningEffort,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort,
         description: String
     ) {
         self.reasoningEffort = reasoningEffort
         self.description = description
     }
 }
+}
 
-package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
+
+package extension CodexReviewSettings {
+struct ModelCatalogItem: Codable, Identifiable, Equatable, Sendable {
     package let id: String
     package let model: String
     package let displayName: String
     package let hidden: Bool
-    package let supportedReasoningEfforts: [CodexReviewReasoningOption]
-    package let defaultReasoningEffort: CodexReviewReasoningEffort
-    package let supportedServiceTiers: [CodexReviewServiceTier]
+    package let supportedReasoningEfforts: [CodexReviewSettings.ReasoningOption]
+    package let defaultReasoningEffort: CodexReviewSettings.ReasoningEffort
+    package let supportedServiceTiers: [CodexReviewSettings.ServiceTier]
     package let isDefault: Bool
 
     private enum CodingKeys: String, CodingKey {
@@ -144,9 +156,9 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
         model: String,
         displayName: String,
         hidden: Bool,
-        supportedReasoningEfforts: [CodexReviewReasoningOption],
-        defaultReasoningEffort: CodexReviewReasoningEffort,
-        supportedServiceTiers: [CodexReviewServiceTier],
+        supportedReasoningEfforts: [CodexReviewSettings.ReasoningOption],
+        defaultReasoningEffort: CodexReviewSettings.ReasoningEffort,
+        supportedServiceTiers: [CodexReviewSettings.ServiceTier],
         isDefault: Bool = false
     ) {
         self.id = id
@@ -170,7 +182,7 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
             forKey: .supportedReasoningEfforts
         )
         supportedReasoningEfforts = rawReasoningEfforts.compactMap { item in
-            guard let reasoningEffort = CodexReviewReasoningEffort(rawValue: item.reasoningEffort) else {
+            guard let reasoningEffort = CodexReviewSettings.ReasoningEffort(rawValue: item.reasoningEffort) else {
                 return nil
             }
             return .init(reasoningEffort: reasoningEffort, description: item.description)
@@ -178,7 +190,7 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
         let decodedDefaultReasoningEffort = try container.decodeIfPresent(
             String.self,
             forKey: .defaultReasoningEffort
-        ).flatMap(CodexReviewReasoningEffort.init(rawValue:))
+        ).flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:))
         defaultReasoningEffort = decodedDefaultReasoningEffort
             ?? supportedReasoningEfforts.first?.reasoningEffort
             ?? .medium
@@ -192,7 +204,7 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
         )?.map(\.id) ?? []
         supportedServiceTiers = Array(Set(additionalSpeedTiers + serviceTierIDs))
             .sorted()
-            .compactMap(CodexReviewServiceTier.init(rawValue:))
+            .compactMap(CodexReviewSettings.ServiceTier.init(rawValue:))
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
     }
 
@@ -239,20 +251,23 @@ package struct CodexReviewModelCatalogItem: Codable, Identifiable, Equatable, Se
             .joined(separator: "-")
     }
 }
+}
 
-package struct CodexReviewSettingsSnapshot: Equatable, Sendable {
+
+package extension CodexReviewSettings {
+struct Snapshot: Equatable, Sendable {
     package var model: String?
     package var fallbackModel: String?
-    package var reasoningEffort: CodexReviewReasoningEffort?
-    package var serviceTier: CodexReviewServiceTier?
-    package var models: [CodexReviewModelCatalogItem]
+    package var reasoningEffort: CodexReviewSettings.ReasoningEffort?
+    package var serviceTier: CodexReviewSettings.ServiceTier?
+    package var models: [CodexReviewSettings.ModelCatalogItem]
 
     package init(
         model: String? = nil,
         fallbackModel: String? = nil,
-        reasoningEffort: CodexReviewReasoningEffort? = nil,
-        serviceTier: CodexReviewServiceTier? = nil,
-        models: [CodexReviewModelCatalogItem] = []
+        reasoningEffort: CodexReviewSettings.ReasoningEffort? = nil,
+        serviceTier: CodexReviewSettings.ServiceTier? = nil,
+        models: [CodexReviewSettings.ModelCatalogItem] = []
     ) {
         self.model = model
         self.fallbackModel = fallbackModel
@@ -260,4 +275,5 @@ package struct CodexReviewSettingsSnapshot: Equatable, Sendable {
         self.serviceTier = serviceTier
         self.models = models
     }
+}
 }

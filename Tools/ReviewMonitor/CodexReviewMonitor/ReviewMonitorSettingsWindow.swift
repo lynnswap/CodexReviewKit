@@ -22,7 +22,7 @@ enum ReviewMonitorSettingsPane: String, CaseIterable {
     }
 
     func tabViewItem(
-        runtimePreferencesStore: any CodexReviewRuntimePreferencesStore
+        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore
     ) -> NSTabViewItem {
         let viewController = makeViewController(
             runtimePreferencesStore: runtimePreferencesStore
@@ -38,7 +38,7 @@ enum ReviewMonitorSettingsPane: String, CaseIterable {
     }
 
     private func makeViewController(
-        runtimePreferencesStore: any CodexReviewRuntimePreferencesStore
+        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore
     ) -> NSViewController {
         switch self {
         case .runtime:
@@ -51,7 +51,7 @@ enum ReviewMonitorSettingsPane: String, CaseIterable {
 
 @MainActor
 final class ReviewMonitorSettingsWindowController: NSWindowController {
-    init(runtimePreferencesStore: any CodexReviewRuntimePreferencesStore) {
+    init(runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore) {
         let tabViewController = NSTabViewController()
         tabViewController.tabStyle = .toolbar
         tabViewController.title = "Settings"
@@ -105,7 +105,7 @@ final class ReviewMonitorSettingsWindow: NSWindow {
 final class ReviewMonitorRuntimeSettingsViewController: NSHostingController<ReviewMonitorRuntimeSettingsForm> {
     let formState: ReviewMonitorRuntimeSettingsFormState
 
-    init(runtimePreferencesStore: any CodexReviewRuntimePreferencesStore) {
+    init(runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore) {
         let formState = ReviewMonitorRuntimeSettingsFormState(
             runtimePreferencesStore: runtimePreferencesStore
         )
@@ -152,14 +152,14 @@ final class ReviewMonitorRuntimeSettingsFormState {
     }
     var statusMessage = ""
     var saveFailed = false
-    private var savedPreferences: CodexReviewRuntimePreferences
+    private var savedPreferences: CodexReviewRuntime.Preferences
     private var preservesCodexHomeFallback = false
     private var isPopulatingFields = false
 
     @ObservationIgnored
-    private let runtimePreferencesStore: any CodexReviewRuntimePreferencesStore
+    private let runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore
 
-    init(runtimePreferencesStore: any CodexReviewRuntimePreferencesStore) {
+    init(runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore) {
         self.runtimePreferencesStore = runtimePreferencesStore
         let preferences = runtimePreferencesStore.load()
         self.savedPreferences = preferences
@@ -247,8 +247,8 @@ final class ReviewMonitorRuntimeSettingsFormState {
         return Int(trimmed) ?? 0
     }
 
-    private var currentPreferences: CodexReviewRuntimePreferences {
-        let preferences = CodexReviewRuntimePreferences(
+    private var currentPreferences: CodexReviewRuntime.Preferences {
+        let preferences = CodexReviewRuntime.Preferences(
             codexHomePath: preservesCodexHomeFallback ? nil : codexHomePath,
             mcpHost: mcpHost,
             mcpPort: parsedMCPPort,
@@ -259,7 +259,7 @@ final class ReviewMonitorRuntimeSettingsFormState {
     }
 
     private func populateFields(
-        with preferences: CodexReviewRuntimePreferences
+        with preferences: CodexReviewRuntime.Preferences
     ) {
         isPopulatingFields = true
         defer { isPopulatingFields = false }
@@ -323,7 +323,7 @@ final class ReviewMonitorRuntimeSettingsFormState {
             return nil
         }
 
-        guard CodexReviewRuntimePreferences(mcpHost: trimmed).mcpHost == trimmed else {
+        guard CodexReviewRuntime.Preferences(mcpHost: trimmed).mcpHost == trimmed else {
             return "MCP host must be a host name or IPv4 address without a scheme or port."
         }
         return nil
@@ -362,17 +362,17 @@ struct ReviewMonitorRuntimeSettingsForm: View {
             TextField(
                 "MCP host",
                 text: $state.mcpHost,
-                prompt: Text(CodexReviewRuntimePreferences.defaults.mcpHost)
+                prompt: Text(CodexReviewRuntime.Preferences.defaults.mcpHost)
             )
             TextField(
                 "MCP port",
                 text: $state.mcpPort,
-                prompt: Text(String(CodexReviewRuntimePreferences.defaults.mcpPort))
+                prompt: Text(String(CodexReviewRuntime.Preferences.defaults.mcpPort))
             )
             TextField(
                 "MCP path",
                 text: $state.mcpPath,
-                prompt: Text(CodexReviewRuntimePreferences.defaults.mcpPath)
+                prompt: Text(CodexReviewRuntime.Preferences.defaults.mcpPath)
             )
             TextField(
                 "Codex executable",
@@ -414,9 +414,9 @@ struct ReviewMonitorRuntimeSettingsForm: View {
 }
 
 @MainActor
-private final class PreviewRuntimePreferencesStore: CodexReviewRuntimePreferencesStore {
-    func load() -> CodexReviewRuntimePreferences {
-        CodexReviewRuntimePreferences(
+private final class PreviewRuntimePreferencesStore: CodexReviewRuntime.PreferencesStore {
+    func load() -> CodexReviewRuntime.Preferences {
+        CodexReviewRuntime.Preferences(
             codexHomePath: "~/.codex_review",
             mcpHost: "localhost",
             mcpPort: 9417,
@@ -424,7 +424,7 @@ private final class PreviewRuntimePreferencesStore: CodexReviewRuntimePreference
         )
     }
 
-    func save(_: CodexReviewRuntimePreferences) throws {
+    func save(_: CodexReviewRuntime.Preferences) throws {
     }
 }
 #endif

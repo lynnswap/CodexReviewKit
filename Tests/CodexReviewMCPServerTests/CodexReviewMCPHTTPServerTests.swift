@@ -106,18 +106,18 @@ struct CodexReviewMCPHTTPServerTests {
     }
 
     @Test func streamableHTTPClassifiesAddressInUseBindError() {
-        let configuration = CodexReviewMCPHTTPServerConfiguration(
+        let configuration = CodexReviewMCPHTTPServer.Configuration(
             host: "127.0.0.1",
             port: 54321
         )
         let error = IOError(errnoCode: EADDRINUSE, reason: "bind")
 
-        let classified = CodexReviewMCPHTTPServerError.classifyStartError(
+        let classified = CodexReviewMCPHTTPServer.Error.classifyStartError(
             error,
             configuration: configuration
         )
 
-        #expect((classified as? CodexReviewMCPHTTPServerError) == .addressInUse(
+        #expect((classified as? CodexReviewMCPHTTPServer.Error) == .addressInUse(
             host: "127.0.0.1",
             port: 54321
         ))
@@ -178,7 +178,7 @@ struct CodexReviewMCPHTTPServerTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
             idGenerator: .init(next: { "job-1" })
         )
-        let configuration = CodexReviewMCPHTTPServerConfiguration(
+        let configuration = CodexReviewMCPHTTPServer.Configuration(
             port: 0,
             streamHeartbeatInterval: nil,
             boundedReviewWaitDuration: .milliseconds(50)
@@ -596,7 +596,7 @@ struct CodexReviewMCPHTTPServerTests {
                         "name": "review_read",
                         "arguments": [
                             "jobId": "job-running",
-                            "logLimit": ReviewLogPageRequest.maxLimit + 1,
+                            "logLimit": CodexReviewAPI.Log.PageRequest.maxLimit + 1,
                         ],
                     ],
                 ]
@@ -1109,7 +1109,7 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func withHTTPServer<T>(
         store: CodexReviewStore,
-        configuration: CodexReviewMCPHTTPServerConfiguration = .init(port: 0),
+        configuration: CodexReviewMCPHTTPServer.Configuration = .init(port: 0),
         operation: (CodexReviewMCPHTTPServer) async throws -> T
     ) async throws -> T {
         let adapter = CodexReviewMCPServer(store: store)

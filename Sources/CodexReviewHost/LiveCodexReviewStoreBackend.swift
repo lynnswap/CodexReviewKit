@@ -68,7 +68,7 @@ private func runRuntimeShutdownCleanup(
 private struct PendingLoginRuntimeCleanup {
     var client: AppServerClient?
     var codexHomeURL: URL?
-    var authenticationSession: (any CodexReviewWebAuthenticationSession)?
+    var authenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
 
     var isEmpty: Bool {
         client == nil && codexHomeURL == nil && authenticationSession == nil
@@ -86,11 +86,11 @@ package struct CodexReviewMCPPortOwner: Equatable, Sendable {
 }
 
 package typealias CodexReviewMCPPortOwnerResolver = @MainActor @Sendable (
-    CodexReviewMCPHTTPServerConfiguration
+    CodexReviewMCPHTTPServer.Configuration
 ) async -> CodexReviewMCPPortOwner?
 
 package typealias CodexReviewMCPHTTPServerBindChecker = @MainActor @Sendable (
-    CodexReviewMCPHTTPServerConfiguration
+    CodexReviewMCPHTTPServer.Configuration
 ) async throws -> Void
 
 package protocol CodexReviewMCPHTTPServing: AnyObject, Sendable {
@@ -105,9 +105,9 @@ extension CodexReviewMCPHTTPServer: CodexReviewMCPHTTPServing {}
 @MainActor
 public extension CodexReviewStore {
     static func makeLiveStore(
-        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
-        nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory = CodexReviewWebAuthenticationSessions.system
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
             runtimePreferences: runtimePreferences,
@@ -118,16 +118,16 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
-        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
-        nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory,
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transport: any JSONRPCTransport
+        transport: any JSONRPC.Transport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
@@ -146,20 +146,20 @@ public extension CodexReviewStore {
 
     package static func makeLiveStoreForTesting(
         environment: [String: String],
-        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
-        nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory,
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
-            CodexReviewMCPHTTPServerConfiguration
+            CodexReviewMCPHTTPServer.Configuration
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPCTransport
+        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
@@ -190,7 +190,7 @@ public extension CodexReviewStore {
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
-        CodexReviewMCPHTTPServerConfiguration
+        CodexReviewMCPHTTPServer.Configuration
     ) -> any CodexReviewMCPHTTPServing
 
     let seed: CodexReviewStoreSeed
@@ -198,21 +198,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var client: AppServerClient?
     private var appServerBackend: AppServerCodexReviewBackend?
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
-    private var loginChallenge: BackendLoginChallenge?
+    private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var loginBackend: AppServerCodexReviewBackend?
     private var loginClient: AppServerClient?
     private var loginCodexHomeURL: URL?
     private var loginActivation: LoginActivation = .activateAuthenticatedAccount
     private var isWaitingForLoginAccountUpdate = false
-    private var activeAuthenticationSession: (any CodexReviewWebAuthenticationSession)?
+    private var activeAuthenticationSession: (any CodexReviewNativeAuthentication.WebSession)?
     private var authenticationTask: Task<Void, Never>?
     private var authNotificationTask: Task<Void, Never>?
     private var loginNotificationTask: Task<Void, Never>?
-    private var settingsSnapshot = CodexReviewSettingsSnapshot()
+    private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
-    private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServerConfiguration
-    private let nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration?
-    private let webAuthenticationSessionFactory: CodexReviewWebAuthenticationSessionFactory
+    private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
+    private let nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
+    private let webAuthenticationSessionFactory: CodexReviewNativeAuthentication.WebSessionFactory
     private let externalURLOpener: ExternalURLOpener
     private let mcpHTTPServerFactory: MCPHTTPServerFactory?
     private let mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver
@@ -223,9 +223,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        runtimePreferences: CodexReviewRuntimePreferences = .defaults,
-        nativeAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewWebAuthenticationSessionFactory = CodexReviewWebAuthenticationSessions.system,
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
         mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration in
             CodexReviewMCPHTTPServer(
@@ -276,12 +276,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         true
     }
 
-    var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
+    var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         settingsSnapshot
     }
 
     private static func codexHomeURL(
-        runtimePreferences: CodexReviewRuntimePreferences,
+        runtimePreferences: CodexReviewRuntime.Preferences,
         environment: [String: String]
     ) -> URL {
         if let codexHomePath = runtimePreferences.codexHomePath {
@@ -291,7 +291,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private static func defaultMCPPortOwnerResolver(
-        configuration: CodexReviewMCPHTTPServerConfiguration
+        configuration: CodexReviewMCPHTTPServer.Configuration
     ) async -> CodexReviewMCPPortOwner? {
         await Task.detached(priority: .utility) {
             guard configuration.port > 0,
@@ -359,7 +359,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private static func defaultMCPHTTPServerBindChecker(
-        configuration: CodexReviewMCPHTTPServerConfiguration
+        configuration: CodexReviewMCPHTTPServer.Configuration
     ) async throws {
         try await CodexReviewMCPHTTPServer.checkBind(configuration: configuration)
     }
@@ -445,7 +445,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func runtimeStartupFailureMessage(for error: Error) async -> String {
-        if let mcpHTTPServerError = error as? CodexReviewMCPHTTPServerError {
+        if let mcpHTTPServerError = error as? CodexReviewMCPHTTPServer.Error {
             switch mcpHTTPServerError {
             case .addressInUse:
                 return await mcpAddressInUseMessage()
@@ -523,7 +523,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func waitUntilStopped() async {}
 
-    func refreshSettings() async throws -> CodexReviewSettingsSnapshot {
+    func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         guard let appServerBackend else {
             return settingsSnapshot
         }
@@ -533,15 +533,15 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
         guard let appServerBackend else {
             return
         }
-        var change = BackendSettingsChange(
+        var change = CodexReviewBackendModel.Settings.Change(
             model: model,
             updatesModel: true
         )
@@ -557,7 +557,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
         guard let appServerBackend else {
             return
@@ -571,7 +571,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
         guard let appServerBackend else {
             return
@@ -884,8 +884,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func monitorAuthenticationSession(
-        challenge: BackendLoginChallenge,
-        session: any CodexReviewWebAuthenticationSession,
+        challenge: CodexReviewBackendModel.Login.Challenge,
+        session: any CodexReviewNativeAuthentication.WebSession,
         completesLoginThroughCallback: Bool,
         auth: CodexReviewAuthModel
     ) async {
@@ -980,7 +980,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         switch activation {
         case .activateAuthenticatedAccount:
             guard let client, let appServerBackend else {
-                throw ReviewError.io("Review runtime is not running.")
+                throw CodexReviewAPI.Error.io("Review runtime is not running.")
             }
             return .init(
                 client: client,
@@ -1002,7 +1002,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleAuthenticationSessionCancelled(
-        challenge: BackendLoginChallenge,
+        challenge: CodexReviewBackendModel.Login.Challenge,
         auth: CodexReviewAuthModel
     ) async {
         guard loginChallenge?.id == challenge.id else {
@@ -1032,41 +1032,41 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await closeIsolatedLoginRuntime(client: loginClient, codexHomeURL: loginCodexHomeURL)
     }
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
+    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
-            throw ReviewError.io("Review runtime is not running.")
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.startReview(request)
     }
 
-    func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
+    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
         guard let appServerBackend else {
-            throw ReviewError.io("Review runtime is not running.")
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         try await appServerBackend.interruptReview(run, reason: reason)
     }
 
     func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         guard let appServerBackend else {
-            throw ReviewError.io("Review runtime is not running.")
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.beginReviewRecovery(run, reason: reason)
     }
 
     func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         guard let appServerBackend else {
-            throw ReviewError.io("Review runtime is not running.")
+            throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         return try await appServerBackend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: BackendReviewRun) async {
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         guard let appServerBackend else {
             return
         }
@@ -1075,7 +1075,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     @discardableResult
     private func applyAuthSnapshot(
-        _ snapshot: BackendAuthSnapshot,
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
         authSourceCodexHomeURL: URL? = nil
@@ -1194,7 +1194,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleAuthNotification(
-        _ notification: JSONRPCNotification,
+        _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
@@ -1236,7 +1236,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleLoginRuntimeNotification(
-        _ notification: JSONRPCNotification,
+        _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
@@ -1254,7 +1254,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleLoginCompletedNotification(
-        _ notification: JSONRPCNotification,
+        _ notification: JSONRPC.Notification,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
@@ -1369,7 +1369,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func applyRateLimitsUpdatedNotification(
-        _ notification: JSONRPCNotification,
+        _ notification: JSONRPC.Notification,
         auth: CodexReviewAuthModel
     ) async {
         do {
@@ -1380,10 +1380,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard selectedAccount.capabilities.supportsRateLimitRefresh else {
                 return
             }
-            guard AppServerAccountRateLimitsResponse.isCodexRateLimit(payload.rateLimits.limitID) else {
+            guard AppServerAPI.Account.RateLimits.Response.isCodexRateLimit(payload.rateLimits.limitID) else {
                 return
             }
-            let response = AppServerAccountRateLimitsResponse(rateLimits: payload.rateLimits)
+            let response = AppServerAPI.Account.RateLimits.Response(rateLimits: payload.rateLimits)
             applyRateLimits(
                 windows: response.codexRateLimitWindows,
                 planType: response.codexPlanType,
@@ -1508,14 +1508,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     ) async throws {
         let snapshot = try await backend.readAuth()
         guard let activeAccountID = snapshot.activeAccountID?.rawValue.nilIfEmpty else {
-            throw ReviewError.io("Saved authentication is missing for \(account.maskedEmail). Sign in again.")
+            throw CodexReviewAPI.Error.io("Saved authentication is missing for \(account.maskedEmail). Sign in again.")
         }
-        let actualAccountKey = normalizedReviewAccountEmail(email: activeAccountID)
+        let actualAccountKey = CodexAccount.normalizedEmail(activeAccountID)
         guard actualAccountKey == account.accountKey else {
             let actualEmail = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID })?.label
                 ?? activeAccountID
             let maskedActualEmail = self.maskedReviewAccountEmail(actualEmail)
-            throw ReviewError.io("Saved authentication is for \(maskedActualEmail), not \(account.maskedEmail). Sign in again.")
+            throw CodexReviewAPI.Error.io("Saved authentication is for \(maskedActualEmail), not \(account.maskedEmail). Sign in again.")
         }
     }
 
@@ -1624,20 +1624,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private static func monitorSettings(
-        from snapshot: BackendSettingsSnapshot
-    ) -> CodexReviewSettingsSnapshot {
+        from snapshot: CodexReviewBackendModel.Settings.Snapshot
+    ) -> CodexReviewSettings.Snapshot {
         .init(
             model: snapshot.model,
             fallbackModel: snapshot.fallbackModel,
-            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewReasoningEffort.init(rawValue:)),
-            serviceTier: snapshot.serviceTier.flatMap(CodexReviewServiceTier.init(rawValue:)),
+            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:)),
+            serviceTier: snapshot.serviceTier.flatMap(CodexReviewSettings.ServiceTier.init(rawValue:)),
             models: snapshot.models
         )
     }
 
-    private static func monitorAccount(from snapshot: BackendAccountSnapshot) -> CodexAccount? {
+    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> CodexAccount? {
         let label = snapshot.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accountKey = normalizedReviewAccountEmail(email: snapshot.id.rawValue)
+        let accountKey = CodexAccount.normalizedEmail(snapshot.id.rawValue)
         guard label.isEmpty == false, accountKey.isEmpty == false else {
             return nil
         }
@@ -1650,9 +1650,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    private static func authenticationURL(from challenge: BackendLoginChallenge) throws -> URL {
+    private static func authenticationURL(from challenge: CodexReviewBackendModel.Login.Challenge) throws -> URL {
         guard let url = challenge.verificationURL else {
-            throw ReviewError.io("Authentication did not provide a valid authorization URL.")
+            throw CodexReviewAPI.Error.io("Authentication did not provide a valid authorization URL.")
         }
         return url
     }
@@ -1666,7 +1666,7 @@ private struct AppServerRuntime: Sendable {
 
 private struct AppServerProcessRuntime: Sendable {
     var transport: AppServerProcessTransport
-    var threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
+    var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
 }
 
 @MainActor
@@ -1713,7 +1713,7 @@ private struct AppServerAccountLoginCompletedNotification: Decodable, Equatable,
 }
 
 private struct AppServerAccountRateLimitsUpdatedPayload: Decodable, Equatable, Sendable {
-    var rateLimits: AppServerRateLimitSnapshotPayload
+    var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
 }
 
 @MainActor
@@ -1786,7 +1786,7 @@ private enum CodexReviewAccountRegistry {
         case apiKey
         case amazonBedrock
 
-        init(_ accountKind: BackendAccountKind) {
+        init(_ accountKind: CodexReviewBackendModel.Account.Kind) {
             switch accountKind {
             case .chatGPT:
                 self = .chatGPT
@@ -1797,7 +1797,7 @@ private enum CodexReviewAccountRegistry {
             }
         }
 
-        var accountKind: BackendAccountKind {
+        var accountKind: CodexReviewBackendModel.Account.Kind {
             switch self {
             case .chatGPT:
                 .chatGPT
@@ -1810,9 +1810,9 @@ private enum CodexReviewAccountRegistry {
 
         static func legacyDefault(accountKey: String?, email: String) -> Self {
             let normalizedAccountKey = accountKey
-                .map(normalizedReviewAccountEmail(email:))
+                .map(CodexAccount.normalizedEmail)
                 .flatMap { $0.isEmpty ? nil : $0 }
-            switch normalizedAccountKey ?? normalizedReviewAccountEmail(email: email) {
+            switch normalizedAccountKey ?? CodexAccount.normalizedEmail(email) {
             case "api-key":
                 return .apiKey
             case "amazon-bedrock":
@@ -1837,7 +1837,7 @@ private enum CodexReviewAccountRegistry {
         let registry = loadRegistry(codexHomeURL: codexHomeURL)
         let accounts = registry.accounts.compactMap(makeAccount(from:))
         let activeAccountKey = registry.activeAccountKey
-            .map(normalizedReviewAccountEmail(email:))
+            .map(CodexAccount.normalizedEmail)
             .flatMap { activeAccountKey in
                 accounts.contains(where: { $0.accountKey == activeAccountKey }) ? activeAccountKey : nil
             }
@@ -1855,7 +1855,7 @@ private enum CodexReviewAccountRegistry {
             normalizedAccountKey(from: entry).map { ($0, entry) }
         })
         let normalizedActiveAccountKey = activeAccountKey
-            .map(normalizedReviewAccountEmail(email:))
+            .map(CodexAccount.normalizedEmail)
             .flatMap { accountKey in
                 accounts.contains(where: { $0.accountKey == accountKey }) ? accountKey : nil
             }
@@ -1899,13 +1899,13 @@ private enum CodexReviewAccountRegistry {
         accounts: [CodexAccount],
         codexHomeURL: URL
     ) throws {
-        let normalizedAccountKey = normalizedReviewAccountEmail(email: accountKey)
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
         let savedAuthURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
             codexHomeURL: codexHomeURL
         )
         guard FileManager.default.fileExists(atPath: savedAuthURL.path) else {
-            throw ReviewError.io("Saved authentication is missing for account \(normalizedAccountKey).")
+            throw CodexReviewAPI.Error.io("Saved authentication is missing for account \(normalizedAccountKey).")
         }
         try saveAccounts(
             accounts,
@@ -1988,7 +1988,7 @@ private enum CodexReviewAccountRegistry {
         from sourceCodexHomeURL: URL,
         to destinationCodexHomeURL: URL
     ) throws -> Bool {
-        let normalizedAccountKey = normalizedReviewAccountEmail(email: accountKey)
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
         let sourceURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
             codexHomeURL: sourceCodexHomeURL
@@ -2008,9 +2008,9 @@ private enum CodexReviewAccountRegistry {
         guard email.isEmpty == false else {
             return nil
         }
-        let normalizedEmail = normalizedReviewAccountEmail(email: email)
+        let normalizedEmail = CodexAccount.normalizedEmail(email)
         let accountKey = entry.accountKey
-            .map(normalizedReviewAccountEmail(email:))
+            .map(CodexAccount.normalizedEmail)
             .flatMap { $0.isEmpty ? nil : $0 }
             ?? normalizedEmail
         let account = CodexAccount(
@@ -2079,9 +2079,9 @@ private enum CodexReviewAccountRegistry {
 
     private static func normalizedAccountKey(from entry: Entry) -> String? {
         let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedEmail = normalizedReviewAccountEmail(email: email)
+        let normalizedEmail = CodexAccount.normalizedEmail(email)
         return entry.accountKey
-            .map(normalizedReviewAccountEmail(email:))
+            .map(CodexAccount.normalizedEmail)
             .flatMap { $0.isEmpty ? nil : $0 }
             ?? (normalizedEmail.isEmpty ? nil : normalizedEmail)
     }
@@ -2110,7 +2110,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     private static func pathComponent(forAccountKey accountKey: String) -> String {
-        let normalizedAccountKey = normalizedReviewAccountEmail(email: accountKey)
+        let normalizedAccountKey = CodexAccount.normalizedEmail(accountKey)
         switch normalizedAccountKey {
         case ".":
             return "%2E"

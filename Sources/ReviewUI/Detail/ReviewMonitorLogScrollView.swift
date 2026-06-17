@@ -39,9 +39,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedRevision: UInt64?
     private var displayedPresentationSignature: Int?
     private var displayedFinderSupplementSignature: Int?
-    private var sourceDocument: ReviewMonitorLogDocument?
-    private var currentDisplayDocument: ReviewMonitorLogDocument?
-    private var logProjection = ReviewMonitorLogProjection()
+    private var sourceDocument: ReviewMonitorLog.Document?
+    private var currentDisplayDocument: ReviewMonitorLog.Document?
+    private var logProjection = ReviewMonitorLog.Projection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
     private var activeFindQueryString: String?
@@ -172,7 +172,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func clear() -> Bool {
-        logProjection = ReviewMonitorLogProjection()
+        logProjection = ReviewMonitorLog.Projection()
         displayedRevision = nil
         displayedPresentationSignature = nil
         displayedFinderSupplementSignature = nil
@@ -203,7 +203,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func render(
-        document: ReviewMonitorLogDocument,
+        document: ReviewMonitorLog.Document,
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -217,8 +217,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func render(
-        sourceDocument source: ReviewMonitorLogDocument,
-        displayDocument display: ReviewMonitorLogDocument,
+        sourceDocument source: ReviewMonitorLog.Document,
+        displayDocument display: ReviewMonitorLog.Document,
         restoring restorationTarget: ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -256,9 +256,9 @@ final class ReviewMonitorLogScrollView: NSScrollView {
            let suffix = appendedSuffix(for: display.text),
            canApplyFallbackAppend(suffix, to: display) {
             let suffixUTF16Length = (suffix as NSString).length
-            let append = ReviewMonitorLogAppend(
+            let append = ReviewMonitorLog.Append(
                 kind: .event,
-                blockID: ReviewMonitorLogBlockID("fallback"),
+                blockID: ReviewMonitorLog.BlockID("fallback"),
                 range: NSRange(
                     location: displayedUTF16Length,
                     length: suffixUTF16Length
@@ -290,7 +290,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         return didRender
     }
 
-    private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLogBlockID) {
+    private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLog.BlockID) {
         let restorationTarget = currentScrollRestorationTarget
         guard let sourceDocument
         else {
@@ -313,7 +313,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
 
         let replacementText = (display.text as NSString).substring(with: nextPanel.range)
-        let replacement = ReviewMonitorLogReplacement(
+        let replacement = ReviewMonitorLog.Replacement(
             kind: .commandOutput,
             blockID: blockID,
             range: previousPanel.range,
@@ -333,14 +333,14 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         invalidateFindIndicator(reason: .viewportChanged)
     }
 
-    private func displayDocument(for document: ReviewMonitorLogDocument) -> ReviewMonitorLogDocument {
+    private func displayDocument(for document: ReviewMonitorLog.Document) -> ReviewMonitorLog.Document {
         displayDocument(for: document, rendererDisplay: nil)
     }
 
     private func displayDocument(
-        for document: ReviewMonitorLogDocument,
-        rendererDisplay: ReviewMonitorLogDocument?
-    ) -> ReviewMonitorLogDocument {
+        for document: ReviewMonitorLog.Document,
+        rendererDisplay: ReviewMonitorLog.Document?
+    ) -> ReviewMonitorLog.Document {
         let expandedBlockIDs = logDocumentView.expandedCommandOutputBlockIDsForDisplayDocument
         guard expandedBlockIDs.isEmpty == false else {
             return rendererDisplay ?? ReviewMonitorCommandOutputDisplayDocument.make(
@@ -356,7 +356,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         )
     }
 
-    private func canApplyAppend(_ append: ReviewMonitorLogAppend, to document: ReviewMonitorLogDocument) -> Bool {
+    private func canApplyAppend(_ append: ReviewMonitorLog.Append, to document: ReviewMonitorLog.Document) -> Bool {
         guard append.text.isEmpty == false else {
             return false
         }
@@ -368,8 +368,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func canApplyReplacement(
-        _ replacement: ReviewMonitorLogReplacement,
-        to document: ReviewMonitorLogDocument
+        _ replacement: ReviewMonitorLog.Replacement,
+        to document: ReviewMonitorLog.Document
     ) -> Bool {
         replacement.textUTF16Length >= 0 &&
             replacement.range.location >= 0 &&
@@ -377,7 +377,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
     }
 
-    private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLogDocument) -> Bool {
+    private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLog.Document) -> Bool {
         guard let displayedPresentationSignature else {
             return false
         }
@@ -392,16 +392,16 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     private func fallbackAppendAnimationSpans(
         suffixUTF16Length: Int,
-        in document: ReviewMonitorLogDocument
-    ) -> [ReviewMonitorLogAnimationSpan] {
+        in document: ReviewMonitorLog.Document
+    ) -> [ReviewMonitorLog.AnimationSpan] {
         let suffixRange = NSRange(location: displayedUTF16Length, length: suffixUTF16Length)
-        var spans: [ReviewMonitorLogAnimationSpan] = []
+        var spans: [ReviewMonitorLog.AnimationSpan] = []
         for block in document.blocks {
             let intersection = NSIntersectionRange(block.range, suffixRange)
             guard intersection.length > 0 else {
                 continue
             }
-            spans.append(contentsOf: ReviewMonitorLogAppend.animationSpans(
+            spans.append(contentsOf: ReviewMonitorLog.Append.animationSpans(
                 forKind: block.kind,
                 absoluteRange: intersection,
                 appendBaseLocation: displayedUTF16Length
@@ -412,8 +412,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     private func applyAppend(
-        _ append: ReviewMonitorLogAppend,
-        document: ReviewMonitorLogDocument,
+        _ append: ReviewMonitorLog.Append,
+        document: ReviewMonitorLog.Document,
         forceAutoFollow: Bool
     ) -> Bool {
         guard append.text.isEmpty == false else {
@@ -453,8 +453,8 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     private func applyReplacement(
-        _ replacement: ReviewMonitorLogReplacement,
-        document: ReviewMonitorLogDocument
+        _ replacement: ReviewMonitorLog.Replacement,
+        document: ReviewMonitorLog.Document
     ) -> Bool {
         let shouldAutoFollow = isPinnedToBottom()
         let resultingTextUTF16Length = displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
@@ -494,7 +494,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     @discardableResult
     private func applyReload(
         _ text: String,
-        document: ReviewMonitorLogDocument,
+        document: ReviewMonitorLog.Document,
         restoring restorationTarget: ScrollRestorationTarget,
         countBottomRestoreAsAutoFollow: Bool
     ) -> Bool {
@@ -606,7 +606,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func shouldRefreshFindSessionForCommandOutputReplacement(
-        _ replacement: ReviewMonitorLogReplacement
+        _ replacement: ReviewMonitorLog.Replacement
     ) -> Bool {
         guard replacement.kind == .commandOutput,
               isFindBarVisible,
@@ -800,7 +800,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     private func presentationSignature(
         forPrefixUTF16Length prefixLength: Int,
-        in document: ReviewMonitorLogDocument
+        in document: ReviewMonitorLog.Document
     ) -> Int {
         let clampedPrefixLength = min(max(0, prefixLength), document.textUTF16Length)
         var hasher = Hasher()
@@ -861,7 +861,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     }
 
     private func sourceSignatureRange(
-        for block: ReviewMonitorLogBlock,
+        for block: ReviewMonitorLog.Block,
         clippedDisplayRange: NSRange
     ) -> NSRange {
         if block.kind == .commandOutput {
@@ -1242,7 +1242,7 @@ extension ReviewMonitorLogScrollView {
         ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayedText)
     }
 
-    func displayTextForTesting(sourceDocument: ReviewMonitorLogDocument) -> String {
+    func displayTextForTesting(sourceDocument: ReviewMonitorLog.Document) -> String {
         ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument(for: sourceDocument).text)
     }
 
@@ -1465,7 +1465,7 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.commandOutputPanelTerminalTextForTesting
     }
 
-    func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLogBlockID) -> String? {
+    func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
         logDocumentView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
     }
 
@@ -1539,7 +1539,7 @@ extension ReviewMonitorLogScrollView {
     }
 
     @discardableResult
-    func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLogBlockID) -> Bool {
+    func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
         logDocumentView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
     }
 

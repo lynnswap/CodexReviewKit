@@ -29,7 +29,7 @@ package final class CodexReviewHost {
     }
 
     package convenience init(
-        appServerTransport: any JSONRPCTransport,
+        appServerTransport: any JSONRPC.Transport,
         endpoint: URL? = nil
     ) {
         let client = AppServerClient(transport: appServerTransport)
@@ -61,15 +61,15 @@ package final class CodexReviewHost {
 private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     let seed = CodexReviewStoreSeed()
     private let backend: any CodexReviewBackend
-    private var currentSettingsSnapshot = CodexReviewSettingsSnapshot()
-    private var loginChallenge: BackendLoginChallenge?
+    private var currentSettingsSnapshot = CodexReviewSettings.Snapshot()
+    private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
     private var active = false
 
     var isActive: Bool {
         active
     }
 
-    var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
+    var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         currentSettingsSnapshot
     }
 
@@ -89,19 +89,19 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func waitUntilStopped() async {}
 
-    func refreshSettings() async throws -> CodexReviewSettingsSnapshot {
+    func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         currentSettingsSnapshot = try await Self.monitorSettings(from: backend.readSettings())
         return currentSettingsSnapshot
     }
 
     func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
-        var change = BackendSettingsChange(
+        var change = CodexReviewBackendModel.Settings.Change(
             model: model,
             updatesModel: true
         )
@@ -117,7 +117,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
         currentSettingsSnapshot = try await Self.monitorSettings(
             from: backend.applySettings(.init(
@@ -128,7 +128,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
         currentSettingsSnapshot = try await Self.monitorSettings(
             from: backend.applySettings(.init(
@@ -233,54 +233,54 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
+    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
         try await backend.startReview(request)
     }
 
     func interruptReview(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await backend.interruptReview(run, reason: reason)
     }
 
     func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         try await backend.beginReviewRecovery(run, reason: reason)
     }
 
     func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         try await backend.resumeReviewRecovery(token, request: request)
     }
 
-    func cleanupReview(_ run: BackendReviewRun) async {
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         await backend.cleanupReview(run)
     }
 
     private static func monitorSettings(
-        from snapshot: BackendSettingsSnapshot
-    ) -> CodexReviewSettingsSnapshot {
+        from snapshot: CodexReviewBackendModel.Settings.Snapshot
+    ) -> CodexReviewSettings.Snapshot {
         .init(
             model: snapshot.model,
             fallbackModel: snapshot.fallbackModel,
-            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewReasoningEffort.init(rawValue:)),
-            serviceTier: snapshot.serviceTier.flatMap(CodexReviewServiceTier.init(rawValue:)),
+            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:)),
+            serviceTier: snapshot.serviceTier.flatMap(CodexReviewSettings.ServiceTier.init(rawValue:)),
             models: snapshot.models
         )
     }
 
     private static func applyAuthSnapshot(
-        _ snapshot: BackendAuthSnapshot,
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel
     ) {
         let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in
             let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-            let accountKey = normalizedReviewAccountEmail(email: account.id.rawValue)
+            let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
             guard label.isEmpty == false, accountKey.isEmpty == false else {
                 return nil
             }
@@ -293,7 +293,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         let activeAccountKey = snapshot.activeAccountID
-            .map { normalizedReviewAccountEmail(email: $0.rawValue) }
+            .map { CodexAccount.normalizedEmail($0.rawValue) }
         auth.applyPersistedAccountStates(
             accounts.map(savedAccountPayload(from:)),
             activeAccountKey: activeAccountKey
@@ -310,7 +310,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 }
 
-extension BackendLoginChallenge {
+extension CodexReviewBackendModel.Login.Challenge {
     func signInDetail(nativeAuthentication: Bool) -> String {
         if let userCode = userCode?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
             return "Enter code \(userCode) in your browser, then return to ReviewMonitor."

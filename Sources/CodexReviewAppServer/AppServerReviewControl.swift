@@ -89,7 +89,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
     ) async throws -> AppServerReviewInterruption {
         do {
-            let _: EmptyResponse = try await client.send(TurnInterruptRequest(
+            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
                 params: .init(threadID: threadID, turnID: turnID)
             ))
             return .init(threadID: threadID, turnID: turnID)
@@ -103,7 +103,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
             if let willInterruptActiveTurn {
                 await willInterruptActiveTurn(activeInterruption)
             }
-            let _: EmptyResponse = try await client.send(TurnInterruptRequest(
+            let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
                 params: .init(threadID: threadID, turnID: activeTurnID)
             ))
             setPhase(.reviewStarted(turnThreadID: threadID, turnID: activeTurnID))
@@ -118,7 +118,7 @@ package final class AppServerReviewControl: @unchecked Sendable {
     }
 
     private static func activeTurnID(from error: Error) -> String? {
-        guard case JSONRPCError.responseError(_, let message) = error,
+        guard case JSONRPC.Error.responseError(_, let message) = error,
               let range = message.range(of: " but found ")
         else {
             return nil

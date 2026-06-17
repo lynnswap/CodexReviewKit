@@ -2,17 +2,17 @@ import AppKit
 
 public final class TextTransitionAttachment: NSTextAttachment {
     public private(set) var text: NSAttributedString
-    public private(set) var contentTransition: TextContentTransition
-    public private(set) var widthReservation: TextWidthReservation
-    public private(set) var motionPolicy: TextTransitionMotionPolicy
+    public private(set) var contentTransition: TextTransition.Content
+    public private(set) var widthReservation: TextTransition.WidthReservation
+    public private(set) var motionPolicy: TextTransition.MotionPolicy
     public var reuseIdentifier: String?
     private let activeViews = NSHashTable<TextTransitionView>.weakObjects()
 
     public init(
         text: NSAttributedString,
-        contentTransition: TextContentTransition = .numericText(),
-        widthReservation: TextWidthReservation = .natural,
-        motionPolicy: TextTransitionMotionPolicy = .system,
+        contentTransition: TextTransition.Content = .numericText(),
+        widthReservation: TextTransition.WidthReservation = .natural,
+        motionPolicy: TextTransition.MotionPolicy = .system,
         reuseIdentifier: String? = nil
     ) {
         self.text = text.copy() as? NSAttributedString ?? text
@@ -29,9 +29,9 @@ public final class TextTransitionAttachment: NSTextAttachment {
 
     @MainActor
     public func configure(
-        contentTransition: TextContentTransition? = nil,
-        widthReservation: TextWidthReservation? = nil,
-        motionPolicy: TextTransitionMotionPolicy? = nil
+        contentTransition: TextTransition.Content? = nil,
+        widthReservation: TextTransition.WidthReservation? = nil,
+        motionPolicy: TextTransition.MotionPolicy? = nil
     ) {
         var shouldUpdateBounds = false
         if let contentTransition, self.contentTransition != contentTransition {

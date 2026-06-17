@@ -1,29 +1,78 @@
 import Foundation
 import CodexReview
 
-package enum AppServerRequestScope: Hashable, Sendable {
-    case thread(String)
+package enum AppServerAPI {
+    package enum Initialize {}
+    package enum Thread {
+        package enum Start {}
+        package enum Rollback {}
+        package enum Delete {}
+        package enum Unsubscribe {}
+        package enum BackgroundTerminals {
+            package enum Clean {}
+        }
+    }
+    package enum Review {
+        package enum Start {}
+    }
+    package enum Turn {
+        package enum Interrupt {}
+    }
+    package enum Config {
+        package enum Read {}
+        package enum BatchWrite {}
+    }
+    package enum Model {
+        package enum List {}
+    }
+    package enum Auth {
+        package enum Read {}
+    }
+    package enum Account {
+        package enum Read {}
+        package enum RateLimits {
+            package enum Read {}
+        }
+        package enum Login {
+            package enum Complete {}
+            package enum Cancel {}
+        }
+    }
 }
 
-package enum AppServerThreadStartPermissionStrategy: Equatable, Sendable {
+package extension AppServerAPI {
+enum RequestScope: Hashable, Sendable {
+    case thread(String)
+}
+}
+
+
+package extension AppServerAPI.Thread.Start {
+enum PermissionStrategy: Equatable, Sendable {
     case modernPermissions
     case legacySandbox
 }
+}
 
-package protocol AppServerRequest: Sendable {
+
+package extension AppServerAPI {
+protocol Request: Sendable {
     associatedtype Params: Encodable & Sendable
     associatedtype Response: Decodable & Sendable
 
     static var method: String { get }
     var params: Params { get }
-    var scope: AppServerRequestScope? { get }
+    var scope: AppServerAPI.RequestScope? { get }
+}
 }
 
-extension AppServerRequest {
-    package var scope: AppServerRequestScope? { nil }
+
+extension AppServerAPI.Request {
+    package var scope: AppServerAPI.RequestScope? { nil }
 }
 
-package struct InitializeClientInfo: Codable, Equatable, Sendable {
+package extension AppServerAPI.Initialize {
+struct ClientInfo: Codable, Equatable, Sendable {
     package var name: String
     package var title: String?
     package var version: String
@@ -34,11 +83,14 @@ package struct InitializeClientInfo: Codable, Equatable, Sendable {
         self.version = version
     }
 }
+}
 
-package struct InitializeCapabilities: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Initialize {
+struct Capabilities: Codable, Equatable, Sendable {
     package var experimentalAPI: Bool
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case experimentalAPI = "experimentalApi"
     }
 
@@ -46,12 +98,15 @@ package struct InitializeCapabilities: Codable, Equatable, Sendable {
         self.experimentalAPI = experimentalAPI
     }
 }
+}
 
-package struct InitializeParams: Codable, Equatable, Sendable {
-    package var clientInfo: InitializeClientInfo
-    package var capabilities: InitializeCapabilities
 
-    package enum CodingKeys: String, CodingKey {
+package extension AppServerAPI.Initialize {
+struct Params: Codable, Equatable, Sendable {
+    package var clientInfo: AppServerAPI.Initialize.ClientInfo
+    package var capabilities: AppServerAPI.Initialize.Capabilities
+
+    enum CodingKeys: String, CodingKey {
         case clientInfo
         case capabilities
     }
@@ -61,8 +116,11 @@ package struct InitializeParams: Codable, Equatable, Sendable {
         self.capabilities = .init()
     }
 }
+}
 
-package struct InitializeResponse: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Initialize {
+struct Response: Codable, Equatable, Sendable {
     package var codexHome: String?
     package var userAgent: String?
 
@@ -71,28 +129,34 @@ package struct InitializeResponse: Codable, Equatable, Sendable {
         self.userAgent = userAgent
     }
 }
+}
 
-package struct InitializeRequest: AppServerRequest {
-    package typealias Response = InitializeResponse
+
+package extension AppServerAPI.Initialize {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Initialize.Response
 
     package static let method = "initialize"
-    package var params: InitializeParams
+    package var params: AppServerAPI.Initialize.Params
 
-    package init(params: InitializeParams) {
+    package init(params: AppServerAPI.Initialize.Params) {
         self.params = params
     }
 }
+}
 
-package struct ThreadStartParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Start {
+struct Params: Codable, Equatable, Sendable {
     package var cwd: String
     package var model: String?
     package var ephemeral: Bool?
     package var approvalPolicy: String?
     package var sandbox: String?
-    package var permissions: ThreadStartPermissions?
+    package var permissions: AppServerAPI.Thread.Start.Permissions?
     // Session start source drives lifecycle hooks; thread source is analytics classification.
-    package var sessionStartSource: ThreadStartSource?
-    package var threadSource: ThreadSource?
+    package var sessionStartSource: AppServerAPI.Thread.Start.Source?
+    package var threadSource: AppServerAPI.Thread.Source?
 
     package init(
         cwd: String,
@@ -100,9 +164,9 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
         ephemeral: Bool? = nil,
         approvalPolicy: String? = nil,
         sandbox: String? = nil,
-        permissions: ThreadStartPermissions? = nil,
-        sessionStartSource: ThreadStartSource? = nil,
-        threadSource: ThreadSource? = nil
+        permissions: AppServerAPI.Thread.Start.Permissions? = nil,
+        sessionStartSource: AppServerAPI.Thread.Start.Source? = nil,
+        threadSource: AppServerAPI.Thread.Source? = nil
     ) {
         self.cwd = cwd
         self.model = model
@@ -114,21 +178,30 @@ package struct ThreadStartParams: Codable, Equatable, Sendable {
         self.threadSource = threadSource
     }
 }
+}
 
-package enum ThreadStartSource: String, Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Start {
+enum Source: String, Codable, Equatable, Sendable {
     case startup
     case clear
 }
+}
 
-package enum ThreadSource: String, Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread {
+enum Source: String, Codable, Equatable, Sendable {
     case user
     case subagent
     case memoryConsolidation = "memory_consolidation"
 }
+}
 
-package enum ThreadStartPermissions: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Start {
+enum Permissions: Codable, Equatable, Sendable {
     case profileID(String)
-    case profileSelection(ThreadStartPermissionProfileSelection)
+    case profileSelection(AppServerAPI.Thread.Start.PermissionProfileSelection)
 
     package init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -136,12 +209,12 @@ package enum ThreadStartPermissions: Codable, Equatable, Sendable {
             self = .profileID(profileID)
             return
         }
-        if let profileSelection = try? container.decode(ThreadStartPermissionProfileSelection.self) {
+        if let profileSelection = try? container.decode(AppServerAPI.Thread.Start.PermissionProfileSelection.self) {
             self = .profileSelection(profileSelection)
             return
         }
         throw DecodingError.typeMismatch(
-            ThreadStartPermissions.self,
+            AppServerAPI.Thread.Start.Permissions.self,
             .init(
                 codingPath: decoder.codingPath,
                 debugDescription: "Expected a permissions profile ID or profile selection object."
@@ -159,8 +232,11 @@ package enum ThreadStartPermissions: Codable, Equatable, Sendable {
         }
     }
 }
+}
 
-package struct ThreadStartPermissionProfileSelection: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Start {
+struct PermissionProfileSelection: Codable, Equatable, Sendable {
     package var type: String
     package var id: String
 
@@ -169,12 +245,15 @@ package struct ThreadStartPermissionProfileSelection: Codable, Equatable, Sendab
         self.id = id
     }
 }
+}
 
-package struct ThreadStartResponse: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Start {
+struct Response: Codable, Equatable, Sendable {
     package var threadID: String
     package var model: String?
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case thread
         case model
     }
@@ -200,24 +279,30 @@ package struct ThreadStartResponse: Codable, Equatable, Sendable {
         try container.encodeIfPresent(model, forKey: .model)
     }
 }
+}
 
-package struct ThreadStartRequest: AppServerRequest {
-    package typealias Response = ThreadStartResponse
+
+package extension AppServerAPI.Thread.Start {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Thread.Start.Response
 
     package static let method = "thread/start"
-    package var params: ThreadStartParams
+    package var params: AppServerAPI.Thread.Start.Params
 
-    package init(params: ThreadStartParams) {
+    package init(params: AppServerAPI.Thread.Start.Params) {
         self.params = params
     }
 }
+}
 
-package struct ReviewStartParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Review.Start {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
-    package var target: ReviewTarget
-    package var delivery: ReviewDelivery
+    package var target: CodexReviewAPI.Target
+    package var delivery: AppServerAPI.Review.Start.Delivery
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case target
         case delivery
@@ -225,45 +310,57 @@ package struct ReviewStartParams: Codable, Equatable, Sendable {
 
     package init(
         threadID: String,
-        target: ReviewTarget,
-        delivery: ReviewDelivery = .inline
+        target: CodexReviewAPI.Target,
+        delivery: AppServerAPI.Review.Start.Delivery = .inline
     ) {
         self.threadID = threadID
         self.target = target
         self.delivery = delivery
     }
 }
+}
 
-package enum ReviewDelivery: String, Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Review.Start {
+enum Delivery: String, Codable, Equatable, Sendable {
     case inline
     case detached
 }
+}
 
-package struct AppServerTurn: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Turn {
+struct Payload: Codable, Equatable, Sendable {
     package var id: String
     package var status: String?
-    package var error: AppServerTurnError?
+    package var error: AppServerAPI.Turn.Error?
 
-    package init(id: String, status: String? = nil, error: AppServerTurnError? = nil) {
+    package init(id: String, status: String? = nil, error: AppServerAPI.Turn.Error? = nil) {
         self.id = id
         self.status = status
         self.error = error
     }
 }
+}
 
-package struct AppServerTurnError: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Turn {
+struct Error: Codable, Equatable, Sendable {
     package var message: String
 
     package init(message: String) {
         self.message = message
     }
 }
+}
 
-package struct ReviewStartResponse: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Review.Start {
+struct Response: Codable, Equatable, Sendable {
     package var turnID: String
     package var reviewThreadID: String?
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case turn
         case reviewThreadID = "reviewThreadId"
     }
@@ -275,36 +372,42 @@ package struct ReviewStartResponse: Codable, Equatable, Sendable {
 
     package init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.turnID = try container.decode(AppServerTurn.self, forKey: .turn).id
+        self.turnID = try container.decode(AppServerAPI.Turn.Payload.self, forKey: .turn).id
         self.reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
     }
 
     package func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(AppServerTurn(id: turnID), forKey: .turn)
+        try container.encode(AppServerAPI.Turn.Payload(id: turnID), forKey: .turn)
         try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
     }
 }
+}
 
-package struct ReviewStartRequest: AppServerRequest {
-    package typealias Response = ReviewStartResponse
+
+package extension AppServerAPI.Review.Start {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Review.Start.Response
 
     package static let method = "review/start"
-    package var params: ReviewStartParams
-    package var scope: AppServerRequestScope? {
+    package var params: AppServerAPI.Review.Start.Params
+    package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: ReviewStartParams) {
+    package init(params: AppServerAPI.Review.Start.Params) {
         self.params = params
     }
 }
+}
 
-package struct TurnInterruptParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Turn.Interrupt {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
     package var turnID: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
     }
@@ -314,23 +417,29 @@ package struct TurnInterruptParams: Codable, Equatable, Sendable {
         self.turnID = turnID
     }
 }
+}
 
-package struct TurnInterruptRequest: AppServerRequest {
+
+package extension AppServerAPI.Turn.Interrupt {
+struct Request: AppServerAPI.Request {
     package typealias Response = EmptyResponse
 
     package static let method = "turn/interrupt"
-    package var params: TurnInterruptParams
+    package var params: AppServerAPI.Turn.Interrupt.Params
 
-    package init(params: TurnInterruptParams) {
+    package init(params: AppServerAPI.Turn.Interrupt.Params) {
         self.params = params
     }
 }
+}
 
-package struct ThreadRollbackParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Rollback {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
     package var numTurns: Int
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case numTurns
     }
@@ -340,25 +449,31 @@ package struct ThreadRollbackParams: Codable, Equatable, Sendable {
         self.numTurns = numTurns
     }
 }
+}
 
-package struct ThreadRollbackRequest: AppServerRequest {
+
+package extension AppServerAPI.Thread.Rollback {
+struct Request: AppServerAPI.Request {
     package typealias Response = EmptyResponse
 
     package static let method = "thread/rollback"
-    package var params: ThreadRollbackParams
-    package var scope: AppServerRequestScope? {
+    package var params: AppServerAPI.Thread.Rollback.Params
+    package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: ThreadRollbackParams) {
+    package init(params: AppServerAPI.Thread.Rollback.Params) {
         self.params = params
     }
 }
+}
 
-package struct ThreadDeleteParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Delete {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
     }
 
@@ -366,25 +481,31 @@ package struct ThreadDeleteParams: Codable, Equatable, Sendable {
         self.threadID = threadID
     }
 }
+}
 
-package struct ThreadDeleteRequest: AppServerRequest {
+
+package extension AppServerAPI.Thread.Delete {
+struct Request: AppServerAPI.Request {
     package typealias Response = EmptyResponse
 
     package static let method = "thread/delete"
-    package var params: ThreadDeleteParams
-    package var scope: AppServerRequestScope? {
+    package var params: AppServerAPI.Thread.Delete.Params
+    package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: ThreadDeleteParams) {
+    package init(params: AppServerAPI.Thread.Delete.Params) {
         self.params = params
     }
 }
+}
 
-package struct ThreadUnsubscribeParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Unsubscribe {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
     }
 
@@ -392,39 +513,51 @@ package struct ThreadUnsubscribeParams: Codable, Equatable, Sendable {
         self.threadID = threadID
     }
 }
+}
 
-package enum ThreadUnsubscribeStatus: String, Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.Unsubscribe {
+enum Status: String, Codable, Equatable, Sendable {
     case notLoaded
     case notSubscribed
     case unsubscribed
 }
+}
 
-package struct ThreadUnsubscribeResponse: Codable, Equatable, Sendable {
-    package var status: ThreadUnsubscribeStatus
 
-    package init(status: ThreadUnsubscribeStatus) {
+package extension AppServerAPI.Thread.Unsubscribe {
+struct Response: Codable, Equatable, Sendable {
+    package var status: AppServerAPI.Thread.Unsubscribe.Status
+
+    package init(status: AppServerAPI.Thread.Unsubscribe.Status) {
         self.status = status
     }
 }
+}
 
-package struct ThreadUnsubscribeRequest: AppServerRequest {
-    package typealias Response = ThreadUnsubscribeResponse
+
+package extension AppServerAPI.Thread.Unsubscribe {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Thread.Unsubscribe.Response
 
     package static let method = "thread/unsubscribe"
-    package var params: ThreadUnsubscribeParams
-    package var scope: AppServerRequestScope? {
+    package var params: AppServerAPI.Thread.Unsubscribe.Params
+    package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: ThreadUnsubscribeParams) {
+    package init(params: AppServerAPI.Thread.Unsubscribe.Params) {
         self.params = params
     }
 }
+}
 
-package struct BackgroundTerminalsCleanParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Thread.BackgroundTerminals.Clean {
+struct Params: Codable, Equatable, Sendable {
     package var threadID: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
     }
 
@@ -432,36 +565,45 @@ package struct BackgroundTerminalsCleanParams: Codable, Equatable, Sendable {
         self.threadID = threadID
     }
 }
+}
 
-package struct BackgroundTerminalsCleanRequest: AppServerRequest {
+
+package extension AppServerAPI.Thread.BackgroundTerminals.Clean {
+struct Request: AppServerAPI.Request {
     package typealias Response = EmptyResponse
 
     package static let method = "thread/backgroundTerminals/clean"
-    package var params: BackgroundTerminalsCleanParams
-    package var scope: AppServerRequestScope? {
+    package var params: AppServerAPI.Thread.BackgroundTerminals.Clean.Params
+    package var scope: AppServerAPI.RequestScope? {
         .thread(params.threadID)
     }
 
-    package init(params: BackgroundTerminalsCleanParams) {
+    package init(params: AppServerAPI.Thread.BackgroundTerminals.Clean.Params) {
         self.params = params
     }
 }
+}
 
-package struct ConfigReadResponse: Codable, Equatable, Sendable {
-    package var config: AppServerConfig
 
-    package init(config: AppServerConfig) {
+package extension AppServerAPI.Config.Read {
+struct Response: Codable, Equatable, Sendable {
+    package var config: AppServerAPI.Config.Snapshot
+
+    package init(config: AppServerAPI.Config.Snapshot) {
         self.config = config
     }
 }
+}
 
-package struct AppServerConfig: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Config {
+struct Snapshot: Codable, Equatable, Sendable {
     package var model: String?
     package var reviewModel: String?
     package var modelReasoningEffort: String?
     package var serviceTier: String?
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case model
         case reviewModel = "review_model"
         case modelReasoningEffort = "model_reasoning_effort"
@@ -480,9 +622,12 @@ package struct AppServerConfig: Codable, Equatable, Sendable {
         self.serviceTier = serviceTier
     }
 }
+}
 
-package struct ConfigReadRequest: AppServerRequest {
-    package typealias Response = ConfigReadResponse
+
+package extension AppServerAPI.Config.Read {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Config.Read.Response
 
     package static let method = "config/read"
     package var params: EmptyResponse
@@ -491,8 +636,11 @@ package struct ConfigReadRequest: AppServerRequest {
         self.params = .init()
     }
 }
+}
 
-package enum AppServerJSONValue: Encodable, Equatable, Sendable {
+
+package extension AppServerAPI.Config {
+enum Value: Encodable, Equatable, Sendable {
     case string(String)
     case null
 
@@ -507,36 +655,45 @@ package enum AppServerJSONValue: Encodable, Equatable, Sendable {
         }
     }
 }
+}
 
-package enum AppServerConfigMergeStrategy: String, Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Config {
+enum MergeStrategy: String, Codable, Equatable, Sendable {
     case replace
     case upsert
 }
+}
 
-package struct AppServerConfigEdit: Encodable, Equatable, Sendable {
+
+package extension AppServerAPI.Config {
+struct Edit: Encodable, Equatable, Sendable {
     package var keyPath: String
-    package var value: AppServerJSONValue
-    package var mergeStrategy: AppServerConfigMergeStrategy
+    package var value: AppServerAPI.Config.Value
+    package var mergeStrategy: AppServerAPI.Config.MergeStrategy
 
     package init(
         keyPath: String,
-        value: AppServerJSONValue,
-        mergeStrategy: AppServerConfigMergeStrategy = .replace
+        value: AppServerAPI.Config.Value,
+        mergeStrategy: AppServerAPI.Config.MergeStrategy = .replace
     ) {
         self.keyPath = keyPath
         self.value = value
         self.mergeStrategy = mergeStrategy
     }
 }
+}
 
-package struct ConfigBatchWriteParams: Encodable, Equatable, Sendable {
-    package var edits: [AppServerConfigEdit]
+
+package extension AppServerAPI.Config.BatchWrite {
+struct Params: Encodable, Equatable, Sendable {
+    package var edits: [AppServerAPI.Config.Edit]
     package var filePath: String?
     package var expectedVersion: String?
     package var reloadUserConfig: Bool
 
     package init(
-        edits: [AppServerConfigEdit],
+        edits: [AppServerAPI.Config.Edit],
         filePath: String? = nil,
         expectedVersion: String? = nil,
         reloadUserConfig: Bool = true
@@ -547,25 +704,34 @@ package struct ConfigBatchWriteParams: Encodable, Equatable, Sendable {
         self.reloadUserConfig = reloadUserConfig
     }
 }
+}
 
-package struct ConfigWriteResponse: Decodable, Equatable, Sendable {
+
+package extension AppServerAPI.Config.BatchWrite {
+struct Response: Decodable, Equatable, Sendable {
     package var status: String
     package var version: String?
     package var filePath: String?
 }
+}
 
-package struct ConfigBatchWriteRequest: AppServerRequest {
-    package typealias Response = ConfigWriteResponse
+
+package extension AppServerAPI.Config.BatchWrite {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Config.BatchWrite.Response
 
     package static let method = "config/batchWrite"
-    package var params: ConfigBatchWriteParams
+    package var params: AppServerAPI.Config.BatchWrite.Params
 
-    package init(params: ConfigBatchWriteParams) {
+    package init(params: AppServerAPI.Config.BatchWrite.Params) {
         self.params = params
     }
 }
+}
 
-package struct ModelListParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Model.List {
+struct Params: Codable, Equatable, Sendable {
     package var cursor: String?
     package var limit: Int?
     package var includeHidden: Bool?
@@ -580,67 +746,85 @@ package struct ModelListParams: Codable, Equatable, Sendable {
         self.includeHidden = includeHidden
     }
 }
+}
 
-package struct ModelListResponse: Codable, Equatable, Sendable {
-    package var data: [CodexReviewModelCatalogItem]
+
+package extension AppServerAPI.Model.List {
+struct Response: Codable, Equatable, Sendable {
+    package var data: [CodexReviewSettings.ModelCatalogItem]
     package var nextCursor: String?
 
     package init(
-        data: [CodexReviewModelCatalogItem],
+        data: [CodexReviewSettings.ModelCatalogItem],
         nextCursor: String? = nil
     ) {
         self.data = data
         self.nextCursor = nextCursor
     }
 }
+}
 
-package struct ModelListRequest: AppServerRequest {
-    package typealias Response = ModelListResponse
+
+package extension AppServerAPI.Model.List {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Model.List.Response
 
     package static let method = "model/list"
-    package var params: ModelListParams
+    package var params: AppServerAPI.Model.List.Params
 
-    package init(params: ModelListParams = .init(includeHidden: true)) {
+    package init(params: AppServerAPI.Model.List.Params = .init(includeHidden: true)) {
         self.params = params
     }
 }
+}
 
-package struct AuthReadRequest: AppServerRequest {
-    package typealias Response = AccountReadResponse
+
+package extension AppServerAPI.Auth.Read {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Account.Read.Response
 
     package static let method = "account/read"
-    package var params: AccountReadParams
+    package var params: AppServerAPI.Account.Read.Params
 
     package init() {
         self.params = .init(refreshToken: false)
     }
 }
+}
 
-package struct AccountReadParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Read {
+struct Params: Codable, Equatable, Sendable {
     package var refreshToken: Bool
 
     package init(refreshToken: Bool) {
         self.refreshToken = refreshToken
     }
 }
+}
 
-package struct AccountReadResponse: Codable, Equatable, Sendable {
-    package var account: AppServerAccount?
+
+package extension AppServerAPI.Account.Read {
+struct Response: Codable, Equatable, Sendable {
+    package var account: AppServerAPI.Account.Snapshot?
     package var requiresOpenAIAuth: Bool
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case account
         case requiresOpenAIAuth = "requiresOpenaiAuth"
     }
 
-    package init(account: AppServerAccount? = nil, requiresOpenAIAuth: Bool = false) {
+    package init(account: AppServerAPI.Account.Snapshot? = nil, requiresOpenAIAuth: Bool = false) {
         self.account = account
         self.requiresOpenAIAuth = requiresOpenAIAuth
     }
 }
+}
 
-package struct AccountRateLimitsReadRequest: AppServerRequest {
-    package typealias Response = AppServerAccountRateLimitsResponse
+
+package extension AppServerAPI.Account.RateLimits.Read {
+struct Request: AppServerAPI.Request {
+    package typealias Response = AppServerAPI.Account.RateLimits.Response
 
     package static let method = "account/rateLimits/read"
     package var params: EmptyResponse
@@ -649,32 +833,38 @@ package struct AccountRateLimitsReadRequest: AppServerRequest {
         self.params = .init()
     }
 }
+}
 
-package struct AppServerAccountRateLimitsResponse: Codable, Equatable, Sendable {
-    package var rateLimits: AppServerRateLimitSnapshotPayload
-    package var rateLimitsByLimitID: [String: AppServerRateLimitSnapshotPayload]?
 
-    package enum CodingKeys: String, CodingKey {
+package extension AppServerAPI.Account.RateLimits {
+struct Response: Codable, Equatable, Sendable {
+    package var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
+    package var rateLimitsByLimitID: [String: AppServerAPI.Account.RateLimits.Snapshot]?
+
+    enum CodingKeys: String, CodingKey {
         case rateLimits
         case rateLimitsByLimitID = "rateLimitsByLimitId"
     }
 
     package init(
-        rateLimits: AppServerRateLimitSnapshotPayload,
-        rateLimitsByLimitID: [String: AppServerRateLimitSnapshotPayload]? = nil
+        rateLimits: AppServerAPI.Account.RateLimits.Snapshot,
+        rateLimitsByLimitID: [String: AppServerAPI.Account.RateLimits.Snapshot]? = nil
     ) {
         self.rateLimits = rateLimits
         self.rateLimitsByLimitID = rateLimitsByLimitID
     }
 }
+}
 
-package struct AppServerRateLimitSnapshotPayload: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.RateLimits {
+struct Snapshot: Codable, Equatable, Sendable {
     package var limitID: String?
-    package var primary: AppServerRateLimitWindowPayload?
-    package var secondary: AppServerRateLimitWindowPayload?
+    package var primary: AppServerAPI.Account.RateLimits.Window?
+    package var secondary: AppServerAPI.Account.RateLimits.Window?
     package var planType: String?
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case limitID = "limitId"
         case primary
         case secondary
@@ -683,8 +873,8 @@ package struct AppServerRateLimitSnapshotPayload: Codable, Equatable, Sendable {
 
     package init(
         limitID: String? = nil,
-        primary: AppServerRateLimitWindowPayload? = nil,
-        secondary: AppServerRateLimitWindowPayload? = nil,
+        primary: AppServerAPI.Account.RateLimits.Window? = nil,
+        secondary: AppServerAPI.Account.RateLimits.Window? = nil,
         planType: String? = nil
     ) {
         self.limitID = limitID
@@ -693,8 +883,11 @@ package struct AppServerRateLimitSnapshotPayload: Codable, Equatable, Sendable {
         self.planType = planType
     }
 }
+}
 
-package struct AppServerRateLimitWindowPayload: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.RateLimits {
+struct Window: Codable, Equatable, Sendable {
     package var usedPercent: Int
     package var windowDurationMins: Int?
     package var resetsAt: Int64?
@@ -709,8 +902,10 @@ package struct AppServerRateLimitWindowPayload: Codable, Equatable, Sendable {
         self.resetsAt = resetsAt
     }
 }
+}
 
-package extension AppServerAccountRateLimitsResponse {
+
+package extension AppServerAPI.Account.RateLimits.Response {
     var codexRateLimitWindows: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)] {
         Self.rateLimitWindows(from: codexSnapshot)
     }
@@ -719,7 +914,7 @@ package extension AppServerAccountRateLimitsResponse {
         codexSnapshot?.planType
     }
 
-    private var codexSnapshot: AppServerRateLimitSnapshotPayload? {
+    private var codexSnapshot: AppServerAPI.Account.RateLimits.Snapshot? {
         if let codexSnapshot = rateLimitsByLimitID?["codex"] {
             return codexSnapshot
         }
@@ -735,7 +930,7 @@ package extension AppServerAccountRateLimitsResponse {
     }
 
     private static func rateLimitWindows(
-        from snapshot: AppServerRateLimitSnapshotPayload?
+        from snapshot: AppServerAPI.Account.RateLimits.Snapshot?
     ) -> [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)] {
         [snapshot?.primary, snapshot?.secondary].compactMap { window in
             guard let window,
@@ -757,17 +952,19 @@ package extension AppServerAccountRateLimitsResponse {
     }
 }
 
-package struct AppServerAccount: Codable, Equatable, Sendable {
-    package var id: BackendAccountID
-    package var kind: BackendAccountKind
+
+package extension AppServerAPI.Account {
+struct Snapshot: Codable, Equatable, Sendable {
+    package var id: CodexReviewBackendModel.Account.ID
+    package var kind: CodexReviewBackendModel.Account.Kind
     package var label: String
     package var planType: String?
-    package var capabilities: BackendAccountCapabilities
+    package var capabilities: CodexReviewBackendModel.Account.Capabilities
 
     package init(email: String, planType: String) {
         self.init(
             kind: .chatGPT,
-            id: .init(normalizedReviewAccountEmail(email: email)),
+            id: .init(CodexAccount.normalizedEmail(email)),
             label: email,
             planType: planType,
             capabilities: .supportsCodexRateLimits
@@ -775,11 +972,11 @@ package struct AppServerAccount: Codable, Equatable, Sendable {
     }
 
     fileprivate init(
-        kind: BackendAccountKind,
-        id: BackendAccountID,
+        kind: CodexReviewBackendModel.Account.Kind,
+        id: CodexReviewBackendModel.Account.ID,
         label: String,
         planType: String?,
-        capabilities: BackendAccountCapabilities
+        capabilities: CodexReviewBackendModel.Account.Capabilities
     ) {
         self.id = id
         self.kind = kind
@@ -790,7 +987,7 @@ package struct AppServerAccount: Codable, Equatable, Sendable {
 
     package init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: AppServerAccountCodingKeys.self)
-        let kind = try container.decode(BackendAccountKind.self, forKey: .type)
+        let kind = try container.decode(CodexReviewBackendModel.Account.Kind.self, forKey: .type)
         let descriptor = AppServerAccountKindDescriptor.descriptor(for: kind)
         self = try descriptor.decode(container)
     }
@@ -802,6 +999,8 @@ package struct AppServerAccount: Codable, Equatable, Sendable {
         try descriptor.encodeFields(self, &container)
     }
 }
+}
+
 
 private enum AppServerAccountCodingKeys: String, CodingKey {
     case type
@@ -810,10 +1009,10 @@ private enum AppServerAccountCodingKeys: String, CodingKey {
 }
 
 private struct AppServerAccountKindDescriptor {
-    var decode: (KeyedDecodingContainer<AppServerAccountCodingKeys>) throws -> AppServerAccount
-    var encodeFields: (AppServerAccount, inout KeyedEncodingContainer<AppServerAccountCodingKeys>) throws -> Void
+    var decode: (KeyedDecodingContainer<AppServerAccountCodingKeys>) throws -> AppServerAPI.Account.Snapshot
+    var encodeFields: (AppServerAPI.Account.Snapshot, inout KeyedEncodingContainer<AppServerAccountCodingKeys>) throws -> Void
 
-    static func descriptor(for kind: BackendAccountKind) -> Self {
+    static func descriptor(for kind: CodexReviewBackendModel.Account.Kind) -> Self {
         switch kind {
         case .apiKey:
             fixed(
@@ -826,7 +1025,7 @@ private struct AppServerAccountKindDescriptor {
             .init(
                 decode: { container in
                     let email = try container.decode(String.self, forKey: .email)
-                    let normalizedEmail = normalizedReviewAccountEmail(email: email)
+                    let normalizedEmail = CodexAccount.normalizedEmail(email)
                     guard normalizedEmail.isEmpty == false else {
                         throw DecodingError.dataCorruptedError(
                             forKey: .email,
@@ -834,7 +1033,7 @@ private struct AppServerAccountKindDescriptor {
                             debugDescription: "ChatGPT account email must not be empty."
                         )
                     }
-                    return AppServerAccount(
+                    return AppServerAPI.Account.Snapshot(
                         kind: .chatGPT,
                         id: .init(normalizedEmail),
                         label: email,
@@ -867,14 +1066,14 @@ private struct AppServerAccountKindDescriptor {
     }
 
     private static func fixed(
-        kind: BackendAccountKind,
+        kind: CodexReviewBackendModel.Account.Kind,
         id: String,
         label: String,
-        capabilities: BackendAccountCapabilities
+        capabilities: CodexReviewBackendModel.Account.Capabilities
     ) -> Self {
         .init(
             decode: { _ in
-                AppServerAccount(
+                AppServerAPI.Account.Snapshot(
                     kind: kind,
                     id: .init(id),
                     label: label,
@@ -887,26 +1086,30 @@ private struct AppServerAccountKindDescriptor {
     }
 }
 
-package struct LoginAccountParams: Codable, Equatable, Sendable {
+package extension AppServerAPI.Account.Login {
+struct Params: Codable, Equatable, Sendable {
     package var type: String
     package var codexStreamlinedLogin: Bool
-    package var nativeWebAuthentication: AppServerNativeWebAuthenticationRequest?
+    package var nativeWebAuthentication: AppServerAPI.Account.Login.NativeWebAuthentication?
 
     package init(
         type: String = "chatgpt",
         codexStreamlinedLogin: Bool = true,
-        nativeWebAuthentication: AppServerNativeWebAuthenticationRequest? = nil
+        nativeWebAuthentication: AppServerAPI.Account.Login.NativeWebAuthentication? = nil
     ) {
         self.type = type
         self.codexStreamlinedLogin = codexStreamlinedLogin
         self.nativeWebAuthentication = nativeWebAuthentication
     }
 }
+}
 
-package struct AppServerNativeWebAuthenticationRequest: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Login {
+struct NativeWebAuthentication: Codable, Equatable, Sendable {
     package var callbackURLScheme: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case callbackURLScheme = "callbackUrlScheme"
     }
 
@@ -914,13 +1117,16 @@ package struct AppServerNativeWebAuthenticationRequest: Codable, Equatable, Send
         self.callbackURLScheme = callbackURLScheme
     }
 }
+}
 
-package enum LoginAccountResponse: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Login {
+enum Response: Codable, Equatable, Sendable {
     case apiKey
     case chatgpt(
         loginID: String,
         authURL: String,
-        nativeWebAuthentication: AppServerNativeWebAuthenticationRequest?
+        nativeWebAuthentication: AppServerAPI.Account.Login.NativeWebAuthentication?
     )
     case chatgptDeviceCode(loginID: String, verificationURL: String, userCode: String)
     case chatgptAuthTokens
@@ -944,7 +1150,7 @@ package enum LoginAccountResponse: Codable, Equatable, Sendable {
                 loginID: try container.decode(String.self, forKey: .loginID),
                 authURL: try container.decode(String.self, forKey: .authURL),
                 nativeWebAuthentication: try container.decodeIfPresent(
-                    AppServerNativeWebAuthenticationRequest.self,
+                    AppServerAPI.Account.Login.NativeWebAuthentication.self,
                     forKey: .nativeWebAuthentication
                 )
             )
@@ -985,12 +1191,15 @@ package enum LoginAccountResponse: Codable, Equatable, Sendable {
         }
     }
 }
+}
 
-package struct CompleteLoginAccountParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Login.Complete {
+struct Params: Codable, Equatable, Sendable {
     package var loginID: String
     package var callbackURL: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case loginID = "loginId"
         case callbackURL = "callbackUrl"
     }
@@ -1000,15 +1209,21 @@ package struct CompleteLoginAccountParams: Codable, Equatable, Sendable {
         self.callbackURL = callbackURL
     }
 }
-
-package struct CompleteLoginAccountResponse: Codable, Equatable, Sendable {
-    package init() {}
 }
 
-package struct CancelLoginAccountParams: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Login.Complete {
+struct Response: Codable, Equatable, Sendable {
+    package init() {}
+}
+}
+
+
+package extension AppServerAPI.Account.Login.Cancel {
+struct Params: Codable, Equatable, Sendable {
     package var loginID: String
 
-    package enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey {
         case loginID = "loginId"
     }
 
@@ -1016,11 +1231,15 @@ package struct CancelLoginAccountParams: Codable, Equatable, Sendable {
         self.loginID = loginID
     }
 }
+}
 
-package struct CancelLoginAccountResponse: Codable, Equatable, Sendable {
+
+package extension AppServerAPI.Account.Login.Cancel {
+struct Response: Codable, Equatable, Sendable {
     package var status: String
 
     package init(status: String = "canceled") {
         self.status = status
     }
+}
 }

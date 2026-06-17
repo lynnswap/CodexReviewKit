@@ -1,13 +1,15 @@
 import AppKit
 
-struct ReviewMonitorLogResolvedDecoration: Equatable {
-    var style: ReviewMonitorLogDecorationStyle
+extension ReviewMonitorLog {
+struct ResolvedDecoration: Equatable {
+    var style: ReviewMonitorLog.DecorationStyle
     var rect: NSRect
+}
 }
 
 @MainActor
 final class ReviewMonitorLogDecorationView: NSView {
-    var decorations: [ReviewMonitorLogResolvedDecoration] = [] {
+    var decorations: [ReviewMonitorLog.ResolvedDecoration] = [] {
         didSet {
             needsDisplay = true
         }
@@ -31,7 +33,7 @@ final class ReviewMonitorLogDecorationView: NSView {
         }
     }
 
-    private func draw(_ decoration: ReviewMonitorLogResolvedDecoration) {
+    private func draw(_ decoration: ReviewMonitorLog.ResolvedDecoration) {
         if case .contextCompaction(let label, _) = decoration.style {
             drawContextCompactionMarker(in: decoration.rect, label: label)
             return
@@ -47,7 +49,7 @@ final class ReviewMonitorLogDecorationView: NSView {
         backgroundPath.fill()
     }
 
-    private func palette(for style: ReviewMonitorLogDecorationStyle) -> Palette {
+    private func palette(for style: ReviewMonitorLog.DecorationStyle) -> Palette {
         switch style {
         case .transcript, .command, .plan, .reasoning, .tool, .diagnostic, .event:
             return .init(
@@ -269,12 +271,14 @@ private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
         abs(lhs.height - rhs.height) <= 0.5
 }
 
-struct ReviewMonitorLogWordFadeAnimation {
+extension ReviewMonitorLog {
+struct WordFadeAnimation {
     var range: NSRange
     var startedAt: TimeInterval?
     var delay: TimeInterval
     var renderedStep: Int
     var baseColor: NSColor
+}
 }
 
 @MainActor

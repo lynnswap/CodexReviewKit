@@ -4,13 +4,13 @@ import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-transport")
 
-package actor AppServerProcessTransport: JSONRPCTransport {
+package actor AppServerProcessTransport: JSONRPC.Transport {
     package struct Configuration: Sendable {
         package var executable: String
         package var arguments: [String]
         package var environment: [String: String]
         package var codexHomeURL: URL
-        package var threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
+        package var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
 
         package init(
             executable: String? = nil,
@@ -56,9 +56,9 @@ package actor AppServerProcessTransport: JSONRPCTransport {
     private let stderr: Pipe
     private let stdoutEvents: AppServerPipeReadEventSource
     private let stderrEvents: AppServerPipeReadEventSource
-    private var framer = JSONRPCFramer()
+    private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
-    private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPCNotification, Error>.Continuation] = [:]
+    private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
     private var stderrLogFilter = AppServerStderrLogFilter()
     private var closed = false
 
@@ -110,7 +110,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         stderrEvents.start()
     }
 
-    package func send(_ request: JSONRPCRequest) async throws -> Data {
+    package func send(_ request: JSONRPC.Request) async throws -> Data {
         try throwIfClosed()
         let payload = try makeRequestPayload(request)
         return try await withTaskCancellationHandler {
@@ -130,16 +130,16 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         }
     }
 
-    package func notify(_ notification: JSONRPCNotification) async throws {
+    package func notify(_ notification: JSONRPC.Notification) async throws {
         try throwIfClosed()
         let payload = try makeNotificationPayload(notification)
         try stdin.fileHandleForWriting.write(contentsOf: payload)
     }
 
-    package func notificationStream() -> AsyncThrowingStream<JSONRPCNotification, Error> {
+    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             if closed {
-                continuation.finish(throwing: JSONRPCError.closed)
+                continuation.finish(throwing: JSONRPC.Error.closed)
                 return
             }
             let id = UUID()
@@ -166,7 +166,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
             logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
             await process.terminateAndWait()
         }
-        finishAll(throwing: JSONRPCError.closed)
+        finishAll(throwing: JSONRPC.Error.closed)
     }
 
     private func receiveStdout(_ event: AppServerPipeReadEvent) async {
@@ -248,7 +248,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         if let errorObject = object["error"] as? [String: Any] {
             let code = errorObject["code"] as? Int ?? -1
             let message = errorObject["message"] as? String ?? "JSON-RPC request failed."
-            pendingResponse.continuation.resume(throwing: JSONRPCError.responseError(
+            pendingResponse.continuation.resume(throwing: JSONRPC.Error.responseError(
                 code: code,
                 message: message
             ))
@@ -287,7 +287,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
         guard let data = try? JSONSerialization.data(withJSONObject: params) else {
             return
         }
-        let notification = JSONRPCNotification(method: method, params: data)
+        let notification = JSONRPC.Notification(method: method, params: data)
         for continuation in notificationContinuations.values {
             continuation.yield(notification)
         }
@@ -316,7 +316,7 @@ package actor AppServerProcessTransport: JSONRPCTransport {
 
     private func throwIfClosed() throws {
         if closed {
-            throw JSONRPCError.closed
+            throw JSONRPC.Error.closed
         }
     }
 }
@@ -1001,7 +1001,7 @@ package enum CodexAppServerExecutable {
     }
 }
 
-private func makeRequestPayload(_ request: JSONRPCRequest) throws -> Data {
+private func makeRequestPayload(_ request: JSONRPC.Request) throws -> Data {
     let params = try JSONSerialization.jsonObject(with: request.params)
     let object: [String: Any] = [
         "id": request.id,
@@ -1013,7 +1013,7 @@ private func makeRequestPayload(_ request: JSONRPCRequest) throws -> Data {
     return data
 }
 
-private func makeNotificationPayload(_ notification: JSONRPCNotification) throws -> Data {
+private func makeNotificationPayload(_ notification: JSONRPC.Notification) throws -> Data {
     let params = try JSONSerialization.jsonObject(with: notification.params)
     let object: [String: Any] = [
         "method": notification.method,

@@ -1,18 +1,27 @@
 import Foundation
 
-package struct BackendSettingsSnapshot: Codable, Equatable, Sendable {
+package enum CodexReviewBackendModel {
+    package enum Settings {}
+    package enum Account {}
+    package enum Auth {}
+    package enum Login {}
+    package enum Review {}
+}
+
+package extension CodexReviewBackendModel.Settings {
+struct Snapshot: Codable, Equatable, Sendable {
     package var model: String?
     package var fallbackModel: String?
     package var reasoningEffort: String?
     package var serviceTier: String?
-    package var models: [CodexReviewModelCatalogItem]
+    package var models: [CodexReviewSettings.ModelCatalogItem]
 
     package init(
         model: String? = nil,
         fallbackModel: String? = nil,
         reasoningEffort: String? = nil,
         serviceTier: String? = nil,
-        models: [CodexReviewModelCatalogItem] = []
+        models: [CodexReviewSettings.ModelCatalogItem] = []
     ) {
         self.model = model
         self.fallbackModel = fallbackModel
@@ -21,8 +30,11 @@ package struct BackendSettingsSnapshot: Codable, Equatable, Sendable {
         self.models = models
     }
 }
+}
 
-package struct BackendSettingsChange: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Settings {
+struct Change: Codable, Equatable, Sendable {
     package var model: String?
     package var reasoningEffort: String?
     package var serviceTier: String?
@@ -46,22 +58,31 @@ package struct BackendSettingsChange: Codable, Equatable, Sendable {
         self.updatesServiceTier = updatesServiceTier ?? (serviceTier != nil)
     }
 }
+}
 
-package struct BackendAccountID: Codable, Hashable, Sendable {
+
+package extension CodexReviewBackendModel.Account {
+struct ID: Codable, Hashable, Sendable {
     package var rawValue: String
 
     package init(_ rawValue: String) {
         self.rawValue = rawValue
     }
 }
+}
 
-package enum BackendAccountKind: String, Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Account {
+enum Kind: String, Codable, Equatable, Sendable {
     case chatGPT = "chatgpt"
     case apiKey
     case amazonBedrock
 }
+}
 
-package struct BackendAccountCapabilities: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Account {
+struct Capabilities: Codable, Equatable, Sendable {
     package var supportsRateLimitRefresh: Bool
 
     package init(supportsRateLimitRefresh: Bool = true) {
@@ -76,9 +97,11 @@ package struct BackendAccountCapabilities: Codable, Equatable, Sendable {
         .init(supportsRateLimitRefresh: false)
     }
 }
+}
 
-package extension BackendAccountKind {
-    var capabilities: BackendAccountCapabilities {
+
+package extension CodexReviewBackendModel.Account.Kind {
+    var capabilities: CodexReviewBackendModel.Account.Capabilities {
         switch self {
         case .chatGPT:
             .supportsCodexRateLimits
@@ -88,21 +111,23 @@ package extension BackendAccountKind {
     }
 }
 
-package struct BackendAccountSnapshot: Codable, Equatable, Sendable, Identifiable {
-    package var id: BackendAccountID
-    package var kind: BackendAccountKind
+
+package extension CodexReviewBackendModel.Account {
+struct Snapshot: Codable, Equatable, Sendable, Identifiable {
+    package var id: CodexReviewBackendModel.Account.ID
+    package var kind: CodexReviewBackendModel.Account.Kind
     package var label: String
     package var isActive: Bool
     package var planType: String?
-    package var capabilities: BackendAccountCapabilities
+    package var capabilities: CodexReviewBackendModel.Account.Capabilities
 
     package init(
-        id: BackendAccountID,
-        kind: BackendAccountKind = .chatGPT,
+        id: CodexReviewBackendModel.Account.ID,
+        kind: CodexReviewBackendModel.Account.Kind = .chatGPT,
         label: String,
         isActive: Bool = false,
         planType: String? = nil,
-        capabilities: BackendAccountCapabilities? = nil
+        capabilities: CodexReviewBackendModel.Account.Capabilities? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -112,42 +137,54 @@ package struct BackendAccountSnapshot: Codable, Equatable, Sendable, Identifiabl
         self.capabilities = capabilities ?? kind.capabilities
     }
 }
+}
 
-package struct BackendAuthSnapshot: Codable, Equatable, Sendable {
-    package var accounts: [BackendAccountSnapshot]
-    package var activeAccountID: BackendAccountID?
+
+package extension CodexReviewBackendModel.Auth {
+struct Snapshot: Codable, Equatable, Sendable {
+    package var accounts: [CodexReviewBackendModel.Account.Snapshot]
+    package var activeAccountID: CodexReviewBackendModel.Account.ID?
 
     package init(
-        accounts: [BackendAccountSnapshot] = [],
-        activeAccountID: BackendAccountID? = nil
+        accounts: [CodexReviewBackendModel.Account.Snapshot] = [],
+        activeAccountID: CodexReviewBackendModel.Account.ID? = nil
     ) {
         self.accounts = accounts
         self.activeAccountID = activeAccountID
     }
 }
+}
 
-package enum BackendAuthPhase: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Auth {
+enum Phase: Codable, Equatable, Sendable {
     case unknown
     case signedOut
     case authenticated
     case authenticating(challengeID: String)
     case failed(message: String)
 }
+}
 
-package struct BackendLoginRequest: Codable, Equatable, Sendable {
-    package var preferredAccountID: BackendAccountID?
+
+package extension CodexReviewBackendModel.Login {
+struct Request: Codable, Equatable, Sendable {
+    package var preferredAccountID: CodexReviewBackendModel.Account.ID?
     package var nativeWebAuthenticationCallbackScheme: String?
 
     package init(
-        preferredAccountID: BackendAccountID? = nil,
+        preferredAccountID: CodexReviewBackendModel.Account.ID? = nil,
         nativeWebAuthenticationCallbackScheme: String? = nil
     ) {
         self.preferredAccountID = preferredAccountID
         self.nativeWebAuthenticationCallbackScheme = nativeWebAuthenticationCallbackScheme
     }
 }
+}
 
-package struct BackendLoginChallenge: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Login {
+struct Challenge: Codable, Equatable, Sendable {
     package var id: String
     package var verificationURL: URL?
     package var userCode: String?
@@ -165,8 +202,11 @@ package struct BackendLoginChallenge: Codable, Equatable, Sendable {
         self.nativeWebAuthenticationCallbackScheme = nativeWebAuthenticationCallbackScheme
     }
 }
+}
 
-package struct BackendLoginResponse: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Login {
+struct Response: Codable, Equatable, Sendable {
     package var challengeID: String
     package var callbackURL: String?
 
@@ -175,21 +215,24 @@ package struct BackendLoginResponse: Codable, Equatable, Sendable {
         self.callbackURL = callbackURL
     }
 }
+}
 
-package struct BackendReviewStart: Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Review {
+struct Start: Equatable, Sendable {
     package var jobID: String
     package var sessionID: String
-    package var request: ReviewStartRequest
+    package var request: CodexReviewAPI.Start.Request
     package var model: String?
 
-    package init(jobID: String, sessionID: String, request: ReviewStartRequest) {
+    package init(jobID: String, sessionID: String, request: CodexReviewAPI.Start.Request) {
         self.init(jobID: jobID, sessionID: sessionID, request: request, model: nil)
     }
 
     package init(
         jobID: String,
         sessionID: String,
-        request: ReviewStartRequest,
+        request: CodexReviewAPI.Start.Request,
         model: String?
     ) {
         self.jobID = jobID
@@ -198,8 +241,11 @@ package struct BackendReviewStart: Equatable, Sendable {
         self.model = model
     }
 }
+}
 
-package struct BackendReviewRun: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Review {
+struct Run: Codable, Equatable, Sendable {
     package var attemptID: String
     package var threadID: String
     package var turnID: String?
@@ -237,21 +283,27 @@ package struct BackendReviewRun: Codable, Equatable, Sendable {
         self.model = try container.decodeIfPresent(String.self, forKey: .model)
     }
 }
+}
 
-package struct BackendReviewRecoveryToken: Equatable, Sendable {
-    package var interruptedRun: BackendReviewRun
+
+package extension CodexReviewBackendModel.Review {
+struct RecoveryToken: Equatable, Sendable {
+    package var interruptedRun: CodexReviewBackendModel.Review.Run
     package var rollbackThreadID: String
 
     package init(
-        interruptedRun: BackendReviewRun,
+        interruptedRun: CodexReviewBackendModel.Review.Run,
         rollbackThreadID: String
     ) {
         self.interruptedRun = interruptedRun
         self.rollbackThreadID = rollbackThreadID
     }
 }
+}
 
-package enum BackendReviewEvent: Equatable, Sendable {
+
+package extension CodexReviewBackendModel.Review {
+enum Event: Equatable, Sendable {
     case started(turnID: String, reviewThreadID: String?, model: String?)
     case message(String)
     case messageDelta(String, itemID: String)
@@ -267,11 +319,15 @@ package enum BackendReviewEvent: Equatable, Sendable {
     case failed(String)
     case cancelled(String)
 }
+}
 
-package struct BackendCancellationReason: Codable, Equatable, Sendable {
+
+package extension CodexReviewBackendModel {
+struct CancellationReason: Codable, Equatable, Sendable {
     package var message: String
 
     package init(message: String = "Cancellation requested.") {
         self.message = message
     }
+}
 }

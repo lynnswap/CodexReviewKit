@@ -21,7 +21,7 @@ extension CodexReviewStore {
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
         jobs: [CodexReviewJob] = [],
-        settingsSnapshot: CodexReviewSettingsSnapshot? = nil
+        settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         precondition(
             backend.isActive == false,

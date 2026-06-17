@@ -7,7 +7,7 @@ private let appServerBackendLogger = Logger(
     category: "app-server-backend"
 )
 
-private func appServerTurnThreadID(for run: BackendReviewRun) -> String {
+private func appServerTurnThreadID(for run: CodexReviewBackendModel.Review.Run) -> String {
     run.reviewThreadID?.nilIfEmpty ?? run.threadID
 }
 
@@ -19,7 +19,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
     private let client: AppServerClient
-    private let threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy
+    private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var activeReviewAttemptIDByThreadID: [String: String] = [:]
@@ -38,15 +38,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package init(
         client: AppServerClient,
-        threadStartPermissionStrategy: AppServerThreadStartPermissionStrategy = .modernPermissions
+        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
     ) {
         self.client = client
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
-    package func readSettings() async throws -> BackendSettingsSnapshot {
+    package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
         _ = try await client.initialize()
-        let response = try await client.send(ConfigReadRequest())
+        let response = try await client.send(AppServerAPI.Config.Read.Request())
         let models = try await readModelCatalog()
         return .init(
             model: response.config.reviewModel?.nilIfEmpty,
@@ -57,65 +57,65 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    package func applySettings(_ change: BackendSettingsChange) async throws -> BackendSettingsSnapshot {
+    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         _ = try await client.initialize()
         let edits = Self.configEdits(from: change)
         if edits.isEmpty == false {
-            let _: ConfigWriteResponse = try await client.send(ConfigBatchWriteRequest(
+            let _: AppServerAPI.Config.BatchWrite.Response = try await client.send(AppServerAPI.Config.BatchWrite.Request(
                 params: .init(edits: edits)
             ))
         }
         return try await readSettings()
     }
 
-    package func readAuth() async throws -> BackendAuthSnapshot {
+    package func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot {
         _ = try await client.initialize()
-        let response = try await client.send(AuthReadRequest())
+        let response = try await client.send(AppServerAPI.Auth.Read.Request())
         guard let account = response.account?.backendAccount else {
             return .init()
         }
         return .init(accounts: [account], activeAccountID: account.id)
     }
 
-    package func readRateLimits() async throws -> AppServerAccountRateLimitsResponse {
+    package func readRateLimits() async throws -> AppServerAPI.Account.RateLimits.Response {
         _ = try await client.initialize()
-        return try await client.send(AccountRateLimitsReadRequest())
+        return try await client.send(AppServerAPI.Account.RateLimits.Read.Request())
     }
 
-    package func startLogin(_ request: BackendLoginRequest) async throws -> BackendLoginChallenge {
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
         _ = try await client.initialize()
         let nativeWebAuthentication = request.nativeWebAuthenticationCallbackScheme
-            .map(AppServerNativeWebAuthenticationRequest.init(callbackURLScheme:))
-        let response: LoginAccountResponse = try await client.send(
+            .map(AppServerAPI.Account.Login.NativeWebAuthentication.init(callbackURLScheme:))
+        let response: AppServerAPI.Account.Login.Response = try await client.send(
             method: "account/login/start",
-            params: LoginAccountParams(nativeWebAuthentication: nativeWebAuthentication),
-            responseType: LoginAccountResponse.self
+            params: AppServerAPI.Account.Login.Params(nativeWebAuthentication: nativeWebAuthentication),
+            responseType: AppServerAPI.Account.Login.Response.self
         )
         return try response.backendChallenge
     }
 
-    package func cancelLogin(_ challenge: BackendLoginChallenge) async throws {
+    package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
         _ = try await client.initialize()
-        let _: CancelLoginAccountResponse = try await client.send(
+        let _: AppServerAPI.Account.Login.Cancel.Response = try await client.send(
             method: "account/login/cancel",
-            params: CancelLoginAccountParams(loginID: challenge.id),
-            responseType: CancelLoginAccountResponse.self
+            params: AppServerAPI.Account.Login.Cancel.Params(loginID: challenge.id),
+            responseType: AppServerAPI.Account.Login.Cancel.Response.self
         )
     }
 
-    package func completeLogin(_ response: BackendLoginResponse) async throws -> BackendAuthSnapshot {
+    package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         if let callbackURL = response.callbackURL {
             _ = try await client.initialize()
-            let _: CompleteLoginAccountResponse = try await client.send(
+            let _: AppServerAPI.Account.Login.Complete.Response = try await client.send(
                 method: "account/login/complete",
-                params: CompleteLoginAccountParams(loginID: response.challengeID, callbackURL: callbackURL),
-                responseType: CompleteLoginAccountResponse.self
+                params: AppServerAPI.Account.Login.Complete.Params(loginID: response.challengeID, callbackURL: callbackURL),
+                responseType: AppServerAPI.Account.Login.Complete.Response.self
             )
         }
         return try await readAuth()
     }
 
-    package func logout(_: BackendAccountID) async throws -> BackendAuthSnapshot {
+    package func logout(_: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         _ = try await client.initialize()
         let _: EmptyResponse = try await client.send(
             method: "account/logout",
@@ -125,7 +125,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return try await readAuth()
     }
 
-    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
+    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let control = AppServerReviewControl(client: client)
@@ -133,7 +133,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let thread = try await startReviewThread(request)
         controlsByThreadID[thread.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
-        let provisionalRun = BackendReviewRun(
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: thread.threadID,
             reviewThreadID: thread.threadID,
@@ -147,10 +147,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         registerReviewEventSession(session, for: provisionalRun)
         control.recordThreadStarted(threadID: thread.threadID)
 
-        let review: ReviewStartResponse
+        let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.send(ReviewStartRequest(
+            review = try await client.send(AppServerAPI.Review.Start.Request(
                 params: .init(threadID: thread.threadID, target: request.request.target)
             ))
         } catch {
@@ -160,7 +160,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             throw error
         }
         let reviewThreadID = review.reviewThreadID ?? thread.threadID
-        let run = BackendReviewRun(
+        let run = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: thread.threadID,
             turnID: review.turnID,
@@ -178,23 +178,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.attempt()
     }
 
-    private func startReviewThread(_ request: BackendReviewStart) async throws -> ThreadStartResponse {
+    private func startReviewThread(_ request: CodexReviewBackendModel.Review.Start) async throws -> AppServerAPI.Thread.Start.Response {
         if threadStartPermissionStrategy == .legacySandbox {
             // Deprecated compatibility: installed Codex builds without the app-server v2
             // session-source flag can ignore permissions without failing the request.
-            return try await client.send(ThreadStartRequest(
+            return try await client.send(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
             ))
         }
         do {
             return try await startReviewThreadWithProfileIDPermissions(request)
-        } catch let error as JSONRPCError where Self.shouldRetryThreadStartWithLegacySandbox(error) {
+        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
             // Deprecated compatibility: some builds accept the permissions field shape
             // without registering the danger-full-access built-in profile.
-            return try await client.send(ThreadStartRequest(
+            return try await client.send(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
             ))
-        } catch let error as JSONRPCError where Self.shouldRetryThreadStartWithObjectPermissions(error) {
+        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
             // Deprecated compatibility: installed Codex builds can require object-shaped
             // permissions while the latest local app-server source accepts a profile ID string.
             return try await startReviewThreadWithProfileSelectionPermissions(request)
@@ -202,9 +202,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func startReviewThreadWithProfileIDPermissions(
-        _ request: BackendReviewStart
-    ) async throws -> ThreadStartResponse {
-        try await client.send(ThreadStartRequest(
+        _ request: CodexReviewBackendModel.Review.Start
+    ) async throws -> AppServerAPI.Thread.Start.Response {
+        try await client.send(AppServerAPI.Thread.Start.Request(
             params: threadStartParams(
                 request,
                 permissions: .profileID(Self.reviewPermissionProfileID)
@@ -213,30 +213,30 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func startReviewThreadWithProfileSelectionPermissions(
-        _ request: BackendReviewStart
-    ) async throws -> ThreadStartResponse {
+        _ request: CodexReviewBackendModel.Review.Start
+    ) async throws -> AppServerAPI.Thread.Start.Response {
         do {
-            return try await client.send(ThreadStartRequest(
+            return try await client.send(AppServerAPI.Thread.Start.Request(
                 params: threadStartParams(
                     request,
                     permissions: .profileSelection(.init(id: Self.reviewPermissionProfileID))
                 )
             ))
-        } catch let error as JSONRPCError
+        } catch let error as JSONRPC.Error
             where Self.shouldRetryThreadStartWithLegacySandbox(error)
         {
             // Deprecated compatibility: installed Codex builds can know the permissions
             // object shape without registering the danger-full-access built-in profile.
-            return try await client.send(ThreadStartRequest(
+            return try await client.send(AppServerAPI.Thread.Start.Request(
                 params: threadStartParamsWithLegacySandbox(request)
             ))
         }
     }
 
     private func threadStartParams(
-        _ request: BackendReviewStart,
-        permissions: ThreadStartPermissions
-    ) -> ThreadStartParams {
+        _ request: CodexReviewBackendModel.Review.Start,
+        permissions: AppServerAPI.Thread.Start.Permissions
+    ) -> AppServerAPI.Thread.Start.Params {
         .init(
             cwd: request.request.cwd,
             model: request.model,
@@ -248,7 +248,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    private func threadStartParamsWithLegacySandbox(_ request: BackendReviewStart) -> ThreadStartParams {
+    private func threadStartParamsWithLegacySandbox(_ request: CodexReviewBackendModel.Review.Start) -> AppServerAPI.Thread.Start.Params {
         .init(
             cwd: request.request.cwd,
             model: request.model,
@@ -260,7 +260,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    private nonisolated static func shouldRetryThreadStartWithObjectPermissions(_ error: JSONRPCError) -> Bool {
+    private nonisolated static func shouldRetryThreadStartWithObjectPermissions(_ error: JSONRPC.Error) -> Bool {
         guard case .responseError(_, let message) = error else {
             return false
         }
@@ -268,7 +268,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             || message.contains("invalid type: string")
     }
 
-    private nonisolated static func shouldRetryThreadStartWithLegacySandbox(_ error: JSONRPCError) -> Bool {
+    private nonisolated static func shouldRetryThreadStartWithLegacySandbox(_ error: JSONRPC.Error) -> Bool {
         guard case .responseError(_, let message) = error else {
             return false
         }
@@ -276,7 +276,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             || message.contains("default_permissions refers to unknown")
     }
 
-    package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
+    package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
         _ = try await client.initialize()
         guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
             return
@@ -297,9 +297,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason _: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         markTurnAbandoned(run.turnID)
@@ -314,27 +314,27 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        return BackendReviewRecoveryToken(
+        return CodexReviewBackendModel.Review.RecoveryToken(
             interruptedRun: run,
             rollbackThreadID: interruption.threadID
         )
     }
 
     package func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let interruptedRun = token.interruptedRun
-        let _: EmptyResponse = try await client.send(ThreadRollbackRequest(
+        let _: EmptyResponse = try await client.send(AppServerAPI.Thread.Rollback.Request(
             params: .init(threadID: token.rollbackThreadID, numTurns: 1)
         ))
 
         let control = controlsByThreadID[interruptedRun.threadID] ?? AppServerReviewControl(client: client)
         controlsByThreadID[interruptedRun.threadID] = control
         let attemptID = makeAppServerReviewAttemptID()
-        let provisionalRun = BackendReviewRun(
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
             reviewThreadID: interruptedRun.threadID,
@@ -347,10 +347,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         registerReviewEventSession(session, for: provisionalRun)
 
-        let review: ReviewStartResponse
+        let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.send(ReviewStartRequest(
+            review = try await client.send(AppServerAPI.Review.Start.Request(
                 params: .init(threadID: interruptedRun.threadID, target: request.request.target)
             ))
         } catch {
@@ -361,7 +361,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             throw error
         }
 
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
             turnID: review.turnID,
@@ -382,7 +382,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return await session.attempt()
     }
 
-    package func cleanupReview(_ run: BackendReviewRun) async {
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         _ = try? await client.initialize()
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
@@ -394,14 +394,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        let _: EmptyResponse? = try? await client.send(BackgroundTerminalsCleanRequest(
+        let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
             params: .init(threadID: run.threadID)
         ))
-        let _: ThreadUnsubscribeResponse? = try? await client.send(ThreadUnsubscribeRequest(
+        let _: AppServerAPI.Thread.Unsubscribe.Response? = try? await client.send(AppServerAPI.Thread.Unsubscribe.Request(
             params: .init(threadID: run.threadID)
         ))
         for threadID in cleanupThreadIDs {
-            let _: EmptyResponse? = try? await client.send(ThreadDeleteRequest(
+            let _: EmptyResponse? = try? await client.send(AppServerAPI.Thread.Delete.Request(
                 params: .init(threadID: threadID)
             ))
         }
@@ -412,7 +412,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
     }
 
-    package func cleanupActiveReviewsForShutdown(reason: BackendCancellationReason) async {
+    package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
         let runs = await activeReviewRunsForShutdown()
         guard runs.isEmpty == false else {
             return
@@ -429,7 +429,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func interruptActiveReviewsForShutdown(reason: BackendCancellationReason) async {
+    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
         let runs = await activeReviewRunsForShutdown()
         guard runs.isEmpty == false else {
             return
@@ -473,12 +473,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await session.detach(subscriptionID: subscriptionID)
     }
 
-    package func reviewAttemptForTesting(_ run: BackendReviewRun) async -> BackendReviewAttempt {
+    package func reviewAttemptForTesting(_ run: CodexReviewBackendModel.Review.Run) async -> BackendReviewAttempt {
         let session = await reviewEventSession(for: run)
         return await session.attempt()
     }
 
-    private func reviewEventSession(for run: BackendReviewRun) async -> AppServerReviewEventSession {
+    private func reviewEventSession(for run: CodexReviewBackendModel.Review.Run) async -> AppServerReviewEventSession {
         await ensureNotificationRouterStarted()
         if let session = reviewEventSessionsByAttemptID[run.attemptID] {
             await session.updateRun(run)
@@ -499,7 +499,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func registerReviewEventSession(
         _ session: AppServerReviewEventSession,
-        for run: BackendReviewRun
+        for run: CodexReviewBackendModel.Review.Run
     ) {
         reviewEventSessionsByAttemptID[run.attemptID] = session
         let activeThreadIDs = Set([run.threadID, run.reviewThreadID].compactMap { $0?.nilIfEmpty })
@@ -535,7 +535,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return reviewEventSessionsByAttemptID[attemptID]
     }
 
-    private func unregisterReviewEventSession(for run: BackendReviewRun) -> AppServerReviewEventSession? {
+    private func unregisterReviewEventSession(for run: CodexReviewBackendModel.Review.Run) -> AppServerReviewEventSession? {
         if activeReviewAttemptIDByThreadID[run.threadID] == run.attemptID {
             activeReviewAttemptIDByThreadID.removeValue(forKey: run.threadID)
         }
@@ -554,7 +554,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func markAttemptAbandoned(
-        _ run: BackendReviewRun,
+        _ run: CodexReviewBackendModel.Review.Run,
         interruption: AppServerReviewInterruption
     ) {
         abandonedReviewAttemptIDs.insert(run.attemptID)
@@ -578,9 +578,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         abandonedTurnIDs.insert(turnID)
     }
 
-    private func activeReviewRunsForShutdown() async -> [BackendReviewRun] {
+    private func activeReviewRunsForShutdown() async -> [CodexReviewBackendModel.Review.Run] {
         let sessions = Array(reviewEventSessionsByAttemptID.values)
-        var runsByAttemptID: [String: BackendReviewRun] = [:]
+        var runsByAttemptID: [String: CodexReviewBackendModel.Review.Run] = [:]
         for session in sessions {
             let run = await session.currentRun()
             runsByAttemptID[run.attemptID] = run
@@ -599,7 +599,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return true
     }
 
-    private func takeUnmatchedReviewNotifications(for run: BackendReviewRun) -> [AppServerRoutedReviewNotification] {
+    private func takeUnmatchedReviewNotifications(for run: CodexReviewBackendModel.Review.Run) -> [AppServerRoutedReviewNotification] {
         guard let reviewThreadID = run.reviewThreadID else {
             return []
         }
@@ -630,7 +630,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func sendTurnInterrupt(
-        for run: BackendReviewRun,
+        for run: CodexReviewBackendModel.Review.Run,
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
     ) async throws -> AppServerReviewInterruption {
         if let control = controlsByThreadID[run.threadID],
@@ -638,13 +638,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return interruption
         }
         let threadID = appServerTurnThreadID(for: run)
-        let _: EmptyResponse = try await client.send(TurnInterruptRequest(
+        let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
             params: .init(threadID: threadID, turnID: run.turnID ?? "")
         ))
         return .init(threadID: threadID, turnID: run.turnID ?? "")
     }
 
-    private func cleanupThreadIDs(for run: BackendReviewRun) -> [String] {
+    private func cleanupThreadIDs(for run: CodexReviewBackendModel.Review.Run) -> [String] {
         var seen: Set<String> = []
         var threadIDs: [String] = []
         let registeredReviewThreadIDs = (reviewThreadIDsForCleanupByThreadID[run.threadID] ?? [])
@@ -692,7 +692,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func consumeReviewNotifications(
-        _ notifications: AsyncThrowingStream<JSONRPCNotification, Error>
+        _ notifications: AsyncThrowingStream<JSONRPC.Notification, Error>
     ) async {
         do {
             for try await notification in notifications {
@@ -705,7 +705,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         notificationRouterTask = nil
     }
 
-    private func routeReviewNotification(_ notification: JSONRPCNotification) async {
+    private func routeReviewNotification(_ notification: JSONRPC.Notification) async {
         notificationRouterMetrics.received += 1
         guard isReviewNotificationMethod(notification.method) else {
             notificationRouterMetrics.ignored += 1
@@ -760,11 +760,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    private func readModelCatalog() async throws -> [CodexReviewModelCatalogItem] {
+    private func readModelCatalog() async throws -> [CodexReviewSettings.ModelCatalogItem] {
         var cursor: String?
-        var models: [CodexReviewModelCatalogItem] = []
+        var models: [CodexReviewSettings.ModelCatalogItem] = []
         repeat {
-            let response = try await client.send(ModelListRequest(
+            let response = try await client.send(AppServerAPI.Model.List.Request(
                 params: .init(cursor: cursor, includeHidden: true)
             ))
             models.append(contentsOf: response.data)
@@ -804,7 +804,7 @@ private struct AppServerRoutedReviewNotification: Sendable {
 }
 
 private struct DecodedReviewNotification {
-    var events: [BackendReviewEvent]
+    var events: [CodexReviewBackendModel.Review.Event]
     var turnID: String?
     var startsReviewMode: Bool
     var finishesReviewMode: Bool
@@ -849,7 +849,7 @@ private struct PendingStreamedLogEntry: Sendable {
         )
     }
 
-    var event: BackendReviewEvent {
+    var event: CodexReviewBackendModel.Review.Event {
         .logEntry(
             kind: kind,
             text: text,
@@ -859,7 +859,7 @@ private struct PendingStreamedLogEntry: Sendable {
         )
     }
 
-    init?(_ event: BackendReviewEvent) {
+    init?(_ event: CodexReviewBackendModel.Review.Event) {
         guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
               text.isEmpty == false,
               replacesGroup == false,
@@ -895,7 +895,7 @@ private actor AppServerReviewEventSession {
     private static let longCommandDurationWarningMs = 100_000
     private static let streamedLogFlushIntervalNanoseconds: UInt64 = 20_000_000
 
-    private var run: BackendReviewRun
+    private var run: CodexReviewBackendModel.Review.Run
     private let control: AppServerReviewControl
     private let mailbox: BackendReviewEventMailbox
     private var trackedTurnIDs: Set<String>
@@ -916,7 +916,7 @@ private actor AppServerReviewEventSession {
     private var metrics = AppServerReviewEventSessionMetrics()
 
     init(
-        run: BackendReviewRun,
+        run: CodexReviewBackendModel.Review.Run,
         control: AppServerReviewControl,
         mailbox: BackendReviewEventMailbox = .init(),
         isRunFinalized: Bool = true
@@ -932,7 +932,7 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    func updateRun(_ run: BackendReviewRun) {
+    func updateRun(_ run: CodexReviewBackendModel.Review.Run) {
         self.run = run
         if let turnID = run.turnID {
             trackedTurnIDs.insert(turnID)
@@ -958,7 +958,7 @@ private actor AppServerReviewEventSession {
         await drainStartupNotifications()
     }
 
-    func currentRun() -> BackendReviewRun {
+    func currentRun() -> CodexReviewBackendModel.Review.Run {
         run
     }
 
@@ -1052,7 +1052,7 @@ private actor AppServerReviewEventSession {
     func detach(subscriptionID _: Int) {}
 
     private func finish(
-        precedingEvents: [BackendReviewEvent],
+        precedingEvents: [CodexReviewBackendModel.Review.Event],
         cancellationMessage: String?
     ) async {
         guard finished == false else {
@@ -1138,7 +1138,7 @@ private actor AppServerReviewEventSession {
                emittedStartedTurnIDs.contains(turnID) == false
             {
                 emittedStartedTurnIDs.insert(turnID)
-                let started = BackendReviewEvent.started(
+                let started = CodexReviewBackendModel.Review.Event.started(
                     turnID: turnID,
                     reviewThreadID: run.reviewThreadID ?? run.threadID,
                     model: nil
@@ -1253,7 +1253,7 @@ private actor AppServerReviewEventSession {
     }
 
     private func emit(
-        _ event: BackendReviewEvent,
+        _ event: CodexReviewBackendModel.Review.Event,
         controlThreadID: String? = nil
     ) async -> Bool {
         noteEmission(event)
@@ -1292,7 +1292,7 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private static func isCommandProgressBoundary(_ event: BackendReviewEvent) -> Bool {
+    private static func isCommandProgressBoundary(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         switch event {
         case .started, .message, .messageDelta, .log:
             return true
@@ -1338,7 +1338,7 @@ private actor AppServerReviewEventSession {
         return false
     }
 
-    private func bufferStreamedLog(_ event: BackendReviewEvent) -> Bool {
+    private func bufferStreamedLog(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         guard let entry = PendingStreamedLogEntry(event) else {
             return false
         }
@@ -1387,7 +1387,7 @@ private actor AppServerReviewEventSession {
         return false
     }
 
-    private func drainPendingStreamedLogEvents() -> [BackendReviewEvent] {
+    private func drainPendingStreamedLogEvents() -> [CodexReviewBackendModel.Review.Event] {
         let events = pendingStreamedLogEntries.map(\.event)
         pendingStreamedLogEntries.removeAll(keepingCapacity: true)
         pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
@@ -1411,7 +1411,7 @@ private actor AppServerReviewEventSession {
         return true
     }
 
-    private func recordReviewEvent(_ event: BackendReviewEvent, controlThreadID: String? = nil) {
+    private func recordReviewEvent(_ event: CodexReviewBackendModel.Review.Event, controlThreadID: String? = nil) {
         switch event {
         case .started(let turnID, _, _):
             control.recordTurnStarted(turnThreadID: controlThreadID ?? appServerTurnThreadID(for: run), turnID: turnID)
@@ -1425,13 +1425,13 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func noteEmissions(_ events: [BackendReviewEvent]) {
+    private func noteEmissions(_ events: [CodexReviewBackendModel.Review.Event]) {
         for event in events {
             noteEmission(event)
         }
     }
 
-    private func emitPrecedingEvents(_ events: [BackendReviewEvent]) async {
+    private func emitPrecedingEvents(_ events: [CodexReviewBackendModel.Review.Event]) async {
         noteEmissions(events)
         for event in events {
             await mailbox.append(event)
@@ -1439,7 +1439,7 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func noteEmission(_ event: BackendReviewEvent) {
+    private func noteEmission(_ event: CodexReviewBackendModel.Review.Event) {
         metrics.emitted += 1
         if metrics.firstEventLatencyMs == nil {
             metrics.firstEventLatencyMs = Self.durationMs(from: createdAt, to: Date())
@@ -1452,7 +1452,7 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private static func isCommandTimeoutWarning(_ event: BackendReviewEvent) -> Bool {
+    private static func isCommandTimeoutWarning(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         guard case .logEntry(_, _, _, _, let metadata) = event,
               metadata?.sourceType == "commandExecution"
         else {
@@ -1473,7 +1473,7 @@ private actor AppServerReviewEventSession {
     }
 }
 
-private extension BackendReviewEvent {
+private extension CodexReviewBackendModel.Review.Event {
     var isTerminal: Bool {
         switch self {
         case .completed, .failed, .cancelled:
@@ -1505,10 +1505,10 @@ private extension BackendReviewEvent {
 }
 
 private final class ReviewCompletionCoordinator {
-    private var pendingCompletion: BackendReviewEvent?
+    private var pendingCompletion: CodexReviewBackendModel.Review.Event?
     private var finished = false
 
-    func emit(_ event: BackendReviewEvent) -> Bool {
+    func emit(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         guard finished == false else {
             return true
         }
@@ -1520,14 +1520,14 @@ private final class ReviewCompletionCoordinator {
         return true
     }
 
-    func deferCompletion(_ event: BackendReviewEvent) {
+    func deferCompletion(_ event: CodexReviewBackendModel.Review.Event) {
         guard finished == false else {
             return
         }
         pendingCompletion = event
     }
 
-    func flushPendingCompletion() -> BackendReviewEvent? {
+    func flushPendingCompletion() -> CodexReviewBackendModel.Review.Event? {
         guard finished == false,
               let event = pendingCompletion
         else {
@@ -1552,32 +1552,32 @@ private final class ReviewCompletionCoordinator {
 }
 
 private extension AppServerCodexReviewBackend {
-    static func configEdits(from change: BackendSettingsChange) -> [AppServerConfigEdit] {
-        var edits: [AppServerConfigEdit] = []
+    static func configEdits(from change: CodexReviewBackendModel.Settings.Change) -> [AppServerAPI.Config.Edit] {
+        var edits: [AppServerAPI.Config.Edit] = []
         if change.updatesModel {
             edits.append(.init(
                 keyPath: "review_model",
-                value: change.model.map(AppServerJSONValue.string) ?? .null
+                value: change.model.map(AppServerAPI.Config.Value.string) ?? .null
             ))
         }
         if change.updatesReasoningEffort {
             edits.append(.init(
                 keyPath: "model_reasoning_effort",
-                value: change.reasoningEffort.map(AppServerJSONValue.string) ?? .null
+                value: change.reasoningEffort.map(AppServerAPI.Config.Value.string) ?? .null
             ))
         }
         if change.updatesServiceTier {
             edits.append(.init(
                 keyPath: "service_tier",
-                value: change.serviceTier.map(AppServerJSONValue.string) ?? .null
+                value: change.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
             ))
         }
         return edits
     }
 }
 
-private extension AppServerAccount {
-    var backendAccount: BackendAccountSnapshot {
+private extension AppServerAPI.Account.Snapshot {
+    var backendAccount: CodexReviewBackendModel.Account.Snapshot {
         .init(
             id: id,
             kind: kind,
@@ -1589,8 +1589,8 @@ private extension AppServerAccount {
     }
 }
 
-private extension LoginAccountResponse {
-    var backendChallenge: BackendLoginChallenge {
+private extension AppServerAPI.Account.Login.Response {
+    var backendChallenge: CodexReviewBackendModel.Login.Challenge {
         get throws {
             switch self {
             case .apiKey:
@@ -1620,7 +1620,7 @@ private extension LoginAccountResponse {
               components.host?.isEmpty == false,
               let url = components.url
         else {
-            throw ReviewError.io("Invalid ChatGPT authentication URL in \(field).")
+            throw CodexReviewAPI.Error.io("Invalid ChatGPT authentication URL in \(field).")
         }
         return url
     }
@@ -1647,7 +1647,7 @@ private struct TurnNotificationPayload: Decodable, Sendable {
     var deltaBase64: String?
     var diff: String?
     var result: String?
-    var error: AppServerTurnError?
+    var error: AppServerAPI.Turn.Error?
     var willRetry: Bool?
     var status: AppServerThreadStatus?
     var summaryIndex: Int?
@@ -1707,7 +1707,7 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         self.deltaBase64 = try container.decodeStringIfPresent(forKey: .deltaBase64)
         self.diff = try container.decodeStringIfPresent(forKey: .diff)
         self.result = try container.decodeStringIfPresent(forKey: .result)
-        self.error = try? container.decodeIfPresent(AppServerTurnError.self, forKey: .error)
+        self.error = try? container.decodeIfPresent(AppServerAPI.Turn.Error.self, forKey: .error)
         self.willRetry = try? container.decodeIfPresent(Bool.self, forKey: .willRetry)
         self.status = try? container.decodeIfPresent(AppServerThreadStatus.self, forKey: .status)
         self.summaryIndex = try? container.decodeIfPresent(Int.self, forKey: .summaryIndex)
@@ -1780,7 +1780,7 @@ private func decodeReviewNotification(
     commandLifecycleByItemID: inout [String: AppServerCommandLifecycle]
 ) throws -> DecodedReviewNotification? {
     let payload = notification.payload
-    let events: [BackendReviewEvent]
+    let events: [CodexReviewBackendModel.Review.Event]
     switch notification.method {
     case "turn/started":
         events = [.started(
@@ -2046,7 +2046,7 @@ private extension TurnNotificationPayload {
         kind: ReviewLogEntry.Kind,
         groupID explicitGroupID: String? = nil,
         metadata: ReviewLogEntry.Metadata? = nil
-    ) -> BackendReviewEvent? {
+    ) -> CodexReviewBackendModel.Review.Event? {
         guard let delta,
               delta.isEmpty == false
         else {
@@ -2064,7 +2064,7 @@ private extension TurnNotificationPayload {
     func base64OutputLog(
         kind: ReviewLogEntry.Kind,
         metadata: ReviewLogEntry.Metadata? = nil
-    ) -> BackendReviewEvent? {
+    ) -> CodexReviewBackendModel.Review.Event? {
         guard let text = decodedBase64Output,
               text.isEmpty == false
         else {
@@ -2091,7 +2091,7 @@ private extension TurnNotificationPayload {
     func messageLog(
         kind: ReviewLogEntry.Kind,
         metadata: ReviewLogEntry.Metadata? = nil
-    ) -> BackendReviewEvent? {
+    ) -> CodexReviewBackendModel.Review.Event? {
         guard let message,
               message.isEmpty == false
         else {
@@ -2244,11 +2244,11 @@ private struct AppServerCommandLifecycle: Sendable {
         streamedOutput += output
     }
 
-    func closingEvents(status: String, completedAt: Date) -> [BackendReviewEvent] {
+    func closingEvents(status: String, completedAt: Date) -> [CodexReviewBackendModel.Review.Event] {
         guard let command = command?.nilIfEmpty else {
             return []
         }
-        var events: [BackendReviewEvent] = []
+        var events: [CodexReviewBackendModel.Review.Event] = []
         let metadata = ReviewLogEntry.Metadata(
             sourceType: "commandExecution",
             status: status,
@@ -2293,14 +2293,14 @@ private struct AppServerCommandLifecycle: Sendable {
 }
 
 private extension Dictionary where Key == String, Value == AppServerCommandLifecycle {
-    func closeActiveCommands(for terminalEvent: BackendReviewEvent) -> [BackendReviewEvent] {
+    func closeActiveCommands(for terminalEvent: CodexReviewBackendModel.Review.Event) -> [CodexReviewBackendModel.Review.Event] {
         guard let status = terminalEvent.activeCommandTerminalStatus else {
             return []
         }
         return closeActiveCommands(status: status)
     }
 
-    func closeActiveCommands(status: String, completedAt: Date = Date()) -> [BackendReviewEvent] {
+    func closeActiveCommands(status: String, completedAt: Date = Date()) -> [CodexReviewBackendModel.Review.Event] {
         values
             .sorted {
                 switch ($0.startedAt, $1.startedAt) {
@@ -2398,7 +2398,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     func startedEvents(
         startedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
-    ) -> [BackendReviewEvent] {
+    ) -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
             return []
@@ -2456,7 +2456,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     func completedEvents(
         completedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
-    ) -> [BackendReviewEvent] {
+    ) -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "userMessage":
             return []
@@ -2466,7 +2466,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty ?? lifecycle?.streamedOutputIfAvailable {
-                var events: [BackendReviewEvent] = []
+                var events: [CodexReviewBackendModel.Review.Event] = []
                 if let command = command ?? lifecycle?.command {
                     events.append(logEntry(
                         kind: .command,
@@ -2551,7 +2551,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         startedAt: Date? = nil,
         completedAt: Date? = nil,
         lifecycle: AppServerCommandLifecycle? = nil
-    ) -> BackendReviewEvent {
+    ) -> CodexReviewBackendModel.Review.Event {
         .logEntry(
             kind: kind,
             text: text,
@@ -2701,8 +2701,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
         prompt?.nilIfEmpty.map { " Prompt: \($0)" } ?? resultSuffix
     }
 
-    private func reasoningCompletionEvents(replacesGroup: Bool) -> [BackendReviewEvent] {
-        let summaryEvents = (summary ?? []).enumerated().compactMap { index, text -> BackendReviewEvent? in
+    private func reasoningCompletionEvents(replacesGroup: Bool) -> [CodexReviewBackendModel.Review.Event] {
+        let summaryEvents = (summary ?? []).enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
             guard text.isEmpty == false else {
                 return nil
             }
@@ -2713,7 +2713,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 replacesGroup: replacesGroup
             )
         }
-        let rawEvents = (content ?? []).enumerated().compactMap { index, text -> BackendReviewEvent? in
+        let rawEvents = (content ?? []).enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
             guard text.isEmpty == false else {
                 return nil
             }

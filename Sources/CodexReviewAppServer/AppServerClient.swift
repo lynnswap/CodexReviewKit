@@ -11,18 +11,18 @@ package actor AppServerClient {
         .milliseconds(500),
     ]
 
-    private let transport: any JSONRPCTransport
+    private let transport: any JSONRPC.Transport
     private let overloadRetryDelay: @Sendable (Int) -> Duration?
     private let retrySleep: @Sendable (Duration) async throws -> Void
     private let serializer = RequestSerializer()
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var nextRequestID = 1
-    private var initializationResponse: InitializeResponse?
-    private var initializationTask: Task<InitializeResponse, Error>?
+    private var initializationResponse: AppServerAPI.Initialize.Response?
+    private var initializationTask: Task<AppServerAPI.Initialize.Response, Error>?
 
     package init(
-        transport: any JSONRPCTransport,
+        transport: any JSONRPC.Transport,
         overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient.defaultOverloadRetryDelay,
         retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
@@ -34,7 +34,7 @@ package actor AppServerClient {
     package func initialize(
         clientName: String = "CodexReviewKit",
         clientVersion: String = "2"
-    ) async throws -> InitializeResponse {
+    ) async throws -> AppServerAPI.Initialize.Response {
         if let initializationResponse {
             return initializationResponse
         }
@@ -59,9 +59,9 @@ package actor AppServerClient {
     private func performInitialize(
         clientName: String,
         clientVersion: String
-    ) async throws -> InitializeResponse {
+    ) async throws -> AppServerAPI.Initialize.Response {
         logger.info("Initializing codex app-server connection as \(clientName, privacy: .public) \(clientVersion, privacy: .public)")
-        let response: InitializeResponse = try await send(InitializeRequest(
+        let response: AppServerAPI.Initialize.Response = try await send(AppServerAPI.Initialize.Request(
             params: .init(clientName: clientName, clientVersion: clientVersion)
         ))
         try await notify(method: "initialized", params: EmptyResponse())
@@ -69,7 +69,7 @@ package actor AppServerClient {
         return response
     }
 
-    package func send<Request: AppServerRequest>(_ request: Request) async throws -> Request.Response {
+    package func send<Request: AppServerAPI.Request>(_ request: Request) async throws -> Request.Response {
         try await send(
             method: Request.method,
             params: request.params,
@@ -82,7 +82,7 @@ package actor AppServerClient {
         method: String,
         params: Params,
         responseType: Response.Type,
-        scope: AppServerRequestScope? = nil
+        scope: AppServerAPI.RequestScope? = nil
     ) async throws -> Response {
         try await serializer.run(scope: scope) { [transport, encoder, decoder, self] in
             let encodedParams = try encoder.encode(params)
@@ -99,7 +99,7 @@ package actor AppServerClient {
                     let response = try decoder.decode(responseType, from: rawResponse)
                     logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
                     return response
-                } catch let error as JSONRPCError {
+                } catch let error as JSONRPC.Error {
                     guard Self.isAppServerOverload(error),
                           let delay = overloadRetryDelay(retryAttempt)
                     else {
@@ -129,7 +129,7 @@ package actor AppServerClient {
         ))
     }
 
-    package func notificationStream() async -> AsyncThrowingStream<JSONRPCNotification, Error> {
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
         await transport.notificationStream()
     }
 
@@ -142,7 +142,7 @@ package actor AppServerClient {
         return nextRequestID
     }
 
-    private nonisolated static func isAppServerOverload(_ error: JSONRPCError) -> Bool {
+    private nonisolated static func isAppServerOverload(_ error: JSONRPC.Error) -> Bool {
         if case .responseError(let code, _) = error {
             return code == appServerOverloadedErrorCode
         }
@@ -160,12 +160,12 @@ package actor AppServerClient {
 }
 
 package actor RequestSerializer {
-    private var lanes: [AppServerRequestScope: SerialLane] = [:]
+    private var lanes: [AppServerAPI.RequestScope: SerialLane] = [:]
 
     package init() {}
 
     package func run<Output: Sendable>(
-        scope: AppServerRequestScope?,
+        scope: AppServerAPI.RequestScope?,
         operation: @Sendable () async throws -> Output
     ) async throws -> Output {
         guard let scope else {
@@ -183,7 +183,7 @@ package actor RequestSerializer {
         }
     }
 
-    private func lane(for scope: AppServerRequestScope) -> SerialLane {
+    private func lane(for scope: AppServerAPI.RequestScope) -> SerialLane {
         if let lane = lanes[scope] {
             return lane
         }
