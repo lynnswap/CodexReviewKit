@@ -1176,7 +1176,9 @@ struct CodexReviewHostTests {
     @Test func liveStoreStopLetsHTTPServerCancelSessionsBeforeDroppingBackend() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let interruptGate = AsyncGate()
         let transport = FakeJSONRPCTransport()
+        await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
         try await transport.enqueue(InitializeResponse(), for: "initialize")
         try await transport.enqueue(AccountReadResponse(), for: "account/read")
         try await transport.enqueue(
@@ -1212,13 +1214,28 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
 
-        await store.stop()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+        }
+        let interruptStarted = await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+        }
+        let methodsBeforeInterruptCompletes = await transport.recordedRequests().map(\.method)
+        await interruptGate.open()
+        await stopTask.value
         let result = try await reviewRead
 
+        #expect(interruptStarted)
+        #expect(methodsBeforeInterruptCompletes.contains("turn/interrupt"))
+        #expect(methodsBeforeInterruptCompletes.contains("thread/backgroundTerminals/clean") == false)
+        #expect(methodsBeforeInterruptCompletes.contains("thread/delete") == false)
         #expect(result.core.lifecycle.status == .cancelled)
         let methods = await transport.recordedRequests().map(\.method)
-        #expect(methods.contains("turn/interrupt"))
-        #expect(methods.contains("thread/delete"))
+        let interruptIndex = try #require(methods.firstIndex(of: "turn/interrupt"))
+        let cleanupIndex = try #require(methods.firstIndex(of: "thread/backgroundTerminals/clean"))
+        let deleteIndex = try #require(methods.firstIndex(of: "thread/delete"))
+        #expect(interruptIndex < cleanupIndex)
+        #expect(interruptIndex < deleteIndex)
     }
 
     @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
