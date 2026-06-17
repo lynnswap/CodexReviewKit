@@ -168,24 +168,24 @@ private func withFakeBackendTimeout(
 package actor FakeCodexReviewBackend: CodexReviewBackend {
     package enum Command: Equatable, Sendable {
         case readSettings
-        case applySettings(BackendSettingsChange)
+        case applySettings(CodexReviewBackendModel.Settings.Change)
         case readAuth
-        case startLogin(BackendLoginRequest)
-        case cancelLogin(BackendLoginChallenge)
-        case completeLogin(BackendLoginResponse)
-        case logout(BackendAccountID)
-        case startReview(BackendReviewStart)
-        case interruptReview(BackendReviewRun, BackendCancellationReason)
-        case beginReviewRecovery(BackendReviewRun, BackendCancellationReason)
-        case resumeReviewRecovery(BackendReviewRecoveryToken, BackendReviewStart)
-        case cleanupReview(BackendReviewRun)
+        case startLogin(CodexReviewBackendModel.Login.Request)
+        case cancelLogin(CodexReviewBackendModel.Login.Challenge)
+        case completeLogin(CodexReviewBackendModel.Login.Response)
+        case logout(CodexReviewBackendModel.Account.ID)
+        case startReview(CodexReviewBackendModel.Review.Start)
+        case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case beginReviewRecovery(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
+        case resumeReviewRecovery(CodexReviewBackendModel.Review.RecoveryToken, CodexReviewBackendModel.Review.Start)
+        case cleanupReview(CodexReviewBackendModel.Review.Run)
     }
 
-    private var settings: BackendSettingsSnapshot
-    private var auth: BackendAuthSnapshot
+    private var settings: CodexReviewBackendModel.Settings.Snapshot
+    private var auth: CodexReviewBackendModel.Auth.Snapshot
     private var commands: [Command] = []
-    private var nextRun: BackendReviewRun
-    private var nextRecoveredRun: BackendReviewRun?
+    private var nextRun: CodexReviewBackendModel.Review.Run
+    private var nextRecoveredRun: CodexReviewBackendModel.Review.Run?
     private var interruptFailureMessage: String?
     private var recoveryFailureMessage: String?
     private var interruptReviewGate: AsyncGate?
@@ -204,7 +204,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         var reviewThreadID: String?
         var model: String?
 
-        init(run: BackendReviewRun) {
+        init(run: CodexReviewBackendModel.Review.Run) {
             self.attemptID = run.attemptID
             self.threadID = run.threadID
             self.turnID = run.turnID
@@ -214,9 +214,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package init(
-        settings: BackendSettingsSnapshot = .init(),
-        auth: BackendAuthSnapshot = .init(),
-        nextRun: BackendReviewRun = .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1")
+        settings: CodexReviewBackendModel.Settings.Snapshot = .init(),
+        auth: CodexReviewBackendModel.Auth.Snapshot = .init(),
+        nextRun: CodexReviewBackendModel.Review.Run = .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1")
     ) {
         self.settings = settings
         self.auth = auth
@@ -247,7 +247,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         resumeReviewRecoveryGate = gate
     }
 
-    package func setNextRecoveredRun(_ run: BackendReviewRun) {
+    package func setNextRecoveredRun(_ run: CodexReviewBackendModel.Review.Run) {
         nextRecoveredRun = run
     }
 
@@ -403,12 +403,12 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func readSettings() async throws -> BackendSettingsSnapshot {
+    package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.readSettings)
         return settings
     }
 
-    package func applySettings(_ change: BackendSettingsChange) async throws -> BackendSettingsSnapshot {
+    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
         commands.append(.applySettings(change))
         settings = .init(
             model: change.updatesModel ? change.model : settings.model,
@@ -420,34 +420,34 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return settings
     }
 
-    package func readAuth() async throws -> BackendAuthSnapshot {
+    package func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.readAuth)
         return auth
     }
 
-    package func startLogin(_ request: BackendLoginRequest) async throws -> BackendLoginChallenge {
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
         commands.append(.startLogin(request))
         return .init(id: "challenge-1")
     }
 
-    package func cancelLogin(_ challenge: BackendLoginChallenge) async throws {
+    package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
         commands.append(.cancelLogin(challenge))
     }
 
-    package func completeLogin(_ response: BackendLoginResponse) async throws -> BackendAuthSnapshot {
+    package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.completeLogin(response))
-        let account = BackendAccountSnapshot(id: .init("account-1"), label: "Codex", isActive: true)
+        let account = CodexReviewBackendModel.Account.Snapshot(id: .init("account-1"), label: "Codex", isActive: true)
         auth = .init(accounts: [account], activeAccountID: account.id)
         return auth
     }
 
-    package func logout(_ account: BackendAccountID) async throws -> BackendAuthSnapshot {
+    package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.logout(account))
         auth = .init()
         return auth
     }
 
-    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
+    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
         commands.append(.startReview(request))
         let waiters = Array(startReviewWaiters.values)
         startReviewWaiters.removeAll(keepingCapacity: false)
@@ -460,7 +460,7 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
-    package func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws {
+    package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
         commands.append(.interruptReview(run, reason))
         let waiters = Array(interruptReviewWaiters.values)
         interruptReviewWaiters.removeAll(keepingCapacity: false)
@@ -476,9 +476,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         commands.append(.beginReviewRecovery(run, reason))
         let waiters = Array(beginReviewRecoveryWaiters.values)
         beginReviewRecoveryWaiters.removeAll(keepingCapacity: false)
@@ -495,8 +495,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     }
 
     package func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         commands.append(.resumeReviewRecovery(token, request))
         let waiters = Array(resumeReviewRecoveryWaiters.values)
@@ -521,19 +521,19 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
-    package func cleanupReview(_ run: BackendReviewRun) async {
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         commands.append(.cleanupReview(run))
     }
 
-    package func yield(_ event: BackendReviewEvent, for run: BackendReviewRun? = nil) async {
+    package func yield(_ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil) async {
         await eventMailbox(for: run ?? nextRun).append(event)
     }
 
-    package func finishEvents(for run: BackendReviewRun? = nil) async {
+    package func finishEvents(for run: CodexReviewBackendModel.Review.Run? = nil) async {
         await eventMailbox(for: run ?? nextRun).finish()
     }
 
-    package func finishEvents(throwing error: any Error, for run: BackendReviewRun? = nil) async {
+    package func finishEvents(throwing error: any Error, for run: CodexReviewBackendModel.Review.Run? = nil) async {
         await eventMailbox(for: run ?? nextRun).fail(error)
     }
 
@@ -545,11 +545,11 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func hasEventMailbox(for run: BackendReviewRun) -> Bool {
+    package func hasEventMailbox(for run: CodexReviewBackendModel.Review.Run) -> Bool {
         eventMailboxes[.init(run: run)] != nil
     }
 
-    private func eventMailbox(for run: BackendReviewRun) -> BackendReviewEventMailbox {
+    private func eventMailbox(for run: CodexReviewBackendModel.Review.Run) -> BackendReviewEventMailbox {
         let key = EventMailboxKey(run: run)
         if let mailbox = eventMailboxes[key] {
             return mailbox
@@ -677,8 +677,8 @@ package struct StoreJobSnapshot: Sendable {
     package var summary: String
     package var lastAgentMessage: String?
     package var logs: [ReviewLogEntry]
-    package var run: ReviewRunMetadata
-    package var activeRun: BackendReviewRun?
+    package var run: ReviewJobCore.Run
+    package var activeRun: CodexReviewBackendModel.Review.Run?
     package var cancellationRequested: Bool
 }
 
@@ -686,7 +686,7 @@ package struct StoreJobSnapshot: Sendable {
 package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let reviewBackend: FakeCodexReviewBackend
     package let seed: CodexReviewStoreSeed
-    package var currentSettingsSnapshot: CodexReviewSettingsSnapshot
+    package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
     package private(set) var isActive = false
     package private(set) var startRequests: [Bool] = []
 
@@ -699,7 +699,7 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.currentSettingsSnapshot = seed.initialSettingsSnapshot
     }
 
-    package var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
+    package var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         currentSettingsSnapshot
     }
 
@@ -814,42 +814,42 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt {
+    package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
         try await reviewBackend.startReview(request)
     }
 
     package func interruptReview(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
     ) async throws {
         try await reviewBackend.interruptReview(run, reason: reason)
     }
 
     package func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         try await reviewBackend.beginReviewRecovery(run, reason: reason)
     }
 
     package func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         try await reviewBackend.resumeReviewRecovery(token, request: request)
     }
 
-    package func cleanupReview(_ run: BackendReviewRun) async {
+    package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         await reviewBackend.cleanupReview(run)
     }
 
-    package func refreshSettings() async throws -> CodexReviewSettingsSnapshot {
+    package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         let snapshot = try await reviewBackend.readSettings()
         currentSettingsSnapshot = .init(
             model: snapshot.model,
             fallbackModel: snapshot.fallbackModel,
-            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewReasoningEffort.init(rawValue:)),
-            serviceTier: snapshot.serviceTier.flatMap(CodexReviewServiceTier.init(rawValue:)),
+            reasoningEffort: snapshot.reasoningEffort.flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:)),
+            serviceTier: snapshot.serviceTier.flatMap(CodexReviewSettings.ServiceTier.init(rawValue:)),
             models: snapshot.models
         )
         return currentSettingsSnapshot
@@ -857,12 +857,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
-        var change = BackendSettingsChange(model: model)
+        var change = CodexReviewBackendModel.Settings.Change(model: model)
         if persistReasoningEffort {
             change.reasoningEffort = reasoningEffort?.rawValue
         }
@@ -873,19 +873,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
         _ = try await reviewBackend.applySettings(.init(reasoningEffort: reasoningEffort?.rawValue))
     }
 
     package func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
         _ = try await reviewBackend.applySettings(.init(serviceTier: serviceTier?.rawValue))
     }
 }
 
-package actor FakeJSONRPCTransport: JSONRPCTransport {
+package actor FakeJSONRPCTransport: JSONRPC.Transport {
     private struct RequestGate: Sendable {
         var gate: AsyncGate
         var ignoresCancellation: Bool
@@ -901,13 +901,13 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
 
     private enum QueuedResponse: Sendable {
         case success(Data)
-        case failure(JSONRPCError)
+        case failure(JSONRPC.Error)
     }
 
     private var responses: [String: [QueuedResponse]]
-    private var requests: [JSONRPCRequest] = []
-    private var notifications: [JSONRPCNotification] = []
-    private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPCNotification, Error>.Continuation] = []
+    private var requests: [JSONRPC.Request] = []
+    private var notifications: [JSONRPC.Notification] = []
+    private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
     private var activeByMethod: [String: Int] = [:]
     private var maxActiveByMethod: [String: Int] = [:]
     private var gatesByMethod: [String: RequestGate] = [:]
@@ -930,7 +930,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
     }
 
     package func enqueueFailure(
-        _ error: JSONRPCError,
+        _ error: JSONRPC.Error,
         for method: String
     ) {
         responses[method, default: []].append(.failure(error))
@@ -948,9 +948,9 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: true))
     }
 
-    package func send(_ request: JSONRPCRequest) async throws -> Data {
+    package func send(_ request: JSONRPC.Request) async throws -> Data {
         guard closed == false else {
-            throw JSONRPCError.closed
+            throw JSONRPC.Error.closed
         }
         requests.append(request)
         resumeRequestCountWaiters()
@@ -993,11 +993,11 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         return gate
     }
 
-    package func notify(_ notification: JSONRPCNotification) async throws {
+    package func notify(_ notification: JSONRPC.Notification) async throws {
         notifications.append(notification)
     }
 
-    package func notificationStream() -> AsyncThrowingStream<JSONRPCNotification, Error> {
+    package func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             serverNotificationContinuations.append(continuation)
             resumeNotificationStreamCountWaiters()
@@ -1019,7 +1019,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         serverNotificationContinuations.removeAll()
     }
 
-    package func recordedRequests() -> [JSONRPCRequest] {
+    package func recordedRequests() -> [JSONRPC.Request] {
         requests
     }
 
@@ -1036,7 +1036,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         }
     }
 
-    package func recordedNotifications() -> [JSONRPCNotification] {
+    package func recordedNotifications() -> [JSONRPC.Notification] {
         notifications
     }
 
@@ -1069,7 +1069,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         method: String,
         params: Params
     ) throws {
-        let notification = JSONRPCNotification(
+        let notification = JSONRPC.Notification(
             method: method,
             params: try JSONEncoder().encode(params)
         )

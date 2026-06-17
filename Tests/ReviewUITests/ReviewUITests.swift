@@ -3191,8 +3191,8 @@ struct ReviewUITests {
 
         _ = try await awaitTransportRender(transport)
 
-        let firstBlockID = ReviewMonitorLogBlockID("commandOutput:cmd_1")
-        let secondBlockID = ReviewMonitorLogBlockID("commandOutput:cmd_2")
+        let firstBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_1")
+        let secondBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_2")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: firstBlockID))
         await awaitNativeLayoutTurn()
 
@@ -4267,7 +4267,7 @@ struct ReviewUITests {
         let initialEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: "bold")
         let restyledEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", replacesGroup: true, text: "**bold**")
         let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: " tail")
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         let initialDocument = projection.render(entries: [initialEntry])
         logScrollView.render(document: initialDocument, restoring: .top, allowIncrementalUpdate: false)
         let appendCount = logScrollView.appendCount
@@ -6348,7 +6348,7 @@ extension CodexReviewStore {
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
         jobs: [CodexReviewJob] = [],
-        settingsSnapshot: CodexReviewSettingsSnapshot? = nil
+        settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(
             serverState: serverState,
@@ -6379,7 +6379,7 @@ extension CodexReviewStore {
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
         content: (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]),
-        settingsSnapshot: CodexReviewSettingsSnapshot? = nil
+        settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(
             serverState: serverState,
@@ -6396,9 +6396,9 @@ extension CodexReviewStore {
 func makeSettingsSnapshot(
     model: String? = "gpt-5.4",
     fallbackModel: String? = nil,
-    reasoningEffort: CodexReviewReasoningEffort = .medium,
-    serviceTier: CodexReviewServiceTier? = .fast
-) -> CodexReviewSettingsSnapshot {
+    reasoningEffort: CodexReviewSettings.ReasoningEffort = .medium,
+    serviceTier: CodexReviewSettings.ServiceTier? = .fast
+) -> CodexReviewSettings.Snapshot {
     .init(
         model: model,
         fallbackModel: fallbackModel,
@@ -6513,8 +6513,8 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
 
     override func waitUntilStopped() async {}
 
-    override func interruptReview(_: BackendReviewRun, reason _: BackendCancellationReason) async throws {
-        throw ReviewError.io("Cancellation failed.")
+    override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
+        throw CodexReviewAPI.Error.io("Cancellation failed.")
     }
 
 }
@@ -6523,14 +6523,14 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
 final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     struct ModelUpdateCall: Equatable {
         let model: String?
-        let reasoningEffort: CodexReviewReasoningEffort?
-        let serviceTier: CodexReviewServiceTier?
+        let reasoningEffort: CodexReviewSettings.ReasoningEffort?
+        let serviceTier: CodexReviewSettings.ServiceTier?
     }
 
     private(set) var refreshCallCount = 0
     private(set) var modelUpdateCalls: [ModelUpdateCall] = []
-    private(set) var reasoningUpdateCalls: [CodexReviewReasoningEffort?] = []
-    private(set) var serviceTierUpdateCalls: [CodexReviewServiceTier?] = []
+    private(set) var reasoningUpdateCalls: [CodexReviewSettings.ReasoningEffort?] = []
+    private(set) var serviceTierUpdateCalls: [CodexReviewSettings.ServiceTier?] = []
 
     private var shouldBlockNextRefresh = false
     private var shouldBlockNextModelUpdate = false
@@ -6542,7 +6542,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     private let blockedReasoningUpdateStartedGate = OneShotGate()
     private let blockedReasoningUpdateResumeGate = OneShotGate()
 
-    init(snapshot: CodexReviewSettingsSnapshot) {
+    init(snapshot: CodexReviewSettings.Snapshot) {
         super.init(
             seed: .init(
                 shouldAutoStartEmbeddedServer: false,
@@ -6562,7 +6562,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
 
     override func waitUntilStopped() async {}
 
-    override func refreshSettings() async throws -> CodexReviewSettingsSnapshot {
+    override func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         refreshCallCount += 1
         if shouldBlockNextRefresh {
             shouldBlockNextRefresh = false
@@ -6574,9 +6574,9 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
 
     override func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
         modelUpdateCalls.append(
@@ -6602,7 +6602,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     }
 
     override func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
         reasoningUpdateCalls.append(reasoningEffort)
         currentSettingsSnapshot.reasoningEffort = reasoningEffort
@@ -6615,7 +6615,7 @@ final class BlockingSettingsBackend: PreviewCodexReviewStoreBackend {
     }
 
     override func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
         serviceTierUpdateCalls.append(serviceTier)
         currentSettingsSnapshot.serviceTier = serviceTier

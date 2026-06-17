@@ -57,7 +57,7 @@ package func makeMCPProtocolServer(
     }
 
     await server.withMethodHandler(CallTool.self) { params in
-        guard let tool = MCPToolName(rawValue: params.name) else {
+        guard let tool = CodexReviewMCP.Tool.Name(rawValue: params.name) else {
             return .init(
                 content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
                 isError: true
@@ -101,7 +101,7 @@ package func makeMCPProtocolServer(
     return server
 }
 
-private func schema(for tool: MCPToolName) -> Value {
+private func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
     switch tool {
     case .reviewStart:
         .object([
@@ -150,13 +150,13 @@ private func schema(for tool: MCPToolName) -> Value {
                 "logLimit": .object([
                     "type": .string("integer"),
                     "minimum": .int(1),
-                    "maximum": .int(ReviewLogPageRequest.maxLimit),
+                    "maximum": .int(CodexReviewAPI.Log.PageRequest.maxLimit),
                 ]),
                 "logFilter": .object([
                     "type": .string("string"),
                     "enum": .array([
-                        .string(ReviewLogFilter.defaultSetting.rawValue),
-                        .string(ReviewLogFilter.all.rawValue),
+                        .string(CodexReviewAPI.Log.Filter.defaultSetting.rawValue),
+                        .string(CodexReviewAPI.Log.Filter.all.rawValue),
                     ]),
                 ]),
             ]),
@@ -187,12 +187,12 @@ private func schema(for tool: MCPToolName) -> Value {
 }
 
 private func toolRequest(
-    tool: MCPToolName,
+    tool: CodexReviewMCP.Tool.Name,
     arguments: [String: Value],
     defaultSessionID: String?,
     boundedReviewWaitDuration: Duration,
     useBoundedReviewStart: Bool
-) throws -> MCPToolRequest {
+) throws -> CodexReviewMCP.Tool.Request {
     switch tool {
     case .reviewStart:
         let cwd = try requiredString("cwd", in: arguments)
@@ -249,7 +249,7 @@ private func sessionID(
     defaultSessionID ?? arguments["sessionID"]?.stringValue ?? fallback
 }
 
-private func toolResult(tool: MCPToolName, response: MCPToolResponse) throws -> CallTool.Result {
+private func toolResult(tool: CodexReviewMCP.Tool.Name, response: CodexReviewMCP.Tool.Response) throws -> CallTool.Result {
     let value: Value
     let text: String
     let isError: Bool
@@ -289,11 +289,11 @@ private func requiredJobID(in arguments: [String: Value]) throws -> String {
     return jobID
 }
 
-private func reviewLogFilter(in arguments: [String: Value]) throws -> ReviewLogFilter {
+private func reviewLogFilter(in arguments: [String: Value]) throws -> CodexReviewAPI.Log.Filter {
     guard let rawValue = arguments["logFilter"]?.stringValue?.nilIfEmpty else {
         return .defaultSetting
     }
-    guard let filter = ReviewLogFilter(rawValue: rawValue) else {
+    guard let filter = CodexReviewAPI.Log.Filter(rawValue: rawValue) else {
         throw MCPProtocolServerError.invalidArgument(
             "Unsupported logFilter: \(rawValue). Use `default` or `all`."
         )
@@ -301,7 +301,7 @@ private func reviewLogFilter(in arguments: [String: Value]) throws -> ReviewLogF
     return filter
 }
 
-private func reviewLogPageRequest(in arguments: [String: Value]) throws -> ReviewLogPageRequest {
+private func reviewLogPageRequest(in arguments: [String: Value]) throws -> CodexReviewAPI.Log.PageRequest {
     let offset: Int?
     if let value = arguments["logOffset"] {
         guard let parsed = value.intValue else {
@@ -320,20 +320,20 @@ private func reviewLogPageRequest(in arguments: [String: Value]) throws -> Revie
         guard let parsed = value.intValue else {
             throw MCPProtocolServerError.invalidArgument("logLimit must be an integer.")
         }
-        guard (1...ReviewLogPageRequest.maxLimit).contains(parsed) else {
+        guard (1...CodexReviewAPI.Log.PageRequest.maxLimit).contains(parsed) else {
             throw MCPProtocolServerError.invalidArgument(
-                "logLimit must be between 1 and \(ReviewLogPageRequest.maxLimit)."
+                "logLimit must be between 1 and \(CodexReviewAPI.Log.PageRequest.maxLimit)."
             )
         }
         limit = parsed
     } else {
-        limit = ReviewLogPageRequest.defaultLimit
+        limit = CodexReviewAPI.Log.PageRequest.defaultLimit
     }
 
-    return ReviewLogPageRequest(offset: offset, limit: limit)
+    return CodexReviewAPI.Log.PageRequest(offset: offset, limit: limit)
 }
 
-private func reviewTarget(from object: [String: Value]) throws -> ReviewTarget {
+private func reviewTarget(from object: [String: Value]) throws -> CodexReviewAPI.Target {
     switch object["type"]?.stringValue {
     case "uncommittedChanges":
         .uncommittedChanges
@@ -494,7 +494,7 @@ private func requiredString(
     return value
 }
 
-private extension ReviewReadResult {
+private extension CodexReviewAPI.Read.Result {
     func textContent() -> String {
         core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
     }
@@ -568,7 +568,7 @@ private extension ReviewReadResult {
         }
         if includeNextAction {
             object["nextAction"] = .object([
-                "tool": .string(MCPToolName.reviewAwait.rawValue),
+                "tool": .string(CodexReviewMCP.Tool.Name.reviewAwait.rawValue),
                 "jobId": .string(jobID),
             ])
         }
@@ -576,7 +576,7 @@ private extension ReviewReadResult {
     }
 }
 
-private extension ReviewLogPage {
+private extension CodexReviewAPI.Log.Page {
     var rangeDescription: String {
         guard returned > 0 else {
             return "0"
@@ -598,7 +598,7 @@ private extension ReviewLogPage {
     }
 }
 
-private extension ReviewJobListItem {
+private extension CodexReviewAPI.Job.ListItem {
     func structuredContent() -> Value {
         .object([
             "jobId": .string(jobID),
@@ -614,7 +614,7 @@ private extension ReviewJobListItem {
     }
 }
 
-private extension ReviewListResult {
+private extension CodexReviewAPI.List.Result {
     func structuredContent() -> Value {
         .object([
             "items": .array(items.map { $0.structuredContent() }),
@@ -622,7 +622,7 @@ private extension ReviewListResult {
     }
 }
 
-private extension ReviewCancelOutcome {
+private extension CodexReviewAPI.Cancel.Outcome {
     func textContent() -> String {
         if cancelled {
             core.lifecycle.cancellation?.message ?? "Review cancelled."
@@ -659,7 +659,7 @@ private extension ReviewLogEntry {
     }
 }
 
-private extension ReviewRunMetadata {
+private extension ReviewJobCore.Run {
     func structuredContent() -> Value {
         .object([
             "reviewThreadId": reviewThreadID.map(Value.string) ?? .null,
@@ -670,7 +670,7 @@ private extension ReviewRunMetadata {
     }
 }
 
-private extension ReviewLifecycleState {
+private extension ReviewJobCore.Lifecycle {
     func structuredContent(
         elapsedSeconds: Int?,
         cancellable: Bool
@@ -688,7 +688,7 @@ private extension ReviewLifecycleState {
     }
 }
 
-private extension ReviewOutputState {
+private extension ReviewJobCore.Output {
     func structuredContent(review: String) -> Value {
         .object([
             "summary": .string(summary),
@@ -721,7 +721,7 @@ private extension ParsedReviewResult {
     }
 }
 
-private extension ParsedReviewFinding {
+private extension ParsedReviewResult.Finding {
     func structuredContent() -> Value {
         .object([
             "title": .string(title),
@@ -733,7 +733,7 @@ private extension ParsedReviewFinding {
     }
 }
 
-private extension ParsedReviewFindingLocation {
+private extension ParsedReviewResult.Finding.Location {
     func structuredContent() -> Value {
         .object([
             "path": .string(path),

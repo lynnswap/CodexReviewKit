@@ -376,7 +376,7 @@ extension ReviewUITests {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
                     == combinedFilter.persistedValue
             )
             harness.window.close()
@@ -400,7 +400,7 @@ extension ReviewUITests {
                 viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
                     == SidebarJobFilter.all.persistedValue
             )
             harness.window.close()
@@ -429,7 +429,7 @@ extension ReviewUITests {
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
-        defaults.set("invalid-filter", forKey: ReviewMonitorSidebarJobFilterPersistence.defaultsKey)
+        defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
 
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(

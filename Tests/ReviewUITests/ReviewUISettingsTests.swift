@@ -64,7 +64,7 @@ struct ReviewUISettingsTests {
     }
 
     @Test func settingsStoreKeepsCurrentHiddenModelVisible() {
-        let hiddenModel = CodexReviewModelCatalogItem(
+        let hiddenModel = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-hidden",
             model: "gpt-hidden",
             displayName: "GPT Hidden",
@@ -75,7 +75,7 @@ struct ReviewUISettingsTests {
             defaultReasoningEffort: .medium,
             supportedServiceTiers: []
         )
-        let visibleModel = CodexReviewModelCatalogItem(
+        let visibleModel = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-5.4",
             model: "gpt-5.4",
             displayName: "GPT-5.4",
@@ -101,7 +101,7 @@ struct ReviewUISettingsTests {
     }
 
     @Test func settingsStoreKeepsConfiguredMissingModelVisible() {
-        let visibleModel = CodexReviewModelCatalogItem(
+        let visibleModel = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-5.4",
             model: "gpt-5.4",
             displayName: "GPT-5.4",
@@ -145,7 +145,7 @@ struct ReviewUISettingsTests {
     }
 
     @Test func settingsStorePreservesReasoningOverrideWhenModelCatalogOmitsOptions() {
-        let modelWithoutReasoningOptions = CodexReviewModelCatalogItem(
+        let modelWithoutReasoningOptions = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-no-options",
             model: "gpt-no-options",
             displayName: "GPT No Options",
@@ -182,7 +182,7 @@ struct ReviewUISettingsTests {
         ]
 
         for testCase in cases {
-            let item = CodexReviewModelCatalogItem(
+            let item = CodexReviewSettings.ModelCatalogItem(
                 id: testCase.displayName,
                 model: testCase.displayName,
                 displayName: testCase.displayName,

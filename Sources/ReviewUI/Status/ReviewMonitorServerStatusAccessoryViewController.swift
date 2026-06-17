@@ -94,7 +94,7 @@ struct AccountRateLimitsSectionView: View {
 
     @ViewBuilder
     private func rateLimitsRow(
-        _ window: CodexRateLimitWindow
+        _ window: CodexAccount.RateLimitWindow
     ) -> some View {
         if let details = Self.rateLimitDetailsText(for: window) {
             Button {
@@ -104,12 +104,12 @@ struct AccountRateLimitsSectionView: View {
         }
     }
 
-    private var rateLimits: [CodexRateLimitWindow] {
+    private var rateLimits: [CodexAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
     static func rateLimitDetailsText(
-        for window: CodexRateLimitWindow
+        for window: CodexAccount.RateLimitWindow
     ) -> AttributedString? {
         guard let resetsAt = window.resetsAt else {
             return nil
@@ -144,7 +144,7 @@ struct StatusView: View {
         )
     }
 
-    private var serviceTierSelection: Binding<CodexReviewServiceTier?> {
+    private var serviceTierSelection: Binding<CodexReviewSettings.ServiceTier?> {
         Binding(
             get: { settings.selectedServiceTier },
             set: { serviceTier in
@@ -155,7 +155,7 @@ struct StatusView: View {
         )
     }
 
-    private var reasoningSelection: Binding<CodexReviewReasoningEffort?> {
+    private var reasoningSelection: Binding<CodexReviewSettings.ReasoningEffort?> {
         Binding(
             get: { settings.selectedReasoningEffort },
             set: { reasoningEffort in
@@ -233,7 +233,7 @@ struct StatusView: View {
                     .pickerStyle(.inline)
                     
                     Picker("Tier", selection: serviceTierSelection) {
-                        Text("Normal").tag(Optional<CodexReviewServiceTier>.none)
+                        Text("Normal").tag(Optional<CodexReviewSettings.ServiceTier>.none)
                         ForEach(settings.availableServiceTiers, id: \.self) { item in
                             Text(item.displayText).tag(Optional(item))
                         }

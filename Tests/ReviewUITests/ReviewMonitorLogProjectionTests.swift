@@ -55,19 +55,19 @@ struct ReviewMonitorLogProjectionTests {
         ]
 
         for testCase in cases {
-            #expect(ReviewMonitorLogLineCounter.lineCount(testCase.text) == testCase.expected)
+            #expect(ReviewMonitorLog.LineCounter.lineCount(testCase.text) == testCase.expected)
             let wrappedText = "prefix\(testCase.text)suffix"
             let string = wrappedText as NSString
             let range = NSRange(
                 location: ("prefix" as NSString).length,
                 length: (testCase.text as NSString).length
             )
-            #expect(ReviewMonitorLogLineCounter.lineCount(in: string, range: range) == testCase.expected)
+            #expect(ReviewMonitorLog.LineCounter.lineCount(in: string, range: range) == testCase.expected)
         }
     }
 
     @Test func commandOutputDisplayPreservesReasoningAppendAnimationSpans() throws {
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
             ReviewLogEntry(kind: .command, groupID: "cmd-1", text: "$ swift test"),
             ReviewLogEntry(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
@@ -98,7 +98,7 @@ struct ReviewMonitorLogProjectionTests {
     }
 
     @Test func progressAppendDoesNotProduceAnimationSpans() throws {
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         let initialEntries = [
             ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
         ]
@@ -177,7 +177,7 @@ struct ReviewMonitorLogProjectionTests {
             Issue.record("Expected command completion to map to a display replacement.")
             return
         }
-        #expect(replacement.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(replacement.blockID == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
         #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
             from: replacement.text
         ) == "Ran git diff for 3s")
@@ -241,7 +241,7 @@ struct ReviewMonitorLogProjectionTests {
             Issue.record("Expected new command panel to map to a display append.")
             return
         }
-        #expect(append.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(append.blockID == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
         #expect(append.text.hasPrefix("\n\n"))
         #expect(ReviewMonitorCommandOutputDisplayDocument.userVisibleText(
             from: append.text
@@ -398,7 +398,7 @@ struct ReviewMonitorLogProjectionTests {
                 ),
             ]
         )
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         let initialDocument = projection.render(entries: job.logEntries)
 
         job.appendLogEntry(.init(
@@ -420,7 +420,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(updatedDocument.revision == initialDocument.revision &+ 1)
         #expect(updatedDocument.lastChange == .replace(.init(
             kind: .contextCompaction,
-            blockID: ReviewMonitorLogBlockID("contextCompaction:compact-1"),
+            blockID: ReviewMonitorLog.BlockID("contextCompaction:compact-1"),
             range: NSRange(
                 location: 0,
                 length: ("Automatically compacting context" as NSString).length
@@ -478,7 +478,7 @@ struct ReviewMonitorLogProjectionTests {
                 .init(kind: .commandOutput, groupID: "cmd-1", text: "README.md | 1 +"),
             ]
         )
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         let initialDocument = projection.render(entries: job.logEntries)
 
         job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd-1", text: "\nSources/App.swift | 2 +"))
@@ -493,7 +493,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(updatedDocument.revision == initialDocument.revision &+ 1)
         #expect(updatedDocument.lastChange == .append(.init(
             kind: .commandOutput,
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             range: NSRange(
                 location: ("$ git diff --stat\n\nREADME.md | 1 +" as NSString).length,
                 length: ("\nSources/App.swift | 2 +" as NSString).length
@@ -525,7 +525,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(displayDocument.text.contains("$ swift test") == false)
         #expect(displayDocument.decorations.isEmpty)
         #expect(displayDocument.commandOutputPanels.count == 1)
-        #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(displayDocument.commandOutputPanels.first?.blockID == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
         #expect(displayDocument.commandOutputPanels.first?.commandText == "swift test")
         #expect(displayDocument.commandOutputPanels.first?.isActive == true)
     }
@@ -561,7 +561,7 @@ struct ReviewMonitorLogProjectionTests {
 
         #expect(displayDocument.commandOutputPanels.count == 2)
         #expect(Set(blockIDs).count == blockIDs.count)
-        #expect(blockIDs.first == ReviewMonitorLogBlockID("commandOutput:cmd-1"))
+        #expect(blockIDs.first == ReviewMonitorLog.BlockID("commandOutput:cmd-1"))
     }
 
     @Test func activeCommandLifecycleDisplaysRunningTitle() {
@@ -772,7 +772,7 @@ struct ReviewMonitorLogProjectionTests {
 
     @Test func commandTimerAttachmentViewCountsUpFromStartDate() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -793,7 +793,7 @@ struct ReviewMonitorLogProjectionTests {
         let documentView = ReviewMonitorLogDocumentView()
         documentView.reduceMotionOverrideForTesting = false
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -814,7 +814,7 @@ struct ReviewMonitorLogProjectionTests {
         let documentView = ReviewMonitorLogDocumentView()
         documentView.reduceMotionOverrideForTesting = false
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -834,7 +834,7 @@ struct ReviewMonitorLogProjectionTests {
     @Test func commandTimerAttachmentViewStopsActiveTransitionWhenReconfiguredDisabled() {
         let documentView = ReviewMonitorLogDocumentView()
         documentView.reduceMotionOverrideForTesting = false
-        let blockID = ReviewMonitorLogBlockID("commandOutput:cmd-1")
+        let blockID = ReviewMonitorLog.BlockID("commandOutput:cmd-1")
         let startedAt = Date(timeIntervalSince1970: 100)
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
             blockID: blockID,
@@ -862,7 +862,7 @@ struct ReviewMonitorLogProjectionTests {
 
     @Test func commandTimerAttachmentViewKeepsWidthWhenDigitsGrow() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -878,7 +878,7 @@ struct ReviewMonitorLogProjectionTests {
 
     @Test func commandTimerAttachmentViewLongTextFitsAttachmentWidth() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -892,7 +892,7 @@ struct ReviewMonitorLogProjectionTests {
 
     @Test func commandTimerAttachmentViewDoesNotAnimateWhenDisabled() {
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13),
             animatesNumericTransition: false
@@ -910,7 +910,7 @@ struct ReviewMonitorLogProjectionTests {
         let documentView = ReviewMonitorLogDocumentView()
         documentView.reduceMotionOverrideForTesting = false
         let attachment = ReviewMonitorCommandOutputTimerAttachment(
-            blockID: ReviewMonitorLogBlockID("commandOutput:cmd-1"),
+            blockID: ReviewMonitorLog.BlockID("commandOutput:cmd-1"),
             startedAt: Date(timeIntervalSince1970: 100),
             font: .systemFont(ofSize: 13)
         )
@@ -990,7 +990,7 @@ struct ReviewMonitorLogProjectionTests {
         let sourceDocument = document(for: job)
         let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
             from: sourceDocument,
-            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+            expandedBlockIDs: [ReviewMonitorLog.BlockID("commandOutput:cmd-1")]
         )
 
         #expect(displayDocument.commandOutputPanels.first?.exitText == "exit 1")
@@ -1046,7 +1046,7 @@ struct ReviewMonitorLogProjectionTests {
 
         let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
             from: document(for: job),
-            expandedBlockIDs: [ReviewMonitorLogBlockID("commandOutput:cmd-1")]
+            expandedBlockIDs: [ReviewMonitorLog.BlockID("commandOutput:cmd-1")]
         )
 
         #expect(displayDocument.commandOutputPanels.first?.outputText == "Tests passed")
@@ -1071,7 +1071,7 @@ struct ReviewMonitorLogProjectionTests {
             ]
         )
         let sourceDocument = document(for: job)
-        let blockID = ReviewMonitorLogBlockID("commandOutput:cmd-1")
+        let blockID = ReviewMonitorLog.BlockID("commandOutput:cmd-1")
 
         let collapsedDocument = ReviewMonitorCommandOutputDisplayDocument.make(
             from: sourceDocument,
@@ -1310,7 +1310,7 @@ struct ReviewMonitorLogProjectionTests {
                 .init(kind: .agentMessage, groupID: "msg-1", text: "Initial"),
             ]
         )
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         _ = projection.render(entries: job.logEntries)
 
         job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg-1", text: " log"))
@@ -1319,7 +1319,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.text == "Initial log")
         #expect(document.blocks == [
             .init(
-                id: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+                id: ReviewMonitorLog.BlockID("agentMessage:msg-1"),
                 kind: .agentMessage,
                 groupID: "msg-1",
                 range: NSRange(location: 0, length: ("Initial log" as NSString).length)
@@ -1327,7 +1327,7 @@ struct ReviewMonitorLogProjectionTests {
         ])
         #expect(document.lastChange == .append(.init(
             kind: .agentMessage,
-            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            blockID: ReviewMonitorLog.BlockID("agentMessage:msg-1"),
             range: NSRange(
                 location: ("Initial" as NSString).length,
                 length: (" log" as NSString).length
@@ -1347,7 +1347,7 @@ struct ReviewMonitorLogProjectionTests {
                 .init(kind: .agentMessage, groupID: "msg-1", text: "**bo"),
             ]
         )
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         _ = projection.render(entries: job.logEntries)
 
         job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg-1", text: "ld**"))
@@ -1357,7 +1357,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.sourceText == "**bold**")
         #expect(document.lastChange == .replace(.init(
             kind: .agentMessage,
-            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            blockID: ReviewMonitorLog.BlockID("agentMessage:msg-1"),
             range: NSRange(location: 0, length: ("**bo" as NSString).length),
             text: "bold"
         )))
@@ -1367,7 +1367,7 @@ struct ReviewMonitorLogProjectionTests {
     @Test func incrementalAppendReplacesTailMarkdownBlockWithoutFullReload() {
         let firstEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "**bo")
         let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg-1", text: "ld**")
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         _ = projection.render(entries: [firstEntry])
 
         let incrementalDocument = projection.append(entries: [appendedEntry], sourceRange: 1..<2)
@@ -1375,7 +1375,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(incrementalDocument?.sourceText == "**bold**")
         #expect(incrementalDocument?.lastChange == .replace(.init(
             kind: .agentMessage,
-            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            blockID: ReviewMonitorLog.BlockID("agentMessage:msg-1"),
             range: NSRange(location: 0, length: ("**bo" as NSString).length),
             text: "bold"
         )))
@@ -1385,7 +1385,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.sourceText == "**bold**")
         #expect(document.lastChange == .replace(.init(
             kind: .agentMessage,
-            blockID: ReviewMonitorLogBlockID("agentMessage:msg-1"),
+            blockID: ReviewMonitorLog.BlockID("agentMessage:msg-1"),
             range: NSRange(location: 0, length: ("**bo" as NSString).length),
             text: "bold"
         )))
@@ -1402,7 +1402,7 @@ struct ReviewMonitorLogProjectionTests {
                 .init(kind: .plan, groupID: "plan-1", text: "- original"),
             ]
         )
-        var projection = ReviewMonitorLogProjection()
+        var projection = ReviewMonitorLog.Projection()
         _ = projection.render(entries: job.logEntries)
 
         job.appendLogEntry(.init(kind: .plan, groupID: "plan-1", replacesGroup: true, text: "- updated"))
@@ -1411,7 +1411,7 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.text == "- updated")
         #expect(document.lastChange == .replace(.init(
             kind: .plan,
-            blockID: ReviewMonitorLogBlockID("plan:plan-1"),
+            blockID: ReviewMonitorLog.BlockID("plan:plan-1"),
             range: NSRange(location: 0, length: ("- original" as NSString).length),
             text: "- updated"
         )))
@@ -1435,8 +1435,8 @@ struct ReviewMonitorLogProjectionTests {
         #expect(document.text.contains("STALE BEGINNING") == false)
     }
 
-    private func document(for job: CodexReviewJob) -> ReviewMonitorLogDocument {
-        var projection = ReviewMonitorLogProjection()
+    private func document(for job: CodexReviewJob) -> ReviewMonitorLog.Document {
+        var projection = ReviewMonitorLog.Projection()
         return projection.render(entries: job.logEntries)
     }
 }

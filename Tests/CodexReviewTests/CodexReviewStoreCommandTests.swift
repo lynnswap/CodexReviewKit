@@ -154,7 +154,7 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let commands = await backend.recordedCommands()
-            let starts = commands.compactMap { command -> BackendReviewStart? in
+            let starts = commands.compactMap { command -> CodexReviewBackendModel.Review.Start? in
                 if case .startReview(let request) = command {
                     return request
                 }
@@ -371,7 +371,7 @@ struct CodexReviewStoreCommandTests {
 
         #expect(read.logs.map(\.text).first == "line-25")
         #expect(read.logs.map(\.text).last == "line-124")
-        #expect(read.logsPage == ReviewLogPage(
+        #expect(read.logsPage == CodexReviewAPI.Log.Page(
             total: 125,
             offset: 25,
             limit: 100,
@@ -411,7 +411,7 @@ struct CodexReviewStoreCommandTests {
         )
 
         #expect(read.logs.map(\.text) == ["line-5", "line-6", "line-7", "line-8"])
-        #expect(read.logsPage == ReviewLogPage(
+        #expect(read.logsPage == CodexReviewAPI.Log.Page(
             total: 12,
             offset: 5,
             limit: 4,
@@ -448,7 +448,7 @@ struct CodexReviewStoreCommandTests {
             try store.readReview(jobID: "job-1", logPage: .init(limit: -1))
         }
         #expect(throws: (any Error).self) {
-            try store.readReview(jobID: "job-1", logPage: .init(limit: ReviewLogPageRequest.maxLimit + 1))
+            try store.readReview(jobID: "job-1", logPage: .init(limit: CodexReviewAPI.Log.PageRequest.maxLimit + 1))
         }
     }
 
@@ -861,13 +861,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryWaitDiscardsOldAttemptCompletion() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -919,13 +919,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryDiscardsOldAttemptEventsDuringRecoverySettle() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -986,13 +986,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryRepeatedSatisfiedSnapshotsRestartAfterLatestSettle() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1042,13 +1042,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryClosesActiveCommandsAsCanceled() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1107,13 +1107,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryUsesActualStartedTurn() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-response",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-recovered",
@@ -1147,7 +1147,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForBeginReviewRecovery(timeout: .seconds(2))
             let commandsAfterInterrupt = await backend.recordedCommands()
-            let interruptedRuns = commandsAfterInterrupt.compactMap { command -> BackendReviewRun? in
+            let interruptedRuns = commandsAfterInterrupt.compactMap { command -> CodexReviewBackendModel.Review.Run? in
                 if case .beginReviewRecovery(let run, _) = command {
                     return run
                 }
@@ -1158,7 +1158,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             try await backend.waitForResumeReviewRecovery(timeout: .seconds(2))
             let commandsAfterRecovery = await backend.recordedCommands()
-            let recoveredFromRuns = commandsAfterRecovery.compactMap { command -> BackendReviewRun? in
+            let recoveredFromRuns = commandsAfterRecovery.compactMap { command -> CodexReviewBackendModel.Review.Run? in
                 if case .resumeReviewRecovery(let token, _) = command {
                     return token.interruptedRun
                 }
@@ -1176,13 +1176,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryRestartsReviewOnSameJobAndSucceeds() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1233,13 +1233,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryClearsAbandonedAttemptOutputBeforeRecoveredCompletion() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1289,13 +1289,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryIgnoresStaleCompletionAfterRecoveredSubscriptionStarts() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1334,13 +1334,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryIgnoresStaleTerminalQueuedWhileRestarting() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1382,13 +1382,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryResubscribesWhenInterruptedEventStreamFinished() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1427,13 +1427,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func cancellationWhileRecoveryRestartIsInFlightStopsRecoveredRun() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -1484,7 +1484,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func cancellationAfterRecoveryEventStreamFinishesWakesWorker() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1524,7 +1524,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func runtimeStopLocalCancellationDetachesWorker() async throws {
-        let run = BackendReviewRun(
+        let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1562,7 +1562,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func stopInterruptsActiveReviewBeforeMarkingJobStopped() async throws {
-        let run = BackendReviewRun(
+        let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1604,7 +1604,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func runtimeStopDetachesNetworkRecoveryWaitingWorker() async throws {
-        let run = BackendReviewRun(
+        let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1642,7 +1642,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func runtimeStopCanDrainDetachedWorkerCleanup() async throws {
-        let run = BackendReviewRun(
+        let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1707,7 +1707,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func cancellationDuringNetworkRecoveryStopsWhenEventStreamFinishes() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
@@ -1739,13 +1739,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func networkRecoveryIgnoresOldAttemptEventsAfterRecoveryBegins() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -2001,13 +2001,13 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func pendingNetworkOutageDefersStreamFailureUntilRecovery() async throws {
-        let initialRun = BackendReviewRun(
+        let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
             turnID: "turn-1",
             reviewThreadID: "review-thread-1",
             model: "gpt-5"
         )
-        let recoveredRun = BackendReviewRun(
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: "attempt-recovered",
             threadID: "thread-1",
             turnID: "turn-2",
@@ -2315,7 +2315,7 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func fakeBackendPreservesSettingsCatalogWhenApplyingOverrides() async throws {
-        let model = CodexReviewModelCatalogItem(
+        let model = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-5.5",
             model: "gpt-5.5",
             displayName: "GPT-5.5",
@@ -2408,7 +2408,7 @@ private func waitUntil(
 @MainActor
 private func waitForRunAttemptActivation(
     store: CodexReviewStore,
-    run: BackendReviewRun,
+    run: CodexReviewBackendModel.Review.Run,
     timeout: Duration = .seconds(2)
 ) async -> Bool {
     await StoreSnapshotProbe(store: store)

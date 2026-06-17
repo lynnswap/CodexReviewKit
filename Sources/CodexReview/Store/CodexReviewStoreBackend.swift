@@ -6,14 +6,14 @@ package struct CodexReviewStoreSeed {
     package var initialAccount: CodexAccount?
     package var initialAccounts: [CodexAccount]
     package var initialActiveAccountKey: String?
-    package var initialSettingsSnapshot: CodexReviewSettingsSnapshot
+    package var initialSettingsSnapshot: CodexReviewSettings.Snapshot
 
     package init(
         shouldAutoStartEmbeddedServer: Bool = false,
         initialAccount: CodexAccount? = nil,
         initialAccounts: [CodexAccount] = [],
         initialActiveAccountKey: String? = nil,
-        initialSettingsSnapshot: CodexReviewSettingsSnapshot = .init()
+        initialSettingsSnapshot: CodexReviewSettings.Snapshot = .init()
     ) {
         self.shouldAutoStartEmbeddedServer = shouldAutoStartEmbeddedServer
         self.initialAccount = initialAccount
@@ -44,17 +44,17 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func refreshAccountRateLimits(auth: CodexReviewAuthModel, accountKey: String) async
     func requiresCurrentSessionRecovery(auth: CodexReviewAuthModel, accountKey: String) -> Bool
 
-    func startReview(_ request: BackendReviewStart) async throws -> BackendReviewAttempt
-    func interruptReview(_ run: BackendReviewRun, reason: BackendCancellationReason) async throws
+    func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
+    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
     func beginReviewRecovery(
-        _ run: BackendReviewRun,
-        reason: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken
+        _ run: CodexReviewBackendModel.Review.Run,
+        reason: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
     func resumeReviewRecovery(
-        _ token: BackendReviewRecoveryToken,
-        request: BackendReviewStart
+        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+        request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
-    func cleanupReview(_ run: BackendReviewRun) async
+    func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
 }
 
 extension CodexReviewStoreBackend {

@@ -1,15 +1,15 @@
-public enum ReviewCancellationSource: String, Codable, Sendable, Hashable {
-    case userInterface
-    case mcpClient
-    case sessionClosed
-    case system
-}
-
 public struct ReviewCancellation: Codable, Sendable, Hashable {
-    public var source: ReviewCancellationSource
+    public enum Source: String, Codable, Sendable, Hashable {
+        case userInterface
+        case mcpClient
+        case sessionClosed
+        case system
+    }
+
+    public var source: Source
     public var message: String
 
-    public init(source: ReviewCancellationSource, message: String) {
+    public init(source: Source, message: String) {
         self.source = source
         self.message = message
     }

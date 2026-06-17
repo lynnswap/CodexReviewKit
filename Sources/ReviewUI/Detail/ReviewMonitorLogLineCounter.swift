@@ -1,6 +1,7 @@
 import Foundation
 
-enum ReviewMonitorLogLineCounter {
+extension ReviewMonitorLog {
+enum LineCounter {
     struct Metrics: Equatable, Sendable {
         var lineCount: Int
         var maximumLineUTF16Length: Int
@@ -48,4 +49,5 @@ enum ReviewMonitorLogLineCounter {
         }
         return Metrics(lineCount: max(0, count), maximumLineUTF16Length: maximumLineLength)
     }
+}
 }

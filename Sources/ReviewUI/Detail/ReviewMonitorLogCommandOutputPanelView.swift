@@ -62,7 +62,7 @@ final class ReviewMonitorLogContentViewportView: ReviewMonitorLogTiledContentVie
 private final class ReviewMonitorCommandOutputScrollView: NSScrollView {}
 
 final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
-    let blockID: ReviewMonitorLogBlockID
+    let blockID: ReviewMonitorLog.BlockID
     let isExpanded: Bool
     let symbolSize: CGFloat
     let fontPointSize: CGFloat
@@ -72,7 +72,7 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
         isExpanded ? "chevron.down" : "chevron.forward"
     }
 
-    init(blockID: ReviewMonitorLogBlockID, isExpanded: Bool, font: NSFont) {
+    init(blockID: ReviewMonitorLog.BlockID, isExpanded: Bool, font: NSFont) {
         self.blockID = blockID
         self.isExpanded = isExpanded
         self.symbolSize = ceil(font.pointSize + 1)
@@ -138,13 +138,13 @@ final class ReviewMonitorCommandOutputToggleAttachment: NSTextAttachment {
 }
 
 final class ReviewMonitorCommandOutputTimerAttachment: NSTextAttachment {
-    let blockID: ReviewMonitorLogBlockID
+    let blockID: ReviewMonitorLog.BlockID
     let startedAt: Date
     let fontPointSize: CGFloat
     let animatesNumericTransition: Bool
 
     init(
-        blockID: ReviewMonitorLogBlockID,
+        blockID: ReviewMonitorLog.BlockID,
         startedAt: Date,
         font: NSFont,
         animatesNumericTransition: Bool = true
@@ -268,7 +268,7 @@ final class ReviewMonitorCommandOutputTimerAttachmentViewProvider: NSTextAttachm
 final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
     private nonisolated static let minimumTimerInterval: TimeInterval = 0.05
 
-    private(set) var blockID: ReviewMonitorLogBlockID
+    private(set) var blockID: ReviewMonitorLog.BlockID
     private var startedAt: Date
     private var timerFont: NSFont
     private var attachmentSize: NSSize
@@ -495,12 +495,12 @@ final class ReviewMonitorCommandOutputTimerAttachmentView: NSView {
 }
 
 final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
-    let blockID: ReviewMonitorLogBlockID
-    let panel: ReviewMonitorLogCommandOutputPanel
+    let blockID: ReviewMonitorLog.BlockID
+    let panel: ReviewMonitorLog.CommandOutputPanel
     let outputLineHeight: CGFloat
 
     init(
-        panel: ReviewMonitorLogCommandOutputPanel,
+        panel: ReviewMonitorLog.CommandOutputPanel,
         outputLineHeight: CGFloat
     ) {
         self.blockID = panel.blockID
@@ -599,7 +599,7 @@ final class ReviewMonitorCommandOutputPanelAttachmentViewProvider: NSTextAttachm
 
 @MainActor
 final class ReviewMonitorCommandOutputToggleButton: NSButton {
-    private(set) var blockID: ReviewMonitorLogBlockID
+    private(set) var blockID: ReviewMonitorLog.BlockID
     private(set) var isExpanded: Bool
     private var buttonSize: NSSize
 
@@ -674,7 +674,7 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
     private let backgroundView = NSVisualEffectView()
     private let panelView: ReviewMonitorCommandOutputPanelView
     private var backgroundAlpha: CGFloat = 0
-    private(set) var blockID: ReviewMonitorLogBlockID
+    private(set) var blockID: ReviewMonitorLog.BlockID
 
     override var isFlipped: Bool {
         true
@@ -865,13 +865,13 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private nonisolated static let commandLeadingInset: CGFloat = 12
     private nonisolated static let commandTrailingInset: CGFloat = 2
 
-    private let blockID: ReviewMonitorLogBlockID
+    private let blockID: ReviewMonitorLog.BlockID
     private let shellLabel = NSTextField(labelWithString: "Shell")
     private let commandTextView = NSTextView(usingTextLayoutManager: true)
     private let outputScrollView = ReviewMonitorCommandOutputScrollView()
     private let outputTextView = NSTextView(usingTextLayoutManager: true)
     private let resultLabel = NSTextField(labelWithString: "")
-    private var panel: ReviewMonitorLogCommandOutputPanel?
+    private var panel: ReviewMonitorLog.CommandOutputPanel?
     private var terminalText = ""
     private var commandLineText = ""
     private var outputText = ""
@@ -887,7 +887,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         true
     }
 
-    init(blockID: ReviewMonitorLogBlockID) {
+    init(blockID: ReviewMonitorLog.BlockID) {
         self.blockID = blockID
         super.init(frame: .zero)
         wantsLayer = true
@@ -929,7 +929,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     @discardableResult
-    func configure(_ panel: ReviewMonitorLogCommandOutputPanel) -> Bool {
+    func configure(_ panel: ReviewMonitorLog.CommandOutputPanel) -> Bool {
         guard self.panel != panel else {
             return false
         }
@@ -964,7 +964,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
 
         if outputChanged {
             outputText = panel.outputText
-            let outputMetrics = ReviewMonitorLogLineCounter.metrics(panel.outputText)
+            let outputMetrics = ReviewMonitorLog.LineCounter.metrics(panel.outputText)
             outputLineCount = outputMetrics.lineCount
             outputMaximumLineUTF16Length = outputMetrics.maximumLineUTF16Length
             outputTextView.textStorage?.setAttributedString(
@@ -1348,7 +1348,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     nonisolated static func proposedSize(
-        for panel: ReviewMonitorLogCommandOutputPanel,
+        for panel: ReviewMonitorLog.CommandOutputPanel,
         width: CGFloat,
         outputLineHeight: CGFloat
     ) -> NSSize {
@@ -1363,7 +1363,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     private nonisolated static func cardHeight(
-        for panel: ReviewMonitorLogCommandOutputPanel,
+        for panel: ReviewMonitorLog.CommandOutputPanel,
         width: CGFloat,
         outputLineHeight: CGFloat
     ) -> CGFloat {

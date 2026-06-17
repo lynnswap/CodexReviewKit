@@ -218,8 +218,8 @@ private enum ReviewMonitorNativeAuthentication {
 struct ReviewMonitorAppComposition {
     typealias PresentationAnchorProvider = @MainActor () -> NSWindow?
     typealias LiveStoreFactory = (
-        CodexReviewRuntimePreferences,
-        CodexReviewNativeAuthenticationConfiguration?
+        CodexReviewRuntime.Preferences,
+        CodexReviewNativeAuthentication.Configuration?
     ) -> CodexReviewStore
 
     var makeStore: (ReviewMonitorLaunchContext, @escaping PresentationAnchorProvider) -> CodexReviewStore
@@ -250,7 +250,7 @@ struct ReviewMonitorAppComposition {
         ) -> NSWindowController,
         makeSettingsWindowController: @escaping () -> NSWindowController = {
             ReviewMonitorSettingsWindowController(
-                runtimePreferencesStore: UserDefaultsCodexReviewRuntimePreferencesStore()
+                runtimePreferencesStore: CodexReviewRuntime.UserDefaultsPreferencesStore()
             )
         }
     ) {
@@ -261,7 +261,7 @@ struct ReviewMonitorAppComposition {
     }
 
     static func live(
-        runtimePreferencesStore: any CodexReviewRuntimePreferencesStore = UserDefaultsCodexReviewRuntimePreferencesStore(),
+        runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore = CodexReviewRuntime.UserDefaultsPreferencesStore(),
         makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration in
             CodexReviewStore.makeLiveStore(
                 runtimePreferences: runtimePreferences,

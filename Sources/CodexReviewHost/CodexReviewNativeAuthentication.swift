@@ -5,57 +5,67 @@ import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "native-auth")
 
-@MainActor
-public struct CodexReviewNativeAuthenticationConfiguration: Sendable {
-    public enum BrowserSessionPolicy: Sendable {
-        case ephemeral
-    }
-
-    public var callbackScheme: String
-    public var browserSessionPolicy: BrowserSessionPolicy
-    public var presentationAnchorProvider: @MainActor @Sendable () -> ASPresentationAnchor?
-
-    public init(
-        callbackScheme: String,
-        browserSessionPolicy: BrowserSessionPolicy,
-        presentationAnchorProvider: @escaping @MainActor @Sendable () -> ASPresentationAnchor?
-    ) {
-        self.callbackScheme = callbackScheme
-        self.browserSessionPolicy = browserSessionPolicy
-        self.presentationAnchorProvider = presentationAnchorProvider
-    }
-}
+public enum CodexReviewNativeAuthentication {}
 
 @MainActor
-public protocol CodexReviewWebAuthenticationSession: AnyObject, Sendable {
-    func waitForCallbackURL() async throws -> URL
-    func cancel() async
-}
+public extension CodexReviewNativeAuthentication {
+    struct Configuration: Sendable {
+        public enum BrowserSessionPolicy: Sendable {
+            case ephemeral
+        }
 
-public typealias CodexReviewWebAuthenticationSessionFactory = @MainActor @Sendable (
-    URL,
-    String,
-    CodexReviewNativeAuthenticationConfiguration.BrowserSessionPolicy,
-    @escaping @MainActor @Sendable () -> ASPresentationAnchor?
-) async throws -> any CodexReviewWebAuthenticationSession
+        public var callbackScheme: String
+        public var browserSessionPolicy: BrowserSessionPolicy
+        public var presentationAnchorProvider: @MainActor @Sendable () -> ASPresentationAnchor?
 
-public enum CodexReviewWebAuthenticationSessions {
-    public static let system: CodexReviewWebAuthenticationSessionFactory = {
-        url,
-        callbackScheme,
-        browserSessionPolicy,
-        presentationAnchorProvider in
-        try await SystemCodexReviewWebAuthenticationSession.start(
-            using: url,
-            callbackScheme: callbackScheme,
-            browserSessionPolicy: browserSessionPolicy,
-            presentationAnchorProvider: presentationAnchorProvider
-        )
+        public init(
+            callbackScheme: String,
+            browserSessionPolicy: BrowserSessionPolicy,
+            presentationAnchorProvider: @escaping @MainActor @Sendable () -> ASPresentationAnchor?
+        ) {
+            self.callbackScheme = callbackScheme
+            self.browserSessionPolicy = browserSessionPolicy
+            self.presentationAnchorProvider = presentationAnchorProvider
+        }
     }
 }
 
 @MainActor
-private final class SystemCodexReviewWebAuthenticationSession: NSObject, CodexReviewWebAuthenticationSession {
+public extension CodexReviewNativeAuthentication {
+    protocol WebSession: AnyObject, Sendable {
+        func waitForCallbackURL() async throws -> URL
+        func cancel() async
+    }
+}
+
+public extension CodexReviewNativeAuthentication {
+    typealias WebSessionFactory = @MainActor @Sendable (
+        URL,
+        String,
+        Configuration.BrowserSessionPolicy,
+        @escaping @MainActor @Sendable () -> ASPresentationAnchor?
+    ) async throws -> any WebSession
+}
+
+public extension CodexReviewNativeAuthentication {
+    enum WebSessions {
+        public static let system: WebSessionFactory = {
+            url,
+            callbackScheme,
+            browserSessionPolicy,
+            presentationAnchorProvider in
+            try await SystemCodexReviewWebAuthenticationSession.start(
+                using: url,
+                callbackScheme: callbackScheme,
+                browserSessionPolicy: browserSessionPolicy,
+                presentationAnchorProvider: presentationAnchorProvider
+            )
+        }
+    }
+}
+
+@MainActor
+private final class SystemCodexReviewWebAuthenticationSession: NSObject, CodexReviewNativeAuthentication.WebSession {
     private final class PresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
         let anchor: ASPresentationAnchor
 
@@ -76,7 +86,7 @@ private final class SystemCodexReviewWebAuthenticationSession: NSObject, CodexRe
     static func start(
         using url: URL,
         callbackScheme: String,
-        browserSessionPolicy: CodexReviewNativeAuthenticationConfiguration.BrowserSessionPolicy,
+        browserSessionPolicy: CodexReviewNativeAuthentication.Configuration.BrowserSessionPolicy,
         presentationAnchorProvider: @escaping @MainActor @Sendable () -> ASPresentationAnchor?
     ) async throws -> SystemCodexReviewWebAuthenticationSession {
         guard let anchor = presentationAnchorProvider() else {

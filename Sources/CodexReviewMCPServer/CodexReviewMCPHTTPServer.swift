@@ -13,84 +13,88 @@ private struct TrackedHTTPResponse {
     var streamCompletion: ActiveRequestCompletion? = nil
 }
 
-package enum CodexReviewMCPHTTPServerError: LocalizedError, Equatable, Sendable {
-    case addressInUse(host: String, port: Int)
+package extension CodexReviewMCPHTTPServer {
+    enum Error: Swift.Error, LocalizedError, Equatable, Sendable {
+        case addressInUse(host: String, port: Int)
 
-    package static func classifyStartError(
-        _ error: Error,
-        configuration: CodexReviewMCPHTTPServerConfiguration
-    ) -> Error {
-        if let ioError = error as? IOError,
-           ioError.errnoCode == EADDRINUSE
-        {
-            return Self.addressInUse(
-                host: configuration.host,
-                port: configuration.port
-            )
+        package static func classifyStartError(
+            _ error: Swift.Error,
+            configuration: CodexReviewMCPHTTPServer.Configuration
+        ) -> Swift.Error {
+            if let ioError = error as? IOError,
+               ioError.errnoCode == EADDRINUSE
+            {
+                return Self.addressInUse(
+                    host: configuration.host,
+                    port: configuration.port
+                )
+            }
+            return error
         }
-        return error
-    }
 
-    package var errorDescription: String? {
-        switch self {
-        case .addressInUse(let host, let port):
-            "MCP HTTP server address \(host):\(port) is already in use."
+        package var errorDescription: String? {
+            switch self {
+            case .addressInUse(let host, let port):
+                "MCP HTTP server address \(host):\(port) is already in use."
+            }
         }
     }
 }
 
-package struct CodexReviewMCPHTTPServerConfiguration: Sendable {
-    package var host: String
-    package var port: Int
-    package var endpoint: String
-    package var sessionTimeout: TimeInterval
-    package var retryInterval: Int?
-    package var streamHeartbeatInterval: Duration?
-    package var boundedReviewWaitDuration: Duration
+package extension CodexReviewMCPHTTPServer {
+    struct Configuration: Sendable {
+        package var host: String
+        package var port: Int
+        package var endpoint: String
+        package var sessionTimeout: TimeInterval
+        package var retryInterval: Int?
+        package var streamHeartbeatInterval: Duration?
+        package var boundedReviewWaitDuration: Duration
 
-    package init(
-        host: String = "localhost",
-        port: Int = 9417,
-        endpoint: String = "/mcp",
-        sessionTimeout: TimeInterval = 3600,
-        retryInterval: Int? = 1000
-    ) {
-        self.init(
-            host: host,
-            port: port,
-            endpoint: endpoint,
-            sessionTimeout: sessionTimeout,
-            retryInterval: retryInterval,
-            streamHeartbeatInterval: .seconds(30),
-            boundedReviewWaitDuration: .seconds(540)
-        )
-    }
+        package init(
+            host: String = "localhost",
+            port: Int = 9417,
+            endpoint: String = "/mcp",
+            sessionTimeout: TimeInterval = 3600,
+            retryInterval: Int? = 1000
+        ) {
+            self.init(
+                host: host,
+                port: port,
+                endpoint: endpoint,
+                sessionTimeout: sessionTimeout,
+                retryInterval: retryInterval,
+                streamHeartbeatInterval: .seconds(30),
+                boundedReviewWaitDuration: .seconds(540)
+            )
+        }
 
-    package init(
-        host: String = "localhost",
-        port: Int = 9417,
-        endpoint: String = "/mcp",
-        sessionTimeout: TimeInterval = 3600,
-        retryInterval: Int? = 1000,
-        streamHeartbeatInterval: Duration?,
-        boundedReviewWaitDuration: Duration = .seconds(540)
-    ) {
-        self.host = host
-        self.port = port
-        self.endpoint = endpoint.hasPrefix("/") ? endpoint : "/\(endpoint)"
-        self.sessionTimeout = sessionTimeout
-        self.retryInterval = retryInterval
-        self.streamHeartbeatInterval = streamHeartbeatInterval
-        self.boundedReviewWaitDuration = boundedReviewWaitDuration
-    }
+        package init(
+            host: String = "localhost",
+            port: Int = 9417,
+            endpoint: String = "/mcp",
+            sessionTimeout: TimeInterval = 3600,
+            retryInterval: Int? = 1000,
+            streamHeartbeatInterval: Duration?,
+            boundedReviewWaitDuration: Duration = .seconds(540)
+        ) {
+            self.host = host
+            self.port = port
+            self.endpoint = endpoint.hasPrefix("/") ? endpoint : "/\(endpoint)"
+            self.sessionTimeout = sessionTimeout
+            self.retryInterval = retryInterval
+            self.streamHeartbeatInterval = streamHeartbeatInterval
+            self.boundedReviewWaitDuration = boundedReviewWaitDuration
+        }
 
-    package func url(boundPort: Int? = nil) -> URL {
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = host
-        components.port = boundPort ?? port
-        components.path = endpoint
-        return components.url!
+        package func url(boundPort: Int? = nil) -> URL {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = host
+            components.port = boundPort ?? port
+            components.path = endpoint
+            return components.url!
+        }
     }
 }
 
@@ -112,7 +116,7 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     private let adapter: CodexReviewMCPServer
-    private let configuration: CodexReviewMCPHTTPServerConfiguration
+    private let configuration: CodexReviewMCPHTTPServer.Configuration
     private var channel: Channel?
     private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private var sessions: [String: SessionContext] = [:]
@@ -121,7 +125,7 @@ package actor CodexReviewMCPHTTPServer {
 
     package init(
         adapter: CodexReviewMCPServer,
-        configuration: CodexReviewMCPHTTPServerConfiguration = .init()
+        configuration: CodexReviewMCPHTTPServer.Configuration = .init()
     ) {
         self.adapter = adapter
         self.configuration = configuration
@@ -136,7 +140,7 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     package static func checkBind(
-        configuration: CodexReviewMCPHTTPServerConfiguration
+        configuration: CodexReviewMCPHTTPServer.Configuration
     ) async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ServerBootstrap(group: group)
@@ -158,7 +162,7 @@ package actor CodexReviewMCPHTTPServer {
             try? await group.shutdownGracefully()
         } catch {
             try? await group.shutdownGracefully()
-            throw CodexReviewMCPHTTPServerError.classifyStartError(
+            throw CodexReviewMCPHTTPServer.Error.classifyStartError(
                 error,
                 configuration: configuration
             )
@@ -198,7 +202,7 @@ package actor CodexReviewMCPHTTPServer {
             logger.info("MCP Streamable HTTP server listening at \(self.url.absoluteString, privacy: .public)")
         } catch {
             try? await group.shutdownGracefully()
-            throw CodexReviewMCPHTTPServerError.classifyStartError(
+            throw CodexReviewMCPHTTPServer.Error.classifyStartError(
                 error,
                 configuration: configuration
             )
@@ -321,7 +325,7 @@ package actor CodexReviewMCPHTTPServer {
                     await self.finishActiveRequest(sessionID: sessionID)
                 }
             }
-            let trackedStream = AsyncThrowingStream<Data, Error>(bufferingPolicy: .unbounded) { continuation in
+            let trackedStream = AsyncThrowingStream<Data, Swift.Error>(bufferingPolicy: .unbounded) { continuation in
                 let heartbeatTask = makeStreamHeartbeatTask(continuation: continuation)
                 let task = Task {
                     defer {
@@ -363,7 +367,7 @@ package actor CodexReviewMCPHTTPServer {
     }
 
     private func makeStreamHeartbeatTask(
-        continuation: AsyncThrowingStream<Data, Error>.Continuation
+        continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
     ) -> Task<Void, Never>? {
         guard let interval = configuration.streamHeartbeatInterval else {
             return nil

@@ -35,11 +35,11 @@ extension CodexReviewStore {
     ) throws {
         guard let job = job(id: jobID)
         else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         guard job.sessionID == sessionID
         else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         guard job.isTerminal == false else {
             return
@@ -67,11 +67,11 @@ extension CodexReviewStore {
     ) throws {
         guard let job = job(id: jobID)
         else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         guard job.sessionID == sessionID
         else {
-            throw ReviewError.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
 
         job.cancellationRequested = false

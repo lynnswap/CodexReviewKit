@@ -1,36 +1,42 @@
 import AppKit
 import QuartzCore
 
-public struct TextContentTransition: Equatable, Sendable {
-    enum Kind: Equatable, Sendable {
-        case identity
-        case opacity
-        case numericText(countsDown: Bool)
-        case numericTextValue(Double)
-    }
+public enum TextTransition {}
 
-    var kind: Kind
+public extension TextTransition {
+    struct Content: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
+            case identity
+            case opacity
+            case numericText(countsDown: Bool)
+            case numericTextValue(Double)
+        }
 
-    public static let identity = TextContentTransition(kind: .identity)
-    public static let opacity = TextContentTransition(kind: .opacity)
+        var kind: Kind
 
-    public static func numericText(countsDown: Bool = false) -> TextContentTransition {
-        TextContentTransition(kind: .numericText(countsDown: countsDown))
-    }
+        public static let identity = TextTransition.Content(kind: .identity)
+        public static let opacity = TextTransition.Content(kind: .opacity)
 
-    public static func numericText(value: Double) -> TextContentTransition {
-        TextContentTransition(kind: .numericTextValue(value))
+        public static func numericText(countsDown: Bool = false) -> TextTransition.Content {
+            TextTransition.Content(kind: .numericText(countsDown: countsDown))
+        }
+
+        public static func numericText(value: Double) -> TextTransition.Content {
+            TextTransition.Content(kind: .numericTextValue(value))
+        }
     }
 }
 
-public enum TextWidthReservation: @unchecked Sendable {
-    case natural
-    case fixed(CGSize)
-    case sample(NSAttributedString)
+public extension TextTransition {
+    enum WidthReservation: @unchecked Sendable {
+        case natural
+        case fixed(CGSize)
+        case sample(NSAttributedString)
+    }
 }
 
-extension TextWidthReservation: Equatable {
-    public static func == (lhs: TextWidthReservation, rhs: TextWidthReservation) -> Bool {
+extension TextTransition.WidthReservation: Equatable {
+    public static func == (lhs: TextTransition.WidthReservation, rhs: TextTransition.WidthReservation) -> Bool {
         switch (lhs, rhs) {
         case (.natural, .natural):
             return true
@@ -44,20 +50,22 @@ extension TextWidthReservation: Equatable {
     }
 }
 
-public enum TextTransitionMotionPolicy: Equatable, Sendable {
-    case system
-    case enabled
-    case disabled
+public extension TextTransition {
+    enum MotionPolicy: Equatable, Sendable {
+        case system
+        case enabled
+        case disabled
 
-    @MainActor
-    var allowsAnimation: Bool {
-        switch self {
-        case .system:
-            return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
-        case .enabled:
-            return true
-        case .disabled:
-            return false
+        @MainActor
+        var allowsAnimation: Bool {
+            switch self {
+            case .system:
+                return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
+            case .enabled:
+                return true
+            case .disabled:
+                return false
+            }
         }
     }
 }
@@ -95,8 +103,8 @@ public final class TextTransitionView: NSView {
     }
 
     public private(set) var text: NSAttributedString
-    public var contentTransition: TextContentTransition
-    public var widthReservation: TextWidthReservation {
+    public var contentTransition: TextTransition.Content
+    public var widthReservation: TextTransition.WidthReservation {
         didSet {
             guard oldValue != widthReservation else {
                 return
@@ -106,7 +114,7 @@ public final class TextTransitionView: NSView {
         }
     }
 
-    public var motionPolicy: TextTransitionMotionPolicy {
+    public var motionPolicy: TextTransition.MotionPolicy {
         didSet {
             if motionPolicy.allowsAnimation == false {
                 completeTransitions()
@@ -130,9 +138,9 @@ public final class TextTransitionView: NSView {
 
     public init(
         text: NSAttributedString = NSAttributedString(string: ""),
-        contentTransition: TextContentTransition = .numericText(),
-        widthReservation: TextWidthReservation = .natural,
-        motionPolicy: TextTransitionMotionPolicy = .system
+        contentTransition: TextTransition.Content = .numericText(),
+        widthReservation: TextTransition.WidthReservation = .natural,
+        motionPolicy: TextTransition.MotionPolicy = .system
     ) {
         self.text = text.copy() as? NSAttributedString ?? text
         self.contentTransition = contentTransition
@@ -161,9 +169,9 @@ public final class TextTransitionView: NSView {
 
     public func configure(
         text: NSAttributedString,
-        contentTransition: TextContentTransition,
-        widthReservation: TextWidthReservation,
-        motionPolicy: TextTransitionMotionPolicy,
+        contentTransition: TextTransition.Content,
+        widthReservation: TextTransition.WidthReservation,
+        motionPolicy: TextTransition.MotionPolicy,
         animated: Bool = false
     ) {
         self.contentTransition = contentTransition
@@ -665,7 +673,7 @@ public final class TextTransitionView: NSView {
     }
 }
 
-extension TextContentTransition {
+extension TextTransition.Content {
     fileprivate var numericValue: Double? {
         guard case .numericTextValue(let value) = kind else {
             return nil
@@ -676,7 +684,7 @@ extension TextContentTransition {
 
 func textTransitionPreferredSize(
     for text: NSAttributedString,
-    widthReservation: TextWidthReservation
+    widthReservation: TextTransition.WidthReservation
 ) -> NSSize {
     switch widthReservation {
     case .natural:

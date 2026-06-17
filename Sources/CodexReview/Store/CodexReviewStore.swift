@@ -28,7 +28,7 @@ public final class CodexReviewStore {
     @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
-    @ObservationIgnored package var activeRuns: [String: BackendReviewRun] = [:]
+    @ObservationIgnored package var activeRuns: [String: CodexReviewBackendModel.Review.Run] = [:]
     @ObservationIgnored package var reviewRecoveryWaitingJobIDs: Set<String> = []
     @ObservationIgnored package var startingJobIDs: Set<String> = []
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
@@ -346,7 +346,7 @@ public final class CodexReviewStore {
         await settingsService.clearModelOverride()
     }
 
-    package func updateSettingsReasoningEffort(_ reasoningEffort: CodexReviewReasoningEffort?) async {
+    package func updateSettingsReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
         await settingsService.updateReasoningEffort(reasoningEffort)
     }
 
@@ -354,7 +354,7 @@ public final class CodexReviewStore {
         await updateSettingsReasoningEffort(nil)
     }
 
-    package func updateSettingsServiceTier(_ serviceTier: CodexReviewServiceTier?) async {
+    package func updateSettingsServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
         await settingsService.updateServiceTier(serviceTier)
     }
 

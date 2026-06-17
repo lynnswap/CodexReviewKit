@@ -1,37 +1,53 @@
 import Foundation
 import CodexReview
 
-package enum MCPToolName: String, Codable, Equatable, Sendable, CaseIterable {
+package enum CodexReviewMCP {
+    package enum Tool {}
+}
+
+package extension CodexReviewMCP.Tool {
+enum Name: String, Codable, Equatable, Sendable, CaseIterable {
     case reviewStart = "review_start"
     case reviewAwait = "review_await"
     case reviewRead = "review_read"
     case reviewList = "review_list"
     case reviewCancel = "review_cancel"
 }
+}
 
-package struct MCPToolDescriptor: Codable, Equatable, Sendable {
-    package var name: MCPToolName
+
+package extension CodexReviewMCP.Tool {
+struct Descriptor: Codable, Equatable, Sendable {
+    package var name: CodexReviewMCP.Tool.Name
     package var description: String
 
-    package init(name: MCPToolName, description: String) {
+    package init(name: CodexReviewMCP.Tool.Name, description: String) {
         self.name = name
         self.description = description
     }
 }
+}
 
-package enum MCPToolRequest: Equatable, Sendable {
-    case reviewStart(sessionID: String, request: ReviewStartRequest, waitTimeout: Duration?)
+
+package extension CodexReviewMCP.Tool {
+enum Request: Equatable, Sendable {
+    case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
     case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
-    case reviewRead(sessionID: String?, jobID: String, logFilter: ReviewLogFilter, logPage: ReviewLogPageRequest)
+    case reviewRead(sessionID: String?, jobID: String, logFilter: CodexReviewAPI.Log.Filter, logPage: CodexReviewAPI.Log.PageRequest)
     case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
-    case reviewCancel(sessionID: String?, selector: ReviewJobSelector, reason: ReviewCancellation)
+    case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
+}
 }
 
-package enum MCPToolResponse: Equatable, Sendable {
-    case reviewRead(ReviewReadResult)
-    case reviewList(ReviewListResult)
-    case reviewCancel(ReviewCancelOutcome)
+
+package extension CodexReviewMCP.Tool {
+enum Response: Equatable, Sendable {
+    case reviewRead(CodexReviewAPI.Read.Result)
+    case reviewList(CodexReviewAPI.List.Result)
+    case reviewCancel(CodexReviewAPI.Cancel.Outcome)
 }
+}
+
 
 @MainActor
 package final class CodexReviewMCPServer {
@@ -41,7 +57,7 @@ package final class CodexReviewMCPServer {
         self.store = store
     }
 
-    package var tools: [MCPToolDescriptor] {
+    package var tools: [CodexReviewMCP.Tool.Descriptor] {
         [
             .init(name: .reviewStart, description: "Start a Codex review."),
             .init(name: .reviewAwait, description: "Wait for a running Codex review job."),
@@ -51,7 +67,7 @@ package final class CodexReviewMCPServer {
         ]
     }
 
-    package func handle(_ request: MCPToolRequest) async throws -> MCPToolResponse {
+    package func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
         switch request {
         case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
             if let waitTimeout {
@@ -103,8 +119,8 @@ package final class CodexReviewMCPServer {
     }
 }
 
-private extension ReviewJobSelector {
-    func defaultingToActiveStatusesForCancellation() -> ReviewJobSelector {
+private extension CodexReviewAPI.Job.Selector {
+    func defaultingToActiveStatusesForCancellation() -> CodexReviewAPI.Job.Selector {
         guard jobID == nil, statuses == nil else {
             return self
         }

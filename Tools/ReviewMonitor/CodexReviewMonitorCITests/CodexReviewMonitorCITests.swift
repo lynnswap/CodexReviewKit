@@ -249,7 +249,7 @@ struct CodexReviewMonitorCITests {
     }
 
     @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
-        let expectedRuntimePreferences = CodexReviewRuntimePreferences(
+        let expectedRuntimePreferences = CodexReviewRuntime.Preferences(
             codexHomePath: FileManager.default.temporaryDirectory
                 .appending(path: "codex-review-monitor-ci-\(UUID().uuidString)", directoryHint: .isDirectory)
                 .path,
@@ -262,8 +262,8 @@ struct CodexReviewMonitorCITests {
             preferences: expectedRuntimePreferences
         )
         let expectedStore = CodexReviewStore.makePreviewStore()
-        var capturedRuntimePreferences: CodexReviewRuntimePreferences?
-        var capturedAuthenticationConfiguration: CodexReviewNativeAuthenticationConfiguration?
+        var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
+        var capturedAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
             makeLiveStore: { runtimePreferences, authenticationConfiguration in
@@ -333,7 +333,7 @@ struct CodexReviewMonitorCITests {
     }
 
     @Test func runtimeSettingsPaneSavesNormalizedRuntimePreferences() {
-        let initialPreferences = CodexReviewRuntimePreferences(
+        let initialPreferences = CodexReviewRuntime.Preferences(
             codexHomePath: "/tmp/codex-home",
             mcpHost: "localhost",
             mcpPort: 1234,
@@ -370,7 +370,7 @@ struct CodexReviewMonitorCITests {
         runtimeViewController.savePreferences(nil)
 
         #expect(store.savedPreferences == [
-            CodexReviewRuntimePreferences(
+            CodexReviewRuntime.Preferences(
                 codexHomePath: nil,
                 mcpHost: "localhost",
                 mcpPort: 9417,
@@ -404,7 +404,7 @@ struct CodexReviewMonitorCITests {
         runtimeViewController.savePreferences(nil)
 
         #expect(store.savedPreferences == [
-            CodexReviewRuntimePreferences(
+            CodexReviewRuntime.Preferences(
                 codexHomePath: nil,
                 mcpPath: "/custom-mcp"
             ),
@@ -482,7 +482,7 @@ struct CodexReviewMonitorCITests {
 
     @Test func runtimeSettingsPaneRestoresDefaultsBeforeSaving() {
         let store = RuntimePreferencesStoreStub(
-            preferences: CodexReviewRuntimePreferences(
+            preferences: CodexReviewRuntime.Preferences(
                 codexHomePath: "/tmp/codex-home",
                 mcpHost: "localhost",
                 mcpPort: 1234,
@@ -612,32 +612,32 @@ private final class FakeLifecycleStore: ReviewMonitorLifecycleStore {
 }
 
 @MainActor
-private final class RuntimePreferencesStoreStub: CodexReviewRuntimePreferencesStore {
-    private var preferences: CodexReviewRuntimePreferences
-    private(set) var savedPreferences: [CodexReviewRuntimePreferences] = []
+private final class RuntimePreferencesStoreStub: CodexReviewRuntime.PreferencesStore {
+    private var preferences: CodexReviewRuntime.Preferences
+    private(set) var savedPreferences: [CodexReviewRuntime.Preferences] = []
 
-    init(preferences: CodexReviewRuntimePreferences = .defaults) {
+    init(preferences: CodexReviewRuntime.Preferences = .defaults) {
         self.preferences = preferences
     }
 
-    func load() -> CodexReviewRuntimePreferences {
+    func load() -> CodexReviewRuntime.Preferences {
         return preferences
     }
 
-    func save(_ preferences: CodexReviewRuntimePreferences) throws {
+    func save(_ preferences: CodexReviewRuntime.Preferences) throws {
         self.preferences = preferences
         savedPreferences.append(preferences)
     }
 }
 
 @MainActor
-private final class FailingRuntimePreferencesStore: CodexReviewRuntimePreferencesStore {
-    func load() -> CodexReviewRuntimePreferences {
+private final class FailingRuntimePreferencesStore: CodexReviewRuntime.PreferencesStore {
+    func load() -> CodexReviewRuntime.Preferences {
         Issue.record("Preview store creation should not load runtime preferences.")
         return .defaults
     }
 
-    func save(_: CodexReviewRuntimePreferences) throws {
+    func save(_: CodexReviewRuntime.Preferences) throws {
         Issue.record("Preview store creation should not save runtime preferences.")
     }
 }

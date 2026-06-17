@@ -559,7 +559,7 @@ public enum ReviewMonitorPreviewContent {
         return account
     }
 
-    static func makePreviewSettingsSnapshot() -> CodexReviewSettingsSnapshot {
+    static func makePreviewSettingsSnapshot() -> CodexReviewSettings.Snapshot {
         .init(
             model: "gpt-5.4",
             reasoningEffort: .medium,
@@ -568,7 +568,7 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    static func makePreviewModelCatalog() -> [CodexReviewModelCatalogItem] {
+    static func makePreviewModelCatalog() -> [CodexReviewSettings.ModelCatalogItem] {
         [
             .init(
                 id: "gpt-5.4",

@@ -2,30 +2,30 @@ import Foundation
 
 @MainActor
 package protocol CodexReviewSettingsBackend: AnyObject {
-    var initialSettingsSnapshot: CodexReviewSettingsSnapshot { get }
+    var initialSettingsSnapshot: CodexReviewSettings.Snapshot { get }
 
-    func refreshSettings() async throws -> CodexReviewSettingsSnapshot
+    func refreshSettings() async throws -> CodexReviewSettings.Snapshot
 
     func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws
 
     func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws
 
     func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws
 }
 
 @MainActor
 package final class CodexReviewSettingsService {
-    let initialSnapshot: CodexReviewSettingsSnapshot
+    let initialSnapshot: CodexReviewSettings.Snapshot
 
     private let backend: any CodexReviewSettingsBackend
     private weak var settingsStore: SettingsStore?
@@ -34,7 +34,7 @@ package final class CodexReviewSettingsService {
     private var lastPersistedSelection: SettingsStore.Selection
 
     package init(
-        initialSnapshot: CodexReviewSettingsSnapshot,
+        initialSnapshot: CodexReviewSettings.Snapshot,
         backend: any CodexReviewSettingsBackend
     ) {
         self.initialSnapshot = initialSnapshot
@@ -96,7 +96,7 @@ package final class CodexReviewSettingsService {
         await updateModel(nil)
     }
 
-    package func updateReasoningEffort(_ reasoningEffort: CodexReviewReasoningEffort?) async {
+    package func updateReasoningEffort(_ reasoningEffort: CodexReviewSettings.ReasoningEffort?) async {
         await applySelectionChange(
             trigger: .reasoningEffort,
             candidate: { settingsStore in
@@ -109,7 +109,7 @@ package final class CodexReviewSettingsService {
         )
     }
 
-    package func updateServiceTier(_ serviceTier: CodexReviewServiceTier?) async {
+    package func updateServiceTier(_ serviceTier: CodexReviewSettings.ServiceTier?) async {
         await applySelectionChange(
             trigger: .serviceTier,
             candidate: { settingsStore in

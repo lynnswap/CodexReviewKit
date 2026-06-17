@@ -1,12 +1,13 @@
 import Foundation
 
-package struct ReviewReadResult: Codable, Sendable, Hashable {
+package extension CodexReviewAPI.Read {
+struct Result: Codable, Sendable, Hashable {
     package var jobID: String
     package var core: ReviewJobCore
     package var elapsedSeconds: Int?
     package var cancellable: Bool
     package var logs: [ReviewLogEntry]
-    package var logsPage: ReviewLogPage
+    package var logsPage: CodexReviewAPI.Log.Page
     package var rawLogText: String
 
     package init(
@@ -15,7 +16,7 @@ package struct ReviewReadResult: Codable, Sendable, Hashable {
         elapsedSeconds: Int? = nil,
         cancellable: Bool,
         logs: [ReviewLogEntry],
-        logsPage: ReviewLogPage,
+        logsPage: CodexReviewAPI.Log.Page,
         rawLogText: String
     ) {
         self.jobID = jobID
@@ -27,11 +28,14 @@ package struct ReviewReadResult: Codable, Sendable, Hashable {
         self.rawLogText = rawLogText
     }
 }
+}
 
-package struct ReviewLogPageRequest: Codable, Sendable, Hashable {
+
+package extension CodexReviewAPI.Log {
+struct PageRequest: Codable, Sendable, Hashable {
     package static let defaultLimit = 100
     package static let maxLimit = 500
-    package static let `default` = ReviewLogPageRequest()
+    package static let `default` = CodexReviewAPI.Log.PageRequest()
 
     package var offset: Int?
     package var limit: Int
@@ -41,17 +45,17 @@ package struct ReviewLogPageRequest: Codable, Sendable, Hashable {
         self.limit = limit
     }
 
-    package func validated() throws -> ReviewLogPageRequest {
+    package func validated() throws -> CodexReviewAPI.Log.PageRequest {
         if let offset, offset < 0 {
-            throw ReviewError.invalidArguments("logOffset must be greater than or equal to 0.")
+            throw CodexReviewAPI.Error.invalidArguments("logOffset must be greater than or equal to 0.")
         }
         guard (1...Self.maxLimit).contains(limit) else {
-            throw ReviewError.invalidArguments("logLimit must be between 1 and \(Self.maxLimit).")
+            throw CodexReviewAPI.Error.invalidArguments("logLimit must be between 1 and \(Self.maxLimit).")
         }
         return self
     }
 
-    package func page(total: Int) -> ReviewLogPage {
+    package func page(total: Int) -> CodexReviewAPI.Log.Page {
         let resolvedOffset = if let offset {
             min(offset, total)
         } else {
@@ -60,7 +64,7 @@ package struct ReviewLogPageRequest: Codable, Sendable, Hashable {
         let returned = min(limit, max(0, total - resolvedOffset))
         let hasMoreBefore = resolvedOffset > 0
         let hasMoreAfter = resolvedOffset + returned < total
-        return ReviewLogPage(
+        return CodexReviewAPI.Log.Page(
             total: total,
             offset: resolvedOffset,
             limit: limit,
@@ -72,8 +76,11 @@ package struct ReviewLogPageRequest: Codable, Sendable, Hashable {
         )
     }
 }
+}
 
-package struct ReviewLogPage: Codable, Sendable, Hashable {
+
+package extension CodexReviewAPI.Log {
+struct Page: Codable, Sendable, Hashable {
     package var total: Int
     package var offset: Int
     package var limit: Int
@@ -103,8 +110,11 @@ package struct ReviewLogPage: Codable, Sendable, Hashable {
         self.nextOffset = nextOffset
     }
 }
+}
 
-package enum ReviewLogFilter: String, Codable, Sendable, Hashable {
+
+package extension CodexReviewAPI.Log {
+enum Filter: String, Codable, Sendable, Hashable {
     case defaultSetting = "default"
     case all
 
@@ -117,8 +127,11 @@ package enum ReviewLogFilter: String, Codable, Sendable, Hashable {
         }
     }
 }
+}
 
-package struct ReviewJobListItem: Codable, Sendable, Hashable {
+
+package extension CodexReviewAPI.Job {
+struct ListItem: Codable, Sendable, Hashable {
     package var jobID: String
     package var cwd: String
     package var targetSummary: String
@@ -142,16 +155,22 @@ package struct ReviewJobListItem: Codable, Sendable, Hashable {
         self.cancellable = cancellable
     }
 }
+}
 
-package struct ReviewListResult: Codable, Sendable, Hashable {
-    package var items: [ReviewJobListItem]
 
-    package init(items: [ReviewJobListItem]) {
+package extension CodexReviewAPI.List {
+struct Result: Codable, Sendable, Hashable {
+    package var items: [CodexReviewAPI.Job.ListItem]
+
+    package init(items: [CodexReviewAPI.Job.ListItem]) {
         self.items = items
     }
 }
+}
 
-package struct ReviewJobSelector: Sendable, Hashable {
+
+package extension CodexReviewAPI.Job {
+struct Selector: Sendable, Hashable {
     package var jobID: String?
     package var cwd: String?
     package var statuses: [ReviewJobState]?
@@ -166,12 +185,17 @@ package struct ReviewJobSelector: Sendable, Hashable {
         self.statuses = statuses
     }
 }
-
-package enum ReviewJobSelectionError: Error, Sendable {
-    case ambiguous([ReviewJobListItem])
 }
 
-extension ReviewJobSelectionError: LocalizedError {
+
+package extension CodexReviewAPI.Job {
+enum SelectionError: Swift.Error, Sendable {
+    case ambiguous([CodexReviewAPI.Job.ListItem])
+}
+}
+
+
+extension CodexReviewAPI.Job.SelectionError: LocalizedError {
     package var errorDescription: String? {
         switch self {
         case .ambiguous(let jobs):
@@ -187,7 +211,9 @@ extension ReviewJobSelectionError: LocalizedError {
     }
 }
 
-package struct ReviewCancelOutcome: Codable, Sendable, Hashable {
+
+package extension CodexReviewAPI.Cancel {
+struct Outcome: Codable, Sendable, Hashable {
     package var jobID: String
     package var cancelled: Bool
     package var core: ReviewJobCore
@@ -201,4 +227,5 @@ package struct ReviewCancelOutcome: Codable, Sendable, Hashable {
         self.cancelled = cancelled
         self.core = core
     }
+}
 }

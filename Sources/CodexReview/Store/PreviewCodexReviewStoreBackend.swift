@@ -4,14 +4,14 @@ import Foundation
 package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     package let seed: CodexReviewStoreSeed
     package var isActive = false
-    package var currentSettingsSnapshot: CodexReviewSettingsSnapshot
+    package var currentSettingsSnapshot: CodexReviewSettings.Snapshot
 
     package init(seed: CodexReviewStoreSeed = .init()) {
         self.seed = seed
         currentSettingsSnapshot = seed.initialSettingsSnapshot
     }
 
-    package var initialSettingsSnapshot: CodexReviewSettingsSnapshot {
+    package var initialSettingsSnapshot: CodexReviewSettings.Snapshot {
         currentSettingsSnapshot
     }
 
@@ -28,15 +28,15 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     package func waitUntilStopped() async {}
 
-    package func refreshSettings() async throws -> CodexReviewSettingsSnapshot {
+    package func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         currentSettingsSnapshot
     }
 
     package func updateSettingsModel(
         _ model: String?,
-        reasoningEffort: CodexReviewReasoningEffort?,
+        reasoningEffort: CodexReviewSettings.ReasoningEffort?,
         persistReasoningEffort: Bool,
-        serviceTier: CodexReviewServiceTier?,
+        serviceTier: CodexReviewSettings.ServiceTier?,
         persistServiceTier: Bool
     ) async throws {
         currentSettingsSnapshot.model = model
@@ -49,13 +49,13 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     package func updateSettingsReasoningEffort(
-        _ reasoningEffort: CodexReviewReasoningEffort?
+        _ reasoningEffort: CodexReviewSettings.ReasoningEffort?
     ) async throws {
         currentSettingsSnapshot.reasoningEffort = reasoningEffort
     }
 
     package func updateSettingsServiceTier(
-        _ serviceTier: CodexReviewServiceTier?
+        _ serviceTier: CodexReviewSettings.ServiceTier?
     ) async throws {
         currentSettingsSnapshot.serviceTier = serviceTier
     }
@@ -133,27 +133,27 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         false
     }
 
-    package func startReview(_: BackendReviewStart) async throws -> BackendReviewAttempt {
-        throw ReviewError.io(Self.previewUnavailableMessage)
+    package func startReview(_: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func interruptReview(_: BackendReviewRun, reason _: BackendCancellationReason) async throws {}
+    package func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {}
 
     package func beginReviewRecovery(
-        _: BackendReviewRun,
-        reason _: BackendCancellationReason
-    ) async throws -> BackendReviewRecoveryToken {
-        throw ReviewError.io(Self.previewUnavailableMessage)
+        _: CodexReviewBackendModel.Review.Run,
+        reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
     package func resumeReviewRecovery(
-        _: BackendReviewRecoveryToken,
-        request _: BackendReviewStart
+        _: CodexReviewBackendModel.Review.RecoveryToken,
+        request _: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        throw ReviewError.io(Self.previewUnavailableMessage)
+        throw CodexReviewAPI.Error.io(Self.previewUnavailableMessage)
     }
 
-    package func cleanupReview(_: BackendReviewRun) async {}
+    package func cleanupReview(_: CodexReviewBackendModel.Review.Run) async {}
 
     fileprivate static let previewUnavailableMessage = "Embedded server is unavailable in preview mode."
     fileprivate static let previewAuthenticationFailureMessage = "Authentication is unavailable in preview mode."

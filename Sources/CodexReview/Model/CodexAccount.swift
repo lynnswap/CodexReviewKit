@@ -1,64 +1,61 @@
 import Foundation
 import Observation
 
-public func normalizedReviewAccountEmail(email: String) -> String {
-    email
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .lowercased()
-}
-
-@MainActor
-@Observable
-public final class CodexRateLimitWindow: Identifiable, Hashable {
-    nonisolated public let id: String
-    nonisolated public let accountKey: String
-    nonisolated public let windowDurationMinutes: Int
-    public var usedPercent: Int
-    public var resetsAt: Date?
-
-    public init(
-        accountKey: String = "__standalone__",
-        windowDurationMinutes: Int,
-        usedPercent: Int,
-        resetsAt: Date? = nil
-    ) {
-        precondition(windowDurationMinutes > 0, "CodexRateLimitWindow duration must be positive.")
-        self.accountKey = accountKey
-        self.windowDurationMinutes = windowDurationMinutes
-        self.id = "\(accountKey):\(windowDurationMinutes)"
-        self.usedPercent = min(max(usedPercent, 0), 100)
-        self.resetsAt = resetsAt
-    }
-
-    package func update(
-        usedPercent: Int,
-        resetsAt: Date?
-    ) {
-        self.usedPercent = min(max(usedPercent, 0), 100)
-        self.resetsAt = resetsAt
-    }
-}
-
-extension CodexRateLimitWindow {
-    public static nonisolated func == (lhs: CodexRateLimitWindow, rhs: CodexRateLimitWindow) -> Bool {
-        lhs.id == rhs.id
-    }
-
-    public nonisolated func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
-}
-
 @MainActor
 @Observable
 public final class CodexAccount: Identifiable, Hashable {
+    @MainActor
+    @Observable
+    public final class RateLimitWindow: Identifiable, Hashable {
+        nonisolated public let id: String
+        nonisolated public let accountKey: String
+        nonisolated public let windowDurationMinutes: Int
+        public var usedPercent: Int
+        public var resetsAt: Date?
+
+        public init(
+            accountKey: String = "__standalone__",
+            windowDurationMinutes: Int,
+            usedPercent: Int,
+            resetsAt: Date? = nil
+        ) {
+            precondition(windowDurationMinutes > 0, "CodexAccount.RateLimitWindow duration must be positive.")
+            self.accountKey = accountKey
+            self.windowDurationMinutes = windowDurationMinutes
+            self.id = "\(accountKey):\(windowDurationMinutes)"
+            self.usedPercent = min(max(usedPercent, 0), 100)
+            self.resetsAt = resetsAt
+        }
+
+        package func update(
+            usedPercent: Int,
+            resetsAt: Date?
+        ) {
+            self.usedPercent = min(max(usedPercent, 0), 100)
+            self.resetsAt = resetsAt
+        }
+
+        public static nonisolated func == (lhs: RateLimitWindow, rhs: RateLimitWindow) -> Bool {
+            lhs.id == rhs.id
+        }
+
+        public nonisolated func hash(into hasher: inout Hasher) {
+            hasher.combine(id)
+        }
+    }
+
+    public nonisolated static func normalizedEmail(_ email: String) -> String {
+        email
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
     nonisolated public let id: String
     public package(set) var email: String
     public package(set) var maskedEmail: String
-    package private(set) var kind: BackendAccountKind
+    package private(set) var kind: CodexReviewBackendModel.Account.Kind
     public var planType: String?
-    package private(set) var capabilities: BackendAccountCapabilities
-    public package(set) var rateLimits: [CodexRateLimitWindow] = []
+    package private(set) var capabilities: CodexReviewBackendModel.Account.Capabilities
+    public package(set) var rateLimits: [RateLimitWindow] = []
     public package(set) var isSwitching = false
     public package(set) var lastRateLimitFetchAt: Date?
     public package(set) var lastRateLimitError: String?
@@ -96,14 +93,14 @@ public final class CodexAccount: Identifiable, Hashable {
         accountKey: String? = nil,
         email: String,
         planType: String? = nil,
-        kind: BackendAccountKind = .chatGPT,
-        capabilities: BackendAccountCapabilities? = nil
+        kind: CodexReviewBackendModel.Account.Kind = .chatGPT,
+        capabilities: CodexReviewBackendModel.Account.Capabilities? = nil
     ) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         precondition(trimmedEmail.isEmpty == false, "CodexAccount email must not be empty.")
-        let normalizedEmail = normalizedReviewAccountEmail(email: trimmedEmail)
+        let normalizedEmail = CodexAccount.normalizedEmail(trimmedEmail)
         let resolvedAccountKey = accountKey.map {
-            normalizedReviewAccountEmail(email: $0)
+            CodexAccount.normalizedEmail($0)
         } ?? normalizedEmail
         precondition(resolvedAccountKey.isEmpty == false, "CodexAccount accountKey must not be empty.")
         self.id = resolvedAccountKey
@@ -137,15 +134,15 @@ public final class CodexAccount: Identifiable, Hashable {
     }
 
     package func updateKind(
-        _ kind: BackendAccountKind,
-        capabilities: BackendAccountCapabilities? = nil
+        _ kind: CodexReviewBackendModel.Account.Kind,
+        capabilities: CodexReviewBackendModel.Account.Capabilities? = nil
     ) {
         self.kind = kind
         self.capabilities = capabilities ?? kind.capabilities
         clearRateLimitStateIfUnsupported()
     }
 
-    package func updateCapabilities(_ capabilities: BackendAccountCapabilities) {
+    package func updateCapabilities(_ capabilities: CodexReviewBackendModel.Account.Capabilities) {
         self.capabilities = capabilities
         clearRateLimitStateIfUnsupported()
     }
@@ -172,7 +169,7 @@ public final class CodexAccount: Identifiable, Hashable {
             }
             result[rateLimit.windowDurationMinutes] = rateLimit
         }
-        let existingRateLimitsByDuration = self.rateLimits.reduce(into: [Int: CodexRateLimitWindow]()) { result, window in
+        let existingRateLimitsByDuration = self.rateLimits.reduce(into: [Int: CodexAccount.RateLimitWindow]()) { result, window in
             result[window.windowDurationMinutes] = window
         }
 
@@ -187,7 +184,7 @@ public final class CodexAccount: Identifiable, Hashable {
                     return existingRateLimit
                 }
 
-                return CodexRateLimitWindow(
+                return CodexAccount.RateLimitWindow(
                     accountKey: accountKey,
                     windowDurationMinutes: rateLimit.windowDurationMinutes,
                     usedPercent: rateLimit.usedPercent,
@@ -259,9 +256,9 @@ private extension CodexAccount {
 package struct CodexSavedAccountPayload: Sendable {
     package var accountKey: String
     package var email: String
-    package var kind: BackendAccountKind
+    package var kind: CodexReviewBackendModel.Account.Kind
     package var planType: String?
-    package var capabilities: BackendAccountCapabilities
+    package var capabilities: CodexReviewBackendModel.Account.Capabilities
     package var rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)]
     package var lastRateLimitFetchAt: Date?
     package var lastRateLimitError: String?
@@ -269,9 +266,9 @@ package struct CodexSavedAccountPayload: Sendable {
     package init(
         accountKey: String,
         email: String,
-        kind: BackendAccountKind = .chatGPT,
+        kind: CodexReviewBackendModel.Account.Kind = .chatGPT,
         planType: String?,
-        capabilities: BackendAccountCapabilities = .supportsCodexRateLimits,
+        capabilities: CodexReviewBackendModel.Account.Capabilities = .supportsCodexRateLimits,
         rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)],
         lastRateLimitFetchAt: Date?,
         lastRateLimitError: String?

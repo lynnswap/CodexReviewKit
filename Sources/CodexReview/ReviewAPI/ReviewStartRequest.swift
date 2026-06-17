@@ -1,23 +1,24 @@
 import Foundation
 
-package struct ReviewStartRequest: Codable, Hashable, Sendable {
-    package var cwd: String
-    package var target: ReviewTarget
+package extension CodexReviewAPI.Start {
+    struct Request: Codable, Hashable, Sendable {
+        package var cwd: String
+        package var target: CodexReviewAPI.Target
 
-    package init(cwd: String, target: ReviewTarget) {
-        self.cwd = cwd
-        self.target = target
-    }
-
-    package func validated() throws -> Self {
-        let trimmedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedCWD.isEmpty == false else {
-            throw ReviewError.invalidArguments("`cwd` is required.")
+        package init(cwd: String, target: CodexReviewAPI.Target) {
+            self.cwd = cwd
+            self.target = target
         }
-        var copy = self
-        copy.cwd = trimmedCWD
-        copy.target = try target.validated()
-        return copy
-    }
 
+        package func validated() throws -> Self {
+            let trimmedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedCWD.isEmpty == false else {
+                throw CodexReviewAPI.Error.invalidArguments("`cwd` is required.")
+            }
+            var copy = self
+            copy.cwd = trimmedCWD
+            copy.target = try target.validated()
+            return copy
+        }
+    }
 }

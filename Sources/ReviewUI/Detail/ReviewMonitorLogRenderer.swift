@@ -1,17 +1,17 @@
 import CodexReview
 
 struct ReviewMonitorRenderedLogDocument: Equatable, Sendable {
-    var source: ReviewMonitorLogDocument
-    var display: ReviewMonitorLogDocument
+    var source: ReviewMonitorLog.Document
+    var display: ReviewMonitorLog.Document
 }
 
 actor ReviewMonitorLogRenderer {
-    private var projection = ReviewMonitorLogProjection()
-    private var displayDocument = ReviewMonitorLogDocument()
+    private var projection = ReviewMonitorLog.Projection()
+    private var displayDocument = ReviewMonitorLog.Document()
 
     func reset() {
-        projection = ReviewMonitorLogProjection()
-        displayDocument = ReviewMonitorLogDocument()
+        projection = ReviewMonitorLog.Projection()
+        displayDocument = ReviewMonitorLog.Document()
     }
 
     func render(entries: [ReviewLogEntry]) -> ReviewMonitorRenderedLogDocument {
@@ -72,7 +72,7 @@ actor ReviewMonitorLogRenderer {
     }
 
     private func renderedDocument(
-        from source: ReviewMonitorLogDocument
+        from source: ReviewMonitorLog.Document
     ) -> ReviewMonitorRenderedLogDocument {
         let display = ReviewMonitorCommandOutputDisplayDocument.make(
             from: source,
