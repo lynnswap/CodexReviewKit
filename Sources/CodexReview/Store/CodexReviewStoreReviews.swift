@@ -249,6 +249,7 @@ extension CodexReviewStore {
     private func markReviewWaitingForNetworkRecovery(_ job: CodexReviewJob) {
         let now = clock.now()
         job.closeActiveCommandLogEntries(status: "canceled", completedAt: now)
+        job.resetReviewAttemptOutputForRecovery()
         appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
     }
 
@@ -620,13 +621,22 @@ extension CodexReviewStore {
                 else {
                     continue
                 }
-                switch failedRun.failure {
-                case .cancelled:
+                if failedRun.failure.isCancellation {
                     throw CancellationError()
-                case .failed(let message):
-                    throw ReviewWorkerInputQueueError(message: message)
                 }
+                if await inputs.networkStatusTracker.currentStatus() != .satisfied {
+                    recoveryState.recordPendingOutageStreamFailure(failedRun.failure)
+                    activeEventSubscriptionID = nil
+                    await inputs.cancelActiveEventSubscription()
+                    continue
+                }
+                try throwReviewEventStreamFailure(failedRun.failure)
             case .networkSnapshot(let snapshot, let recoveryGeneration):
+                if let pendingFailure = recoveryState.takePendingOutageStreamFailureAfterTransientRecovery(
+                    snapshot
+                ) {
+                    try throwReviewEventStreamFailure(pendingFailure)
+                }
                 switch recoveryState.networkSnapshotEffect(snapshot, recoveryGeneration: recoveryGeneration) {
                 case .none:
                     continue
@@ -718,6 +728,15 @@ extension CodexReviewStore {
             )
         }
         return true
+    }
+
+    private func throwReviewEventStreamFailure(_ failure: ReviewWorkerEventStreamFailure) throws -> Never {
+        switch failure {
+        case .cancelled:
+            throw CancellationError()
+        case .failed(let message):
+            throw ReviewWorkerInputQueueError(message: message)
+        }
     }
 
     private func restartReviewAfterNetworkRestore(
@@ -1105,6 +1124,15 @@ private extension CodexReviewJob {
         agentMessagesByItemID[itemID] = text
         completedAgentMessageItemIDs.insert(itemID)
     }
+
+    func resetReviewAttemptOutputForRecovery() {
+        core.output.lastAgentMessage = nil
+        core.output.hasFinalReview = false
+        core.output.reviewResult = nil
+        agentMessagesByItemID.removeAll(keepingCapacity: true)
+        completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
+        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage })
+    }
 }
 
 private struct ReviewWorkerReviewEvent: Sendable {
@@ -1127,6 +1155,15 @@ private struct ReviewWorkerEventStreamFailed: Sendable {
 private enum ReviewWorkerEventStreamFailure: Sendable {
     case cancelled
     case failed(String)
+
+    var isCancellation: Bool {
+        switch self {
+        case .cancelled:
+            true
+        case .failed:
+            false
+        }
+    }
 }
 
 private enum ReviewWorkerInput: Sendable {
@@ -1155,6 +1192,7 @@ private struct ReviewNetworkRecoveryLoopState {
     private(set) var recoveryToken: BackendReviewRecoveryToken?
     private var isSettlingForNetworkRecovery = false
     private var recoverySettleGeneration: Int?
+    private var pendingOutageStreamFailure: ReviewWorkerEventStreamFailure?
     let recoveryReason = BackendCancellationReason(message: networkRecoveryUnavailableMessage)
 
     init(currentRun: BackendReviewRun) {
@@ -1165,6 +1203,7 @@ private struct ReviewNetworkRecoveryLoopState {
         isWaitingForNetworkRecovery = true
         isSettlingForNetworkRecovery = false
         recoverySettleGeneration = nil
+        pendingOutageStreamFailure = nil
     }
 
     mutating func markRecoveryToken(_ token: BackendReviewRecoveryToken) {
@@ -1177,6 +1216,25 @@ private struct ReviewNetworkRecoveryLoopState {
         recoveryToken = nil
         isSettlingForNetworkRecovery = false
         recoverySettleGeneration = nil
+        pendingOutageStreamFailure = nil
+    }
+
+    mutating func recordPendingOutageStreamFailure(_ failure: ReviewWorkerEventStreamFailure) {
+        pendingOutageStreamFailure = failure
+    }
+
+    mutating func takePendingOutageStreamFailureAfterTransientRecovery(
+        _ snapshot: CodexReviewNetworkSnapshot
+    ) -> ReviewWorkerEventStreamFailure? {
+        guard snapshot.status == .satisfied,
+              isWaitingForNetworkRecovery == false
+        else {
+            return nil
+        }
+        defer {
+            pendingOutageStreamFailure = nil
+        }
+        return pendingOutageStreamFailure
     }
 
     func shouldIgnoreFinishedEvent(for run: BackendReviewRun) -> Bool {

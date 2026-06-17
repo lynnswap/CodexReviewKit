@@ -125,6 +125,8 @@ public extension CodexReviewStore {
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         transport: any JSONRPCTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -136,6 +138,8 @@ public extension CodexReviewStore {
             mcpPortOwnerResolver: mcpPortOwnerResolver,
             mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
             shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
             transportFactory: { _ in transport }
         )
     }
@@ -153,26 +157,32 @@ public extension CodexReviewStore {
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPCTransport
     ) -> CodexReviewStore {
-        CodexReviewStore(backend: LiveCodexReviewStoreBackend(
-            environment: environment,
-            runtimePreferences: runtimePreferences,
-            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
-            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
-            externalURLOpener: externalURLOpener,
-            mcpHTTPServerFactory: mcpHTTPServerFactory,
-            mcpPortOwnerResolver: mcpPortOwnerResolver,
-            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
-            shutdownCleanupTimeout: shutdownCleanupTimeout,
-            appServerRuntimeFactory: { codexHomeURL in
-                let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
-                return .init(
-                    client: client,
-                    backend: AppServerCodexReviewBackend(client: client)
-                )
-            }
-        ))
+        CodexReviewStore(
+            backend: LiveCodexReviewStoreBackend(
+                environment: environment,
+                runtimePreferences: runtimePreferences,
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+                externalURLOpener: externalURLOpener,
+                mcpHTTPServerFactory: mcpHTTPServerFactory,
+                mcpPortOwnerResolver: mcpPortOwnerResolver,
+                mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+                shutdownCleanupTimeout: shutdownCleanupTimeout,
+                appServerRuntimeFactory: { codexHomeURL in
+                    let client = AppServerClient(transport: try await transportFactory(codexHomeURL))
+                    return .init(
+                        client: client,
+                        backend: AppServerCodexReviewBackend(client: client)
+                    )
+                }
+            ),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy
+        )
     }
 }
 
@@ -473,7 +483,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let didCleanUp = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
             await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
         }
-        if didCleanUp == false {
+        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
+            timeout: shutdownCleanupTimeout
+        )
+        if didCleanUp == false || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }

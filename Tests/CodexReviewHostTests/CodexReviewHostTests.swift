@@ -1263,6 +1263,76 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
 
+    @Test func liveStoreStopDrainsRecoveryWaitingWorkerCleanupBeforeDroppingBackend() async throws {
+        let homeURL = try temporaryHome()
+        let cleanupGate = AsyncGate()
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let transport = FakeJSONRPCTransport()
+        await transport.holdNextIgnoringCancellation(
+            method: "thread/backgroundTerminals/clean",
+            gate: cleanupGate
+        )
+        try await transport.enqueue(InitializeResponse(), for: "initialize")
+        try await transport.enqueue(AccountReadResponse(), for: "account/read")
+        try await transport.enqueue(
+            ConfigReadResponse(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(ModelListResponse(data: []), for: "model/list")
+        try await transport.enqueue(
+            ThreadStartResponse(threadID: "thread-1", model: "gpt-5"),
+            for: "thread/start"
+        )
+        try await transport.enqueue(
+            ReviewStartResponse(turnID: "turn-1", reviewThreadID: "review-thread-1"),
+            for: "review/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            shutdownCleanupTimeout: .seconds(1),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in }),
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let reviewRead = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) { store.jobs.first?.core.run.turnID == "turn-1" })
+
+        networkMonitor.yield(.init(status: .unsatisfied))
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("turn/interrupt")
+        })
+
+        let stopFinished = CompletionFlag()
+        let stopTask = Task { @MainActor in
+            await store.stop()
+            await stopFinished.complete()
+        }
+        let cleanupStarted = await waitUntil(timeout: .seconds(2)) {
+            await transport.recordedRequests().map(\.method).contains("thread/backgroundTerminals/clean")
+        }
+        let stoppedBeforeCleanupUnblocked = await waitUntil(timeout: .milliseconds(100)) {
+            await stopFinished.isCompleted()
+        }
+        await cleanupGate.open()
+        await stopTask.value
+        let result = try await reviewRead.value
+
+        #expect(cleanupStarted)
+        #expect(stoppedBeforeCleanupUnblocked == false)
+        #expect(result.core.lifecycle.status == .cancelled)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods.contains("thread/delete"))
+    }
+
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeJSONRPCTransport()
@@ -1923,6 +1993,22 @@ private func waitUntil(_ condition: @escaping () async -> Bool) async {
     }
 }
 
+@MainActor
+private func waitUntil(
+    timeout: Duration,
+    condition: @escaping () async -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while await condition() == false {
+        if clock.now >= deadline {
+            return false
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return true
+}
+
 private func waitForTaskValue<T: Sendable>(
     _ task: Task<T, any Error>,
     timeout: Duration
@@ -1938,5 +2024,17 @@ private func waitForTaskValue<T: Sendable>(
         let result = try await group.next() ?? nil
         group.cancelAll()
         return result
+    }
+}
+
+private actor CompletionFlag {
+    private var completed = false
+
+    func complete() {
+        completed = true
+    }
+
+    func isCompleted() -> Bool {
+        completed
     }
 }

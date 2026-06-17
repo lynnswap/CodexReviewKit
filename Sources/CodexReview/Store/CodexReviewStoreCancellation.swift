@@ -1,5 +1,32 @@
 import Foundation
 
+private actor RuntimeStopDetachedReviewWorkerDrainRace {
+    private var result: Bool?
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func finish(_ value: Bool) {
+        guard result == nil else {
+            return
+        }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func wait() async -> Bool {
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            if let result {
+                continuation.resume(returning: result)
+            } else {
+                self.continuation = continuation
+            }
+        }
+    }
+}
+
 extension CodexReviewStore {
     package func completeCancellationLocally(
         jobID: String,
@@ -144,6 +171,49 @@ extension CodexReviewStore {
             startingJobIDs.remove(jobID)
             startupCancellations.removeValue(forKey: jobID)
         }
+    }
+
+    package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
+        let tasks = Array(runtimeStopDetachedReviewWorkerTasks.values)
+        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    }
+
+    package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
+        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
+        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    }
+
+    private func drainReviewWorkerTasksForRuntimeStop(
+        _ tasks: [Task<Void, Never>],
+        timeout: Duration
+    ) async -> Bool {
+        guard tasks.isEmpty == false else {
+            return true
+        }
+
+        let race = RuntimeStopDetachedReviewWorkerDrainRace()
+        let drainTask = Task {
+            for task in tasks {
+                await task.value
+            }
+            await race.finish(true)
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
+            await race.finish(false)
+        }
+
+        let didDrain = await race.wait()
+        if didDrain {
+            timeoutTask.cancel()
+        } else {
+            drainTask.cancel()
+        }
+        return didDrain
     }
 
     package func terminateAllRunningJobsLocally(

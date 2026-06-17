@@ -28,6 +28,20 @@ package actor AsyncGate {
         }
     }
 
+    package func waitIgnoringCancellation() async {
+        if isOpen {
+            return
+        }
+        let waiterID = UUID()
+        await withCheckedContinuation { continuation in
+            if isOpen {
+                continuation.resume()
+            } else {
+                waiters[waiterID] = continuation
+            }
+        }
+    }
+
     package func open() {
         guard isOpen == false else {
             return
@@ -872,6 +886,19 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
 }
 
 package actor FakeJSONRPCTransport: JSONRPCTransport {
+    private struct RequestGate: Sendable {
+        var gate: AsyncGate
+        var ignoresCancellation: Bool
+
+        func wait() async {
+            if ignoresCancellation {
+                await gate.waitIgnoringCancellation()
+            } else {
+                await gate.wait()
+            }
+        }
+    }
+
     private enum QueuedResponse: Sendable {
         case success(Data)
         case failure(JSONRPCError)
@@ -883,8 +910,8 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
     private var serverNotificationContinuations: [AsyncThrowingStream<JSONRPCNotification, Error>.Continuation] = []
     private var activeByMethod: [String: Int] = [:]
     private var maxActiveByMethod: [String: Int] = [:]
-    private var gatesByMethod: [String: AsyncGate] = [:]
-    private var oneShotGatesByMethod: [String: [AsyncGate]] = [:]
+    private var gatesByMethod: [String: RequestGate] = [:]
+    private var oneShotGatesByMethod: [String: [RequestGate]] = [:]
     private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closed = false
@@ -910,11 +937,15 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
     }
 
     package func hold(method: String, gate: AsyncGate) {
-        gatesByMethod[method] = gate
+        gatesByMethod[method] = .init(gate: gate, ignoresCancellation: false)
     }
 
     package func holdNext(method: String, gate: AsyncGate) {
-        oneShotGatesByMethod[method, default: []].append(gate)
+        oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: false))
+    }
+
+    package func holdNextIgnoringCancellation(method: String, gate: AsyncGate) {
+        oneShotGatesByMethod[method, default: []].append(.init(gate: gate, ignoresCancellation: true))
     }
 
     package func send(_ request: JSONRPCRequest) async throws -> Data {
@@ -953,7 +984,7 @@ package actor FakeJSONRPCTransport: JSONRPCTransport {
         return response
     }
 
-    private func dequeueOneShotGate(for method: String) -> AsyncGate? {
+    private func dequeueOneShotGate(for method: String) -> RequestGate? {
         guard var gates = oneShotGatesByMethod[method], gates.isEmpty == false else {
             return nil
         }
