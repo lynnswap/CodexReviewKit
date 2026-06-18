@@ -2453,6 +2453,154 @@ struct ReviewUITests {
         }
     }
 
+    @Test func sidebarLatestFinishedFilterUsesLinkedWorktreeGroupLatestJob() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstJob = makeJob(
+            id: "job-first-worktree-older-finished",
+            cwd: firstWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "First worktree older finished"
+        )
+        let secondJob = makeJob(
+            id: "job-second-worktree-newer-finished",
+            cwd: secondWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .failed,
+            targetSummary: "Second worktree newer finished"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [firstJob, secondJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = .latestFinished
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree-newer-finished"])
+
+        firstJob.updateStateForTesting(endedAt: Date(timeIntervalSince1970: 400))
+        try await waitForObservedValue(
+            from: sidebar.sidebarTopologyObservationForTesting,
+            ["job-first-worktree-older-finished"]
+        ) {
+            sidebar.displayedJobIDsForTesting(in: firstWorkspace)
+        }
+
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [])
+    }
+
+    @Test func sidebarRunningAndLatestFinishedFilterUsesLinkedWorktreeGroupLatestJob() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let firstRunningJob = makeJob(
+            id: "job-first-worktree-running-a",
+            cwd: firstWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .running,
+            targetSummary: "First worktree running A"
+        )
+        let firstHiddenFinishedJob = makeJob(
+            id: "job-first-worktree-hidden-finished",
+            cwd: firstWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "First worktree hidden finished"
+        )
+        let firstQueuedJob = makeJob(
+            id: "job-first-worktree-queued-b",
+            cwd: firstWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 350),
+            status: .queued,
+            targetSummary: "First worktree queued B"
+        )
+        let secondQueuedJob = makeJob(
+            id: "job-second-worktree-queued",
+            cwd: secondWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 400),
+            status: .queued,
+            targetSummary: "Second worktree queued"
+        )
+        let secondLatestFinishedJob = makeJob(
+            id: "job-second-worktree-latest-finished",
+            cwd: secondWorkspace.cwd,
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .failed,
+            targetSummary: "Second worktree latest finished"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, secondWorkspace],
+            jobs: [
+                firstRunningJob,
+                firstHiddenFinishedJob,
+                firstQueuedJob,
+                secondQueuedJob,
+                secondLatestFinishedJob,
+            ]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        uiState.sidebarJobFilter = [.running, .latestFinished]
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
+        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+            "job-first-worktree-running-a",
+            "job-first-worktree-queued-b",
+        ])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            "job-second-worktree-queued",
+            "job-second-worktree-latest-finished",
+        ])
+
+        #expect(sidebar.performJobDropForTesting(
+            firstRunningJob,
+            proposedWorkspaceSectionContaining: secondWorkspace,
+            childIndex: 3
+        ) == false)
+
+        #expect(sidebar.performJobDropForTesting(
+            firstRunningJob,
+            proposedWorkspaceSectionContaining: firstWorkspace,
+            childIndex: 2
+        ))
+        await Task.yield()
+
+        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+            "job-first-worktree-queued-b",
+            "job-first-worktree-running-a",
+        ])
+        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            "job-second-worktree-queued",
+            "job-second-worktree-latest-finished",
+        ])
+        #expect(store.orderedJobs(in: firstWorkspace).map(\.id) == [
+            "job-first-worktree-hidden-finished",
+            "job-first-worktree-queued-b",
+            "job-first-worktree-running-a",
+        ])
+    }
+
     @Test func workspaceSectionSelectionExpandsWhenLinkedWorktreeArrives() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
