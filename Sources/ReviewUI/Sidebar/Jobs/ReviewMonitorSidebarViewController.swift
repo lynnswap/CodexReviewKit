@@ -341,8 +341,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard let self else {
                 return
             }
-            let workspaceTopologies = self.sidebarWorkspaceTopologies(filter: filter)
-            let rootTopologies = self.sidebarRootTopologies(from: workspaceTopologies)
+            let workspaceTopologies = self.sidebarWorkspaceTopologies()
+            let rootTopologies = self.sidebarRootTopologies(
+                from: workspaceTopologies,
+                filter: filter
+            )
             let animated = event.kind == .initial ? animatedInitialDelivery : true
             self.applySidebarTopology(
                 rootTopologies,
@@ -379,17 +382,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return hasSidebarContent ? .jobList : .empty
     }
 
-    private func sidebarWorkspaceTopologies(filter: SidebarJobFilter) -> [SidebarWorkspaceTopology] {
+    private func sidebarWorkspaceTopologies() -> [SidebarWorkspaceTopology] {
         store.orderedWorkspaces.map { workspace in
             SidebarWorkspaceTopology(
                 workspace: workspace,
-                jobs: visibleJobs(in: workspace, filter: filter)
+                jobs: store.orderedJobs(in: workspace)
             )
         }
     }
 
     private func sidebarRootTopologies(
-        from workspaceTopologies: [SidebarWorkspaceTopology]
+        from workspaceTopologies: [SidebarWorkspaceTopology],
+        filter: SidebarJobFilter
     ) -> [SidebarRootTopology] {
         var topologiesBySectionID: [String: [SidebarWorkspaceTopology]] = [:]
         var sectionIdentityByID: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
@@ -413,10 +417,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
 
             renderedSectionIDs.insert(identity.id)
+            let sectionJobs = Self.visibleJobs(
+                in: topologies.flatMap(\.jobs),
+                filter: filter
+            )
             let section = workspaceSection(
                 identity: identity,
                 workspaces: topologies.map(\.workspace),
-                jobs: topologies.flatMap(\.jobs)
+                jobs: sectionJobs
             )
             return SidebarRootTopology(
                 item: section,
@@ -981,22 +989,24 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func visibleJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
-        visibleJobs(in: workspace, filter: uiState.sidebarJobFilter)
+        guard let section = workspaceSection(containing: workspace) else {
+            return []
+        }
+        return section.jobs.filter { $0.cwd == workspace.cwd }
     }
 
-    private func visibleJobs(
-        in workspace: CodexReviewWorkspace,
+    private static func visibleJobs(
+        in jobs: [CodexReviewJob],
         filter: SidebarJobFilter
     ) -> [CodexReviewJob] {
-        let orderedJobs = store.orderedJobs(in: workspace)
         guard filter.isActive else {
-            return orderedJobs
+            return jobs
         }
 
         let latestFinishedJob = filter.contains(.latestFinished)
-            ? Self.latestFinishedJob(in: orderedJobs)
+            ? latestFinishedJob(in: jobs)
             : nil
-        return orderedJobs.filter { job in
+        return jobs.filter { job in
             if filter.contains(.running),
                job.core.lifecycle.status.isTerminal == false
             {
