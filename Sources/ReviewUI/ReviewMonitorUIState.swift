@@ -124,7 +124,7 @@ struct SidebarJobFilter: OptionSet, Hashable, Sendable {
     }
 
     var allowsJobReordering: Bool {
-        contains(.latestFinished) == false
+        self == .all || contains(.running)
     }
 
     var persistedValue: String {
