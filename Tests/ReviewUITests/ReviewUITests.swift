@@ -797,7 +797,7 @@ struct ReviewUITests {
         ])
     }
 
-    @Test func jobDropIsRejectedForLatestFinishedFilter() async throws {
+    @Test func jobDropIsRejectedForLatestFinishedOnlyFilter() {
         let runningJob = makeJob(
             id: "job-running",
             cwd: "/tmp/workspace-alpha",
@@ -834,19 +834,57 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-latest"])
         #expect(sidebar.performJobDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
+    }
 
+    @Test func jobDropWhileRunningAndLatestFinishedFilterReordersVisibleJobs() async throws {
+        let runningJob = makeJob(
+            id: "job-running",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 300),
+            status: .running,
+            targetSummary: "Running"
+        )
+        let olderJob = makeJob(
+            id: "job-finished-older",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 100),
+            status: .succeeded,
+            targetSummary: "Older finished"
+        )
+        let latestJob = makeJob(
+            id: "job-finished-latest",
+            cwd: "/tmp/workspace-alpha",
+            startedAt: Date(timeIntervalSince1970: 200),
+            status: .failed,
+            targetSummary: "Latest finished"
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/workspace-alpha")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [runningJob, olderJob, latestJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarJobFilter = [.running, .latestFinished]
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running", "job-finished-latest"])
+        #expect(sidebar.performJobDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 2))
+        await Task.yield()
+
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
-            ["job-running", "job-finished-latest"]
+            ["job-finished-latest", "job-running"]
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
         }
-        #expect(sidebar.performJobDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 1) == false)
         #expect(store.orderedJobs(in: workspace).map(\.id) == [
-            "job-running",
             "job-finished-older",
             "job-finished-latest",
+            "job-running",
         ])
     }
 
