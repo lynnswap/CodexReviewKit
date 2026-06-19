@@ -2314,6 +2314,38 @@ struct CodexReviewStoreCommandTests {
         #expect(store.auth.selectedAccount?.accountKey == active.accountKey)
     }
 
+    @Test func switchActionsAreUnavailableForSelectedAccount() async throws {
+        let selectedAccount = CodexAccount(email: "selected@example.com", planType: "pro")
+        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let backend = SwitchRecordingBackend()
+        let store = CodexReviewStore.makeTestingStore(backend: backend)
+        store.loadForTesting(
+            serverState: .running,
+            account: selectedAccount,
+            persistedAccounts: [selectedAccount, otherAccount],
+            workspaces: []
+        )
+        let displayedSelectedAccount = try #require(store.auth.selectedAccount)
+        let displayedOtherAccount = try #require(
+            store.auth.persistedAccounts.first { $0.accountKey == otherAccount.accountKey }
+        )
+
+        #expect(store.switchActionIsDisabled(for: displayedSelectedAccount))
+        #expect(store.switchActionRequiresRunningJobsConfirmation(for: displayedSelectedAccount) == false)
+        #expect(store.switchActionIsDisabled(for: displayedOtherAccount) == false)
+        #expect(store.switchActionRequiresRunningJobsConfirmation(for: displayedOtherAccount))
+
+        store.requestSwitchAccountFromUserAction(displayedSelectedAccount)
+        await Task.yield()
+        #expect(backend.switchRequests.isEmpty)
+
+        try await store.switchAccount(displayedSelectedAccount)
+        #expect(backend.switchRequests.isEmpty)
+
+        try await store.switchAccount(displayedOtherAccount)
+        #expect(backend.switchRequests == [displayedOtherAccount.accountKey])
+    }
+
     @Test func fakeBackendPreservesSettingsCatalogWhenApplyingOverrides() async throws {
         let model = CodexReviewSettings.ModelCatalogItem(
             id: "gpt-5.5",
@@ -2386,6 +2418,25 @@ struct CodexReviewStoreCommandTests {
                 return false
             })
         }
+    }
+}
+
+@MainActor
+private final class SwitchRecordingBackend: PreviewCodexReviewStoreBackend {
+    private(set) var switchRequests: [String] = []
+
+    override func switchAccount(
+        auth _: CodexReviewAuthModel,
+        accountKey: String
+    ) async throws {
+        switchRequests.append(accountKey)
+    }
+
+    override func requiresCurrentSessionRecovery(
+        auth _: CodexReviewAuthModel,
+        accountKey _: String
+    ) -> Bool {
+        true
     }
 }
 
