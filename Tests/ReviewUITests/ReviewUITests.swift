@@ -380,7 +380,18 @@ struct ReviewUITests {
         let firstJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(firstJob))
         let secondJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(secondJob))
         #expect(firstJobRowHeightBeforeDrop == secondJobRowHeightBeforeDrop)
-        #expect(sidebar.performJobDropForTesting(firstJob, proposedWorkspace: workspace, childIndex: store.jobCount(in: workspace)))
+        #expect(sidebar.performJobDropForTesting(
+            firstJob,
+            proposedJob: secondJob,
+            hoveringBelowMidpoint: false
+        ) == false)
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-1", "job-2"])
+
+        #expect(sidebar.performJobDropForTesting(
+            firstJob,
+            proposedJob: secondJob,
+            hoveringBelowMidpoint: true
+        ))
         await Task.yield()
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
         #expect(sidebar.selectedJobForTesting?.id == "job-1")
@@ -772,7 +783,11 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
 
-        #expect(sidebar.performJobDropForTesting(runningA, proposedWorkspace: workspace, childIndex: 1))
+        #expect(sidebar.performJobDropForTesting(
+            runningA,
+            proposedJob: runningB,
+            hoveringBelowMidpoint: false
+        ) == false)
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
@@ -784,7 +799,11 @@ struct ReviewUITests {
             "job-hidden-suffix",
         ])
 
-        #expect(sidebar.performJobDropForTesting(runningA, proposedWorkspace: workspace, childIndex: 2))
+        #expect(sidebar.performJobDropForTesting(
+            runningA,
+            proposedJob: runningB,
+            hoveringBelowMidpoint: true
+        ))
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
@@ -2851,8 +2870,14 @@ struct ReviewUITests {
 
         #expect(sidebar.performJobDropForTesting(
             secondWorkspaceFirstJob,
-            proposedWorkspaceSectionContaining: secondWorkspace,
-            childIndex: 3
+            proposedJob: firstWorkspaceJob,
+            hoveringBelowMidpoint: true
+        ) == false)
+
+        #expect(sidebar.performJobDropForTesting(
+            secondWorkspaceFirstJob,
+            proposedJob: secondWorkspaceSecondJob,
+            hoveringBelowMidpoint: true
         ))
         await Task.yield()
 
