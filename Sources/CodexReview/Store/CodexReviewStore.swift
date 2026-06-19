@@ -328,10 +328,10 @@ public final class CodexReviewStore {
     }
 
     package func switchActionRequiresRunningJobsConfirmation(for account: CodexAccount) -> Bool {
-        if account.accountKey != auth.selectedAccount?.accountKey {
-            return true
+        guard canSwitchAccount(account) else {
+            return false
         }
-        return backend.requiresCurrentSessionRecovery(auth: auth, accountKey: account.accountKey)
+        return true
     }
 
     package func refreshSettings() async {
@@ -460,7 +460,7 @@ public final class CodexReviewStore {
     }
 
     private func canSwitchAccount(_ account: CodexAccount) -> Bool {
-        auth.persistedAccounts.contains(where: { $0.accountKey == account.accountKey })
+        auth.canRequestSwitchAccount(account)
     }
 
 }

@@ -127,11 +127,16 @@ public final class CodexReviewAuthModel {
 
     package init() {}
 
+    package func canRequestSwitchAccount(_ account: CodexAccount) -> Bool {
+        persistedAccounts.contains { $0.accountKey == account.accountKey }
+            && selectedAccount?.accountKey != account.accountKey
+    }
+
     package func requestSwitchAccount(
         _ account: CodexAccount,
         requiresConfirmation: Bool
     ) {
-        guard persistedAccounts.contains(where: { $0.accountKey == account.accountKey }) else {
+        guard canRequestSwitchAccount(account) else {
             return
         }
         requestAccountAction(
