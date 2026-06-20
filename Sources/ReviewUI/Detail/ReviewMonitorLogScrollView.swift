@@ -543,6 +543,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         reloadCount += 1
 #endif
         restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
+        finalizeViewportLayoutAfterScrollRestoration(restorationTarget)
         invalidateFindIndicator()
         return true
     }
@@ -1041,6 +1042,21 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         }
     }
 
+    private func finalizeViewportLayoutAfterScrollRestoration(
+        _ restorationTarget: ScrollRestorationTarget
+    ) {
+        let frameBeforeLayout = logDocumentView.frame
+        logDocumentView.layoutTextViewport(force: true)
+        let frameChanged = syncDocumentFrameToTextLayout() ||
+            rectsAreNearlyEqual(frameBeforeLayout, logDocumentView.frame) == false
+        guard frameChanged else {
+            return
+        }
+
+        restoreScrollPosition(restorationTarget, countAsAutoFollow: false)
+        logDocumentView.layoutTextViewport(force: true)
+    }
+
     var currentScrollRestorationTarget: ScrollRestorationTarget {
         guard displayedText.isEmpty == false else {
             return .top
@@ -1417,6 +1433,10 @@ extension ReviewMonitorLogScrollView {
         return logDocumentView.visibleFragmentViewCountForTesting
     }
 
+    var visibleFragmentViewCountWithoutForcingLayoutForTesting: Int {
+        logDocumentView.visibleFragmentViewCountForTesting
+    }
+
     var commandOutputPanelCountForTesting: Int {
         logDocumentView.commandOutputPanelCountForTesting
     }
@@ -1546,6 +1566,10 @@ extension ReviewMonitorLogScrollView {
     var visibleFragmentBoundsForTesting: NSRect {
         logDocumentView.layoutTextViewport(force: true)
         return logDocumentView.visibleFragmentBoundsForTesting
+    }
+
+    var visibleFragmentBoundsWithoutForcingLayoutForTesting: NSRect {
+        logDocumentView.visibleFragmentBoundsForTesting
     }
 
     var staleFragmentViewCountForTesting: Int {

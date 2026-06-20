@@ -3772,6 +3772,43 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
     }
 
+    @Test func switchingFromShortToLongJobMaterializesVisibleTextKit2Fragments() async throws {
+        let shortLog = (0..<3).map { "short visible line \($0)" }.joined(separator: "\n")
+        let longLog = (0..<700)
+            .map { "long visible fragment line \($0) with enough text to exercise viewport surface reuse" }
+            .joined(separator: "\n")
+        let shortJob = makeJob(
+            id: "job-fragment-short",
+            status: .running,
+            targetSummary: "Short log",
+            summary: "Short preview.",
+            logText: shortLog
+        )
+        let longJob = makeJob(
+            id: "job-fragment-long",
+            status: .succeeded,
+            targetSummary: "Long log",
+            summary: "Long review completed.",
+            logText: longLog
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [shortJob, longJob]))
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 900, height: 600))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
+        _ = try await awaitTransportRender(transport)
+
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(longJob)
+        let longSnapshot = try await awaitTransportRender(transport)
+
+        #expect(longSnapshot.log == longLog)
+        #expect(transport.isLogPinnedToBottomForTesting)
+        expectLogVisibleFragmentsWithoutForcingLayout(transport)
+    }
+
     @Test func shortLogSelectionCacheRestoresTopAfterLaterGrowth() async throws {
         let shortLog = (0..<3).map { "short line \($0)" }.joined(separator: "\n")
         let longLog = (0..<400).map { "long line \($0)" }.joined(separator: "\n")
@@ -3802,6 +3839,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
         _ = try await awaitTransportRender(transport)
+        expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
         shortJob.replaceLogEntries([.init(kind: .agentMessage, text: longLog)])
         viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
@@ -3812,6 +3850,7 @@ struct ReviewUITests {
                 - transport.logMinimumVerticalScrollOffsetForTesting
         ) < 0.5)
         #expect(transport.isLogPinnedToBottomForTesting == false)
+        expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
 
     @Test func previouslySelectedJobUpdatesDoNotRepaintCurrentDetailPane() async throws {
@@ -6315,6 +6354,24 @@ func expectLogTextContainerWidthTracksContentView(
     let expectedWidth = max(0, textContentFrame.width - textContainerInset.width * 2)
 
     #expect(abs(textContainerSize.width - expectedWidth) < 1)
+}
+
+@MainActor
+func expectLogVisibleFragmentsWithoutForcingLayout(
+    _ transport: ReviewMonitorTransportViewController
+) {
+    let fragmentBounds = transport.logVisibleFragmentBoundsWithoutForcingLayoutForTesting
+    let viewportRect = NSRect(
+        x: 0,
+        y: transport.logVerticalScrollOffsetForTesting,
+        width: transport.logDocumentViewFrameForTesting.width,
+        height: transport.logViewportHeightForTesting
+    )
+
+    #expect(transport.logVisibleFragmentViewCountWithoutForcingLayoutForTesting > 0)
+    #expect(fragmentBounds.isEmpty == false)
+    #expect(fragmentBounds.intersects(viewportRect))
+    #expect(transport.logStaleFragmentViewCountForTesting == 0)
 }
 
 @MainActor
