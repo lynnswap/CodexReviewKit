@@ -331,6 +331,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         textContentStorage.performEditingTransaction {
             textStorage.setAttributedString(NSAttributedString(string: text, attributes: baseAttributes))
         }
+        resetViewportRenderingSurfaces()
         invalidateFinderStringMapping()
         clampSelectedRange()
         invalidateTextLayout(measureEstimatedHeightImmediately: true)
@@ -1692,6 +1693,21 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
         needsLayout = true
         needsDisplay = true
+    }
+
+    private func resetViewportRenderingSurfaces() {
+        for fragmentView in visibleFragmentViews {
+            fragmentView.removeFromSuperview()
+        }
+        for fragmentView in lastUsedFragmentViews {
+            fragmentView.removeFromSuperview()
+        }
+        visibleFragmentViews.removeAll()
+        lastUsedFragmentViews.removeAll()
+        fragmentViewMap.removeAllObjects()
+        needsViewportLayout = true
+        needsViewportRelayout = false
+        lastViewportLayoutBounds = nil
     }
 
     private func appendInvalidationStartUTF16Offset() -> Int {

@@ -1156,8 +1156,16 @@ extension ReviewMonitorTransportViewController {
         logScrollView.visibleFragmentViewCountForTesting
     }
 
+    var logVisibleFragmentViewCountWithoutForcingLayoutForTesting: Int {
+        logScrollView.visibleFragmentViewCountWithoutForcingLayoutForTesting
+    }
+
     var logVisibleFragmentBoundsForTesting: NSRect {
         logScrollView.visibleFragmentBoundsForTesting
+    }
+
+    var logVisibleFragmentBoundsWithoutForcingLayoutForTesting: NSRect {
+        logScrollView.visibleFragmentBoundsWithoutForcingLayoutForTesting
     }
 
     var logStaleFragmentViewCountForTesting: Int {
