@@ -710,6 +710,71 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func workspaceReorderBeforeAnchorMovesBlockAndReportsMutation() {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let firstGroupedWorkspace = CodexReviewWorkspace(cwd: "/tmp/group-a-1")
+        let secondWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-b")
+        let thirdWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-c")
+        let secondGroupedWorkspace = CodexReviewWorkspace(cwd: "/tmp/group-a-2")
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstGroupedWorkspace, secondWorkspace, thirdWorkspace, secondGroupedWorkspace]
+        )
+
+        #expect(store.reorderWorkspaces(
+            cwds: [firstGroupedWorkspace.cwd, secondGroupedWorkspace.cwd],
+            beforeCWD: thirdWorkspace.cwd
+        ))
+        #expect(store.orderedWorkspaces.map(\.cwd) == [
+            secondWorkspace.cwd,
+            firstGroupedWorkspace.cwd,
+            secondGroupedWorkspace.cwd,
+            thirdWorkspace.cwd,
+        ])
+        #expect(store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: firstGroupedWorkspace.cwd) == false)
+        #expect(store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: "/tmp/missing") == false)
+    }
+
+    @Test func jobReorderBeforeAnchorMovesItemAndReportsMutation() {
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
+        )
+        let workspace = CodexReviewWorkspace(cwd: "/tmp/project")
+        let firstJob = CodexReviewJob.makeForTesting(
+            id: "job-first",
+            cwd: workspace.cwd,
+            targetSummary: "First",
+            status: .running,
+            summary: "Running"
+        )
+        let secondJob = CodexReviewJob.makeForTesting(
+            id: "job-second",
+            cwd: workspace.cwd,
+            targetSummary: "Second",
+            status: .running,
+            summary: "Running"
+        )
+        let thirdJob = CodexReviewJob.makeForTesting(
+            id: "job-third",
+            cwd: workspace.cwd,
+            targetSummary: "Third",
+            status: .running,
+            summary: "Running"
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [workspace],
+            jobs: [firstJob, secondJob, thirdJob]
+        )
+
+        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: thirdJob.id))
+        #expect(store.orderedJobs(in: workspace).map(\.id) == ["job-second", "job-first", "job-third"])
+        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: firstJob.id) == false)
+        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: "job-missing") == false)
+    }
+
     @Test func cancelRunningReviewUsesBackendInterruptAndPublicState() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

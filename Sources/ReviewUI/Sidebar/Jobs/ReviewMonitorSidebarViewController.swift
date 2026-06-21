@@ -79,8 +79,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private struct SidebarResolvedDrop {
         enum Operation {
             case none
-            case reorderWorkspaceSection(id: String, cwds: [String], storeIndex: Int, displayIndex: Int)
-            case reorderJob(id: String, cwd: String, storeIndex: Int, displayIndex: Int)
+            case reorderWorkspaceSection(id: String, cwds: [String], beforeCWD: String?, displayIndex: Int)
+            case reorderJob(id: String, cwd: String, beforeJobID: String?, displayIndex: Int)
         }
 
         let operation: Operation
@@ -94,13 +94,49 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private struct SidebarWorkspaceDropDestination {
-        let storeInsertionIndex: Int
         let rootInsertionIndex: Int
     }
 
     private struct SidebarJobDropDestination {
         let workspace: CodexReviewWorkspace
         let childIndex: Int
+        let movesToFullOrderEnd: Bool
+    }
+
+    private struct DisplayedSidebarTopologySnapshot {
+        let rootTopologies: [SidebarRootTopology]
+
+        func rootIndex(forRootItem rootItem: AnyObject) -> Int? {
+            rootTopologies.firstIndex { $0.item === rootItem }
+        }
+
+        func workspaceBeforeCWD(
+            movingRootItem: AnyObject,
+            rootInsertionIndex rawRootInsertionIndex: Int
+        ) -> String? {
+            let displayDestinationIndex = displayDestinationIndex(
+                movingRootItem: movingRootItem,
+                rootInsertionIndex: rawRootInsertionIndex
+            )
+            let remainingTopologies = rootTopologies.filter { $0.item !== movingRootItem }
+            guard displayDestinationIndex < remainingTopologies.count else {
+                return nil
+            }
+            return remainingTopologies[displayDestinationIndex].workspaces.first?.cwd
+        }
+
+        func displayDestinationIndex(
+            movingRootItem: AnyObject,
+            rootInsertionIndex rawRootInsertionIndex: Int
+        ) -> Int {
+            let sourceRootIndex = rootIndex(forRootItem: movingRootItem) ?? rootTopologies.count
+            let remainingRootCount = max(0, rootTopologies.count - 1)
+            let rootInsertionIndex = max(0, min(rawRootInsertionIndex, rootTopologies.count))
+            let displayDestinationIndex = rootInsertionIndex > sourceRootIndex
+                ? rootInsertionIndex - 1
+                : rootInsertionIndex
+            return max(0, min(displayDestinationIndex, remainingRootCount))
+        }
     }
 
     private final class SidebarWorkspaceSection: Hashable {
@@ -1152,12 +1188,39 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return job
     }
 
-    private func workspaceIndex(cwd: String) -> Int? {
-        workspaces().firstIndex(where: { $0.cwd == cwd })
-    }
-
     private func workspace(containing job: CodexReviewJob) -> CodexReviewWorkspace? {
         store.workspace(containing: job)
+    }
+
+    private func workspaceReorderWouldChange(cwds: [String], beforeCWD: String?) -> Bool {
+        let cwdSet = Set(cwds)
+        guard cwdSet.isEmpty == false,
+              beforeCWD.map({ cwdSet.contains($0) }) != true
+        else {
+            return false
+        }
+
+        let ordered = workspaces()
+        let moving = ordered.filter { cwdSet.contains($0.cwd) }
+        guard moving.isEmpty == false else {
+            return false
+        }
+
+        let remaining = ordered.filter { cwdSet.contains($0.cwd) == false }
+        let destinationIndex: Int
+        if let beforeCWD {
+            guard let beforeIndex = remaining.firstIndex(where: { $0.cwd == beforeCWD }) else {
+                return false
+            }
+            destinationIndex = beforeIndex
+        } else {
+            destinationIndex = remaining.count
+        }
+
+        var reordered = remaining
+        reordered.insert(contentsOf: moving, at: destinationIndex)
+        return reordered.count == ordered.count &&
+            zip(reordered, ordered).contains { $0.0 !== $0.1 }
     }
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
@@ -1224,9 +1287,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
+        let snapshot = DisplayedSidebarTopologySnapshot(rootTopologies: currentRootTopologies)
         guard let section = workspaceSection(id: id),
-              let sourceRootIndex = rootIndex(forRootItem: section),
-              let sourceStoreIndex = section.workspaces.compactMap({ workspaceIndex(cwd: $0.cwd) }).min(),
+              snapshot.rootIndex(forRootItem: section) != nil,
               let destination = resolvedWorkspaceDropDestination(
                 draggingLocation: draggingLocation,
                 proposedItem: proposedItem,
@@ -1236,25 +1299,23 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
 
-        let storeDestinationIndex = destination.storeInsertionIndex > sourceStoreIndex
-            ? destination.storeInsertionIndex - section.workspaces.count
-            : destination.storeInsertionIndex
-        let remainingWorkspaceCount = max(0, workspaces().count - section.workspaces.count)
-        let clampedStoreDestinationIndex = max(0, min(storeDestinationIndex, remainingWorkspaceCount))
-        let displayDestinationIndex = destination.rootInsertionIndex > sourceRootIndex
-            ? destination.rootInsertionIndex - 1
-            : destination.rootInsertionIndex
-        let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, currentRootTopologies.count - 1))
-        guard clampedStoreDestinationIndex != sourceStoreIndex
-            || clampedDisplayDestinationIndex != sourceRootIndex
-        else {
+        let beforeCWD = snapshot.workspaceBeforeCWD(
+            movingRootItem: section,
+            rootInsertionIndex: destination.rootInsertionIndex
+        )
+        let cwds = section.workspaces.map(\.cwd)
+        guard workspaceReorderWouldChange(cwds: cwds, beforeCWD: beforeCWD) else {
             return nil
         }
+        let displayDestinationIndex = snapshot.displayDestinationIndex(
+            movingRootItem: section,
+            rootInsertionIndex: destination.rootInsertionIndex
+        )
         let operation: SidebarResolvedDrop.Operation = .reorderWorkspaceSection(
             id: section.id,
-            cwds: section.workspaces.map(\.cwd),
-            storeIndex: clampedStoreDestinationIndex,
-            displayIndex: clampedDisplayDestinationIndex
+            cwds: cwds,
+            beforeCWD: beforeCWD,
+            displayIndex: displayDestinationIndex
         )
         return SidebarResolvedDrop(
             operation: operation,
@@ -1290,6 +1351,20 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             )
         }
 
+        if let targetJob = job(from: proposedItem),
+           let targetWorkspace = workspace(containing: targetJob),
+           let targetSection = workspaceSection(containing: targetWorkspace),
+           let targetRootIndex = rootIndex(forRootItem: targetSection)
+        {
+            return workspaceRootDropDestination(
+                rootInsertionIndex: workspaceRootInsertionIndex(
+                    aroundRootItem: targetSection,
+                    defaultIndex: targetRootIndex,
+                    draggingLocation: draggingLocation
+                )
+            )
+        }
+
         return nil
     }
 
@@ -1302,7 +1377,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             draggingLocation: draggingLocation,
             proposedItem: proposedItem,
             proposedChildIndex: index
-        )?.storeInsertionIndex
+        )?.rootInsertionIndex
     }
 
     private func blankAreaWorkspaceDropDestination(
@@ -1346,20 +1421,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func workspaceRootDropDestination(rootInsertionIndex index: Int) -> SidebarWorkspaceDropDestination {
         let rootInsertionIndex = max(0, min(index, currentRootTopologies.count))
-        return SidebarWorkspaceDropDestination(
-            storeInsertionIndex: workspaceStoreInsertionIndex(forRootInsertionIndex: rootInsertionIndex),
-            rootInsertionIndex: rootInsertionIndex
-        )
-    }
-
-    private func workspaceStoreInsertionIndex(forRootInsertionIndex rootInsertionIndex: Int) -> Int {
-        guard rootInsertionIndex < currentRootTopologies.count,
-              let firstWorkspace = currentRootTopologies[rootInsertionIndex].workspaces.first,
-              let storeInsertionIndex = workspaceIndex(cwd: firstWorkspace.cwd)
-        else {
-            return workspaces().count
-        }
-        return storeInsertionIndex
+        return SidebarWorkspaceDropDestination(rootInsertionIndex: rootInsertionIndex)
     }
 
     private func rootIndex(containing workspace: CodexReviewWorkspace) -> Int? {
@@ -1421,36 +1483,33 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         let orderedJobs = store.orderedJobs(in: destination.workspace)
         let destinationVisibleJobs = visibleJobs(in: destination.workspace)
-        guard let sourceIndex = orderedJobs.firstIndex(where: { $0.id == id }) else {
-            return nil
-        }
         guard let visibleSourceIndex = destinationVisibleJobs.firstIndex(where: { $0.id == id }) else {
             return nil
         }
 
         let visibleInsertionIndex = max(0, min(destination.childIndex, destinationVisibleJobs.count))
-        let storeInsertionIndex = storeJobInsertionIndex(
+        let beforeJobID = jobBeforeID(
+            movingJobID: id,
             visibleInsertionIndex: visibleInsertionIndex,
             visibleJobs: destinationVisibleJobs,
-            orderedJobs: orderedJobs
+            orderedJobs: orderedJobs,
+            movesToFullOrderEnd: destination.movesToFullOrderEnd
         )
-        let storeDestinationIndex = storeInsertionIndex > sourceIndex
-            ? storeInsertionIndex - 1
-            : storeInsertionIndex
-        let clampedStoreDestinationIndex = max(0, min(storeDestinationIndex, orderedJobs.count - 1))
         let displayDestinationIndex = visibleInsertionIndex > visibleSourceIndex
             ? visibleInsertionIndex - 1
             : visibleInsertionIndex
         let clampedDisplayDestinationIndex = max(0, min(displayDestinationIndex, destinationVisibleJobs.count - 1))
-        guard clampedDisplayDestinationIndex != visibleSourceIndex,
-              clampedStoreDestinationIndex != sourceIndex
-        else {
+        let displayOrderChanges = clampedDisplayDestinationIndex != visibleSourceIndex
+        guard destination.movesToFullOrderEnd || displayOrderChanges else {
+            return nil
+        }
+        guard jobReorderWouldChange(id: id, inWorkspace: cwd, beforeJobID: beforeJobID) else {
             return nil
         }
         let operation: SidebarResolvedDrop.Operation = .reorderJob(
             id: id,
             cwd: cwd,
-            storeIndex: clampedStoreDestinationIndex,
+            beforeJobID: beforeJobID,
             displayIndex: clampedDisplayDestinationIndex
         )
         let dropPresentation = jobDropPresentation(
@@ -1464,21 +1523,60 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         )
     }
 
-    private func storeJobInsertionIndex(
+    private func jobBeforeID(
+        movingJobID: String,
         visibleInsertionIndex: Int,
         visibleJobs: [CodexReviewJob],
-        orderedJobs: [CodexReviewJob]
-    ) -> Int {
-        if visibleInsertionIndex < visibleJobs.count,
-           let targetIndex = orderedJobs.firstIndex(where: { $0 === visibleJobs[visibleInsertionIndex] }) {
-            return targetIndex
+        orderedJobs: [CodexReviewJob],
+        movesToFullOrderEnd: Bool
+    ) -> String? {
+        if movesToFullOrderEnd {
+            return nil
+        }
+        if visibleInsertionIndex < visibleJobs.count {
+            let targetJobID = visibleJobs[visibleInsertionIndex].id
+            return targetJobID == movingJobID ? movingJobID : targetJobID
         }
         guard let lastVisibleJob = visibleJobs.last,
               let lastVisibleIndex = orderedJobs.firstIndex(where: { $0 === lastVisibleJob })
         else {
-            return orderedJobs.count
+            return nil
         }
-        return lastVisibleIndex + 1
+        let nextIndex = lastVisibleIndex + 1
+        guard nextIndex < orderedJobs.count,
+              orderedJobs[nextIndex].id != movingJobID
+        else {
+            return nil
+        }
+        return orderedJobs[nextIndex].id
+    }
+
+    private func jobReorderWouldChange(
+        id: String,
+        inWorkspace cwd: String,
+        beforeJobID: String?
+    ) -> Bool {
+        guard beforeJobID != id else {
+            return false
+        }
+        let ordered = store.orderedJobs(inWorkspace: cwd)
+        guard let movingJob = ordered.first(where: { $0.id == id }) else {
+            return false
+        }
+        let remaining = ordered.filter { $0 !== movingJob }
+        let destinationIndex: Int
+        if let beforeJobID {
+            guard let beforeIndex = remaining.firstIndex(where: { $0.id == beforeJobID }) else {
+                return false
+            }
+            destinationIndex = beforeIndex
+        } else {
+            destinationIndex = remaining.count
+        }
+        var reordered = remaining
+        reordered.insert(movingJob, at: destinationIndex)
+        return reordered.count == ordered.count &&
+            zip(reordered, ordered).contains { $0.0 !== $0.1 }
     }
 
     private func resolvedJobDropDestination(
@@ -1487,6 +1585,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedChildIndex index: Int,
         sourceCWD: String
     ) -> SidebarJobDropDestination? {
+        if let destination = blankAreaJobDropDestination(
+            draggingLocation: draggingLocation,
+            sourceCWD: sourceCWD
+        ) {
+            return destination
+        }
+
         if let section = workspaceSection(from: proposedItem),
            index != NSOutlineViewDropOnItemIndex
         {
@@ -1535,6 +1640,33 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         )
     }
 
+    private func blankAreaJobDropDestination(
+        draggingLocation: NSPoint?,
+        sourceCWD: String
+    ) -> SidebarJobDropDestination? {
+        guard let draggingLocation,
+              outlineView.numberOfRows > 0
+        else {
+            return nil
+        }
+
+        let lastRowRect = outlineView.rect(ofRow: outlineView.numberOfRows - 1)
+        guard draggingLocation.y > lastRowRect.maxY,
+              let workspace = workspace(cwd: sourceCWD),
+              let sourceSection = workspaceSection(containing: workspace),
+              currentRootTopologies.last?.item === sourceSection,
+              sourceSection.jobs.last?.cwd == sourceCWD
+        else {
+            return nil
+        }
+
+        return SidebarJobDropDestination(
+            workspace: workspace,
+            childIndex: visibleJobs(in: workspace).count,
+            movesToFullOrderEnd: true
+        )
+    }
+
     private func resolvedJobDropDestination(
         in section: SidebarWorkspaceSection,
         sourceCWD: String,
@@ -1557,7 +1689,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         return SidebarJobDropDestination(
             workspace: workspace,
-            childIndex: rootInsertionIndex - workspaceRootStartIndex
+            childIndex: rootInsertionIndex - workspaceRootStartIndex,
+            movesToFullOrderEnd: false
         )
     }
 
@@ -1581,13 +1714,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         switch resolvedDrop.operation {
         case .none:
             return false
-        case .reorderWorkspaceSection(let id, let cwds, let storeIndex, let displayIndex):
-            store.reorderWorkspaces(cwds: cwds, toIndex: storeIndex)
+        case .reorderWorkspaceSection(let id, let cwds, let beforeCWD, let displayIndex):
+            guard store.reorderWorkspaces(cwds: cwds, beforeCWD: beforeCWD) else {
+                return false
+            }
             moveWorkspaceSectionInOutline(id: id, toRootIndex: displayIndex)
             return true
-        case .reorderJob(let id, let cwd, let storeIndex, let displayIndex):
+        case .reorderJob(let id, let cwd, let beforeJobID, let displayIndex):
             let workspace = workspace(cwd: cwd)
-            store.reorderJob(id: id, inWorkspace: cwd, toIndex: storeIndex)
+            guard store.reorderJob(id: id, inWorkspace: cwd, beforeJobID: beforeJobID) else {
+                return false
+            }
             if let workspace {
                 moveJobInOutline(id: id, in: workspace, toIndex: displayIndex)
             }
@@ -2167,6 +2304,33 @@ extension ReviewMonitorSidebarViewController {
         ) == nil
     }
 
+    @discardableResult
+    func performWorkspaceDropForTesting(
+        _ workspace: CodexReviewWorkspace,
+        proposedJob targetJob: CodexReviewJob,
+        hoveringBelowMidpoint: Bool
+    ) -> Bool {
+        guard let section = workspaceSection(containing: workspace),
+              let targetRow = row(forJobID: targetJob.id)
+        else {
+            return false
+        }
+        let targetRowRect = outlineView.rect(ofRow: targetRow)
+        let draggingLocation = NSPoint(
+            x: targetRowRect.midX,
+            y: hoveringBelowMidpoint ? targetRowRect.midY + 1 : targetRowRect.midY - 1
+        )
+        guard let resolvedDrop = resolvedDrop(
+            for: .workspaceSection(id: section.id),
+            draggingLocation: draggingLocation,
+            proposedItem: targetJob,
+            proposedChildIndex: NSOutlineViewDropOnItemIndex
+        ) else {
+            return false
+        }
+        return applyResolvedDrop(resolvedDrop)
+    }
+
     func workspaceSectionCanStartDragForTesting(containing workspace: CodexReviewWorkspace) -> Bool {
         guard let section = workspaceSection(containing: workspace) else {
             return false
@@ -2291,6 +2455,27 @@ extension ReviewMonitorSidebarViewController {
             proposedItem: nil,
             proposedChildIndex: NSOutlineViewDropOnItemIndex
         ) == nil
+    }
+
+    @discardableResult
+    func performJobBlankAreaDropForTesting(_ job: CodexReviewJob) -> Bool {
+        guard outlineView.numberOfRows > 0,
+              let workspace = workspace(cwd: job.cwd),
+              let section = workspaceSection(containing: workspace)
+        else {
+            return false
+        }
+        let lastRowRect = outlineView.rect(ofRow: outlineView.numberOfRows - 1)
+        let draggingLocation = NSPoint(x: lastRowRect.midX, y: lastRowRect.maxY + 1)
+        guard let resolvedDrop = resolvedDrop(
+            for: .job(id: job.id, cwd: job.cwd),
+            draggingLocation: draggingLocation,
+            proposedItem: section,
+            proposedChildIndex: section.jobs.count
+        ) else {
+            return false
+        }
+        return applyResolvedDrop(resolvedDrop)
     }
 
     private func blankPointForTesting() -> NSPoint {
