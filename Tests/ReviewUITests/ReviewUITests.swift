@@ -289,7 +289,7 @@ struct ReviewUITests {
         #expect(sidebar.blankAreaWorkspaceInsertionIndexForTesting(atEnd: true) == store.workspaces.count)
     }
 
-    @Test func workspaceDropOnJobRowIsRejected() {
+    @Test func workspaceDropOnJobRowReordersSection() async {
         let workspaceAlphaJob = makeJob(
             id: "job-workspace-alpha-reject",
             cwd: "/tmp/workspace-alpha",
@@ -313,16 +313,23 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         guard let workspaceBeta = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-beta" }),
               let workspaceAlpha = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }),
-              let alphaJob = store.orderedJobs(in: workspaceAlpha).first
+              let betaJob = store.orderedJobs(in: workspaceBeta).first
         else {
             Issue.record("workspace/job state was not loaded.")
             return
         }
 
-        #expect(sidebar.workspaceDropIsRejectedForTesting(workspaceBeta, proposedJob: alphaJob))
+        #expect(sidebar.displayedSectionTitlesForTesting == [workspaceAlpha.displayTitle, workspaceBeta.displayTitle])
+        #expect(sidebar.performWorkspaceDropForTesting(
+            workspaceAlpha,
+            proposedJob: betaJob,
+            hoveringBelowMidpoint: true
+        ))
+        await Task.yield()
+        #expect(sidebar.displayedSectionTitlesForTesting == [workspaceBeta.displayTitle, workspaceAlpha.displayTitle])
     }
 
-    @Test func jobDropOnBlankAreaIsRejected() {
+    @Test func jobDropOnBlankAreaMovesToFullOrderEnd() async {
         let firstJob = makeJob(
             id: "job-blank-area-reject",
             cwd: "/tmp/workspace-alpha",
@@ -346,7 +353,10 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.jobDropIsRejectedForTesting(firstJob))
+        #expect(sidebar.performJobBlankAreaDropForTesting(firstJob))
+        await Task.yield()
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-blank-area-peer", "job-blank-area-reject"])
+        #expect(store.orderedJobs(in: workspace).map(\.id) == ["job-blank-area-peer", "job-blank-area-reject"])
     }
 
     @Test func jobDropReordersWithinWorkspaceAndPreservesSelection() async throws {
@@ -813,6 +823,18 @@ struct ReviewUITests {
             "job-running-b",
             "job-running-a",
             "job-hidden-suffix",
+        ])
+
+        #expect(sidebar.performJobBlankAreaDropForTesting(runningA))
+        await Task.yield()
+
+        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
+        #expect(store.orderedJobs(in: workspace).map(\.id) == [
+            "job-hidden-prefix",
+            "job-hidden-middle",
+            "job-running-b",
+            "job-hidden-suffix",
+            "job-running-a",
         ])
     }
 
@@ -2820,6 +2842,69 @@ struct ReviewUITests {
             secondWorkspace.cwd,
         ])
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
+    }
+
+    @Test func workspaceSectionDropBlockifiesNonContiguousGroupedWorkspaces() async throws {
+        let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.rootURL)
+        }
+        let standaloneBURL = fixture.rootURL.appendingPathComponent("StandaloneB", isDirectory: true)
+        let standaloneCURL = fixture.rootURL.appendingPathComponent("StandaloneC", isDirectory: true)
+        try FileManager.default.createDirectory(at: standaloneBURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: standaloneCURL, withIntermediateDirectories: true)
+        let firstWorkspace = CodexReviewWorkspace(cwd: fixture.firstWorktreeURL.path)
+        let secondWorkspace = CodexReviewWorkspace(cwd: fixture.secondWorktreeURL.path)
+        let standaloneBWorkspace = CodexReviewWorkspace(cwd: standaloneBURL.path)
+        let standaloneCWorkspace = CodexReviewWorkspace(cwd: standaloneCURL.path)
+        let firstJob = makeJob(
+            id: "job-noncontiguous-group-first",
+            cwd: firstWorkspace.cwd,
+            status: .succeeded,
+            targetSummary: "First grouped workspace"
+        )
+        let standaloneBJob = makeJob(
+            id: "job-noncontiguous-standalone-b",
+            cwd: standaloneBWorkspace.cwd,
+            status: .running,
+            targetSummary: "Standalone B"
+        )
+        let standaloneCJob = makeJob(
+            id: "job-noncontiguous-standalone-c",
+            cwd: standaloneCWorkspace.cwd,
+            status: .queued,
+            targetSummary: "Standalone C"
+        )
+        let secondJob = makeJob(
+            id: "job-noncontiguous-group-second",
+            cwd: secondWorkspace.cwd,
+            status: .failed,
+            targetSummary: "Second grouped workspace"
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [firstWorkspace, standaloneBWorkspace, standaloneCWorkspace, secondWorkspace],
+            jobs: [firstJob, standaloneBJob, standaloneCJob, secondJob]
+        )
+        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+        #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "StandaloneB", "StandaloneC"])
+
+        #expect(sidebar.performWorkspaceSectionDropForTesting(
+            containing: firstWorkspace,
+            toIndex: 2
+        ))
+        await Task.yield()
+
+        #expect(sidebar.displayedSectionTitlesForTesting == ["StandaloneB", "CodexReviewKit", "StandaloneC"])
+        #expect(store.orderedWorkspaces.map(\.cwd) == [
+            standaloneBWorkspace.cwd,
+            firstWorkspace.cwd,
+            secondWorkspace.cwd,
+            standaloneCWorkspace.cwd,
+        ])
     }
 
     @Test func workspaceSectionJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
