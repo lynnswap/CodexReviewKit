@@ -232,6 +232,7 @@ struct AppServerWireEventTests {
               "id": "cmd-2",
               "type": "commandExecution",
               "command": "swift test",
+              "aggregatedOutput": "",
               "exitCode": 1
             }
           }
@@ -427,6 +428,23 @@ struct AppServerWireEventTests {
             return
         }
         #expect(processItemID.rawValue == "process-1")
+
+        let metadataOnlyCompletion = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test",
+              "exitCode": 0,
+              "durationMs": 1000
+            }
+          }
+        }
+        """)
+
+        #expect(metadataOnlyCompletion.domainEvents().isEmpty)
     }
 
     @Test func preservesReasoningDeltaIndexesInItemIDs() throws {

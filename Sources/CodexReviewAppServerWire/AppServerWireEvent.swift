@@ -534,6 +534,9 @@ public extension AppServerWireReviewNotification {
             if reasoningSeeds.isEmpty == false {
                 return reasoningSeeds.map(ReviewDomainEvent.itemCompleted)
             }
+            if item.wouldEraseStreamedCommandOutput(fallbackDelta: delta) {
+                return []
+            }
             return [.itemCompleted(seed(for: item, phase: phase))]
         }
 
@@ -1215,6 +1218,12 @@ public extension AppServerWireReviewNotification {
             case .lifecycle, .unknown:
                 return .unknown(.init(title: type.rawValue, detail: rawValue?.jsonString))
             }
+        }
+
+        func wouldEraseStreamedCommandOutput(fallbackDelta: String?) -> Bool {
+            family == .command
+                && aggregatedOutput == nil
+                && fallbackDelta == nil
         }
 
         private var joinedContentText: String? {
