@@ -47,6 +47,191 @@ public struct ReviewWireEventKind: ReviewStringIdentifier, CustomStringConvertib
     public static let mcpToolCallProgress: Self = "item/mcpToolCall/progress"
 }
 
+public protocol ReviewOpenStringValue: ReviewStringIdentifier, CustomStringConvertible {}
+
+public extension ReviewOpenStringValue {
+    var description: String {
+        rawValue
+    }
+}
+
+public struct ReviewCommandStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let inProgress: Self = "inProgress"
+    public static let completed: Self = "completed"
+    public static let failed: Self = "failed"
+    public static let cancelled: Self = "cancelled"
+}
+
+public struct ReviewCommandSource: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
+public struct ReviewCommandActionKind: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let read: Self = "read"
+    public static let listFiles: Self = "listFiles"
+    public static let search: Self = "search"
+    public static let unknown: Self = "unknown"
+}
+
+public struct ReviewToolCallStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let started: Self = "started"
+    public static let inProgress: Self = "inProgress"
+    public static let completed: Self = "completed"
+    public static let failed: Self = "failed"
+    public static let cancelled: Self = "cancelled"
+}
+
+public struct ReviewAppContext: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
+public struct ReviewPluginID: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
+public struct ReviewFileChangeStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let started: Self = "started"
+    public static let updated: Self = "updated"
+    public static let completed: Self = "completed"
+    public static let failed: Self = "failed"
+}
+
+public struct ReviewApprovalDecision: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let approved: Self = "approved"
+    public static let denied: Self = "denied"
+    public static let cancelled: Self = "cancelled"
+}
+
+public struct ReviewApprovalScope: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
+public struct ReviewApprovalRisk: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let low: Self = "low"
+    public static let medium: Self = "medium"
+    public static let high: Self = "high"
+}
+
+public struct ReviewApprovalStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let pending: Self = "pending"
+    public static let decided: Self = "decided"
+    public static let cancelled: Self = "cancelled"
+}
+
+public struct ReviewDiagnosticSeverity: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let info: Self = "info"
+    public static let warning: Self = "warning"
+    public static let error: Self = "error"
+}
+
+public struct ReviewDiagnosticRetryState: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let scheduled: Self = "scheduled"
+    public static let retrying: Self = "retrying"
+    public static let exhausted: Self = "exhausted"
+}
+
+public struct ReviewSearchStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let started: Self = "started"
+    public static let completed: Self = "completed"
+    public static let failed: Self = "failed"
+}
+
+public struct ReviewContextCompactionStatus: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public static let inProgress: Self = "inProgress"
+    public static let completed: Self = "completed"
+    public static let failed: Self = "failed"
+}
+
+public struct ReviewRawReferenceKind: ReviewOpenStringValue {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
 public enum ReviewItemFamily: String, Codable, Hashable, Sendable {
     case approval
     case command

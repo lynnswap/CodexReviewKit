@@ -23,6 +23,7 @@ public final class ReviewTimeline {
     public private(set) var itemsByID: [ReviewTimelineItem.ID: ReviewTimelineItem] = [:]
     public private(set) var activeItemIDs: Set<ReviewTimelineItem.ID> = []
     public private(set) var latestActivity: ReviewTimelineItem.ID?
+    public private(set) var terminalStatus: ReviewLifecycleStatus?
     public private(set) var terminalSummary: String?
     public private(set) var terminalResult: String?
 
@@ -33,7 +34,7 @@ public final class ReviewTimeline {
     }
 
     public var isTerminal: Bool {
-        terminalSummary != nil
+        terminalStatus != nil
     }
 
     public func reset(keepingTerminal: Bool = true) {
@@ -42,6 +43,7 @@ public final class ReviewTimeline {
         activeItemIDs.removeAll(keepingCapacity: true)
         latestActivity = nil
         if keepingTerminal == false {
+            terminalStatus = nil
             terminalSummary = nil
             terminalResult = nil
         }
@@ -51,12 +53,22 @@ public final class ReviewTimeline {
     public func apply(_ event: ReviewDomainEvent, at timestamp: Date = Date()) {
         switch event {
         case .runStarted:
+            terminalStatus = nil
             terminalSummary = nil
             terminalResult = nil
             bumpRevision()
         case .itemStarted(let seed):
             let item = upsert(seed, timestamp: timestamp)
-            item.update(phase: seed.phase, updatedAt: timestamp, startedAt: seed.startedAt)
+            item.update(
+                kind: seed.kind,
+                family: seed.family,
+                phase: seed.phase,
+                content: item.content.mergingTimelineUpdate(seed.content),
+                updatedAt: timestamp,
+                startedAt: seed.startedAt,
+                completedAt: seed.completedAt,
+                durationMs: seed.durationMs
+            )
             activeItemIDs.insert(item.id)
             latestActivity = item.id
             bumpRevision()
@@ -66,7 +78,7 @@ public final class ReviewTimeline {
                 kind: seed.kind,
                 family: seed.family,
                 phase: seed.phase,
-                content: seed.content,
+                content: item.content.mergingTimelineUpdate(seed.content),
                 updatedAt: timestamp,
                 startedAt: seed.startedAt,
                 completedAt: seed.completedAt,
@@ -85,7 +97,7 @@ public final class ReviewTimeline {
                 kind: seed.kind,
                 family: seed.family,
                 phase: seed.phase,
-                content: seed.content,
+                content: item.content.mergingTimelineUpdate(seed.content),
                 updatedAt: timestamp,
                 startedAt: seed.startedAt,
                 completedAt: seed.completedAt,
@@ -107,16 +119,21 @@ public final class ReviewTimeline {
             latestActivity = item.id
             bumpRevision()
         case .reviewCompleted(let summary, let result):
+            terminalStatus = .succeeded
             terminalSummary = summary
             terminalResult = result
             activeItemIDs.removeAll(keepingCapacity: true)
             bumpRevision()
         case .reviewFailed(let message):
+            terminalStatus = .failed
             terminalSummary = message
+            terminalResult = nil
             activeItemIDs.removeAll(keepingCapacity: true)
             bumpRevision()
         case .reviewCancelled(let message):
+            terminalStatus = .cancelled
             terminalSummary = message
+            terminalResult = nil
             activeItemIDs.removeAll(keepingCapacity: true)
             bumpRevision()
         }
