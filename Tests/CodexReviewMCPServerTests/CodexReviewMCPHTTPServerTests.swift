@@ -491,6 +491,7 @@ struct CodexReviewMCPHTTPServerTests {
             let sessionID = try await initializeSession(endpoint: await server.url)
             let startedAt = Date(timeIntervalSince1970: 20)
             let completedAt = Date(timeIntervalSince1970: 23)
+            let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
             let commandMetadata = ReviewLogEntry.Metadata(
                 sourceType: "commandExecution",
                 status: "completed",
@@ -524,7 +525,7 @@ struct CodexReviewMCPHTTPServerTests {
                             .init(
                                 kind: .commandOutput,
                                 groupID: "cmd-1",
-                                text: "Tests passed",
+                                text: longOutput,
                                 metadata: commandMetadata
                             ),
                         ]
@@ -584,6 +585,10 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(timeline["activeItemIds"] as? [String] == [])
             #expect(timeline["activeItemCount"] as? Int == 0)
             #expect(timeline["latestActivityId"] as? String == "cmd-1")
+            let itemsPage = try #require(timeline["itemsPage"] as? [String: Any])
+            #expect(itemsPage["total"] as? Int == 1)
+            #expect(itemsPage["limit"] as? Int == 2)
+            #expect(itemsPage["returned"] as? Int == 1)
             let items = try #require(timeline["items"] as? [[String: Any]])
             let commandItem = try #require(items.first)
             #expect(commandItem["id"] as? String == "cmd-1")
@@ -596,8 +601,12 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(content["type"] as? String == "command")
             #expect(content["command"] as? String == "swift test")
             #expect(content["cwd"] as? String == "/tmp/project")
-            #expect(content["output"] as? String == "Tests passed")
             #expect(content["exitCode"] as? Int == 0)
+            let timelineOutput = try #require(content["output"] as? String)
+            #expect(timelineOutput.hasPrefix("Tests passed"))
+            #expect(timelineOutput.hasSuffix("..."))
+            #expect(timelineOutput.count < longOutput.count)
+            #expect(content["truncatedFields"] as? [String] == ["output"])
         }
     }
 
