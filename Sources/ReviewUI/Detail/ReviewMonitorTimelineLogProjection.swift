@@ -232,8 +232,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         for block: ReviewTimelineDocument.Block,
         command: ReviewTimelineDocument.Command
     ) -> ReviewLogEntry.Metadata {
-        let status: String = command.status?.rawValue
-            ?? (command.output.isEmpty ? block.phase.rawValue : "completed")
+        let status = commandStatus(for: block, command: command)
         return .init(
             sourceType: "commandExecution",
             status: status,
@@ -247,6 +246,19 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             commandActions: command.actions.map(commandAction),
             commandStatus: status
         )
+    }
+
+    private static func commandStatus(
+        for block: ReviewTimelineDocument.Block,
+        command: ReviewTimelineDocument.Command
+    ) -> String {
+        if let status = command.status?.rawValue {
+            return status
+        }
+        if block.phase.isTerminal {
+            return block.phase.rawValue
+        }
+        return command.output.isEmpty ? block.phase.rawValue : "completed"
     }
 
     private static func genericCommandOutputMetadata(

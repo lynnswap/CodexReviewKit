@@ -3305,6 +3305,62 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
     }
 
+    @Test func directTimelineFailedCommandPreservesFailedPanelStatus() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-failed-command",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        let startedAt = Date(timeIntervalSince1970: 300)
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-failed-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .failed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests failed"
+            )),
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(4),
+            durationMs: 4_000
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test for 4s")
+        }
+        #expect(snapshot.log.contains("Tests failed") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-failed-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Failed")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests failed") == true)
+    }
+
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-context-compaction-marker",
