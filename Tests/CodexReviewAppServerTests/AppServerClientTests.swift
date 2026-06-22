@@ -1417,6 +1417,53 @@ struct AppServerClientTests {
         #expect(seed.phase == .failed)
     }
 
+    @Test func backendRetainsCompatibilityLogForTextBearingItemUpdatedNotifications() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/updated",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "plan", id: "plan-1", text: "- [inProgress] Inspect diff")
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        guard case .domainEvents(let domainEvents, let suppressionCount) = try await iterator.next() else {
+            Issue.record("expected direct plan update")
+            return
+        }
+        #expect(suppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(domainEvents.first) else {
+            Issue.record("expected plan item update")
+            return
+        }
+        #expect(seed.id.rawValue == "plan-1")
+        guard case .plan(let plan) = seed.content else {
+            Issue.record("expected plan content")
+            return
+        }
+        #expect(plan.markdown == "- [inProgress] Inspect diff")
+        #expect(try await iterator.next() == .logEntry(
+            kind: .plan,
+            text: "- [inProgress] Inspect diff",
+            groupID: "plan-1",
+            replacesGroup: true
+        ))
+    }
+
     @Test func backendMapsMCPToolProgressDomainEventAsProgress() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -5423,6 +5470,7 @@ private struct TestItemNotification: Encodable, Sendable {
 private struct TestItem: Encodable, Sendable {
     var type: String
     var id: String
+    var text: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -5448,6 +5496,7 @@ private struct TestItem: Encodable, Sendable {
     init(
         type: String,
         id: String,
+        text: String? = nil,
         review: String? = nil,
         command: String? = nil,
         cwd: String? = nil,
@@ -5472,6 +5521,7 @@ private struct TestItem: Encodable, Sendable {
     ) {
         self.type = type
         self.id = id
+        self.text = text
         self.review = review
         self.command = command
         self.cwd = cwd

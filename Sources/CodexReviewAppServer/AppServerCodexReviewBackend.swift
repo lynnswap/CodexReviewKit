@@ -2018,7 +2018,7 @@ private func decodeReviewNotification(
             events = payload.item?.startedEvents(startedAt: payload.startedAt, lifecycle: nil) ?? []
         }
     case "item/updated":
-        events = []
+        events = payload.item?.updatedEvents() ?? []
     case "item/completed":
         if let item = payload.item,
            item.type == "commandExecution" {
@@ -2709,6 +2709,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return []
         default:
             return [.logEntry(kind: .event, text: "App-server item started: \(type).", groupID: id, replacesGroup: true)]
+        }
+    }
+
+    func updatedEvents() -> [CodexReviewBackendModel.Review.Event] {
+        switch type {
+        case "agentMessage":
+            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+        case "plan":
+            return text.map { [.logEntry(kind: .plan, text: $0, groupID: id, replacesGroup: true)] } ?? []
+        case "reasoning":
+            return reasoningCompletionEvents(replacesGroup: true)
+        default:
+            return []
         }
     }
 
