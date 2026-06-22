@@ -326,6 +326,62 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected diagnostic content")
         }
+
+        let deprecation = try decodeNotification("""
+        {
+          "method": "deprecationNotice",
+          "params": {
+            "turnId": "turn-5",
+            "summary": "Deprecated setting",
+            "details": "Use the replacement setting."
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let deprecationSeed) = try #require(deprecation.domainEvents().first) else {
+            Issue.record("expected deprecation diagnostic update")
+            return
+        }
+        if case .diagnostic(let diagnostic) = deprecationSeed.content {
+            #expect(diagnostic.message == "Deprecated setting\nUse the replacement setting.")
+        } else {
+            Issue.record("expected deprecation diagnostic content")
+        }
+    }
+
+    @Test func mapsTurnPlanUpdatesToPlanContent() throws {
+        let notification = try decodeNotification("""
+        {
+          "method": "turn/plan/updated",
+          "params": {
+            "turnId": "turn-1",
+            "plan": [
+              {
+                "step": "Inspect diff",
+                "status": "inProgress"
+              },
+              {
+                "step": "Write findings",
+                "status": "pending"
+              }
+            ]
+          }
+        }
+        """)
+
+        let events = notification.domainEvents()
+        guard case .itemUpdated(let seed) = try #require(events.first) else {
+            Issue.record("expected plan item update")
+            return
+        }
+        #expect(seed.id.rawValue == "turn-1")
+        #expect(seed.kind == .plan)
+        #expect(seed.family == .plan)
+        if case .plan(let plan) = seed.content {
+            #expect(plan.markdown == "[inProgress] Inspect diff\n[pending] Write findings")
+        } else {
+            Issue.record("expected plan content")
+        }
     }
 }
 

@@ -234,6 +234,8 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
             return payload.fileChangeUpdateEvent(method: method)
         case .turnDiffUpdated:
             return payload.diffUpdateEvent(method: method)
+        case .turnPlanUpdated:
+            return payload.planUpdateEvent(method: method)
         case .threadCompacted:
             return payload.contextCompactionEvent(method: method)
         case .error:
@@ -394,10 +396,17 @@ public extension AppServerWireReviewNotification {
         }
 
         var diagnosticMessage: String? {
-            message?.nilIfEmpty
-                ?? error?.message?.nilIfEmpty
-                ?? summary?.nilIfEmpty
-                ?? details?.nilIfEmpty
+            if let message = message?.nilIfEmpty {
+                return message
+            }
+            if let error = error?.message?.nilIfEmpty {
+                return error
+            }
+            if let summary = summary?.nilIfEmpty,
+               let details = details?.nilIfEmpty {
+                return "\(summary)\n\(details)"
+            }
+            return summary?.nilIfEmpty ?? details?.nilIfEmpty
         }
 
         var outputDelta: String? {
@@ -483,6 +492,31 @@ public extension AppServerWireReviewNotification {
                 family: .fileChange,
                 phase: .running,
                 content: .fileChange(.init(title: "", output: diff))
+            ))]
+        }
+
+        func planUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            let markdown = plan.compactMap { step -> String? in
+                switch (step.status.nilIfEmpty, step.step.nilIfEmpty) {
+                case let (status?, step?):
+                    return "[\(status)] \(step)"
+                case let (status?, nil):
+                    return "[\(status)]"
+                case let (nil, step?):
+                    return step
+                case (nil, nil):
+                    return nil
+                }
+            }.joined(separator: "\n")
+            guard markdown.isEmpty == false else {
+                return unknownEvent(method: method)
+            }
+            return [.itemUpdated(ReviewTimelineItemSeed(
+                id: .init(rawValue: itemID ?? resolvedTurnID ?? syntheticItemID(method: method.rawValue)),
+                kind: .plan,
+                family: .plan,
+                phase: .running,
+                content: .plan(.init(markdown: markdown))
             ))]
         }
 
@@ -961,6 +995,7 @@ private extension ReviewWireEventKind {
     static let turnCancelled: Self = "turn/cancelled"
     static let turnAborted: Self = "turn/aborted"
     static let turnDiffUpdated: Self = "turn/diff/updated"
+    static let turnPlanUpdated: Self = "turn/plan/updated"
     static let itemUpdated: Self = "item/updated"
     static let commandExecOutputDelta: Self = "command/exec/outputDelta"
     static let processOutputDelta: Self = "process/outputDelta"
