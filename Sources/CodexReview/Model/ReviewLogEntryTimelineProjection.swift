@@ -266,7 +266,12 @@ private extension ReviewLogEntry {
             ?? metadata?.path?.nilIfEmpty
             ?? existingFileChange?.title.nilIfEmpty
             ?? "File changes"
-        let output = kind == .commandOutput ? text : existingFileChange?.output ?? text
+        let output: String
+        if kind == .commandOutput {
+            output = replacesGroup ? text : (existingFileChange?.output ?? "") + text
+        } else {
+            output = existingFileChange?.output ?? text
+        }
         return .init(title: title, output: output)
     }
 

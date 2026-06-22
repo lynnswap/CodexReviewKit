@@ -33,6 +33,43 @@ struct CodexReviewJobRenderingTests {
         """)
     }
 
+    @Test func fileChangeCommandOutputChunksAccumulateInTimelineProjection() throws {
+        let metadata = ReviewLogEntry.Metadata(
+            sourceType: "fileChange",
+            title: "Updated Sources/App.swift",
+            status: "updated",
+            itemID: "file-1"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-file-change-output-chunks",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .commandOutput,
+                    groupID: "file-1",
+                    text: "Sources/App.swift | 1 +\n",
+                    metadata: metadata
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "file-1",
+                    text: "+ new line\n",
+                    metadata: metadata
+                ),
+            ]
+        )
+
+        let item = try #require(job.timeline.item(for: "file-1"))
+        guard case .fileChange(let fileChange) = item.content else {
+            Issue.record("Expected file-change timeline content.")
+            return
+        }
+        #expect(fileChange.output == "Sources/App.swift | 1 +\n+ new line\n")
+    }
+
     @Test func tailAppendPublishesIncrementalLogMutation() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-tail-append-mutation",
