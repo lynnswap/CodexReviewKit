@@ -3575,6 +3575,57 @@ struct ReviewUITests {
         }
     }
 
+    @Test func timelineProjectionRendersToolCallProgressUpdates() {
+        let timestamp = Date(timeIntervalSince1970: 300)
+        var projection = ReviewMonitorTimelineLogProjection()
+
+        func document(revision: UInt64, progress: String) -> ReviewTimelineDocument {
+            ReviewTimelineDocument(
+                timelineRevision: .init(rawValue: revision),
+                orderedBlockIDs: ["tool-progress"],
+                activeBlockIDs: ["tool-progress"],
+                activeBlockCount: 1,
+                latestActivityBlockID: "tool-progress",
+                terminalStatus: nil,
+                terminalSummary: nil,
+                terminalResult: nil,
+                blocks: [
+                    .init(
+                        id: "tool-progress",
+                        sourceItemID: "tool-progress",
+                        kind: .mcpToolCall,
+                        family: .tool,
+                        phase: .running,
+                        isActive: true,
+                        primaryText: "codex_review.review_start",
+                        rawTranscriptText: progress,
+                        content: .toolCall(.init(
+                            namespace: "codex_review",
+                            server: "codex_review",
+                            name: "review_start",
+                            status: .inProgress,
+                            progress: progress
+                        )),
+                        createdAt: timestamp,
+                        updatedAt: timestamp
+                    ),
+                ]
+            )
+        }
+
+        let initialLog = projection.render(timelineDocument: document(
+            revision: 1,
+            progress: "MCP codex_review.review_start started."
+        ))
+        let updatedLog = projection.render(timelineDocument: document(
+            revision: 2,
+            progress: "MCP codex_review.review_start still running."
+        ))
+
+        #expect(initialLog.text == "MCP codex_review.review_start started.")
+        #expect(updatedLog.text == "MCP codex_review.review_start still running.")
+    }
+
     @Test func timelineProjectionPreservesOutputOnlyCommandMetadata() throws {
         let startedAt = Date(timeIntervalSince1970: 300)
         let completedAt = startedAt.addingTimeInterval(4)

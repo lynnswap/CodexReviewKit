@@ -164,8 +164,9 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             return [projectedBlock(
                 block,
                 kind: .toolCall,
-                text: toolCall.error
-                    ?? toolCall.result
+                text: toolCall.error?.nilIfEmpty
+                    ?? toolCall.result?.nilIfEmpty
+                    ?? toolCall.progress?.nilIfEmpty
                     ?? label.nilIfEmpty
                     ?? "Tool call",
                 metadata: metadata(
