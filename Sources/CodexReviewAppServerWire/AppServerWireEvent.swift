@@ -506,9 +506,14 @@ public extension AppServerWireReviewNotification {
                 return []
             }
             let phase = item.phase(default: .running)
-            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
-            if reasoningSeeds.isEmpty == false {
-                return reasoningSeeds.map(ReviewDomainEvent.itemStarted)
+            if item.family == .reasoning {
+                let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+                if reasoningSeeds.isEmpty == false {
+                    return reasoningSeeds.map(ReviewDomainEvent.itemStarted)
+                }
+                guard item.hasReasoningParentContent(fallbackDelta: delta) else {
+                    return []
+                }
             }
             return [.itemStarted(seed(for: item, phase: phase))]
         }
@@ -516,9 +521,16 @@ public extension AppServerWireReviewNotification {
         func itemUpdateEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
             if let item {
                 let phase = item.phase(default: .running)
-                let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
-                if reasoningSeeds.isEmpty == false {
-                    return reasoningSeeds.map(ReviewDomainEvent.itemUpdated)
+                if item.family == .reasoning {
+                    let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+                    if reasoningSeeds.isEmpty == false {
+                        return reasoningSeeds.map(ReviewDomainEvent.itemUpdated)
+                    }
+                    guard item.hasReasoningParentContent(fallbackDelta: delta)
+                        || item.hasReasoningLifecycleUpdate(phase: phase)
+                    else {
+                        return []
+                    }
                 }
                 return [.itemUpdated(seed(for: item, phase: phase))]
             }
@@ -530,11 +542,17 @@ public extension AppServerWireReviewNotification {
                 return []
             }
             let phase = item.phase(default: .completed)
-            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
-            if reasoningSeeds.isEmpty == false {
-                return reasoningSeeds.map(ReviewDomainEvent.itemCompleted)
+            if item.family == .reasoning {
+                let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+                if reasoningSeeds.isEmpty == false {
+                    return reasoningSeeds.map(ReviewDomainEvent.itemCompleted)
+                }
             }
-            if item.wouldEraseStreamedCommandOutput(fallbackDelta: delta) {
+            if item.wouldEraseStreamedCommandOutput(
+                fallbackDelta: delta,
+                phase: phase,
+                hasCompletionMetadata: completedAt != nil
+            ) {
                 return []
             }
             return [.itemCompleted(seed(for: item, phase: phase))]
@@ -952,6 +970,7 @@ public extension AppServerWireReviewNotification {
         public var processID: String?
         public var source: String?
         public var aggregatedOutput: String?
+        public var hasAggregatedOutputField: Bool
         public var exitCode: Int?
         public var durationMs: Int?
         public var status: String?
@@ -991,6 +1010,7 @@ public extension AppServerWireReviewNotification {
             processID: String? = nil,
             source: String? = nil,
             aggregatedOutput: String? = nil,
+            hasAggregatedOutputField: Bool = false,
             exitCode: Int? = nil,
             durationMs: Int? = nil,
             status: String? = nil,
@@ -1021,6 +1041,7 @@ public extension AppServerWireReviewNotification {
             self.processID = processID
             self.source = source
             self.aggregatedOutput = aggregatedOutput
+            self.hasAggregatedOutputField = hasAggregatedOutputField
             self.exitCode = exitCode
             self.durationMs = durationMs
             self.status = status
@@ -1083,7 +1104,8 @@ public extension AppServerWireReviewNotification {
             self.cwd = try container.decodeStringIfPresent(forKey: .cwd)
             self.processID = try container.decodeStringIfPresent(forKey: .processID)
             self.source = try container.decodeStringIfPresent(forKey: .source)
-            self.aggregatedOutput = try container.decodeStringIfPresent(forKey: .aggregatedOutput)
+            self.hasAggregatedOutputField = container.contains(.aggregatedOutput)
+            self.aggregatedOutput = try container.decodeStringIfPresent(forKey: .aggregatedOutput)?.nilIfEmpty
             self.exitCode = try? container.decodeIfPresent(Int.self, forKey: .exitCode)
             self.durationMs = try? container.decodeIfPresent(Int.self, forKey: .durationMs)
             self.status = try container.decodeStringIfPresent(forKey: .status)
@@ -1178,7 +1200,8 @@ public extension AppServerWireReviewNotification {
             return defaultPhase
         }
 
-        func content(fallbackDelta: String?) -> ReviewTimelineItem.Content {
+        func content(fallbackDelta rawFallbackDelta: String?) -> ReviewTimelineItem.Content {
+            let fallbackDelta = rawFallbackDelta?.nilIfEmpty
             switch family {
             case .message:
                 return .message(.init(text: text ?? review ?? joinedContentText ?? fallbackDelta ?? ""))
@@ -1220,14 +1243,45 @@ public extension AppServerWireReviewNotification {
             }
         }
 
-        func wouldEraseStreamedCommandOutput(fallbackDelta: String?) -> Bool {
+        func wouldEraseStreamedCommandOutput(
+            fallbackDelta: String?,
+            phase: ReviewItemPhase,
+            hasCompletionMetadata: Bool
+        ) -> Bool {
             family == .command
                 && aggregatedOutput == nil
-                && fallbackDelta == nil
+                && hasAggregatedOutputField == false
+                && fallbackDelta?.nilIfEmpty == nil
+                && phase == .completed
+                && hasCompletionMetadata == false
+                && hasCommandLifecycleMetadata == false
+        }
+
+        func hasReasoningParentContent(fallbackDelta: String?) -> Bool {
+            family == .reasoning
+                && (text?.nilIfEmpty != nil || fallbackDelta?.nilIfEmpty != nil)
+        }
+
+        func hasReasoningLifecycleUpdate(phase: ReviewItemPhase) -> Bool {
+            family == .reasoning
+                && phase.isTerminal
+                && (
+                    status?.nilIfEmpty != nil
+                        || success != nil
+                        || error?.nonNullText?.nilIfEmpty != nil
+                )
+        }
+
+        var hasCommandLifecycleMetadata: Bool {
+            exitCode != nil
+                || durationMs != nil
+                || status?.nilIfEmpty != nil
+                || success != nil
         }
 
         private var joinedContentText: String? {
-            (content + contentFragments.compactMap { $0.text?.nilIfEmpty })
+            indexedContentTexts
+                .map { $0.1 }
                 .joined(separator: "\n")
                 .nilIfEmpty
         }

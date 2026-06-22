@@ -429,14 +429,54 @@ struct AppServerWireEventTests {
         }
         #expect(processItemID.rawValue == "process-1")
 
-        let metadataOnlyCompletion = try decodeNotification("""
+        let bareCompletion = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution"
+            }
+          }
+        }
+        """)
+
+        #expect(bareCompletion.domainEvents().isEmpty)
+
+        let explicitEmptyAggregatedOutput = try decodeNotification("""
         {
           "method": "item/completed",
           "params": {
             "item": {
               "id": "cmd-1",
               "type": "commandExecution",
+              "aggregatedOutput": ""
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let explicitEmptySeed) = try #require(explicitEmptyAggregatedOutput.domainEvents().first) else {
+            Issue.record("expected explicit empty aggregate to complete command")
+            return
+        }
+        #expect(explicitEmptySeed.phase == .completed)
+        if case .command(let command) = explicitEmptySeed.content {
+            #expect(command.output.isEmpty)
+        } else {
+            Issue.record("expected command content")
+        }
+
+        let emptyAggregatedOutputCompletion = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "completedAtMs": 2000,
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
               "command": "swift test",
+              "aggregatedOutput": "",
               "exitCode": 0,
               "durationMs": 1000
             }
@@ -444,7 +484,157 @@ struct AppServerWireEventTests {
         }
         """)
 
-        #expect(metadataOnlyCompletion.domainEvents().isEmpty)
+        guard case .itemCompleted(let emptyOutputSeed) = try #require(emptyAggregatedOutputCompletion.domainEvents().first) else {
+            Issue.record("expected empty-output command completion with lifecycle metadata")
+            return
+        }
+        #expect(emptyOutputSeed.phase == .completed)
+        #expect(emptyOutputSeed.completedAt == Date(timeIntervalSince1970: 2))
+        #expect(emptyOutputSeed.durationMs == 1000)
+        if case .command(let command) = emptyOutputSeed.content {
+            #expect(command.command == "swift test")
+            #expect(command.output.isEmpty)
+            #expect(command.exitCode == 0)
+        } else {
+            Issue.record("expected command content")
+        }
+    }
+
+    @Test func preservesFailedCommandCompletionWithEmptyAggregatedOutput() throws {
+        let failed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test",
+              "aggregatedOutput": "",
+              "exitCode": 1
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let seed) = try #require(failed.domainEvents().first) else {
+            Issue.record("expected failed command completion")
+            return
+        }
+        #expect(seed.phase == .failed)
+        if case .command(let command) = seed.content {
+            #expect(command.command == "swift test")
+            #expect(command.output.isEmpty)
+            #expect(command.exitCode == 1)
+        } else {
+            Issue.record("expected command content")
+        }
+    }
+
+    @Test @MainActor func emptyCommandCompletionPreservesStreamedOutputAndCompletesItem() throws {
+        let started = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test"
+            }
+          }
+        }
+        """)
+
+        let delta = try decodeNotification("""
+        {
+          "method": "item/commandExecution/outputDelta",
+          "params": {
+            "itemId": "cmd-1",
+            "delta": "streamed output"
+          }
+        }
+        """)
+
+        let completed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test",
+              "aggregatedOutput": ""
+            }
+          }
+        }
+        """)
+
+        let timeline = ReviewTimeline()
+        for event in started.domainEvents() + delta.domainEvents() + completed.domainEvents() {
+            timeline.apply(event)
+        }
+
+        let item = try #require(timeline.item(for: "cmd-1"))
+        #expect(item.phase == .completed)
+        if case .command(let command) = item.content {
+            #expect(command.output == "streamed output")
+            #expect(command.exitCode == nil)
+        } else {
+            Issue.record("expected command content")
+        }
+    }
+
+    @Test @MainActor func successOnlyEmptyCommandCompletionPreservesStreamedOutputAndCompletesItem() throws {
+        let started = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test"
+            }
+          }
+        }
+        """)
+
+        let delta = try decodeNotification("""
+        {
+          "method": "item/commandExecution/outputDelta",
+          "params": {
+            "itemId": "cmd-1",
+            "delta": "streamed output"
+          }
+        }
+        """)
+
+        let completed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test",
+              "aggregatedOutput": "",
+              "success": true
+            }
+          }
+        }
+        """)
+
+        let timeline = ReviewTimeline()
+        for event in started.domainEvents() + delta.domainEvents() + completed.domainEvents() {
+            timeline.apply(event)
+        }
+
+        let item = try #require(timeline.item(for: "cmd-1"))
+        #expect(item.phase == .completed)
+        if case .command(let command) = item.content {
+            #expect(command.output == "streamed output")
+            #expect(command.exitCode == nil)
+        } else {
+            Issue.record("expected command content")
+        }
     }
 
     @Test func preservesReasoningDeltaIndexesInItemIDs() throws {
@@ -534,6 +724,208 @@ struct AppServerWireEventTests {
             "raw chain plus final"
         ])
         #expect(reasoning.map(\.style) == [.summary, .summary, .raw, .raw, .raw])
+    }
+
+    @Test func ignoresReasoningParentStartsAndUpdatesWithoutPartParentContentOrLifecycleMetadata() throws {
+        for method in ["item/started", "item/updated"] {
+            let notification = try decodeNotification("""
+            {
+              "method": "\(method)",
+              "params": {
+                "item": {
+                  "id": "reasoning-1",
+                  "type": "reasoning"
+                }
+              }
+            }
+            """)
+
+            #expect(notification.domainEvents().isEmpty)
+        }
+    }
+
+    @Test @MainActor func statusOnlyReasoningUpdateCompletesExistingParent() throws {
+        let started = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "reasoning-1",
+              "type": "reasoning",
+              "text": "parent reasoning"
+            }
+          }
+        }
+        """)
+
+        let failed = try decodeNotification("""
+        {
+          "method": "item/updated",
+          "params": {
+            "item": {
+              "id": "reasoning-1",
+              "type": "reasoning",
+              "status": "failed"
+            }
+          }
+        }
+        """)
+
+        guard case .itemStarted(let startSeed) = try #require(started.domainEvents().first),
+              case .itemUpdated(let updateSeed) = try #require(failed.domainEvents().first)
+        else {
+            Issue.record("expected reasoning start and update")
+            return
+        }
+        #expect(updateSeed.phase == .failed)
+
+        let timeline = ReviewTimeline()
+        timeline.apply(.itemStarted(startSeed))
+        timeline.apply(.itemUpdated(updateSeed))
+        let item = try #require(timeline.item(for: "reasoning-1"))
+        #expect(item.phase == .failed)
+        if case .reasoning(let reasoning) = item.content {
+            #expect(reasoning.text == "parent reasoning")
+        } else {
+            Issue.record("expected reasoning content")
+        }
+    }
+
+    @Test @MainActor func successAndErrorReasoningUpdatesCompleteExistingParent() throws {
+        for (field, expectedPhase) in [
+            (#""success": true"#, ReviewItemPhase.completed),
+            (#""error": "boom""#, ReviewItemPhase.failed)
+        ] {
+            let started = try decodeNotification("""
+            {
+              "method": "item/started",
+              "params": {
+                "item": {
+                  "id": "reasoning-1",
+                  "type": "reasoning",
+                  "text": "parent reasoning"
+                }
+              }
+            }
+            """)
+
+            let lifecycleUpdate = try decodeNotification("""
+            {
+              "method": "item/updated",
+              "params": {
+                "item": {
+                  "id": "reasoning-1",
+                  "type": "reasoning",
+                  \(field)
+                }
+              }
+            }
+            """)
+
+            guard case .itemStarted(let startSeed) = try #require(started.domainEvents().first),
+                  case .itemUpdated(let updateSeed) = try #require(lifecycleUpdate.domainEvents().first)
+            else {
+                Issue.record("expected reasoning start and lifecycle update")
+                return
+            }
+            #expect(updateSeed.phase == expectedPhase)
+
+            let timeline = ReviewTimeline()
+            timeline.apply(.itemStarted(startSeed))
+            timeline.apply(.itemUpdated(updateSeed))
+            let item = try #require(timeline.item(for: "reasoning-1"))
+            #expect(item.phase == expectedPhase)
+            if case .reasoning(let reasoning) = item.content {
+                #expect(reasoning.text == "parent reasoning")
+            } else {
+                Issue.record("expected reasoning content")
+            }
+        }
+    }
+
+    @Test @MainActor func completesReasoningParentWithBareCompletion() throws {
+        let parentText = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "reasoning-2",
+              "type": "reasoning",
+              "text": "parent reasoning"
+            }
+          }
+        }
+        """)
+
+        guard case .itemStarted(let startSeed) = try #require(parentText.domainEvents().first) else {
+            Issue.record("expected parent reasoning start")
+            return
+        }
+        #expect(startSeed.id.rawValue == "reasoning-2")
+        if case .reasoning(let reasoning) = startSeed.content {
+            #expect(reasoning.text == "parent reasoning")
+        } else {
+            Issue.record("expected reasoning content")
+        }
+
+        let bareCompletion = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "reasoning-2",
+              "type": "reasoning"
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let completionSeed) = try #require(bareCompletion.domainEvents().first) else {
+            Issue.record("expected bare reasoning completion")
+            return
+        }
+        #expect(completionSeed.id.rawValue == "reasoning-2")
+        #expect(completionSeed.phase == .completed)
+        #expect(completionSeed.completedAt == nil)
+
+        let timeline = ReviewTimeline()
+        timeline.apply(.itemStarted(startSeed))
+        timeline.apply(.itemCompleted(completionSeed))
+        let item = try #require(timeline.item(for: "reasoning-2"))
+        #expect(item.phase == .completed)
+        if case .reasoning(let reasoning) = item.content {
+            #expect(reasoning.text == "parent reasoning")
+        } else {
+            Issue.record("expected timeline reasoning content")
+        }
+    }
+
+    @Test func doesNotDuplicatePlainStringMessageContentFragments() throws {
+        let notification = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "message-1",
+              "type": "agentMessage",
+              "content": [
+                "Line one",
+                "Line two"
+              ]
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let seed) = try #require(notification.domainEvents().first) else {
+            Issue.record("expected message completion")
+            return
+        }
+        if case .message(let message) = seed.content {
+            #expect(message.text == "Line one\nLine two")
+        } else {
+            Issue.record("expected message content")
+        }
     }
 
     @Test func mapsPartialProgressUpdatesToScopedItems() throws {
