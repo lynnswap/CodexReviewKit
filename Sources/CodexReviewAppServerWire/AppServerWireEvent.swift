@@ -254,6 +254,10 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
             return payload.errorEvents(method: method)
         case .warning, .guardianWarning, .deprecationNotice, .configWarning, .diagnostic:
             return payload.diagnosticEvents(method: method)
+        case .modelRerouted:
+            return payload.modelReroutedEvents(method: method)
+        case .modelVerification:
+            return payload.modelVerificationEvents(method: method)
         case .agentMessage:
             return payload.messageEvent(method: method)
         case .log:
@@ -271,6 +275,9 @@ public extension AppServerWireReviewNotification {
         public var turnID: String?
         public var reviewThreadID: String?
         public var model: String?
+        public var fromModel: String?
+        public var toModel: String?
+        public var reason: String?
         public var itemID: String?
         public var processID: String?
         public var processHandle: String?
@@ -303,6 +310,9 @@ public extension AppServerWireReviewNotification {
             turnID: String? = nil,
             reviewThreadID: String? = nil,
             model: String? = nil,
+            fromModel: String? = nil,
+            toModel: String? = nil,
+            reason: String? = nil,
             itemID: String? = nil,
             processID: String? = nil,
             processHandle: String? = nil,
@@ -330,6 +340,9 @@ public extension AppServerWireReviewNotification {
             self.turnID = turnID
             self.reviewThreadID = reviewThreadID
             self.model = model
+            self.fromModel = fromModel
+            self.toModel = toModel
+            self.reason = reason
             self.itemID = itemID
             self.processID = processID
             self.processHandle = processHandle
@@ -359,6 +372,9 @@ public extension AppServerWireReviewNotification {
             case turnID = "turnId"
             case reviewThreadID = "reviewThreadId"
             case model
+            case fromModel
+            case toModel
+            case reason
             case itemID = "itemId"
             case processID = "processId"
             case processHandle
@@ -389,6 +405,9 @@ public extension AppServerWireReviewNotification {
             self.turnID = try container.decodeStringIfPresent(forKey: .turnID)
             self.reviewThreadID = try container.decodeStringIfPresent(forKey: .reviewThreadID)
             self.model = try container.decodeStringIfPresent(forKey: .model)
+            self.fromModel = try container.decodeStringIfPresent(forKey: .fromModel)
+            self.toModel = try container.decodeStringIfPresent(forKey: .toModel)
+            self.reason = try container.decodeStringIfPresent(forKey: .reason)
             self.itemID = try container.decodeStringIfPresent(forKey: .itemID)
             self.processID = try container.decodeStringIfPresent(forKey: .processID)
             self.processHandle = try container.decodeStringIfPresent(forKey: .processHandle)
@@ -603,6 +622,23 @@ public extension AppServerWireReviewNotification {
             return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
         }
 
+        func modelReroutedEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            let route = [fromModel?.nilIfEmpty, toModel?.nilIfEmpty].compactMap(\.self).joined(separator: " -> ")
+            let message = [route.nilIfEmpty, reason?.nilIfEmpty].compactMap(\.self).joined(separator: "\n")
+            guard message.isEmpty == false else {
+                return unknownEvent(method: method)
+            }
+            return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
+        }
+
+        func modelVerificationEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            let message = diagnosticMessage ?? verifications.joined(separator: "\n").nilIfEmpty
+            guard let message else {
+                return unknownEvent(method: method)
+            }
+            return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
+        }
+
         func messageEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
             guard let message = message?.nilIfEmpty else {
                 return unknownEvent(method: method)
@@ -668,7 +704,7 @@ public extension AppServerWireReviewNotification {
             phase: ReviewItemPhase
         ) -> ReviewTimelineItemSeed {
             ReviewTimelineItemSeed(
-                id: .init(rawValue: itemID ?? resolvedTurnID ?? syntheticItemID(method: method.rawValue)),
+                id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
                 kind: ReviewItemKind(rawValue: method.rawValue),
                 family: .diagnostic,
                 phase: phase,
@@ -1132,6 +1168,8 @@ private extension ReviewWireEventKind {
     static let deprecationNotice: Self = "deprecationNotice"
     static let configWarning: Self = "configWarning"
     static let diagnostic: Self = "diagnostic"
+    static let modelRerouted: Self = "model/rerouted"
+    static let modelVerification: Self = "model/verification"
     static let threadCompacted: Self = "thread/compacted"
     static let threadClosed: Self = "thread/closed"
     static let threadStatusChanged: Self = "thread/status/changed"

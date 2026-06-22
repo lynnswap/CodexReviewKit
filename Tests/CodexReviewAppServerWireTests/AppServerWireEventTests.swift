@@ -524,6 +524,66 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected deprecation diagnostic content")
         }
+
+        let warning = try decodeNotification("""
+        {
+          "method": "warning",
+          "params": {
+            "turnId": "turn-5",
+            "message": "Model warning"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let warningSeed) = try #require(warning.domainEvents().first) else {
+            Issue.record("expected warning diagnostic update")
+            return
+        }
+        #expect(warningSeed.id.rawValue == "turn-5:warning")
+        #expect(deprecationSeed.id.rawValue == "turn-5:deprecationNotice")
+        #expect(warningSeed.id != deprecationSeed.id)
+
+        let rerouted = try decodeNotification("""
+        {
+          "method": "model/rerouted",
+          "params": {
+            "turnId": "turn-6",
+            "fromModel": "gpt-5",
+            "toModel": "gpt-5.1",
+            "reason": "policy"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let reroutedSeed) = try #require(rerouted.domainEvents().first) else {
+            Issue.record("expected model reroute diagnostic")
+            return
+        }
+        if case .diagnostic(let diagnostic) = reroutedSeed.content {
+            #expect(diagnostic.message == "gpt-5 -> gpt-5.1\npolicy")
+        } else {
+            Issue.record("expected model reroute diagnostic content")
+        }
+
+        let verification = try decodeNotification("""
+        {
+          "method": "model/verification",
+          "params": {
+            "turnId": "turn-7",
+            "verifications": ["capability", "safety"]
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let verificationSeed) = try #require(verification.domainEvents().first) else {
+            Issue.record("expected model verification diagnostic")
+            return
+        }
+        if case .diagnostic(let diagnostic) = verificationSeed.content {
+            #expect(diagnostic.message == "capability\nsafety")
+        } else {
+            Issue.record("expected model verification diagnostic content")
+        }
     }
 
     @Test func mapsTurnPlanUpdatesToPlanContent() throws {
