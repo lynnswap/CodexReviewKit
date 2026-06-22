@@ -3438,6 +3438,59 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Building...") == true)
     }
 
+    @Test func directTimelineTerminalPhaseOverridesStaleCommandStatus() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-stale-command-status",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-stale-status-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests passed",
+                status: .inProgress
+            ))
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test")
+        }
+        #expect(snapshot.log.contains("Running swift test") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-stale-status-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+    }
+
     @Test func directTimelineFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-direct-timeline-file-change",

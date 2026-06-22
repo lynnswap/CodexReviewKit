@@ -34,8 +34,9 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
 
     private static func makeDocument(from timelineDocument: ReviewTimelineDocument) -> ReviewMonitorLog.Document {
         var builder = DocumentBuilder()
+        let blocksByID = Dictionary(uniqueKeysWithValues: timelineDocument.blocks.map { ($0.id, $0) })
         for blockID in timelineDocument.orderedBlockIDs {
-            guard let block = timelineDocument.blocks.first(where: { $0.id == blockID }) else {
+            guard let block = blocksByID[blockID] else {
                 continue
             }
             for projectedBlock in projectedBlocks(for: block) {
@@ -250,11 +251,11 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         for block: ReviewTimelineDocument.Block,
         command: ReviewTimelineDocument.Command
     ) -> String {
-        if let status = command.status?.rawValue {
-            return status
-        }
         if block.phase.isTerminal {
             return block.phase.rawValue
+        }
+        if let status = command.status?.rawValue {
+            return status
         }
         if block.isActive {
             return block.phase.rawValue
