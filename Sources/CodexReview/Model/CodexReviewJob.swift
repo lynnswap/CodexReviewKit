@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CodexReviewDomain
 
 @MainActor
 @Observable
@@ -423,6 +424,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
     private var logState: LogState
 
     public nonisolated let id: String
+    public let domainJob: ReviewJob
+    public var timeline: ReviewTimeline {
+        domainJob.timeline
+    }
     public let sessionID: String
     public let cwd: String
     public internal(set) var sortOrder: Double
@@ -468,6 +473,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     ) {
         let initialState = Self.trimmedLogState(entries: logEntries)
         self.id = id
+        self.domainJob = ReviewJob(id: .init(rawValue: id))
         self.sessionID = sessionID
         self.cwd = cwd
         self.sortOrder = sortOrder
@@ -486,6 +492,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.cappedLogBytes = initialState.logState.cappedBytes
         self.logRevision = 0
         self.lastLogMutation = .reload
+        rebuildTimelineFromLogEntries()
     }
 
     public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
@@ -500,6 +507,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         let trimmedState = Self.trimmedLogState(entries: entries)
         logEntries = trimmedState.entries
         logState = trimmedState.logState
+        rebuildTimelineFromLogEntries()
         syncLogState(mutation: .reload)
     }
 
@@ -512,7 +520,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
         if supportsIncrementalAppend == false {
             logState = LogState(entries: logEntries)
         }
+        applyTimelineEntry(entry)
         let didTrim = core.lifecycle.status.isTerminal ? trimReviewLogToLimit() : false
+        if didTrim {
+            rebuildTimelineFromLogEntries()
+        }
         syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
@@ -548,6 +560,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
         logEntries = trimmedState.entries
         logState = trimmedState.logState
+        rebuildTimelineFromLogEntries()
         return true
     }
 

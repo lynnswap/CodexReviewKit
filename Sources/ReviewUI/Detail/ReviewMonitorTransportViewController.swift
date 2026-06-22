@@ -168,6 +168,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundJob = selectedJob
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
+            _ = selectedJob.timeline.revision
             _ = selectedJob.logRevision
             guard let self,
                   self.boundJob === selectedJob

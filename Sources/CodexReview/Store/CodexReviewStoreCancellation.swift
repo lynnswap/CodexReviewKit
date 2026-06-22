@@ -1,4 +1,5 @@
 import Foundation
+import CodexReviewDomain
 
 private actor RuntimeStopDetachedReviewWorkerDrainRace {
     private var result: Bool?
@@ -55,6 +56,7 @@ extension CodexReviewStore {
         job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
+        job.timeline.apply(.reviewCancelled(cancellation.message), at: endedAt)
         job.applyReviewLogLimit()
         noteJobMutation()
         resumeReviewWaiters(for: job.id)
@@ -236,6 +238,7 @@ extension CodexReviewStore {
                 ?? reason.nilIfEmpty
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
+            job.timeline.apply(.reviewFailed(job.core.output.summary), at: job.core.lifecycle.endedAt ?? clock.now())
             job.applyReviewLogLimit()
             terminatedJobIDs.append(job.id)
         }

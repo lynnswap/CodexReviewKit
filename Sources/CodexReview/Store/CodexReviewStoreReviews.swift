@@ -1,4 +1,6 @@
 import Foundation
+import CodexReviewApplication
+import CodexReviewDomain
 
 private let networkRecoveryUnavailableMessage = "Network unavailable; waiting to reconnect."
 private let networkRecoveryRestoredMessage = "Network restored; restarting review."
@@ -300,7 +302,9 @@ extension CodexReviewStore {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         let pageRequest = try logPage.validated()
-        let filteredLogs = projectedLogsForReviewRead(job.logEntries).filter(logFilter.includes)
+        let timelineLogs = job.timelineLogEntries
+        let logSource = timelineLogs.isEmpty ? job.logEntries : timelineLogs
+        let filteredLogs = projectedLogsForReviewRead(logSource).filter(logFilter.includes)
         let page = pageRequest.page(total: filteredLogs.count)
         return CodexReviewAPI.Read.Result(
             jobID: job.id,
@@ -553,6 +557,11 @@ extension CodexReviewStore {
         job.core.lifecycle.status = .running
         job.core.lifecycle.startedAt = startedAt
         job.core.output.summary = "Review started."
+        job.timeline.apply(.runStarted(
+            turnID: .init(rawValue: job.core.run.turnID ?? job.id),
+            reviewThreadID: job.core.run.reviewThreadID.map(ReviewThread.ID.init(rawValue:)),
+            model: job.core.run.model
+        ), at: startedAt)
         writeDiagnosticsIfNeeded()
     }
 
@@ -567,6 +576,7 @@ extension CodexReviewStore {
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
         job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
+        job.timeline.apply(.reviewFailed(message), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
         resumeReviewWaiters(for: job.id)
@@ -843,6 +853,11 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             activeRuns[job.id] = updatedRun
             job.core.output.summary = "Review started."
+            job.timeline.apply(.runStarted(
+                turnID: .init(rawValue: turnID),
+                reviewThreadID: (reviewThreadID ?? job.core.run.reviewThreadID).map(ReviewThread.ID.init(rawValue:)),
+                model: model ?? job.core.run.model
+            ), at: clock.now())
         case .message(let text):
             job.core.output.lastAgentMessage = text
             job.core.output.summary = text
@@ -929,47 +944,22 @@ extension CodexReviewStore {
            result != previousAgentMessage {
             job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
         }
+        job.timeline.apply(.reviewCompleted(summary: summary, result: finalReviewText), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
         resumeReviewWaiters(for: job.id)
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard job(id: jobID)?.isTerminal == false else {
+        guard let job = job(id: jobID),
+              job.isTerminal == false
+        else {
             return
         }
-        let waiterID = UUID()
-        let timeoutTask = timeout.map { duration in
-            Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: duration)
-                } catch {
-                    return
-                }
-                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
-            }
-        }
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if job(id: jobID)?.isTerminal != false {
-                    timeoutTask?.cancel()
-                    continuation.resume()
-                    return
-                }
-                reviewTerminalWaiters[jobID, default: []].append(.init(
-                    id: waiterID,
-                    continuation: continuation,
-                    timeoutTask: timeoutTask
-                ))
-            }
-        } onCancel: {
-            timeoutTask?.cancel()
-            Task { @MainActor [weak self] in
-                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
-            }
-        }
-        timeoutTask?.cancel()
+        _ = await ReviewObservationAwaiter.waitUntilTerminal(
+            timeline: job.timeline,
+            timeout: timeout
+        )
     }
 
     package func resumeReviewWaiters(for jobID: String) {

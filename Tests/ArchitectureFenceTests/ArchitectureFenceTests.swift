@@ -107,4 +107,70 @@ struct ArchitectureFenceTests {
 
         #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
     }
+
+    @Test func observationTimelineTargetsKeepOneWayDependencies() throws {
+        let repo = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+
+        let rules: [(root: String, forbiddenImports: Set<String>)] = [
+            (
+                "Sources/CodexReviewDomain",
+                [
+                    "CodexReview",
+                    "CodexReviewApplication",
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewMCPAdapter",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            (
+                "Sources/CodexReviewAppServerWire",
+                [
+                    "CodexReview",
+                    "CodexReviewApplication",
+                    "CodexReviewAppServer",
+                    "CodexReviewMCPAdapter",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            (
+                "Sources/ReviewUI",
+                [
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                ]
+            ),
+        ]
+
+        var violations: [String] = []
+        for rule in rules {
+            let root = repo.appending(path: rule.root)
+            let files = try FileManager.default
+                .subpathsOfDirectory(atPath: root.path)
+                .filter { $0.hasSuffix(".swift") }
+            for file in files {
+                let url = root.appending(path: file)
+                let text = try String(contentsOf: url, encoding: .utf8)
+                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard trimmed.hasPrefix("import ") || trimmed.hasPrefix("package import ") else {
+                        continue
+                    }
+                    let module = trimmed.split(separator: " ").last.map(String.init)
+                    if let module, rule.forbiddenImports.contains(module) {
+                        violations.append("\(rule.root)/\(file):\(offset + 1): \(trimmed)")
+                    }
+                }
+            }
+        }
+
+        #expect(violations.isEmpty, Comment(rawValue: violations.joined(separator: "\n")))
+    }
 }
