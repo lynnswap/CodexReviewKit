@@ -84,6 +84,7 @@ struct ArchitectureFenceTests {
                     "CodexReview",
                     "CodexReviewApplication",
                     "CodexReviewAppServer",
+                    "CodexReviewHost",
                     "CodexReviewMCPAdapter",
                     "CodexReviewMCPServer",
                     "ReviewMonitorRendering",
@@ -97,38 +98,8 @@ struct ArchitectureFenceTests {
                     "CodexReviewApplication",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
+                    "CodexReviewHost",
                     "CodexReviewMCPAdapter",
-                    "CodexReviewMCPServer",
-                    "ReviewMonitorRendering",
-                    "ReviewUI",
-                ]
-            ),
-            .init(
-                root: "Sources/ReviewUI",
-                forbiddenImports: [
-                    "CodexReviewAppServer",
-                    "CodexReviewAppServerWire",
-                    "CodexReviewMCPAdapter",
-                    "CodexReviewMCPServer",
-                ]
-            ),
-            .init(
-                root: "Sources/ReviewMonitorRendering",
-                forbiddenImports: [
-                    "CodexReview",
-                    "CodexReviewApplication",
-                    "CodexReviewAppServer",
-                    "CodexReviewAppServerWire",
-                    "CodexReviewMCPAdapter",
-                    "CodexReviewMCPServer",
-                    "ReviewUI",
-                ]
-            ),
-            .init(
-                root: "Sources/CodexReviewMCPAdapter",
-                forbiddenImports: [
-                    "CodexReviewAppServer",
-                    "CodexReviewAppServerWire",
                     "CodexReviewMCPServer",
                     "ReviewMonitorRendering",
                     "ReviewUI",
@@ -140,8 +111,77 @@ struct ArchitectureFenceTests {
                     "CodexReview",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
+                    "CodexReviewHost",
                     "CodexReviewMCPAdapter",
                     "CodexReviewMCPServer",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            .init(
+                root: "Sources/CodexReview",
+                forbiddenImports: [
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewHost",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            .init(
+                root: "Sources/CodexReviewAppServer",
+                forbiddenImports: [
+                    "CodexReviewHost",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            .init(
+                root: "Sources/ReviewUI",
+                forbiddenImports: [
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewHost",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                ]
+            ),
+            .init(
+                root: "Sources/ReviewMonitorRendering",
+                forbiddenImports: [
+                    "AppKit",
+                    "CodexReview",
+                    "CodexReviewApplication",
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewHost",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                    "ReviewUI",
+                    "SwiftUI",
+                ]
+            ),
+            .init(
+                root: "Sources/CodexReviewMCPAdapter",
+                forbiddenImports: [
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewHost",
+                    "CodexReviewMCPServer",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            .init(
+                root: "Sources/CodexReviewMCPServer",
+                forbiddenImports: [
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewHost",
                     "ReviewMonitorRendering",
                     "ReviewUI",
                 ]
