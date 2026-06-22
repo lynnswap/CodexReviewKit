@@ -231,6 +231,16 @@ let package = Package(
             ]
         ),
         .testTarget(
+            name: "ReviewMonitorRenderingTests",
+            dependencies: [
+                "CodexReviewDomain",
+                "ReviewMonitorRendering",
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .testTarget(
             name: "TextTransitionsTests",
             dependencies: [
                 "TextTransitions",
