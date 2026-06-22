@@ -59,7 +59,6 @@ extension CodexReviewStore {
         job.timeline.apply(.reviewCancelled(cancellation.message), at: endedAt)
         job.applyReviewLogLimit()
         noteJobMutation()
-        resumeReviewWaiters(for: job.id)
     }
 
     package func recordCancellationFailure(
@@ -223,7 +222,6 @@ extension CodexReviewStore {
         failureMessage: String
     ) {
         let resolvedError = failureMessage.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        var terminatedJobIDs: [String] = []
         for job in orderedJobs where job.isTerminal == false {
             job.cancellationRequested = false
             job.core.lifecycle.cancellation = nil
@@ -240,11 +238,7 @@ extension CodexReviewStore {
             job.core.lifecycle.endedAt = clock.now()
             job.timeline.apply(.reviewFailed(job.core.output.summary), at: job.core.lifecycle.endedAt ?? clock.now())
             job.applyReviewLogLimit()
-            terminatedJobIDs.append(job.id)
         }
         noteJobMutation()
-        for jobID in terminatedJobIDs {
-            resumeReviewWaiters(for: jobID)
-        }
     }
 }

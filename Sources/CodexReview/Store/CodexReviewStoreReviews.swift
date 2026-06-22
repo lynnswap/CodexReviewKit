@@ -104,7 +104,6 @@ extension CodexReviewStore {
         guard let job = job(id: jobID) else {
             startingJobIDs.remove(jobID)
             reviewWorkerTasks.removeValue(forKey: jobID)
-            resumeReviewWaiters(for: jobID)
             return
         }
         let startRequest = CodexReviewBackendModel.Review.Start(
@@ -197,9 +196,6 @@ extension CodexReviewStore {
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
         runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
-        if job.isTerminal {
-            resumeReviewWaiters(for: jobID)
-        }
     }
 
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
@@ -579,7 +575,6 @@ extension CodexReviewStore {
         job.timeline.apply(.reviewFailed(message), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
-        resumeReviewWaiters(for: job.id)
     }
 
     private func consumeReviewEvents(
@@ -947,7 +942,6 @@ extension CodexReviewStore {
         job.timeline.apply(.reviewCompleted(summary: summary, result: finalReviewText), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
-        resumeReviewWaiters(for: job.id)
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
@@ -960,30 +954,6 @@ extension CodexReviewStore {
             timeline: job.timeline,
             timeout: timeout
         )
-    }
-
-    package func resumeReviewWaiters(for jobID: String) {
-        let waiters = reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
-        for waiter in waiters {
-            waiter.timeoutTask?.cancel()
-            waiter.continuation.resume()
-        }
-    }
-
-    private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
-        guard var waiters = reviewTerminalWaiters[jobID],
-              let index = waiters.firstIndex(where: { $0.id == waiterID })
-        else {
-            return
-        }
-        let waiter = waiters.remove(at: index)
-        if waiters.isEmpty {
-            reviewTerminalWaiters.removeValue(forKey: jobID)
-        } else {
-            reviewTerminalWaiters[jobID] = waiters
-        }
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume()
     }
 
     private func nextJobSortOrder(inWorkspace cwd: String) -> Double {
