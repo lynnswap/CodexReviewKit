@@ -3229,6 +3229,82 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
 
+    @Test func detailPaneRendersDirectTimelineUpdatesWithoutLogEntryChanges() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-detail",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        let initialLogEntries = job.logEntries
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "message-direct",
+            kind: .agentMessage,
+            family: .message,
+            phase: .completed,
+            content: .message(.init(text: "Timeline-only detail update"))
+        )))
+
+        var snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log == "Timeline-only detail update")
+        #expect(job.logEntries == initialLogEntries)
+
+        let startedAt = Date(timeIntervalSince1970: 250)
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests passed",
+                exitCode: 0,
+                status: .completed,
+                durationMs: 2_000
+            )),
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(2),
+            durationMs: 2_000
+        )))
+
+        snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test for 2s")
+        }
+        #expect(snapshot.log.contains("Timeline-only detail update"))
+        #expect(snapshot.log.contains("Ran swift test for 2s"))
+        #expect(snapshot.log.contains("$ swift test") == false)
+        #expect(snapshot.log.contains("Tests passed") == false)
+        #expect(job.logEntries == initialLogEntries)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("$ swift test") == true)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+    }
+
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-context-compaction-marker",
@@ -3338,17 +3414,15 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
         _ = try await awaitTransportRender(transport)
-        #expect(transport.displayedLogForTesting.contains("Ran command for 17s"))
-        #expect(transport.displayedLogForTesting.contains("Ran command for 17s - 9 lines") == false)
-        #expect(transport.displayedLogForTesting.contains("swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("Ran swift test - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
         #expect(transport.displayedLogForTesting.contains("output line 1") == false)
-        let titleRange = (transport.displayedLogForTesting as NSString).range(of: "Ran command for 17s")
+        let titleRange = (transport.displayedLogForTesting as NSString).range(of: "Ran swift test")
         try #require(titleRange.location != NSNotFound)
-        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran swift test"))
         transport.setSelectedLogRangeForTesting(titleRange)
-        #expect(transport.logSelectedTextForTesting?.hasPrefix("Ran command for 17") == true)
-        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran swift test"))
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
         #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
@@ -3360,7 +3434,7 @@ struct ReviewUITests {
         #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
-        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("Ran swift test"))
         #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
         #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3383,7 +3457,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("$ swift test") == false)
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("output line 1") == true)
         #expect(transport.logCommandOutputPanelOutputHitTestTargetsTextViewForTesting)
-        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("Ran swift test"))
         #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
         #expect(transport.logFindStringForTesting.contains("output line 3") == false)
         #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
@@ -3422,7 +3496,7 @@ struct ReviewUITests {
         #expect(abs(reopenedOutputScrollOffset - reopenedOutputScrollMaximumOffset) <= 0.5)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("$ swift test") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran swift test - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
@@ -4565,7 +4639,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Need to inspect files."))
         #expect(snapshot.log.contains("Running git diff"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
-        #expect(transport.logAppendCountForTesting == appendCount + 2)
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 

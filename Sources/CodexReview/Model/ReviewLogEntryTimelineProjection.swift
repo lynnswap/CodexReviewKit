@@ -161,9 +161,9 @@ private extension ReviewLogEntry {
             return false
         }
         switch kind {
-        case .agentMessage, .commandOutput, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
             return true
-        case .command, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
     }
@@ -228,12 +228,24 @@ private extension ReviewLogEntry {
         } else {
             nil
         }
-        let commandText = metadata?.command?.nilIfEmpty
-            ?? existingCommand?.command.nilIfEmpty
-            ?? Self.commandText(from: text)
-            ?? metadata?.title?.nilIfEmpty
-            ?? "Command"
-        let output = kind == .commandOutput ? text : existingCommand?.output ?? ""
+        let commandText: String
+        if kind == .commandOutput {
+            commandText = metadata?.command?.nilIfEmpty
+                ?? existingCommand?.command.nilIfEmpty
+                ?? "Command"
+        } else {
+            commandText = metadata?.command?.nilIfEmpty
+                ?? existingCommand?.command.nilIfEmpty
+                ?? Self.commandText(from: text)
+                ?? metadata?.title?.nilIfEmpty
+                ?? "Command"
+        }
+        let output: String
+        if kind == .commandOutput {
+            output = replacesGroup ? text : (existingCommand?.output ?? "") + text
+        } else {
+            output = existingCommand?.output ?? ""
+        }
         return .init(
             command: commandText,
             cwd: metadata?.cwd ?? existingCommand?.cwd,
