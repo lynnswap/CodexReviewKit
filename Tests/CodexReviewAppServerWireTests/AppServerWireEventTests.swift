@@ -70,6 +70,25 @@ struct AppServerWireEventTests {
 
         #expect(scalarParams.rawPayload == .string("raw"))
         #expect(scalarParams.payload.rawValue == .string("raw"))
+
+        let nullParams = try decodeNotification("""
+        {
+          "method": "future/null",
+          "params": null
+        }
+        """)
+
+        #expect(nullParams.rawPayload == .null)
+        #expect(nullParams.payload.rawValue == .null)
+        guard case .itemUpdated(let nullSeed) = try #require(nullParams.domainEvents().first) else {
+            Issue.record("expected unknown event for null params")
+            return
+        }
+        if case .unknown(let unknown) = nullSeed.content {
+            #expect(unknown.detail == "null")
+        } else {
+            Issue.record("expected unknown null content")
+        }
     }
 
     @Test func preservesUnknownItemKindRawValueAndRawFields() throws {

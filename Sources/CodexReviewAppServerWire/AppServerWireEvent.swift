@@ -153,7 +153,9 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawMethod = try container.decode(String.self, forKey: .method)
         self.method = ReviewWireEventKind(rawValue: rawMethod)
-        self.rawPayload = try container.decodeIfPresent(AppServerWireJSONValue.self, forKey: .payload)
+        self.rawPayload = container.contains(.payload)
+            ? try container.decode(AppServerWireJSONValue.self, forKey: .payload)
+            : nil
         if rawPayload?.objectValue != nil,
            let payload = try? container.decodeIfPresent(Payload.self, forKey: .payload) {
             self.payload = payload
