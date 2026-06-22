@@ -999,7 +999,8 @@ struct AppServerWireEventTests {
         #expect(toolSeed.id.rawValue == "tool-1:progress")
         #expect(toolSeed.family == .tool)
         if case .toolCall(let tool) = toolSeed.content {
-            #expect(tool.result == "Reading review job")
+            #expect(tool.progress == "Reading review job")
+            #expect(tool.result == nil)
             #expect(tool.server == nil)
             #expect(tool.tool == nil)
         } else {
