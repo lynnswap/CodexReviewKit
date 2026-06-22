@@ -610,6 +610,115 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func streamableHTTPReviewReadPagesTimelineFromRequestedOffsetWhenLogsAreFiltered() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-filtered-timeline",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Included",
+                        status: .succeeded,
+                        summary: "Done",
+                        logEntries: [
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-0",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 0",
+                                    status: "completed",
+                                    itemID: "file-0"
+                                )
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-1",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 1",
+                                    status: "completed",
+                                    itemID: "file-1"
+                                )
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-2",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 2",
+                                    status: "completed",
+                                    itemID: "file-2"
+                                )
+                            ),
+                        ]
+                    ),
+                ]
+            )
+
+            let firstPage = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-filtered-timeline",
+                            "logOffset": 0,
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+            let secondPage = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-filtered-timeline",
+                            "logOffset": 1,
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(firstPage.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 0)
+            let firstTimeline = try #require(firstPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let firstItemsPage = try #require(firstTimeline["itemsPage"] as? [String: Any])
+            #expect(firstItemsPage["total"] as? Int == 3)
+            #expect(firstItemsPage["offset"] as? Int == 0)
+            #expect(firstItemsPage["returned"] as? Int == 1)
+            #expect(firstItemsPage["nextOffset"] as? Int == 1)
+            let firstItems = try #require(firstTimeline["items"] as? [[String: Any]])
+            #expect(firstItems.first?["id"] as? String == "file-0")
+
+            let secondTimeline = try #require(secondPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let secondItemsPage = try #require(secondTimeline["itemsPage"] as? [String: Any])
+            #expect(secondItemsPage["offset"] as? Int == 1)
+            #expect(secondItemsPage["previousOffset"] as? Int == 0)
+            let secondItems = try #require(secondTimeline["items"] as? [[String: Any]])
+            #expect(secondItems.first?["id"] as? String == "file-1")
+        }
+    }
+
     @Test func streamableHTTPReviewReadReturnsPagedRunningSummary() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

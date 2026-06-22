@@ -43,7 +43,11 @@ enum Request: Equatable, Sendable {
 
 package extension CodexReviewMCP.Tool {
 enum Response: Equatable, Sendable {
-    case reviewRead(CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection)
+    case reviewRead(
+        CodexReviewAPI.Read.Result,
+        timeline: ReviewMCPProjection,
+        timelinePage: CodexReviewAPI.Log.PageRequest?
+    )
     case reviewList(CodexReviewAPI.List.Result)
     case reviewCancel(CodexReviewAPI.Cancel.Outcome)
 }
@@ -102,7 +106,8 @@ package final class CodexReviewMCPServer {
                     logFilter: logFilter,
                     logPage: logPage
                 ),
-                sessionID: sessionID
+                sessionID: sessionID,
+                timelinePage: logPage
             )
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
@@ -125,13 +130,18 @@ package final class CodexReviewMCPServer {
 
     private func reviewReadResponse(
         _ result: CodexReviewAPI.Read.Result,
-        sessionID: String?
+        sessionID: String?,
+        timelinePage: CodexReviewAPI.Log.PageRequest? = nil
     ) throws -> CodexReviewMCP.Tool.Response {
         let job = try store.resolveJob(
             sessionID: sessionID,
             selector: .init(jobID: result.jobID)
         )
-        return .reviewRead(result, timeline: ReviewMCPProjection(timeline: job.timeline))
+        return .reviewRead(
+            result,
+            timeline: ReviewMCPProjection(timeline: job.timeline),
+            timelinePage: timelinePage
+        )
     }
 
     package func closeSession(_ sessionID: String) async {

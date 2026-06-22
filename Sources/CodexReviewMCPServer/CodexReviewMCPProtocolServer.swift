@@ -255,9 +255,9 @@ private func toolResult(tool: CodexReviewMCP.Tool.Name, response: CodexReviewMCP
     let text: String
     let isError: Bool
     switch response {
-    case .reviewRead(let result, let timeline):
+    case .reviewRead(let result, let timeline, let timelinePage):
         value = tool == .reviewRead
-            ? result.structuredContentForRead(timeline: timeline)
+            ? result.structuredContentForRead(timeline: timeline, timelinePage: timelinePage)
             : result.structuredContentForStartOrAwait(timeline: timeline)
         text = tool == .reviewRead
             ? result.textContentForRead()
@@ -552,14 +552,23 @@ private extension CodexReviewAPI.Read.Result {
         )
     }
 
-    func structuredContentForRead(timeline: ReviewMCPProjection) -> Value {
-        structuredContent(includeDetails: true, includeNextAction: false, timeline: timeline)
+    func structuredContentForRead(
+        timeline: ReviewMCPProjection,
+        timelinePage: CodexReviewAPI.Log.PageRequest?
+    ) -> Value {
+        structuredContent(
+            includeDetails: true,
+            includeNextAction: false,
+            timeline: timeline,
+            timelinePage: timelinePage ?? .default
+        )
     }
 
     func structuredContent(
         includeDetails: Bool,
         includeNextAction: Bool,
-        timeline: ReviewMCPProjection
+        timeline: ReviewMCPProjection,
+        timelinePage: CodexReviewAPI.Log.PageRequest? = nil
     ) -> Value {
         var object: [String: Value] = [
             "jobId": .string(jobID),
@@ -576,7 +585,7 @@ private extension CodexReviewAPI.Read.Result {
             object["rawLogText"] = .string(rawLogText)
         }
         object["timeline"] = includeDetails
-            ? timeline.structuredContent(logsPage: logsPage)
+            ? timeline.structuredContent(pageRequest: timelinePage ?? .default)
             : timeline.structuredContent()
         if includeNextAction {
             object["nextAction"] = .object([
@@ -615,7 +624,7 @@ private extension ReviewMCPProjection {
         return .object(object)
     }
 
-    func structuredContent(logsPage: CodexReviewAPI.Log.Page) -> Value {
+    func structuredContent(pageRequest: CodexReviewAPI.Log.PageRequest) -> Value {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
             "revision": timelineRevision.rawValue.structuredRevisionValue(),
@@ -634,7 +643,7 @@ private extension ReviewMCPProjection {
                 truncatedFields: &truncatedFields
             ),
         ]
-        let page = TimelineItemPage(logsPage: logsPage, total: items.count)
+        let page = TimelineItemPage(pageRequest: pageRequest, total: items.count)
         object["items"] = .array(items[page.range].map { $0.structuredContent() })
         object["itemsPage"] = page.structuredContent()
         object["truncatedFields"] = .array(truncatedFields.map(Value.string))
@@ -892,16 +901,9 @@ private struct TimelineItemPage {
         )
     }
 
-    init(logsPage: CodexReviewAPI.Log.Page, total: Int) {
-        let limit = logsPage.limit
-        let offset: Int
-        if total == 0 {
-            offset = 0
-        } else if logsPage.offset >= total || logsPage.hasMoreAfter == false {
-            offset = max(0, total - limit)
-        } else {
-            offset = logsPage.offset
-        }
+    init(pageRequest: CodexReviewAPI.Log.PageRequest, total: Int) {
+        let limit = pageRequest.limit
+        let offset = min(pageRequest.offset ?? max(0, total - limit), total)
         let returned = min(limit, max(0, total - offset))
         self.total = total
         self.offset = offset
