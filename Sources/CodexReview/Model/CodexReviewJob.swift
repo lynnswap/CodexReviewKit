@@ -1135,7 +1135,9 @@ private extension ReviewTimelineItem.Content {
              .reasoning:
             true
         case .toolCall(let toolCall):
-            toolCall.progress?.isEmpty == false || toolCall.result?.isEmpty == false
+            toolCall.progress?.isEmpty == false
+                || toolCall.result?.isEmpty == false
+                || toolCall.error?.isEmpty == false
         case .approval,
              .contextCompaction,
              .search,

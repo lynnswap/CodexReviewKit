@@ -410,6 +410,8 @@ private extension ReviewTimelineItem.Content {
         case .toolCall(var toolCall):
             if toolCall.progress != nil {
                 toolCall.progress = text
+            } else if toolCall.error != nil {
+                toolCall.error = text
             } else {
                 toolCall.result = text
             }

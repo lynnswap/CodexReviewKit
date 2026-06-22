@@ -640,6 +640,66 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "tool-error-1")
+            let longError = String(repeating: "error", count: 60_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .mcpToolCall,
+                    family: .tool,
+                    phase: .failed,
+                    content: .toolCall(.init(
+                        server: "codex_review",
+                        tool: "review_read",
+                        error: longError
+                    ))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: longError,
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "mcpToolCall",
+                    title: "codex_review.review_read",
+                    status: "failed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    errorText: longError
+                )
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .toolCall(let toolCall) = item.content else {
+                Issue.record("expected tool call timeline content")
+                return
+            }
+            #expect((toolCall.error ?? "").count < longError.count)
+        }
+    }
+
     @Test func mappedDirectTimelineTextClearsWhenCompatibilityLogIsRemovedByLimit() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
