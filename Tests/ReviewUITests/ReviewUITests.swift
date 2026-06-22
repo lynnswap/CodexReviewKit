@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import ObservationBridge
+import CodexReviewDomain
+import ReviewMonitorRendering
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReview
@@ -3193,8 +3195,30 @@ struct ReviewUITests {
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
             logEntries: [
-                .init(kind: .command, groupID: "cmd_1", text: "$ git diff --stat"),
-                .init(kind: .commandOutput, groupID: "cmd_1", text: "README.md | 1 +"),
+                .init(
+                    kind: .command,
+                    groupID: "cmd_1",
+                    text: "$ git diff --stat",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "cmd_1",
+                        command: "git diff --stat",
+                        commandStatus: "completed"
+                    )
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_1",
+                    text: "README.md | 1 +",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "cmd_1",
+                        command: "git diff --stat",
+                        commandStatus: "completed"
+                    )
+                ),
                 .init(kind: .agentMessage, text: "No correctness issues found.")
             ]
         )
@@ -3227,6 +3251,580 @@ struct ReviewUITests {
         #expect(transport.logTerminalDecorationRectCountForTesting == 0)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
+    }
+
+    @Test func detailPaneRendersDirectTimelineUpdatesWithoutLogEntryChanges() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-detail",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+        let initialLogEntries = job.logEntries
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "message-direct",
+            kind: .agentMessage,
+            family: .message,
+            phase: .completed,
+            content: .message(.init(text: "Timeline-only detail update"))
+        )))
+
+        var snapshot = try await awaitTransportRender(transport)
+        #expect(snapshot.log == "Timeline-only detail update")
+        #expect(job.logEntries == initialLogEntries)
+
+        let startedAt = Date(timeIntervalSince1970: 250)
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests passed",
+                exitCode: 0,
+                status: .completed,
+                durationMs: 2_000
+            )),
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(2),
+            durationMs: 2_000
+        )))
+
+        snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test for 2s")
+        }
+        #expect(snapshot.log.contains("Timeline-only detail update"))
+        #expect(snapshot.log.contains("Ran swift test for 2s"))
+        #expect(snapshot.log.contains("$ swift test") == false)
+        #expect(snapshot.log.contains("Tests passed") == false)
+        #expect(job.logEntries == initialLogEntries)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("$ swift test") == true)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+    }
+
+    @Test func directTimelineFailedCommandPreservesFailedPanelStatus() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-failed-command",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        let startedAt = Date(timeIntervalSince1970: 300)
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-failed-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .failed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests failed"
+            )),
+            startedAt: startedAt,
+            completedAt: startedAt.addingTimeInterval(4),
+            durationMs: 4_000
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test for 4s")
+        }
+        #expect(snapshot.log.contains("Tests failed") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-failed-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Failed")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests failed") == true)
+    }
+
+    @Test func directTimelineRunningCommandOutputStaysActive() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-running-command",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemStarted(.init(
+            id: "cmd-running-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(.init(
+                command: "swift test",
+                output: "Building..."
+            )),
+            startedAt: Date(timeIntervalSince1970: 300)
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Running swift test")
+        }
+        #expect(snapshot.log.contains("Running swift test"))
+        #expect(snapshot.log.contains("Ran swift test") == false)
+        #expect(snapshot.log.contains("Building...") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-running-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "running")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Building...") == true)
+    }
+
+    @Test func directTimelineTerminalPhaseOverridesStaleCommandStatus() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-stale-command-status",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "cmd-stale-status-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests passed",
+                status: .inProgress
+            ))
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Ran swift test")
+        }
+        #expect(snapshot.log.contains("Running swift test") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-stale-status-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+    }
+
+    @Test func timelineProjectionDoesNotAppendWhenExistingBlockPresentationChanges() {
+        let timestamp = Date(timeIntervalSince1970: 300)
+        var projection = ReviewMonitorTimelineLogProjection()
+
+        func document(
+            revision: UInt64,
+            blocks: [ReviewTimelineDocument.Block]
+        ) -> ReviewTimelineDocument {
+            ReviewTimelineDocument(
+                timelineRevision: .init(rawValue: revision),
+                orderedBlockIDs: blocks.map(\.id),
+                activeBlockIDs: blocks.filter(\.isActive).map(\.id),
+                activeBlockCount: blocks.filter(\.isActive).count,
+                latestActivityBlockID: blocks.last?.id,
+                terminalStatus: nil,
+                terminalSummary: nil,
+                terminalResult: nil,
+                blocks: blocks
+            )
+        }
+
+        func toolBlock(
+            phase: ReviewItemPhase,
+            isActive: Bool,
+            status: ReviewToolCallStatus
+        ) -> ReviewTimelineDocument.Block {
+            ReviewTimelineDocument.Block(
+                id: "tool-block",
+                sourceItemID: "tool-item",
+                kind: .mcpToolCall,
+                family: .tool,
+                phase: phase,
+                isActive: isActive,
+                primaryText: "Tool output",
+                rawTranscriptText: "Tool output",
+                content: .toolCall(.init(
+                    namespace: "codex_review",
+                    server: "codex_review",
+                    name: "review_start",
+                    result: "Tool output",
+                    status: status
+                )),
+                createdAt: timestamp,
+                updatedAt: timestamp
+            )
+        }
+
+        let initialDocument = document(
+            revision: 1,
+            blocks: [
+                toolBlock(phase: .running, isActive: true, status: .inProgress),
+            ]
+        )
+        _ = projection.render(timelineDocument: initialDocument)
+
+        let updatedDocument = document(
+            revision: 2,
+            blocks: [
+                toolBlock(phase: .completed, isActive: false, status: .completed),
+                ReviewTimelineDocument.Block(
+                    id: "message-block",
+                    sourceItemID: "message-item",
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    isActive: false,
+                    primaryText: "Review complete.",
+                    rawTranscriptText: "Review complete.",
+                    content: .message(.init(text: "Review complete.")),
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                ),
+            ]
+        )
+        let updatedLog = projection.render(timelineDocument: updatedDocument)
+
+        #expect(updatedLog.text == "Tool output\n\nReview complete.")
+        if case .append = updatedLog.lastChange {
+            Issue.record("Timeline projection must not append when existing block presentation changed.")
+        }
+    }
+
+    @Test func timelineProjectionRendersToolCallProgressUpdates() {
+        let timestamp = Date(timeIntervalSince1970: 300)
+        var projection = ReviewMonitorTimelineLogProjection()
+
+        func document(revision: UInt64, progress: String) -> ReviewTimelineDocument {
+            ReviewTimelineDocument(
+                timelineRevision: .init(rawValue: revision),
+                orderedBlockIDs: ["tool-progress"],
+                activeBlockIDs: ["tool-progress"],
+                activeBlockCount: 1,
+                latestActivityBlockID: "tool-progress",
+                terminalStatus: nil,
+                terminalSummary: nil,
+                terminalResult: nil,
+                blocks: [
+                    .init(
+                        id: "tool-progress",
+                        sourceItemID: "tool-progress",
+                        kind: .mcpToolCall,
+                        family: .tool,
+                        phase: .running,
+                        isActive: true,
+                        primaryText: "codex_review.review_start",
+                        rawTranscriptText: progress,
+                        content: .toolCall(.init(
+                            namespace: "codex_review",
+                            server: "codex_review",
+                            name: "review_start",
+                            status: .inProgress,
+                            progress: progress
+                        )),
+                        createdAt: timestamp,
+                        updatedAt: timestamp
+                    ),
+                ]
+            )
+        }
+
+        let initialLog = projection.render(timelineDocument: document(
+            revision: 1,
+            progress: "MCP codex_review.review_start started."
+        ))
+        let updatedLog = projection.render(timelineDocument: document(
+            revision: 2,
+            progress: "MCP codex_review.review_start still running."
+        ))
+
+        #expect(initialLog.text == "MCP codex_review.review_start started.")
+        #expect(updatedLog.text == "MCP codex_review.review_start still running.")
+    }
+
+    @Test func timelineProjectionPreservesOutputOnlyCommandMetadata() throws {
+        let startedAt = Date(timeIntervalSince1970: 300)
+        let completedAt = startedAt.addingTimeInterval(4)
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-output-only"],
+            activeBlockIDs: [],
+            activeBlockCount: 0,
+            latestActivityBlockID: "cmd-output-only",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-output-only",
+                    sourceItemID: "cmd-output-only",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .failed,
+                    isActive: false,
+                    primaryText: "Command output",
+                    rawTranscriptText: "stderr",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "Command",
+                        output: "stderr",
+                        exitCode: 2,
+                        status: .failed,
+                        durationMs: 4_000
+                    )),
+                    createdAt: startedAt,
+                    updatedAt: completedAt,
+                    startedAt: startedAt,
+                    completedAt: completedAt,
+                    durationMs: 4_000
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran command for 4s")
+        #expect(panel.exitText == "exit 2")
+        #expect(metadata.itemID == "cmd-output-only")
+        #expect(metadata.command == nil)
+        #expect(metadata.exitCode == 2)
+        #expect(metadata.durationMs == 4_000)
+    }
+
+    @Test func timelineProjectionTreatsExitCodeAsTerminalBeforeActiveFallback() throws {
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-active-exited"],
+            activeBlockIDs: ["cmd-active-exited"],
+            activeBlockCount: 1,
+            latestActivityBlockID: "cmd-active-exited",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-active-exited",
+                    sourceItemID: "cmd-active-exited",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    isActive: true,
+                    primaryText: "Running swift test",
+                    rawTranscriptText: "$ swift test\nTests failed",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "swift test",
+                        output: "Tests failed",
+                        exitCode: 1
+                    )),
+                    createdAt: Date(timeIntervalSince1970: 400),
+                    updatedAt: Date(timeIntervalSince1970: 400)
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran swift test")
+        #expect(panel.exitText == "exit 1")
+        #expect(metadata.status == "failed")
+        #expect(metadata.commandStatus == "failed")
+    }
+
+    @Test func timelineProjectionMarksInactiveRunningCommandCompleted() throws {
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-inactive-running"],
+            activeBlockIDs: [],
+            activeBlockCount: 0,
+            latestActivityBlockID: "cmd-inactive-running",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-inactive-running",
+                    sourceItemID: "cmd-inactive-running",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    isActive: false,
+                    primaryText: "Running swift test",
+                    rawTranscriptText: "$ swift test",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "swift test",
+                        status: .inProgress
+                    )),
+                    createdAt: Date(timeIntervalSince1970: 400),
+                    updatedAt: Date(timeIntervalSince1970: 400)
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran swift test")
+        #expect(metadata.status == "completed")
+        #expect(metadata.commandStatus == "completed")
+    }
+
+    @Test func directTimelineFileChangePreservesPanelTitle() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-file-change",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "file-change-direct",
+            kind: .fileChange,
+            family: .fileChange,
+            phase: .completed,
+            content: .fileChange(.init(
+                title: "Updated Sources/App.swift",
+                output: "Sources/App.swift | 12 ++++++------",
+                paths: ["Sources/App.swift"],
+                status: .started
+            ))
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Updated Sources/App.swift")
+        }
+        #expect(snapshot.log.contains("Updated Sources/App.swift"))
+        #expect(snapshot.log.contains("Ran command") == false)
+        #expect(snapshot.log.contains("Sources/App.swift | 12") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:file-change-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?
+                .contains("Sources/App.swift | 12 ++++++------") == true
+        )
     }
 
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
@@ -3338,17 +3936,15 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
         _ = try await awaitTransportRender(transport)
-        #expect(transport.displayedLogForTesting.contains("Ran command for 17s"))
-        #expect(transport.displayedLogForTesting.contains("Ran command for 17s - 9 lines") == false)
-        #expect(transport.displayedLogForTesting.contains("swift test") == false)
+        #expect(transport.displayedLogForTesting.contains("Ran swift test"))
+        #expect(transport.displayedLogForTesting.contains("Ran swift test - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
         #expect(transport.displayedLogForTesting.contains("output line 1") == false)
-        let titleRange = (transport.displayedLogForTesting as NSString).range(of: "Ran command for 17s")
+        let titleRange = (transport.displayedLogForTesting as NSString).range(of: "Ran swift test")
         try #require(titleRange.location != NSNotFound)
-        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran swift test"))
         transport.setSelectedLogRangeForTesting(titleRange)
-        #expect(transport.logSelectedTextForTesting?.hasPrefix("Ran command for 17") == true)
-        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran command for 17s"))
+        #expect(transport.logHitTestTargetsDocumentViewForFirstOccurrenceForTesting("Ran swift test"))
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 0)
         #expect(transport.logCommandOutputPanelToggleSymbolNameForTesting == "chevron.forward")
@@ -3360,7 +3956,7 @@ struct ReviewUITests {
         #expect(transport.logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting)
         #expect(transport.logCommandOutputPanelUsesSystemMaterialBackgroundForTesting == false)
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
-        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("Ran swift test"))
         #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
         #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3383,7 +3979,7 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("$ swift test") == false)
         #expect(transport.logCommandOutputPanelOutputScrollTextForTesting?.contains("output line 1") == true)
         #expect(transport.logCommandOutputPanelOutputHitTestTargetsTextViewForTesting)
-        #expect(transport.logFindStringForTesting.contains("Ran command for 17s"))
+        #expect(transport.logFindStringForTesting.contains("Ran swift test"))
         #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
         #expect(transport.logFindStringForTesting.contains("output line 3") == false)
         #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
@@ -3422,7 +4018,7 @@ struct ReviewUITests {
         #expect(abs(reopenedOutputScrollOffset - reopenedOutputScrollMaximumOffset) <= 0.5)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("$ swift test") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran command for 17s - 9 lines") == false)
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("Ran swift test - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
@@ -3591,10 +4187,10 @@ struct ReviewUITests {
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
-            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Running swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3603,7 +4199,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3613,7 +4209,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }
     }
@@ -4565,7 +5161,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Need to inspect files."))
         #expect(snapshot.log.contains("Running git diff"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
-        #expect(transport.logAppendCountForTesting == appendCount + 2)
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 

@@ -1,20 +1,14 @@
 import AppKit
 import ObservationBridge
 import CodexReview
+import CodexReviewDomain
+import ReviewMonitorRendering
 
 @MainActor
 final class ReviewMonitorTransportViewController: NSViewController {
     private enum DisplayedSelection: Equatable {
         case job(String)
         case workspaceSection(String)
-    }
-
-    private struct LogEntryRenderSignature: Equatable, Sendable {
-        var entry: ReviewLogEntry
-
-        init(_ entry: ReviewLogEntry) {
-            self.entry = entry
-        }
     }
 
     private let uiState: ReviewMonitorUIState
@@ -34,7 +28,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderTask: Task<Void, Never>?
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
-    private var appliedLogEntrySignatures: [LogEntryRenderSignature] = []
     private var hasAppliedBoundJobLog = false
 
     init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
@@ -168,19 +161,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundJob = selectedJob
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
-            _ = selectedJob.timeline.revision
-            _ = selectedJob.logRevision
+            let timeline = selectedJob.timeline
+            _ = timeline.revision
+            let eventKind = event.kind
+            let shouldRender = eventKind == .initial || event.matches(\ReviewTimeline.revision)
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
+            guard shouldRender else {
+                return
+            }
             self.renderBoundJobLog(
-                selectedJob,
-                restorationTarget: event.kind == .initial
+                timeline: timeline,
+                restorationTarget: eventKind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
-                allowIncrementalUpdate: event.kind != .initial
+                allowIncrementalUpdate: eventKind != .initial
             )
         }
     }
@@ -363,139 +361,40 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     @discardableResult
-    private func renderSelectedJobLog(
-        entries: [ReviewLogEntry],
-        targetSignatures: [LogEntryRenderSignature],
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) -> Bool {
-        guard let boundJob else {
-            return false
-        }
-
-        logRenderGeneration &+= 1
-        let generation = logRenderGeneration
-        let renderer = logRenderer
-        let jobID = boundJob.id
-        logRenderTask?.cancel()
-        logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let renderedDocument = await renderer.render(entries: entries)
-            await MainActor.run { [weak self] in
-                guard Task.isCancelled == false,
-                      let self,
-                      self.logRenderGeneration == generation,
-                      self.boundJob?.id == jobID
-                else {
-                    return
-                }
-                _ = self.logScrollView.render(
-                    sourceDocument: renderedDocument.source,
-                    displayDocument: renderedDocument.display,
-                    restoring: restorationTarget,
-                    allowIncrementalUpdate: allowIncrementalUpdate
-                )
-                self.appliedLogEntrySignatures = targetSignatures
-                self.appliedLogRenderGeneration = generation
-                self.hasAppliedBoundJobLog = true
-            }
-        }
-        return true
-    }
-
-    @discardableResult
-    private func renderSelectedJobLogAppend(
-        entries: [ReviewLogEntry],
-        sourceRange: Range<Int>,
-        targetSignatures: [LogEntryRenderSignature]
-    ) -> Bool {
-        guard let boundJob else {
-            return false
-        }
-
-        logRenderGeneration &+= 1
-        let generation = logRenderGeneration
-        let renderer = logRenderer
-        let jobID = boundJob.id
-        logRenderTask?.cancel()
-        logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
-            let resolved: (
-                documents: [ReviewMonitorRenderedLogDocument],
-                signatures: [LogEntryRenderSignature]
-            )
-            if let documents = await renderer.appendSteps(entries: entries, sourceRange: sourceRange) {
-                resolved = (documents, targetSignatures)
-            } else {
-                guard let fallback = await MainActor.run(body: { [weak self] () -> (entries: [ReviewLogEntry], signatures: [LogEntryRenderSignature])? in
-                    guard Task.isCancelled == false,
-                          let self,
-                          self.logRenderGeneration == generation,
-                          self.boundJob?.id == jobID,
-                          let entries = self.boundJob?.logEntries
-                    else {
-                        return nil
-                    }
-                    return (entries, entries.map(LogEntryRenderSignature.init))
-                }) else {
-                    return
-                }
-                let document = await renderer.render(entries: fallback.entries)
-                resolved = ([document], fallback.signatures)
-            }
-            await MainActor.run { [weak self] in
-                guard Task.isCancelled == false,
-                      let self,
-                      self.logRenderGeneration == generation,
-                      self.boundJob?.id == jobID
-                else {
-                    return
-                }
-                for document in resolved.documents {
-                    _ = self.logScrollView.render(
-                        sourceDocument: document.source,
-                        displayDocument: document.display,
-                        restoring: self.logScrollView.currentScrollRestorationTarget,
-                        allowIncrementalUpdate: true
-                    )
-                }
-                self.appliedLogEntrySignatures = resolved.signatures
-                self.appliedLogRenderGeneration = generation
-                self.hasAppliedBoundJobLog = true
-            }
-        }
-        return true
-    }
-
-    @discardableResult
     private func renderBoundJobLog(
-        _ job: CodexReviewJob,
+        timeline: ReviewTimeline,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        guard boundJob != nil else {
+        guard let boundJob else {
             return false
         }
-        let entries = job.logEntries
-        let targetSignatures = entries.map(LogEntryRenderSignature.init)
-        if allowIncrementalUpdate,
-           hasAppliedBoundJobLog,
-           targetSignatures.starts(with: appliedLogEntrySignatures) {
-            let appendedStartIndex = appliedLogEntrySignatures.count
-            let appendedEntries = Array(entries.dropFirst(appendedStartIndex))
-            if appendedEntries.isEmpty {
-                return false
+
+        logRenderGeneration &+= 1
+        let generation = logRenderGeneration
+        let renderer = logRenderer
+        let jobID = boundJob.id
+        logRenderTask?.cancel()
+        logRenderTask = Task { @MainActor [weak self] in
+            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: timeline)
+            let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
+            guard Task.isCancelled == false,
+                  let self,
+                  self.logRenderGeneration == generation,
+                  self.boundJob?.id == jobID
+            else {
+                return
             }
-            return renderSelectedJobLogAppend(
-                entries: appendedEntries,
-                sourceRange: appendedStartIndex..<entries.count,
-                targetSignatures: targetSignatures
+            _ = self.logScrollView.render(
+                sourceDocument: renderedDocument.source,
+                displayDocument: renderedDocument.display,
+                restoring: restorationTarget,
+                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundJobLog
             )
+            self.appliedLogRenderGeneration = generation
+            self.hasAppliedBoundJobLog = true
         }
-        return renderSelectedJobLog(
-            entries: entries,
-            targetSignatures: targetSignatures,
-            restorationTarget: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate
-        )
+        return true
     }
 
     private func cacheBoundJobScrollTarget() {
@@ -510,7 +409,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderTask = nil
         logRenderGeneration &+= 1
         appliedLogRenderGeneration = logRenderGeneration
-        appliedLogEntrySignatures = []
         hasAppliedBoundJobLog = false
         logRenderer = ReviewMonitorLogRenderer()
     }
@@ -959,8 +857,9 @@ extension ReviewMonitorTransportViewController {
                 title: nil,
                 summary: nil,
                 log: {
-                    var projection = ReviewMonitorLog.Projection()
-                    let document = projection.render(entries: job.logEntries)
+                    let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
+                    var projection = ReviewMonitorTimelineLogProjection()
+                    let document = projection.render(timelineDocument: timelineDocument)
                     return logScrollView.displayTextForTesting(sourceDocument: document)
                 }(),
                 isShowingEmptyState: false

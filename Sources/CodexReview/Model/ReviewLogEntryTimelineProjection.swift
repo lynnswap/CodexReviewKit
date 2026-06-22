@@ -161,8 +161,10 @@ private extension ReviewLogEntry {
             return false
         }
         switch kind {
-        case .agentMessage, .commandOutput, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
+        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
             return true
+        case .commandOutput:
+            return metadata == nil
         case .command, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
@@ -228,17 +230,30 @@ private extension ReviewLogEntry {
         } else {
             nil
         }
-        let commandText = metadata?.command?.nilIfEmpty
-            ?? existingCommand?.command.nilIfEmpty
-            ?? Self.commandText(from: text)
-            ?? metadata?.title?.nilIfEmpty
-            ?? "Command"
-        let output = kind == .commandOutput ? text : existingCommand?.output ?? ""
+        let commandText: String
+        if kind == .commandOutput {
+            commandText = metadata?.command?.nilIfEmpty
+                ?? existingCommand?.command.nilIfEmpty
+                ?? "Command"
+        } else {
+            commandText = metadata?.command?.nilIfEmpty
+                ?? existingCommand?.command.nilIfEmpty
+                ?? Self.commandText(from: text)
+                ?? metadata?.title?.nilIfEmpty
+                ?? "Command"
+        }
+        let output: String
+        if kind == .commandOutput {
+            output = replacesGroup ? text : (existingCommand?.output ?? "") + text
+        } else {
+            output = existingCommand?.output ?? ""
+        }
         return .init(
             command: commandText,
             cwd: metadata?.cwd ?? existingCommand?.cwd,
             output: output,
-            exitCode: metadata?.exitCode ?? existingCommand?.exitCode
+            exitCode: metadata?.exitCode ?? existingCommand?.exitCode,
+            actions: metadata?.commandActions?.map(ReviewTimelineItem.CommandAction.init) ?? existingCommand?.actions ?? []
         )
     }
 
@@ -253,7 +268,12 @@ private extension ReviewLogEntry {
             ?? metadata?.path?.nilIfEmpty
             ?? existingFileChange?.title.nilIfEmpty
             ?? "File changes"
-        let output = kind == .commandOutput ? text : existingFileChange?.output ?? text
+        let output: String
+        if kind == .commandOutput {
+            output = replacesGroup ? text : (existingFileChange?.output ?? "") + text
+        } else {
+            output = existingFileChange?.output ?? text
+        }
         return .init(title: title, output: output)
     }
 
@@ -263,6 +283,18 @@ private extension ReviewLogEntry {
             return trimmed.nilIfEmpty
         }
         return String(trimmed.dropFirst(2)).nilIfEmpty
+    }
+}
+
+private extension ReviewTimelineItem.CommandAction {
+    init(_ action: ReviewLogEntry.Metadata.CommandAction) {
+        self.init(
+            kind: .init(rawValue: action.kind.rawValue),
+            command: action.command,
+            name: action.name,
+            path: action.path,
+            query: action.query
+        )
     }
 }
 
