@@ -126,7 +126,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                 text: fileChange.output.isEmpty ? fileChange.title : fileChange.output,
                 metadata: fileChangeMetadata(
                     title: fileChange.title,
-                    status: fileChange.status?.rawValue,
+                    status: fileChange.status?.rawValue ?? block.phase.rawValue,
                     path: fileChange.paths.first
                 )
             )]
@@ -377,6 +377,13 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         let block = current.blocks.first {
             NSIntersectionRange($0.range, suffixRange).length > 0
         }
+        guard existingPresentationUnchanged(
+            previous: previous,
+            current: current,
+            suffixBlockID: block?.id
+        ) else {
+            return nil
+        }
         return .init(
             kind: block?.kind ?? .event,
             blockID: block?.id ?? ReviewMonitorLog.BlockID("timelineAppend"),
@@ -395,6 +402,38 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                 )
             }
         )
+    }
+
+    private static func existingPresentationUnchanged(
+        previous: ReviewMonitorLog.Document,
+        current: ReviewMonitorLog.Document,
+        suffixBlockID: ReviewMonitorLog.BlockID?
+    ) -> Bool {
+        var currentBlocksByID = [ReviewMonitorLog.BlockID: ReviewMonitorLog.Block]()
+        for currentBlock in current.blocks {
+            currentBlocksByID[currentBlock.id] = currentBlock
+        }
+
+        for previousBlock in previous.blocks {
+            guard let currentBlock = currentBlocksByID[previousBlock.id] else {
+                return false
+            }
+            if previousBlock.id == suffixBlockID {
+                guard currentBlock.kind == previousBlock.kind,
+                      currentBlock.groupID == previousBlock.groupID,
+                      currentBlock.range.location == previousBlock.range.location,
+                      currentBlock.sourceRange.location == previousBlock.sourceRange.location,
+                      currentBlock.metadata == previousBlock.metadata,
+                      currentBlock.range.length >= previousBlock.range.length,
+                      currentBlock.sourceRange.length >= previousBlock.sourceRange.length
+                else {
+                    return false
+                }
+            } else if currentBlock != previousBlock {
+                return false
+            }
+        }
+        return true
     }
 
     private static func replacementChange(

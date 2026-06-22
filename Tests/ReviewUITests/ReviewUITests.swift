@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
 import ObservationBridge
+import CodexReviewDomain
+import ReviewMonitorRendering
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReview
@@ -3491,6 +3493,88 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
     }
 
+    @Test func timelineProjectionDoesNotAppendWhenExistingBlockPresentationChanges() {
+        let timestamp = Date(timeIntervalSince1970: 300)
+        var projection = ReviewMonitorTimelineLogProjection()
+
+        func document(
+            revision: UInt64,
+            blocks: [ReviewTimelineDocument.Block]
+        ) -> ReviewTimelineDocument {
+            ReviewTimelineDocument(
+                timelineRevision: .init(rawValue: revision),
+                orderedBlockIDs: blocks.map(\.id),
+                activeBlockIDs: blocks.filter(\.isActive).map(\.id),
+                activeBlockCount: blocks.filter(\.isActive).count,
+                latestActivityBlockID: blocks.last?.id,
+                terminalStatus: nil,
+                terminalSummary: nil,
+                terminalResult: nil,
+                blocks: blocks
+            )
+        }
+
+        func toolBlock(
+            phase: ReviewItemPhase,
+            isActive: Bool,
+            status: ReviewToolCallStatus
+        ) -> ReviewTimelineDocument.Block {
+            ReviewTimelineDocument.Block(
+                id: "tool-block",
+                sourceItemID: "tool-item",
+                kind: .mcpToolCall,
+                family: .tool,
+                phase: phase,
+                isActive: isActive,
+                primaryText: "Tool output",
+                rawTranscriptText: "Tool output",
+                content: .toolCall(.init(
+                    namespace: "codex_review",
+                    server: "codex_review",
+                    name: "review_start",
+                    result: "Tool output",
+                    status: status
+                )),
+                createdAt: timestamp,
+                updatedAt: timestamp
+            )
+        }
+
+        let initialDocument = document(
+            revision: 1,
+            blocks: [
+                toolBlock(phase: .running, isActive: true, status: .inProgress),
+            ]
+        )
+        _ = projection.render(timelineDocument: initialDocument)
+
+        let updatedDocument = document(
+            revision: 2,
+            blocks: [
+                toolBlock(phase: .completed, isActive: false, status: .completed),
+                ReviewTimelineDocument.Block(
+                    id: "message-block",
+                    sourceItemID: "message-item",
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    isActive: false,
+                    primaryText: "Review complete.",
+                    rawTranscriptText: "Review complete.",
+                    content: .message(.init(text: "Review complete.")),
+                    createdAt: timestamp,
+                    updatedAt: timestamp
+                ),
+            ]
+        )
+        let updatedLog = projection.render(timelineDocument: updatedDocument)
+
+        #expect(updatedLog.text == "Tool output\n\nReview complete.")
+        if case .append = updatedLog.lastChange {
+            Issue.record("Timeline projection must not append when existing block presentation changed.")
+        }
+    }
+
     @Test func directTimelineFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-direct-timeline-file-change",
@@ -3527,8 +3611,7 @@ struct ReviewUITests {
             content: .fileChange(.init(
                 title: "Updated Sources/App.swift",
                 output: "Sources/App.swift | 12 ++++++------",
-                paths: ["Sources/App.swift"],
-                status: .completed
+                paths: ["Sources/App.swift"]
             ))
         )))
 
@@ -3543,6 +3626,7 @@ struct ReviewUITests {
         let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:file-change-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
         #expect(
             transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?
                 .contains("Sources/App.swift | 12 ++++++------") == true
