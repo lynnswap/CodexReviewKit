@@ -1,5 +1,6 @@
 import Foundation
 import CodexReview
+import CodexReviewMCPAdapter
 
 package enum CodexReviewMCP {
     package enum Tool {}
@@ -42,7 +43,7 @@ enum Request: Equatable, Sendable {
 
 package extension CodexReviewMCP.Tool {
 enum Response: Equatable, Sendable {
-    case reviewRead(CodexReviewAPI.Read.Result)
+    case reviewRead(CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection)
     case reviewList(CodexReviewAPI.List.Result)
     case reviewCancel(CodexReviewAPI.Cancel.Outcome)
 }
@@ -71,26 +72,38 @@ package final class CodexReviewMCPServer {
         switch request {
         case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
             if let waitTimeout {
-                return .reviewRead(try await store.startReview(
-                    sessionID: sessionID,
-                    request: reviewRequest,
-                    waitTimeout: waitTimeout
-                ))
+                return try reviewReadResponse(
+                    try await store.startReview(
+                        sessionID: sessionID,
+                        request: reviewRequest,
+                        waitTimeout: waitTimeout
+                    ),
+                    sessionID: sessionID
+                )
             }
-            return .reviewRead(try await store.startReview(sessionID: sessionID, request: reviewRequest))
+            return try reviewReadResponse(
+                try await store.startReview(sessionID: sessionID, request: reviewRequest),
+                sessionID: sessionID
+            )
         case .reviewAwait(let sessionID, let jobID, let waitTimeout):
-            return .reviewRead(try await store.awaitReview(
-                sessionID: sessionID,
-                jobID: jobID,
-                timeout: waitTimeout
-            ))
+            return try reviewReadResponse(
+                try await store.awaitReview(
+                    sessionID: sessionID,
+                    jobID: jobID,
+                    timeout: waitTimeout
+                ),
+                sessionID: sessionID
+            )
         case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
-            return .reviewRead(try store.readReview(
-                sessionID: sessionID,
-                jobID: jobID,
-                logFilter: logFilter,
-                logPage: logPage
-            ))
+            return try reviewReadResponse(
+                try store.readReview(
+                    sessionID: sessionID,
+                    jobID: jobID,
+                    logFilter: logFilter,
+                    logPage: logPage
+                ),
+                sessionID: sessionID
+            )
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
                 sessionID: sessionID,
@@ -108,6 +121,17 @@ package final class CodexReviewMCPServer {
                 cancellation: reason
             ))
         }
+    }
+
+    private func reviewReadResponse(
+        _ result: CodexReviewAPI.Read.Result,
+        sessionID: String?
+    ) throws -> CodexReviewMCP.Tool.Response {
+        let job = try store.resolveJob(
+            sessionID: sessionID,
+            selector: .init(jobID: result.jobID)
+        )
+        return .reviewRead(result, timeline: ReviewMCPProjection(timeline: job.timeline))
     }
 
     package func closeSession(_ sessionID: String) async {

@@ -1,6 +1,7 @@
 import Foundation
 import MCP
 import CodexReview
+import CodexReviewMCPAdapter
 
 package actor MCPClientSessionState {
     private var clientInfo: Client.Info?
@@ -254,10 +255,10 @@ private func toolResult(tool: CodexReviewMCP.Tool.Name, response: CodexReviewMCP
     let text: String
     let isError: Bool
     switch response {
-    case .reviewRead(let result):
+    case .reviewRead(let result, let timeline):
         value = tool == .reviewRead
-            ? result.structuredContentForRead()
-            : result.structuredContentForStartOrAwait()
+            ? result.structuredContentForRead(timeline: timeline)
+            : result.structuredContentForStartOrAwait(timeline: timeline)
         text = tool == .reviewRead
             ? result.textContentForRead()
             : result.textContentForStartOrAwait()
@@ -543,15 +544,23 @@ private extension CodexReviewAPI.Read.Result {
         return String(normalized[..<index]) + "..."
     }
 
-    func structuredContentForStartOrAwait() -> Value {
-        structuredContent(includeDetails: false, includeNextAction: core.lifecycle.status.isTerminal == false)
+    func structuredContentForStartOrAwait(timeline: ReviewMCPProjection) -> Value {
+        structuredContent(
+            includeDetails: false,
+            includeNextAction: core.lifecycle.status.isTerminal == false,
+            timeline: timeline
+        )
     }
 
-    func structuredContentForRead() -> Value {
-        structuredContent(includeDetails: true, includeNextAction: false)
+    func structuredContentForRead(timeline: ReviewMCPProjection) -> Value {
+        structuredContent(includeDetails: true, includeNextAction: false, timeline: timeline)
     }
 
-    func structuredContent(includeDetails: Bool, includeNextAction: Bool) -> Value {
+    func structuredContent(
+        includeDetails: Bool,
+        includeNextAction: Bool,
+        timeline: ReviewMCPProjection
+    ) -> Value {
         var object: [String: Value] = [
             "jobId": .string(jobID),
             "run": core.run.structuredContent(),
@@ -566,6 +575,7 @@ private extension CodexReviewAPI.Read.Result {
             object["logsPage"] = logsPage.structuredContent()
             object["rawLogText"] = .string(rawLogText)
         }
+        object["timeline"] = timeline.structuredContent()
         if includeNextAction {
             object["nextAction"] = .object([
                 "tool": .string(CodexReviewMCP.Tool.Name.reviewAwait.rawValue),
@@ -573,6 +583,123 @@ private extension CodexReviewAPI.Read.Result {
             ])
         }
         return .object(object)
+    }
+}
+
+private extension ReviewMCPProjection {
+    func structuredContent() -> Value {
+        .object([
+            "revision": timelineRevision.rawValue.structuredRevisionValue(),
+            "orderedItemIds": .array(orderedItemIDs.map { .string($0.rawValue) }),
+            "activeItemIds": .array(activeItemIDs.map { .string($0.rawValue) }),
+            "activeItemCount": .int(activeItemCount),
+            "latestActivityId": latestActivityID.map { .string($0.rawValue) } ?? .null,
+            "terminalSummary": terminalSummary.map(Value.string) ?? .null,
+            "terminalResult": terminalResult.map(Value.string) ?? .null,
+            "items": .array(items.map { $0.structuredContent() }),
+        ])
+    }
+}
+
+private extension ReviewMCPProjection.Item {
+    func structuredContent() -> Value {
+        .object([
+            "id": .string(id.rawValue),
+            "kind": .string(kind.rawValue),
+            "family": .string(family.rawValue),
+            "phase": .string(phase.rawValue),
+            "isActive": .bool(isActive),
+            "content": content.structuredContent(),
+            "createdAt": .string(createdAt.ISO8601Format()),
+            "updatedAt": .string(updatedAt.ISO8601Format()),
+            "startedAt": startedAt.map { .string($0.ISO8601Format()) } ?? .null,
+            "completedAt": completedAt.map { .string($0.ISO8601Format()) } ?? .null,
+            "durationMs": durationMs.map(Value.int) ?? .null,
+        ])
+    }
+}
+
+private extension ReviewMCPProjection.Content {
+    func structuredContent() -> Value {
+        switch self {
+        case .approval(let approval):
+            return .object([
+                "type": .string("approval"),
+                "title": .string(approval.title),
+                "detail": approval.detail.map(Value.string) ?? .null,
+            ])
+        case .command(let command):
+            return .object([
+                "type": .string("command"),
+                "command": .string(command.command),
+                "cwd": command.cwd.map(Value.string) ?? .null,
+                "output": .string(command.output),
+                "exitCode": command.exitCode.map(Value.int) ?? .null,
+            ])
+        case .contextCompaction(let contextCompaction):
+            return .object([
+                "type": .string("contextCompaction"),
+                "title": .string(contextCompaction.title),
+            ])
+        case .diagnostic(let diagnostic):
+            return .object([
+                "type": .string("diagnostic"),
+                "message": .string(diagnostic.message),
+            ])
+        case .fileChange(let fileChange):
+            return .object([
+                "type": .string("fileChange"),
+                "title": .string(fileChange.title),
+                "output": .string(fileChange.output),
+            ])
+        case .message(let message):
+            return .object([
+                "type": .string("message"),
+                "text": .string(message.text),
+            ])
+        case .plan(let plan):
+            return .object([
+                "type": .string("plan"),
+                "markdown": .string(plan.markdown),
+            ])
+        case .reasoning(let reasoning):
+            return .object([
+                "type": .string("reasoning"),
+                "text": .string(reasoning.text),
+                "style": .string(reasoning.style.rawValue),
+            ])
+        case .search(let search):
+            return .object([
+                "type": .string("search"),
+                "query": .string(search.query),
+                "result": search.result.map(Value.string) ?? .null,
+            ])
+        case .toolCall(let toolCall):
+            return .object([
+                "type": .string("toolCall"),
+                "namespace": toolCall.namespace.map(Value.string) ?? .null,
+                "server": toolCall.server.map(Value.string) ?? .null,
+                "tool": toolCall.tool.map(Value.string) ?? .null,
+                "arguments": toolCall.arguments.map(Value.string) ?? .null,
+                "result": toolCall.result.map(Value.string) ?? .null,
+                "error": toolCall.error.map(Value.string) ?? .null,
+            ])
+        case .unknown(let unknown):
+            return .object([
+                "type": .string("unknown"),
+                "title": .string(unknown.title),
+                "detail": unknown.detail.map(Value.string) ?? .null,
+            ])
+        }
+    }
+}
+
+private extension UInt64 {
+    func structuredRevisionValue() -> Value {
+        if self <= UInt64(Int.max) {
+            return .int(Int(self))
+        }
+        return .string(String(self))
     }
 }
 

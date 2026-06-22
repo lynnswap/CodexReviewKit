@@ -233,6 +233,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(awaited.value(for: ["result", "isError"]) as? Bool == false)
             #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String == "Done")
+            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String == "review text")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -476,6 +478,126 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect((denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "Job job-other-session was not found.")
+        }
+    }
+
+    @Test func streamableHTTPReviewReadAddsSemanticTimelineWithoutChangingLegacyShape() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let startedAt = Date(timeIntervalSince1970: 20)
+            let completedAt = Date(timeIntervalSince1970: 23)
+            let commandMetadata = ReviewLogEntry.Metadata(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                cwd: "/tmp/project",
+                exitCode: 0,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: 3000,
+                commandStatus: "completed"
+            )
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-semantic",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Included",
+                        status: .succeeded,
+                        summary: "Done",
+                        logEntries: [
+                            .init(
+                                kind: .command,
+                                groupID: "cmd-1",
+                                text: "$ swift test",
+                                metadata: commandMetadata
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                groupID: "cmd-1",
+                                text: "Tests passed",
+                                metadata: commandMetadata
+                            ),
+                        ]
+                    ),
+                ]
+            )
+
+            let defaultResponse = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-semantic",
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+            let allResponse = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-semantic",
+                            "logFilter": "all",
+                            "logLimit": 2,
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-semantic")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) as? String != nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 1)
+            let defaultLogs = try #require(defaultResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            #expect(defaultLogs.compactMap { $0["kind"] as? String } == ["command"])
+
+            #expect(allResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
+            let allLogs = try #require(allResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            #expect(allLogs.compactMap { $0["kind"] as? String } == ["command", "commandOutput"])
+
+            let timeline = try #require(allResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            #expect(timeline["orderedItemIds"] as? [String] == ["cmd-1"])
+            #expect(timeline["activeItemIds"] as? [String] == [])
+            #expect(timeline["activeItemCount"] as? Int == 0)
+            #expect(timeline["latestActivityId"] as? String == "cmd-1")
+            let items = try #require(timeline["items"] as? [[String: Any]])
+            let commandItem = try #require(items.first)
+            #expect(commandItem["id"] as? String == "cmd-1")
+            #expect(commandItem["kind"] as? String == "commandExecution")
+            #expect(commandItem["family"] as? String == "command")
+            #expect(commandItem["phase"] as? String == "completed")
+            #expect(commandItem["isActive"] as? Bool == false)
+            #expect(commandItem["durationMs"] as? Int == 3000)
+            let content = try #require(commandItem["content"] as? [String: Any])
+            #expect(content["type"] as? String == "command")
+            #expect(content["command"] as? String == "swift test")
+            #expect(content["cwd"] as? String == "/tmp/project")
+            #expect(content["output"] as? String == "Tests passed")
+            #expect(content["exitCode"] as? Int == 0)
         }
     }
 
