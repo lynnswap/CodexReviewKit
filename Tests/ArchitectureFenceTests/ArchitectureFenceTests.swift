@@ -151,6 +151,19 @@ struct ArchitectureFenceTests {
         Self.expectNoViolations(violations)
     }
 
+    @Test func importScannerHandlesSwiftImportForms() {
+        let imports = Self.importedModules(
+            from: "import Foundation; @testable import CodexReviewAppServer; import let CodexReviewAppServerWire.someConstant"
+        )
+
+        #expect(imports == [
+            "Foundation",
+            "CodexReviewAppServer",
+            "CodexReviewAppServerWire",
+        ])
+        #expect(Self.importedModules(from: #"let text = "import CodexReviewAppServer""#).isEmpty)
+    }
+
     private struct ImportBoundaryRule {
         var root: String
         var forbiddenImports: Set<String>
@@ -178,20 +191,23 @@ struct ArchitectureFenceTests {
                 let url = root.appending(path: file)
                 let text = try String(contentsOf: url, encoding: .utf8)
                 for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-                    guard let importedModule = importedModule(from: line),
-                          rule.forbiddenImports.contains(importedModule)
-                    else {
-                        continue
+                    let forbiddenImports = importedModules(from: line)
+                        .filter { rule.forbiddenImports.contains($0) }
+                    for _ in forbiddenImports {
+                        violations.append("\(rule.root)/\(file):\(offset + 1): \(line.trimmingCharacters(in: .whitespaces))")
                     }
-                    violations.append("\(rule.root)/\(file):\(offset + 1): \(line.trimmingCharacters(in: .whitespaces))")
                 }
             }
         }
         return violations
     }
 
-    private static func importedModule(from line: Substring) -> String? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+    private static func importedModules(from line: Substring) -> [String] {
+        line.split(separator: ";").compactMap(importedModule(fromImportStatement:))
+    }
+
+    private static func importedModule(fromImportStatement statement: Substring) -> String? {
+        let trimmed = statement.trimmingCharacters(in: .whitespaces)
         guard trimmed.isEmpty == false,
               trimmed.hasPrefix("//") == false
         else {
@@ -240,6 +256,8 @@ struct ArchitectureFenceTests {
         "class",
         "enum",
         "func",
+        "let",
+        "operator",
         "protocol",
         "struct",
         "typealias",
