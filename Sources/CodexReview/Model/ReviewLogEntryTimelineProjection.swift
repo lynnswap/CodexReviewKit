@@ -163,7 +163,9 @@ private extension ReviewLogEntry {
         switch kind {
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
             return true
-        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+        case .commandOutput:
+            return metadata == nil
+        case .command, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return false
         }
     }

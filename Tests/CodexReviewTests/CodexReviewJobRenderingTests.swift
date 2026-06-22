@@ -70,6 +70,44 @@ struct CodexReviewJobRenderingTests {
         #expect(fileChange.output == "Sources/App.swift | 1 +\n+ new line\n")
     }
 
+    @Test func metadataFreeCommandOutputAppendPreservesTerminalTimelineState() throws {
+        let commandMetadata = ReviewLogEntry.Metadata(
+            sourceType: "commandExecution",
+            status: "completed",
+            itemID: "cmd-1",
+            command: "swift test",
+            exitCode: 0,
+            commandStatus: "completed"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-command-output-after-completion",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .succeeded,
+            summary: "Done",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    text: "$ swift test",
+                    metadata: commandMetadata
+                ),
+                .init(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
+            ]
+        )
+
+        let item = try #require(job.timeline.item(for: "cmd-1"))
+        guard case .command(let command) = item.content else {
+            Issue.record("Expected command timeline content.")
+            return
+        }
+        #expect(item.phase == .completed)
+        #expect(job.timeline.activeItemIDs.contains("cmd-1") == false)
+        #expect(command.output == "Tests passed")
+        #expect(command.exitCode == 0)
+    }
+
     @Test func tailAppendPublishesIncrementalLogMutation() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-tail-append-mutation",
