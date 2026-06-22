@@ -1,6 +1,7 @@
 import AppKit
 import ObservationBridge
 import CodexReview
+import CodexReviewDomain
 import ReviewMonitorRendering
 
 @MainActor
@@ -160,19 +161,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundJob = selectedJob
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
-            _ = selectedJob.timeline.revision
-            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: selectedJob.timeline)
+            let timeline = selectedJob.timeline
+            _ = timeline.revision
+            let eventKind = event.kind
+            let shouldRender = eventKind == .initial || event.matches(\ReviewTimeline.revision)
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
+            guard shouldRender else {
+                return
+            }
             self.renderBoundJobLog(
-                timelineDocument: timelineDocument,
-                restorationTarget: event.kind == .initial
+                timeline: timeline,
+                restorationTarget: eventKind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
-                allowIncrementalUpdate: event.kind != .initial
+                allowIncrementalUpdate: eventKind != .initial
             )
         }
     }
@@ -355,8 +361,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     @discardableResult
-    private func renderSelectedJobLog(
-        timelineDocument: ReviewTimelineDocument,
+    private func renderBoundJobLog(
+        timeline: ReviewTimeline,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -369,43 +375,26 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let renderer = logRenderer
         let jobID = boundJob.id
         logRenderTask?.cancel()
-        logRenderTask = Task.detached(priority: .userInitiated) { [weak self] in
+        logRenderTask = Task { @MainActor [weak self] in
+            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: timeline)
             let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
-            await MainActor.run { [weak self] in
-                guard Task.isCancelled == false,
-                      let self,
-                      self.logRenderGeneration == generation,
-                      self.boundJob?.id == jobID
-                else {
-                    return
-                }
-                _ = self.logScrollView.render(
-                    sourceDocument: renderedDocument.source,
-                    displayDocument: renderedDocument.display,
-                    restoring: restorationTarget,
-                    allowIncrementalUpdate: allowIncrementalUpdate
-                )
-                self.appliedLogRenderGeneration = generation
-                self.hasAppliedBoundJobLog = true
+            guard Task.isCancelled == false,
+                  let self,
+                  self.logRenderGeneration == generation,
+                  self.boundJob?.id == jobID
+            else {
+                return
             }
+            _ = self.logScrollView.render(
+                sourceDocument: renderedDocument.source,
+                displayDocument: renderedDocument.display,
+                restoring: restorationTarget,
+                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundJobLog
+            )
+            self.appliedLogRenderGeneration = generation
+            self.hasAppliedBoundJobLog = true
         }
         return true
-    }
-
-    @discardableResult
-    private func renderBoundJobLog(
-        timelineDocument: ReviewTimelineDocument,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) -> Bool {
-        guard boundJob != nil else {
-            return false
-        }
-        return renderSelectedJobLog(
-            timelineDocument: timelineDocument,
-            restorationTarget: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate && hasAppliedBoundJobLog
-        )
     }
 
     private func cacheBoundJobScrollTarget() {

@@ -123,9 +123,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                 kind: .commandOutput,
                 groupID: block.id.rawValue,
                 text: fileChange.output.isEmpty ? fileChange.title : fileChange.output,
-                metadata: metadata(
-                    for: block,
-                    sourceType: "fileChange",
+                metadata: fileChangeMetadata(
                     title: fileChange.title,
                     status: fileChange.status?.rawValue,
                     path: fileChange.paths.first
@@ -258,7 +256,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         if block.phase.isTerminal {
             return block.phase.rawValue
         }
-        return command.output.isEmpty ? block.phase.rawValue : "completed"
+        return block.phase.rawValue
     }
 
     private static func genericCommandOutputMetadata(
@@ -268,6 +266,19 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             sourceType: "command",
             title: "Command output",
             status: block.phase.isTerminal ? block.phase.rawValue : "completed"
+        )
+    }
+
+    private static func fileChangeMetadata(
+        title: String?,
+        status: String?,
+        path: String?
+    ) -> ReviewLogEntry.Metadata {
+        .init(
+            sourceType: "fileChange",
+            title: title,
+            status: status,
+            path: path
         )
     }
 
