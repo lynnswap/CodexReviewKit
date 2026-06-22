@@ -105,6 +105,27 @@ struct AppServerWireEventTests {
     }
 
     @Test func mapsOfficialItemNotificationsToStructuredContentWithoutDisplayText() throws {
+        let turnStarted = try decodeNotification("""
+        {
+          "method": "turn/started",
+          "params": {
+            "threadId": "thread-1",
+            "turn": {
+              "id": "turn-1"
+            },
+            "model": "gpt-5"
+          }
+        }
+        """)
+
+        guard case .runStarted(let turnID, let reviewThreadID, let model) = try #require(turnStarted.domainEvents().first) else {
+            Issue.record("expected turn start")
+            return
+        }
+        #expect(turnID.rawValue == "turn-1")
+        #expect(reviewThreadID?.rawValue == "thread-1")
+        #expect(model == "gpt-5")
+
         let commandStarted = try decodeNotification("""
         {
           "method": "item/started",
@@ -247,6 +268,60 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected approval content")
         }
+
+        let fragmentedApproval = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "approval-2",
+              "type": "hookPrompt",
+              "fragments": [
+                {
+                  "text": "Allow file write?"
+                }
+              ]
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let fragmentedApprovalSeed) = try #require(fragmentedApproval.domainEvents().first) else {
+            Issue.record("expected fragmented approval completion")
+            return
+        }
+        if case .approval(let approval) = fragmentedApprovalSeed.content {
+            #expect(approval.title == "Allow file write?")
+        } else {
+            Issue.record("expected fragmented approval content")
+        }
+
+        let userMessage = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "user-1",
+              "type": "userMessage",
+              "content": [
+                {
+                  "text": "Please review this diff"
+                }
+              ]
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let userSeed) = try #require(userMessage.domainEvents().first) else {
+            Issue.record("expected user message completion")
+            return
+        }
+        if case .message(let message) = userSeed.content {
+            #expect(message.text == "Please review this diff")
+        } else {
+            Issue.record("expected user message content")
+        }
     }
 
     @Test func decodesCommandOutputAggregationEntryPointsWithoutDisplayText() throws {
@@ -281,6 +356,22 @@ struct AppServerWireEventTests {
                 Issue.record("expected command content")
             }
         }
+
+        let processOutput = try decodeNotification("""
+        {
+          "method": "process/outputDelta",
+          "params": {
+            "processHandle": "process-1",
+            "deltaBase64": "\(encoded)"
+          }
+        }
+        """)
+
+        guard case .textDelta(let processItemID, _, _, _, _) = try #require(processOutput.domainEvents().first) else {
+            Issue.record("expected process output delta")
+            return
+        }
+        #expect(processItemID.rawValue == "process-1")
     }
 
     @Test func mapsPartialProgressUpdatesToScopedItems() throws {
@@ -313,7 +404,13 @@ struct AppServerWireEventTests {
           "method": "item/fileChange/patchUpdated",
           "params": {
             "itemId": "file-1",
-            "message": "patch"
+            "changes": [
+              {
+                "path": "Sources/App.swift",
+                "kind": "modify",
+                "diff": "diff --git"
+              }
+            ]
           }
         }
         """)
@@ -325,8 +422,8 @@ struct AppServerWireEventTests {
         #expect(fileSeed.id.rawValue == "file-1:patch")
         #expect(fileSeed.family == .fileChange)
         if case .fileChange(let fileChange) = fileSeed.content {
-            #expect(fileChange.title.isEmpty)
-            #expect(fileChange.output == "patch")
+            #expect(fileChange.title == "Sources/App.swift")
+            #expect(fileChange.output == "modify\nSources/App.swift\ndiff --git")
         } else {
             Issue.record("expected file patch content")
         }

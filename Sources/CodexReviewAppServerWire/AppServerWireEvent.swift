@@ -167,7 +167,7 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
         case .turnStarted:
             return [.runStarted(
                 turnID: ReviewTurn.ID(rawValue: payload.resolvedTurnID ?? ""),
-                reviewThreadID: payload.reviewThreadID.map(ReviewThread.ID.init(rawValue:)) ?? fallbackReviewThreadID,
+                reviewThreadID: (payload.reviewThreadID ?? payload.threadID).map(ReviewThread.ID.init(rawValue:)) ?? fallbackReviewThreadID,
                 model: payload.model
             )]
         case .turnCompleted:
@@ -219,7 +219,8 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
                 kind: .commandExecution,
                 family: .command,
                 content: .command(.init(command: payload.item?.command ?? "", cwd: payload.item?.cwd)),
-                delta: payload.outputDelta
+                delta: payload.outputDelta,
+                itemID: payload.outputItemID
             )
         case .commandExecutionTerminalInteraction:
             return payload.deltaDomainEvent(
@@ -271,6 +272,8 @@ public extension AppServerWireReviewNotification {
         public var reviewThreadID: String?
         public var model: String?
         public var itemID: String?
+        public var processID: String?
+        public var processHandle: String?
         public var delta: String?
         public var deltaBase64: String?
         public var stdin: String?
@@ -286,6 +289,7 @@ public extension AppServerWireReviewNotification {
         public var completedAtMs: Int64?
         public var plan: [PlanStep]
         public var verifications: [String]
+        public var changes: [FileChange]
         public var item: Item?
         public var rawValue: AppServerWireJSONValue?
 
@@ -300,6 +304,8 @@ public extension AppServerWireReviewNotification {
             reviewThreadID: String? = nil,
             model: String? = nil,
             itemID: String? = nil,
+            processID: String? = nil,
+            processHandle: String? = nil,
             delta: String? = nil,
             deltaBase64: String? = nil,
             stdin: String? = nil,
@@ -315,6 +321,7 @@ public extension AppServerWireReviewNotification {
             completedAtMs: Int64? = nil,
             plan: [PlanStep] = [],
             verifications: [String] = [],
+            changes: [FileChange] = [],
             item: Item? = nil,
             rawValue: AppServerWireJSONValue? = nil
         ) {
@@ -324,6 +331,8 @@ public extension AppServerWireReviewNotification {
             self.reviewThreadID = reviewThreadID
             self.model = model
             self.itemID = itemID
+            self.processID = processID
+            self.processHandle = processHandle
             self.delta = delta
             self.deltaBase64 = deltaBase64
             self.stdin = stdin
@@ -339,6 +348,7 @@ public extension AppServerWireReviewNotification {
             self.completedAtMs = completedAtMs
             self.plan = plan
             self.verifications = verifications
+            self.changes = changes
             self.item = item
             self.rawValue = rawValue
         }
@@ -350,6 +360,8 @@ public extension AppServerWireReviewNotification {
             case reviewThreadID = "reviewThreadId"
             case model
             case itemID = "itemId"
+            case processID = "processId"
+            case processHandle
             case delta
             case deltaBase64
             case stdin
@@ -365,6 +377,7 @@ public extension AppServerWireReviewNotification {
             case completedAtMs
             case plan
             case verifications
+            case changes
             case item
         }
 
@@ -377,6 +390,8 @@ public extension AppServerWireReviewNotification {
             self.reviewThreadID = try container.decodeStringIfPresent(forKey: .reviewThreadID)
             self.model = try container.decodeStringIfPresent(forKey: .model)
             self.itemID = try container.decodeStringIfPresent(forKey: .itemID)
+            self.processID = try container.decodeStringIfPresent(forKey: .processID)
+            self.processHandle = try container.decodeStringIfPresent(forKey: .processHandle)
             self.delta = try container.decodeStringIfPresent(forKey: .delta)
             self.deltaBase64 = try container.decodeStringIfPresent(forKey: .deltaBase64)
             self.stdin = try container.decodeStringIfPresent(forKey: .stdin)
@@ -392,6 +407,7 @@ public extension AppServerWireReviewNotification {
             self.completedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
             self.plan = (try? container.decodeIfPresent([PlanStep].self, forKey: .plan)) ?? []
             self.verifications = (try? container.decodeIfPresent([String].self, forKey: .verifications)) ?? []
+            self.changes = (try? container.decodeIfPresent([FileChange].self, forKey: .changes)) ?? []
             self.item = try? container.decodeIfPresent(Item.self, forKey: .item)
         }
 
@@ -422,6 +438,10 @@ public extension AppServerWireReviewNotification {
 
         var outputDelta: String? {
             delta?.nilIfEmpty ?? decodedBase64Output?.nilIfEmpty
+        }
+
+        var outputItemID: String? {
+            itemID ?? processID ?? processHandle ?? item?.id.nilIfEmpty ?? item?.processID
         }
 
         var decodedBase64Output: String? {
@@ -455,7 +475,8 @@ public extension AppServerWireReviewNotification {
             kind: ReviewItemKind,
             family: ReviewItemFamily,
             content: ReviewTimelineItem.Content,
-            delta explicitDelta: String? = nil
+            delta explicitDelta: String? = nil,
+            itemID explicitItemID: String? = nil
         ) -> [ReviewDomainEvent] {
             guard let delta = explicitDelta ?? delta,
                   delta.isEmpty == false
@@ -463,7 +484,7 @@ public extension AppServerWireReviewNotification {
                 return []
             }
             return [.textDelta(
-                itemID: .init(rawValue: itemID ?? syntheticItemID(method: kind.rawValue)),
+                itemID: .init(rawValue: explicitItemID ?? itemID ?? syntheticItemID(method: kind.rawValue)),
                 kind: kind,
                 family: family,
                 content: content,
@@ -485,6 +506,8 @@ public extension AppServerWireReviewNotification {
         }
 
         func fileChangeUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            let changesOutput = changes.map(\.summaryText).joined(separator: "\n").nilIfEmpty
+            let changePath = changes.compactMap { $0.path?.nilIfEmpty }.first
             let updateItemID = item?.path?.nilIfEmpty == nil
                 ? itemID.map { "\($0):patch" }
                 : item?.id.nilIfEmpty ?? itemID
@@ -493,7 +516,7 @@ public extension AppServerWireReviewNotification {
                 kind: .fileChange,
                 family: .fileChange,
                 phase: item?.phase(default: .running) ?? .running,
-                content: .fileChange(.init(title: item?.path ?? "", output: message ?? delta ?? diff ?? ""))
+                content: .fileChange(.init(title: item?.path ?? changePath ?? "", output: message ?? delta ?? diff ?? changesOutput ?? ""))
             ))]
         }
 
@@ -752,6 +775,35 @@ public extension AppServerWireReviewNotification {
         }
     }
 
+    struct FileChange: Decodable, Equatable, Sendable {
+        public var path: String?
+        public var kind: String?
+        public var diff: String?
+
+        public var summaryText: String {
+            [kind, path, diff].compactMap { $0?.nilIfEmpty }.joined(separator: "\n")
+        }
+
+        public init(path: String? = nil, kind: String? = nil, diff: String? = nil) {
+            self.path = path
+            self.kind = kind
+            self.diff = diff
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case path
+            case kind
+            case diff
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.path = try container.decodeStringIfPresent(forKey: .path)
+            self.kind = try container.decodeStringIfPresent(forKey: .kind)
+            self.diff = try container.decodeStringIfPresent(forKey: .diff)
+        }
+    }
+
     struct Item: Decodable, Equatable, Sendable {
         public var id: String
         public var type: ReviewItemKind
@@ -773,6 +825,8 @@ public extension AppServerWireReviewNotification {
         public var prompt: String?
         public var summary: [String]
         public var content: [String]
+        public var contentFragments: [TextFragment]
+        public var fragments: [TextFragment]
         public var arguments: AppServerWireJSONValue?
         public var input: AppServerWireJSONValue?
         public var result: AppServerWireJSONValue?
@@ -809,6 +863,8 @@ public extension AppServerWireReviewNotification {
             prompt: String? = nil,
             summary: [String] = [],
             content: [String] = [],
+            contentFragments: [TextFragment] = [],
+            fragments: [TextFragment] = [],
             arguments: AppServerWireJSONValue? = nil,
             input: AppServerWireJSONValue? = nil,
             result: AppServerWireJSONValue? = nil,
@@ -836,6 +892,8 @@ public extension AppServerWireReviewNotification {
             self.prompt = prompt
             self.summary = summary
             self.content = content
+            self.contentFragments = contentFragments
+            self.fragments = fragments
             self.arguments = arguments
             self.input = input
             self.result = result
@@ -865,6 +923,7 @@ public extension AppServerWireReviewNotification {
             case prompt
             case summary
             case content
+            case fragments
             case arguments
             case input
             case result
@@ -895,6 +954,8 @@ public extension AppServerWireReviewNotification {
             self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
             self.summary = (try? container.decodeIfPresent([String].self, forKey: .summary)) ?? []
             self.content = (try? container.decodeIfPresent([String].self, forKey: .content)) ?? []
+            self.contentFragments = (try? container.decodeIfPresent([TextFragment].self, forKey: .content)) ?? []
+            self.fragments = (try? container.decodeIfPresent([TextFragment].self, forKey: .fragments)) ?? []
             self.arguments = try? container.decodeIfPresent(AppServerWireJSONValue.self, forKey: .arguments)
             self.input = try? container.decodeIfPresent(AppServerWireJSONValue.self, forKey: .input)
             self.result = try? container.decodeIfPresent(AppServerWireJSONValue.self, forKey: .result)
@@ -974,7 +1035,7 @@ public extension AppServerWireReviewNotification {
         func content(fallbackDelta: String?) -> ReviewTimelineItem.Content {
             switch family {
             case .message:
-                return .message(.init(text: text ?? review ?? fallbackDelta ?? ""))
+                return .message(.init(text: text ?? review ?? joinedContentText ?? fallbackDelta ?? ""))
             case .command:
                 return .command(.init(
                     command: command ?? "",
@@ -1005,12 +1066,41 @@ public extension AppServerWireReviewNotification {
                     error: error?.nonNullText
                 ))
             case .approval:
-                return .approval(.init(title: prompt ?? text ?? "", detail: review))
+                return .approval(.init(title: prompt ?? text ?? joinedFragmentText ?? "", detail: review))
             case .diagnostic:
                 return .diagnostic(.init(message: text ?? error?.nonNullText ?? fallbackDelta ?? ""))
             case .lifecycle, .unknown:
                 return .unknown(.init(title: type.rawValue, detail: rawValue?.jsonString))
             }
+        }
+
+        private var joinedContentText: String? {
+            (content + contentFragments.compactMap { $0.text?.nilIfEmpty })
+                .joined(separator: "\n")
+                .nilIfEmpty
+        }
+
+        private var joinedFragmentText: String? {
+            fragments.compactMap { $0.text?.nilIfEmpty }
+                .joined(separator: "\n")
+                .nilIfEmpty
+        }
+    }
+
+    struct TextFragment: Decodable, Equatable, Sendable {
+        public var text: String?
+
+        public init(text: String? = nil) {
+            self.text = text
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case text
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.text = try container.decodeStringIfPresent(forKey: .text)
         }
     }
 }
