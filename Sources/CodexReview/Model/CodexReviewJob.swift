@@ -449,6 +449,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
     @ObservationIgnored
     package var directTimelineTextItemIDsWithCompatibilityLog: Set<ReviewTimelineItem.ID>
     @ObservationIgnored
+    package var directTimelineTextCompatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
+    @ObservationIgnored
+    private var pendingDirectTimelineTextItemIDsForCompatibilityLog: [ReviewTimelineItem.ID]
+    @ObservationIgnored
     package var legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     public private(set) var logEntries: [ReviewLogEntry]
     public private(set) var logText: String
@@ -499,6 +503,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.pendingTerminalFailureLogTimelineProjectionSuppressions = 0
         self.directTimelineTextItemIDs = []
         self.directTimelineTextItemIDsWithCompatibilityLog = []
+        self.directTimelineTextCompatibilityItemIDsByLogEntryID = [:]
+        self.pendingDirectTimelineTextItemIDsForCompatibilityLog = []
         self.legacyProjectedTimelineTextItemIDs = []
         self.logState = initialState.logState
         self.logEntries = initialState.entries
@@ -533,6 +539,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
             pendingTerminalFailureLogTimelineProjectionSuppressions = 0
             directTimelineTextItemIDs.removeAll(keepingCapacity: true)
             directTimelineTextItemIDsWithCompatibilityLog.removeAll(keepingCapacity: true)
+            directTimelineTextCompatibilityItemIDsByLogEntryID.removeAll(keepingCapacity: true)
+            pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll(keepingCapacity: true)
             legacyProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
         }
         if usesDirectTimelineEvents {
@@ -596,11 +604,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
         usesDirectTimelineEvents = true
         pendingLegacyTimelineProjectionSuppressions += max(0, legacyProjectionSuppressionCount)
+        var directTextItemIDsApplied: [ReviewTimelineItem.ID] = []
         for event in directEvents {
             if let itemID = event.directTimelineTextItemID {
                 directTimelineTextItemIDs.insert(itemID)
+                directTextItemIDsApplied.append(itemID)
             }
             timeline.apply(event, at: timestamp)
+        }
+        if legacyProjectionSuppressionCount > 0 {
+            appendPendingDirectTimelineTextItemIDsForCompatibilityLog(directTextItemIDsApplied)
         }
     }
 
@@ -615,9 +628,41 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private func recordDirectTimelineTextCompatibilityLog(for entry: ReviewLogEntry) {
+        var itemIDs: Set<ReviewTimelineItem.ID> = []
         for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
-            directTimelineTextItemIDsWithCompatibilityLog.insert(itemID)
+            itemIDs.insert(itemID)
         }
+        if itemIDs.isEmpty,
+           pendingLegacyTimelineProjectionSuppressions > 0,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+            itemIDs.insert(pendingItemID)
+        }
+        guard itemIDs.isEmpty == false else {
+            return
+        }
+        directTimelineTextItemIDsWithCompatibilityLog.formUnion(itemIDs)
+        directTimelineTextCompatibilityItemIDsByLogEntryID[entry.id, default: []].formUnion(itemIDs)
+        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+    }
+
+    private func appendPendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: [ReviewTimelineItem.ID]) {
+        for itemID in itemIDs where pendingDirectTimelineTextItemIDsForCompatibilityLog.contains(itemID) == false {
+            pendingDirectTimelineTextItemIDsForCompatibilityLog.append(itemID)
+        }
+    }
+
+    private func popPendingDirectTimelineTextItemIDForCompatibilityLog() -> ReviewTimelineItem.ID? {
+        guard pendingDirectTimelineTextItemIDsForCompatibilityLog.isEmpty == false else {
+            return nil
+        }
+        return pendingDirectTimelineTextItemIDsForCompatibilityLog.removeFirst()
+    }
+
+    private func removePendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: Set<ReviewTimelineItem.ID>) {
+        guard itemIDs.isEmpty == false else {
+            return
+        }
+        pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll { itemIDs.contains($0) }
     }
 
     private func recordLegacyProjectedTimelineTextItemIDsFromLogEntries() {

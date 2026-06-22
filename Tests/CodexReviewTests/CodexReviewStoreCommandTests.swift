@@ -502,7 +502,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func unmappedDirectTimelineTextSurvivesReviewLogLimitTrim() async throws {
+    @Test func syntheticDirectTimelineTextIsTrimmedThroughSuppressedCompatibilityLog() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -543,7 +543,7 @@ struct CodexReviewStoreCommandTests {
                 Issue.record("expected message timeline content")
                 return
             }
-            #expect(message.text == longText)
+            #expect(message.text.count < longText.count)
         }
     }
 

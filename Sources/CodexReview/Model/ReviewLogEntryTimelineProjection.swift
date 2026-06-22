@@ -58,7 +58,7 @@ extension CodexReviewJob {
         }
         var textByItemID: [ReviewTimelineItem.ID: String] = [:]
         for entry in logEntries where entry.canProvideDirectTimelineText {
-            for itemID in entry.directTimelineTextCandidateIDs {
+            for itemID in directTimelineTextCandidateIDs(for: entry) {
                 if entry.shouldAppendRetainedTimelineText {
                     textByItemID[itemID, default: ""] += entry.text
                 } else {
@@ -90,6 +90,15 @@ extension CodexReviewJob {
             }
             timeline.updateItemContent(trimmedContent, for: itemID)
         }
+    }
+
+    private func directTimelineTextCandidateIDs(for entry: ReviewLogEntry) -> [ReviewTimelineItem.ID] {
+        var ids = entry.directTimelineTextCandidateIDs
+        if let compatibilityItemIDs = directTimelineTextCompatibilityItemIDsByLogEntryID[entry.id] {
+            ids.append(contentsOf: compatibilityItemIDs)
+        }
+        var seen: Set<ReviewTimelineItem.ID> = []
+        return ids.filter { seen.insert($0).inserted }
     }
 }
 
