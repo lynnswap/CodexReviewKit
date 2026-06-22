@@ -216,6 +216,8 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
             )
         case .reasoningSummaryPartAdded:
             return []
+        case .autoApprovalReviewStarted, .autoApprovalReviewCompleted:
+            return []
         case .commandExecutionOutputDelta, .commandExecOutputDelta, .processOutputDelta:
             return payload.deltaDomainEvent(
                 kind: .commandExecution,
@@ -1160,6 +1162,8 @@ private extension ReviewWireEventKind {
     static let turnDiffUpdated: Self = "turn/diff/updated"
     static let turnPlanUpdated: Self = "turn/plan/updated"
     static let reasoningSummaryPartAdded: Self = "item/reasoning/summaryPartAdded"
+    static let autoApprovalReviewStarted: Self = "item/autoApprovalReview/started"
+    static let autoApprovalReviewCompleted: Self = "item/autoApprovalReview/completed"
     static let itemUpdated: Self = "item/updated"
     static let commandExecOutputDelta: Self = "command/exec/outputDelta"
     static let processOutputDelta: Self = "process/outputDelta"

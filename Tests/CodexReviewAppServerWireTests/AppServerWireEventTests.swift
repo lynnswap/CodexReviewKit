@@ -784,6 +784,22 @@ struct AppServerWireEventTests {
         #expect(notification.domainEvents().isEmpty)
         #expect(notification.payload.rawFields["summaryIndex"] == .int(1))
     }
+
+    @Test func ignoresAutoApprovalReviewBoundaryNotifications() throws {
+        for method in ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"] {
+            let notification = try decodeNotification("""
+            {
+              "method": "\(method)",
+              "params": {
+                "itemId": "approval-review-1"
+              }
+            }
+            """)
+
+            #expect(notification.domainEvents().isEmpty)
+            #expect(notification.payload.rawFields["itemId"] == .string("approval-review-1"))
+        }
+    }
 }
 
 private func decodeNotification(_ json: String) throws -> AppServerWireReviewNotification {
