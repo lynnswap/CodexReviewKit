@@ -71,7 +71,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                         kind: .commandOutput,
                         groupID: groupID,
                         text: command.output,
-                        metadata: genericCommandOutputMetadata(for: block)
+                        metadata: outputOnlyCommandMetadata(for: block, command: command)
                     ),
                 ]
             }
@@ -261,6 +261,45 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             return block.phase.rawValue
         }
         return command.output.isEmpty ? block.phase.rawValue : "completed"
+    }
+
+    private static func outputOnlyCommandMetadata(
+        for block: ReviewTimelineDocument.Block,
+        command: ReviewTimelineDocument.Command
+    ) -> ReviewLogEntry.Metadata {
+        guard hasStructuredOutputOnlyCommandMetadata(for: block, command: command) else {
+            return genericCommandOutputMetadata(for: block)
+        }
+
+        let normalizedStatus = commandStatus(for: block, command: command)
+        return ReviewLogEntry.Metadata(
+            sourceType: "commandExecution",
+            status: normalizedStatus,
+            itemID: block.sourceItemID.rawValue,
+            cwd: command.cwd,
+            exitCode: command.exitCode,
+            startedAt: block.startedAt,
+            completedAt: block.completedAt,
+            durationMs: command.durationMs ?? block.durationMs,
+            commandActions: command.actions.map(commandAction),
+            commandStatus: normalizedStatus
+        )
+    }
+
+    private static func hasStructuredOutputOnlyCommandMetadata(
+        for block: ReviewTimelineDocument.Block,
+        command: ReviewTimelineDocument.Command
+    ) -> Bool {
+        command.cwd != nil ||
+            command.exitCode != nil ||
+            command.status != nil ||
+            command.source != nil ||
+            command.processID != nil ||
+            command.actions.isEmpty == false ||
+            command.durationMs != nil ||
+            block.startedAt != nil ||
+            block.completedAt != nil ||
+            block.durationMs != nil
     }
 
     private static func genericCommandOutputMetadata(

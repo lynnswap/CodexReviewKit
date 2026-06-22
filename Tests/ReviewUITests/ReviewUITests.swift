@@ -3575,6 +3575,60 @@ struct ReviewUITests {
         }
     }
 
+    @Test func timelineProjectionPreservesOutputOnlyCommandMetadata() throws {
+        let startedAt = Date(timeIntervalSince1970: 300)
+        let completedAt = startedAt.addingTimeInterval(4)
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-output-only"],
+            activeBlockIDs: [],
+            activeBlockCount: 0,
+            latestActivityBlockID: "cmd-output-only",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-output-only",
+                    sourceItemID: "cmd-output-only",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .failed,
+                    isActive: false,
+                    primaryText: "Command output",
+                    rawTranscriptText: "stderr",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "Command",
+                        output: "stderr",
+                        exitCode: 2,
+                        status: .failed,
+                        durationMs: 4_000
+                    )),
+                    createdAt: startedAt,
+                    updatedAt: completedAt,
+                    startedAt: startedAt,
+                    completedAt: completedAt,
+                    durationMs: 4_000
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran command for 4s")
+        #expect(panel.exitText == "exit 2")
+        #expect(metadata.itemID == "cmd-output-only")
+        #expect(metadata.command == nil)
+        #expect(metadata.exitCode == 2)
+        #expect(metadata.durationMs == 4_000)
+    }
+
     @Test func directTimelineFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-direct-timeline-file-change",
