@@ -39,6 +39,22 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected unknown content")
         }
+
+        let turnScoped = try decodeNotification("""
+        {
+          "method": "future/turnScoped",
+          "params": {
+            "turnId": "turn-1",
+            "value": "raw"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let turnScopedSeed) = try #require(turnScoped.domainEvents().first) else {
+            Issue.record("expected turn-scoped unknown item update")
+            return
+        }
+        #expect(turnScopedSeed.id.rawValue == "turn-1:future/turnScoped")
     }
 
     @Test func preservesNonObjectRawParams() throws {
@@ -207,6 +223,26 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected completed command content")
         }
+
+        let commandFailed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-2",
+              "type": "commandExecution",
+              "command": "swift test",
+              "exitCode": 1
+            }
+          }
+        }
+        """)
+
+        guard case .itemCompleted(let failedSeed) = try #require(commandFailed.domainEvents().first) else {
+            Issue.record("expected failed command item completion")
+            return
+        }
+        #expect(failedSeed.phase == .failed)
 
         let searchStarted = try decodeNotification("""
         {

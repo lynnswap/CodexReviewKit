@@ -656,7 +656,7 @@ public extension AppServerWireReviewNotification {
 
         func unknownEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
             [.itemUpdated(ReviewTimelineItemSeed(
-                id: .init(rawValue: itemID ?? resolvedTurnID ?? syntheticItemID(method: method.rawValue)),
+                id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
                 kind: ReviewItemKind(rawValue: method.rawValue),
                 family: .unknown,
                 phase: .running,
@@ -1066,6 +1066,9 @@ public extension AppServerWireReviewNotification {
             }
             if success == true {
                 return .completed
+            }
+            if let exitCode {
+                return exitCode == 0 ? .completed : .failed
             }
             return defaultPhase
         }
