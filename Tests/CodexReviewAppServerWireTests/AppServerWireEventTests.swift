@@ -477,6 +477,21 @@ struct AppServerWireEventTests {
             Issue.record("expected systemError diagnostic content")
         }
     }
+
+    @Test func ignoresReasoningSummaryBoundaryNotifications() throws {
+        let notification = try decodeNotification("""
+        {
+          "method": "item/reasoning/summaryPartAdded",
+          "params": {
+            "itemId": "reasoning-1",
+            "summaryIndex": 1
+          }
+        }
+        """)
+
+        #expect(notification.domainEvents().isEmpty)
+        #expect(notification.payload.rawFields["summaryIndex"] == .int(1))
+    }
 }
 
 private func decodeNotification(_ json: String) throws -> AppServerWireReviewNotification {
