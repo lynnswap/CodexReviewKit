@@ -421,6 +421,87 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func retainedCommandOutputChunksAppendWhenTrimmingDirectTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "cmd-1")
+            let firstChunk = "first retained chunk\n"
+            let secondChunk = "second retained chunk\n"
+            await backend.yield(.domainEvents([
+                .itemStarted(.init(
+                    id: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    content: .command(.init(command: "swift test"))
+                )),
+                .textDelta(
+                    itemID: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    content: .command(.init(command: "swift test")),
+                    delta: firstChunk
+                ),
+                .textDelta(
+                    itemID: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    content: .command(.init(command: "swift test")),
+                    delta: secondChunk
+                ),
+            ], legacyProjectionSuppressionCount: 2))
+            let outputMetadata = ReviewLogEntry.Metadata(
+                sourceType: "commandExecution",
+                title: "Command output",
+                itemID: itemID.rawValue,
+                command: "swift test"
+            )
+            await backend.yield(.logEntry(
+                kind: .commandOutput,
+                text: firstChunk,
+                groupID: itemID.rawValue,
+                replacesGroup: false,
+                metadata: outputMetadata
+            ))
+            await backend.yield(.logEntry(
+                kind: .commandOutput,
+                text: secondChunk,
+                groupID: itemID.rawValue,
+                replacesGroup: false,
+                metadata: outputMetadata
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 3
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .command(let command) = item.content else {
+                Issue.record("expected command timeline content")
+                return
+            }
+            #expect(command.output == firstChunk + secondChunk)
+        }
+    }
+
     @Test func unmappedDirectTimelineTextSurvivesReviewLogLimitTrim() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

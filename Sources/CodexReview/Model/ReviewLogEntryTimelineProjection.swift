@@ -59,7 +59,7 @@ extension CodexReviewJob {
         var textByItemID: [ReviewTimelineItem.ID: String] = [:]
         for entry in logEntries where entry.canProvideDirectTimelineText {
             for itemID in entry.directTimelineTextCandidateIDs {
-                if entry.shouldApplyAsTimelineDelta {
+                if entry.shouldAppendRetainedTimelineText {
                     textByItemID[itemID, default: ""] += entry.text
                 } else {
                     textByItemID[itemID] = entry.text
@@ -139,6 +139,10 @@ package extension ReviewLogEntry {
         kind == .toolCall
             && metadata?.sourceType == "mcpToolCall"
             && metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines) == "Tool progress"
+    }
+
+    var shouldAppendRetainedTimelineText: Bool {
+        shouldApplyAsTimelineDelta || (kind == .commandOutput && replacesGroup == false)
     }
 
     var timelineItemID: ReviewTimelineItem.ID {

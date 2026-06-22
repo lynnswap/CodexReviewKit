@@ -1417,6 +1417,49 @@ struct AppServerClientTests {
         #expect(seed.phase == .failed)
     }
 
+    @Test func backendMapsMCPToolProgressDomainEventAsProgress() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/mcpToolCall/progress",
+            params: TestMessageNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "tool-1",
+                message: "Reading review job"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        guard case .domainEvents(let domainEvents, let suppressionCount) = try await iterator.next() else {
+            Issue.record("expected mcp progress domain event")
+            return
+        }
+        #expect(suppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(domainEvents.first) else {
+            Issue.record("expected progress item update")
+            return
+        }
+        #expect(seed.id.rawValue == "tool-1:progress")
+        guard case .toolCall(let toolCall) = seed.content else {
+            Issue.record("expected tool call content")
+            return
+        }
+        #expect(toolCall.progress == "Reading review job")
+        #expect(toolCall.result == nil)
+    }
+
     @Test func backendClosesActiveCommandBeforeDirectOnlyProgressDomainEvents() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
