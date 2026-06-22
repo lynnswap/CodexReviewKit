@@ -250,7 +250,8 @@ private extension ReviewLogEntry {
             command: commandText,
             cwd: metadata?.cwd ?? existingCommand?.cwd,
             output: output,
-            exitCode: metadata?.exitCode ?? existingCommand?.exitCode
+            exitCode: metadata?.exitCode ?? existingCommand?.exitCode,
+            actions: metadata?.commandActions?.map(ReviewTimelineItem.CommandAction.init) ?? existingCommand?.actions ?? []
         )
     }
 
@@ -275,6 +276,18 @@ private extension ReviewLogEntry {
             return trimmed.nilIfEmpty
         }
         return String(trimmed.dropFirst(2)).nilIfEmpty
+    }
+}
+
+private extension ReviewTimelineItem.CommandAction {
+    init(_ action: ReviewLogEntry.Metadata.CommandAction) {
+        self.init(
+            kind: .init(rawValue: action.kind.rawValue),
+            command: action.command,
+            name: action.name,
+            path: action.path,
+            query: action.query
+        )
     }
 }
 

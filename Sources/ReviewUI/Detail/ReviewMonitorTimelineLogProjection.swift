@@ -256,7 +256,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         if block.phase.isTerminal {
             return block.phase.rawValue
         }
-        if block.isActive, block.startedAt != nil {
+        if block.isActive {
             return block.phase.rawValue
         }
         return command.output.isEmpty ? block.phase.rawValue : "completed"
@@ -268,7 +268,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         .init(
             sourceType: "command",
             title: "Command output",
-            status: block.phase.isTerminal || (block.isActive && block.startedAt != nil)
+            status: block.phase.isTerminal || block.isActive
                 ? block.phase.rawValue
                 : "completed"
         )
