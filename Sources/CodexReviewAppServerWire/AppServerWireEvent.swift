@@ -179,17 +179,11 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
         case .turnCancelled, .turnAborted:
             return [.reviewCancelled(payload.terminalMessage ?? "")]
         case .itemStarted:
-            guard let item = payload.item else {
-                return []
-            }
-            return [.itemStarted(payload.seed(for: item, phase: item.phase(default: .running)))]
+            return payload.itemStartedEvents(method: method)
         case .itemUpdated:
             return payload.itemUpdateEvents(method: method)
         case .itemCompleted:
-            guard let item = payload.item else {
-                return []
-            }
-            return [.itemCompleted(payload.seed(for: item, phase: item.phase(default: .completed)))]
+            return payload.itemCompletionEvents(method: method)
         case .agentMessageDelta:
             return payload.deltaDomainEvent(
                 kind: .agentMessage,
@@ -480,11 +474,11 @@ public extension AppServerWireReviewNotification {
         }
 
         var reasoningSummaryItemID: String? {
-            itemID.map { "\($0):summary:\(summaryIndex ?? 0)" }
+            itemID.map { Self.reasoningSummaryItemID(itemID: $0, summaryIndex: summaryIndex ?? 0) }
         }
 
         var rawReasoningItemID: String? {
-            itemID.map { "\($0):content:\(contentIndex ?? 0)" }
+            itemID.map { Self.rawReasoningItemID(itemID: $0, contentIndex: contentIndex ?? 0) }
         }
 
         var decodedBase64Output: String? {
@@ -507,11 +501,40 @@ public extension AppServerWireReviewNotification {
             }
         }
 
+        func itemStartedEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            guard let item else {
+                return []
+            }
+            let phase = item.phase(default: .running)
+            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+            if reasoningSeeds.isEmpty == false {
+                return reasoningSeeds.map(ReviewDomainEvent.itemStarted)
+            }
+            return [.itemStarted(seed(for: item, phase: phase))]
+        }
+
         func itemUpdateEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
             if let item {
-                return [.itemUpdated(seed(for: item, phase: item.phase(default: .running)))]
+                let phase = item.phase(default: .running)
+                let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+                if reasoningSeeds.isEmpty == false {
+                    return reasoningSeeds.map(ReviewDomainEvent.itemUpdated)
+                }
+                return [.itemUpdated(seed(for: item, phase: phase))]
             }
             return unknownEvent(method: method)
+        }
+
+        func itemCompletionEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            guard let item else {
+                return []
+            }
+            let phase = item.phase(default: .completed)
+            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+            if reasoningSeeds.isEmpty == false {
+                return reasoningSeeds.map(ReviewDomainEvent.itemCompleted)
+            }
+            return [.itemCompleted(seed(for: item, phase: phase))]
         }
 
         func deltaDomainEvent(
@@ -703,6 +726,51 @@ public extension AppServerWireReviewNotification {
             )
         }
 
+        private func reasoningPartSeeds(for item: Item, phase: ReviewItemPhase) -> [ReviewTimelineItemSeed] {
+            guard item.family == .reasoning else {
+                return []
+            }
+            let parentItemID = item.id.nilIfEmpty ?? itemID ?? syntheticItemID(method: item.type.rawValue)
+            let summarySeeds = item.indexedSummaryTexts.map { index, text in
+                reasoningSeed(
+                    id: Self.reasoningSummaryItemID(itemID: parentItemID, summaryIndex: index),
+                    text: text,
+                    style: .summary,
+                    item: item,
+                    phase: phase
+                )
+            }
+            let rawSeeds = item.indexedContentTexts.map { index, text in
+                reasoningSeed(
+                    id: Self.rawReasoningItemID(itemID: parentItemID, contentIndex: index),
+                    text: text,
+                    style: .raw,
+                    item: item,
+                    phase: phase
+                )
+            }
+            return summarySeeds + rawSeeds
+        }
+
+        private func reasoningSeed(
+            id: String,
+            text: String,
+            style: ReviewTimelineItem.Reasoning.Style,
+            item: Item,
+            phase: ReviewItemPhase
+        ) -> ReviewTimelineItemSeed {
+            ReviewTimelineItemSeed(
+                id: .init(rawValue: id),
+                kind: item.type,
+                family: .reasoning,
+                phase: phase,
+                content: .reasoning(.init(text: text, style: style)),
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: item.durationMs
+            )
+        }
+
         private var terminalDisposition: TerminalDisposition {
             switch normalizedStatus(turn?.status ?? status?.type) {
             case "failed", "failure", "error", "errored":
@@ -738,6 +806,14 @@ public extension AppServerWireReviewNotification {
 
         private func syntheticItemID(method: String) -> String {
             [resolvedTurnID, method].compactMap(\.self).joined(separator: ":").nilIfEmpty ?? method
+        }
+
+        private static func reasoningSummaryItemID(itemID: String, summaryIndex: Int) -> String {
+            "\(itemID):summary:\(summaryIndex)"
+        }
+
+        private static func rawReasoningItemID(itemID: String, contentIndex: Int) -> String {
+            "\(itemID):content:\(contentIndex)"
         }
 
         private static func date(millisecondsSince1970 milliseconds: Int64) -> Date {
@@ -884,6 +960,7 @@ public extension AppServerWireReviewNotification {
         public var review: String?
         public var prompt: String?
         public var summary: [String]
+        public var summaryFragments: [TextFragment]
         public var content: [String]
         public var contentFragments: [TextFragment]
         public var fragments: [TextFragment]
@@ -922,6 +999,7 @@ public extension AppServerWireReviewNotification {
             review: String? = nil,
             prompt: String? = nil,
             summary: [String] = [],
+            summaryFragments: [TextFragment] = [],
             content: [String] = [],
             contentFragments: [TextFragment] = [],
             fragments: [TextFragment] = [],
@@ -951,6 +1029,7 @@ public extension AppServerWireReviewNotification {
             self.review = review
             self.prompt = prompt
             self.summary = summary
+            self.summaryFragments = summaryFragments
             self.content = content
             self.contentFragments = contentFragments
             self.fragments = fragments
@@ -1013,6 +1092,7 @@ public extension AppServerWireReviewNotification {
             self.review = try container.decodeStringIfPresent(forKey: .review)
             self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
             self.summary = (try? container.decodeIfPresent([String].self, forKey: .summary)) ?? []
+            self.summaryFragments = (try? container.decodeIfPresent([TextFragment].self, forKey: .summary)) ?? []
             self.content = (try? container.decodeIfPresent([String].self, forKey: .content)) ?? []
             self.contentFragments = (try? container.decodeIfPresent([TextFragment].self, forKey: .content)) ?? []
             self.fragments = (try? container.decodeIfPresent([TextFragment].self, forKey: .fragments)) ?? []
@@ -1143,6 +1223,30 @@ public extension AppServerWireReviewNotification {
                 .nilIfEmpty
         }
 
+        fileprivate var indexedSummaryTexts: [(Int, String)] {
+            let strings = summary.enumerated().compactMap { index, text in
+                text.nilIfEmpty.map { (index, $0) }
+            }
+            if strings.isEmpty == false {
+                return strings
+            }
+            return summaryFragments.enumerated().compactMap { index, fragment in
+                fragment.text?.nilIfEmpty.map { (index, $0) }
+            }
+        }
+
+        fileprivate var indexedContentTexts: [(Int, String)] {
+            let strings = content.enumerated().compactMap { index, text in
+                text.nilIfEmpty.map { (index, $0) }
+            }
+            if strings.isEmpty == false {
+                return strings
+            }
+            return contentFragments.enumerated().compactMap { index, fragment in
+                fragment.text?.nilIfEmpty.map { (index, $0) }
+            }
+        }
+
         private var joinedFragmentText: String? {
             fragments.compactMap { $0.text?.nilIfEmpty }
                 .joined(separator: "\n")
@@ -1162,6 +1266,15 @@ public extension AppServerWireReviewNotification {
         }
 
         public init(from decoder: Decoder) throws {
+            let singleValueContainer = try decoder.singleValueContainer()
+            if singleValueContainer.decodeNil() {
+                self.text = nil
+                return
+            }
+            if let text = try? singleValueContainer.decode(String.self) {
+                self.text = text
+                return
+            }
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.text = try container.decodeStringIfPresent(forKey: .text)
         }

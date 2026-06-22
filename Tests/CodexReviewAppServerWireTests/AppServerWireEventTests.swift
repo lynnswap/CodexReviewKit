@@ -465,6 +465,59 @@ struct AppServerWireEventTests {
         #expect(rawItemID.rawValue == "reasoning-1:content:3")
     }
 
+    @Test func completesReasoningPartsWithDeltaItemIDs() throws {
+        let completed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "completedAtMs": 3000,
+            "item": {
+              "id": "reasoning-1",
+              "type": "reasoning",
+              "summary": ["first final", "summary replacement"],
+              "content": ["raw final", "other raw", "raw chain plus final"]
+            }
+          }
+        }
+        """)
+
+        let events = completed.domainEvents()
+        let seeds = events.compactMap { event -> ReviewTimelineItemSeed? in
+            guard case .itemCompleted(let seed) = event else {
+                return nil
+            }
+            return seed
+        }
+
+        #expect(seeds.count == 5)
+        #expect(seeds.map(\.id.rawValue) == [
+            "reasoning-1:summary:0",
+            "reasoning-1:summary:1",
+            "reasoning-1:content:0",
+            "reasoning-1:content:1",
+            "reasoning-1:content:2"
+        ])
+        #expect(seeds.contains { $0.id.rawValue == "reasoning-1" } == false)
+        #expect(seeds.allSatisfy { $0.phase == .completed })
+        #expect(seeds.allSatisfy { $0.completedAt == Date(timeIntervalSince1970: 3) })
+
+        let reasoning = seeds.compactMap { seed -> ReviewTimelineItem.Reasoning? in
+            guard case .reasoning(let content) = seed.content else {
+                return nil
+            }
+            return content
+        }
+
+        #expect(reasoning.map(\.text) == [
+            "first final",
+            "summary replacement",
+            "raw final",
+            "other raw",
+            "raw chain plus final"
+        ])
+        #expect(reasoning.map(\.style) == [.summary, .summary, .raw, .raw, .raw])
+    }
+
     @Test func mapsPartialProgressUpdatesToScopedItems() throws {
         let toolProgress = try decodeNotification("""
         {
