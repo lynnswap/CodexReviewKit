@@ -491,7 +491,7 @@ public extension AppServerWireReviewNotification {
                 return unknownEvent(method: method)
             }
             return [.itemUpdated(ReviewTimelineItemSeed(
-                id: .init(rawValue: itemID ?? resolvedTurnID ?? syntheticItemID(method: method.rawValue)),
+                id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
                 kind: .fileChange,
                 family: .fileChange,
                 phase: .running,
@@ -516,7 +516,7 @@ public extension AppServerWireReviewNotification {
                 return unknownEvent(method: method)
             }
             return [.itemUpdated(ReviewTimelineItemSeed(
-                id: .init(rawValue: itemID ?? resolvedTurnID ?? syntheticItemID(method: method.rawValue)),
+                id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
                 kind: .plan,
                 family: .plan,
                 phase: .running,
@@ -536,10 +536,16 @@ public extension AppServerWireReviewNotification {
 
         func threadStatusEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
             switch normalizedStatus(status?.type) {
-            case "notloaded", "systemerror", "closed":
+            case "notloaded", "closed":
                 return [.reviewFailed(terminalMessage ?? status?.type ?? "")]
             case "cancelled", "canceled", "interrupted", "aborted":
                 return [.reviewCancelled(terminalMessage ?? status?.type ?? "")]
+            case "systemerror":
+                return [.itemUpdated(diagnosticSeed(
+                    method: method,
+                    message: terminalMessage ?? status?.type ?? "",
+                    phase: .running
+                ))]
             default:
                 return unknownEvent(method: method)
             }

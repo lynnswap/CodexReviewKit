@@ -374,7 +374,7 @@ struct AppServerWireEventTests {
             Issue.record("expected plan item update")
             return
         }
-        #expect(seed.id.rawValue == "turn-1")
+        #expect(seed.id.rawValue == "turn-1:turn/plan/updated")
         #expect(seed.kind == .plan)
         #expect(seed.family == .plan)
         if case .plan(let plan) = seed.content {
@@ -382,6 +382,23 @@ struct AppServerWireEventTests {
         } else {
             Issue.record("expected plan content")
         }
+
+        let diff = try decodeNotification("""
+        {
+          "method": "turn/diff/updated",
+          "params": {
+            "turnId": "turn-1",
+            "diff": "diff --git"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let diffSeed) = try #require(diff.domainEvents().first) else {
+            Issue.record("expected diff item update")
+            return
+        }
+        #expect(diffSeed.id.rawValue == "turn-1:turn/diff/updated")
+        #expect(diffSeed.id != seed.id)
     }
 
     @Test func mapsTerminalThreadNotificationsBeforeUnknownFallback() throws {
@@ -435,6 +452,30 @@ struct AppServerWireEventTests {
             return
         }
         #expect(interruptedMessage == "interrupted")
+
+        let systemError = try decodeNotification("""
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-1",
+            "status": {
+              "type": "systemError"
+            }
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let systemErrorSeed) = try #require(systemError.domainEvents().first) else {
+            Issue.record("expected systemError diagnostic update")
+            return
+        }
+        #expect(systemErrorSeed.family == .diagnostic)
+        #expect(systemErrorSeed.phase == .running)
+        if case .diagnostic(let diagnostic) = systemErrorSeed.content {
+            #expect(diagnostic.message == "systemError")
+        } else {
+            Issue.record("expected systemError diagnostic content")
+        }
     }
 }
 
