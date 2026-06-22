@@ -218,6 +218,16 @@ struct CodexReviewStoreCommandTests {
             )
             _ = try await result
 
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: "final"))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: "final",
@@ -228,7 +238,6 @@ struct CodexReviewStoreCommandTests {
                 store.job(id: "job-1")?.logEntries.contains { $0.text == "final" } == true
             })
 
-            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
             await backend.yield(.domainEvents([
                 .textDelta(
                     itemID: itemID,
@@ -238,13 +247,16 @@ struct CodexReviewStoreCommandTests {
                     delta: "late"
                 ),
             ], legacyProjectionSuppressionCount: 1))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.item(for: itemID) != nil
-            })
             await backend.yield(.messageDelta("late", itemID: "msg-1"))
             #expect(await waitUntil {
                 store.job(id: "job-1")?.logEntries.contains { $0.text == "late" } == false
             })
+            let messageItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            guard case .message(let message) = messageItem.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text == "final")
 
             let timelineCount = try #require(store.job(id: "job-1")?.timeline.items.count)
             await backend.yield(.logEntry(
@@ -555,6 +567,76 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(plan.markdown.count < longText.count)
+        }
+    }
+
+    @Test func mcpToolCompletionLogDoesNotReplaceDirectProgressTextDuringTrim() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let progressItemID = ReviewTimelineItem.ID(rawValue: "tool-1:progress")
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: progressItemID,
+                    kind: .mcpToolCall,
+                    family: .tool,
+                    phase: .running,
+                    content: .toolCall(.init(
+                        server: "codex_review",
+                        tool: "review_read",
+                        progress: "Reading review job"
+                    ))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "Reading review job",
+                groupID: "tool-1",
+                replacesGroup: false,
+                metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+            ))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "codex_review.review_read completed. Result: ok",
+                groupID: "tool-1",
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "mcpToolCall",
+                    title: "codex_review.review_read",
+                    status: "completed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    resultText: "ok"
+                )
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 3
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: progressItemID))
+            guard case .toolCall(let toolCall) = item.content else {
+                Issue.record("expected tool progress timeline content")
+                return
+            }
+            #expect(toolCall.progress == "Reading review job")
         }
     }
 

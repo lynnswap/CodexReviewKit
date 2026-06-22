@@ -126,14 +126,19 @@ package extension ReviewLogEntry {
             if kind == .todoList {
                 ids.append(.init(rawValue: "\(rawID):turn/plan/updated"))
             }
-            if kind == .toolCall,
-               metadata?.sourceType == "mcpToolCall" {
+            if isMCPToolProgressCompatibilityLog {
                 ids.append(.init(rawValue: "\(rawID):progress"))
             }
         }
         ids.append(timelineItemID)
         var seen: Set<ReviewTimelineItem.ID> = []
         return ids.filter { seen.insert($0).inserted }
+    }
+
+    var isMCPToolProgressCompatibilityLog: Bool {
+        kind == .toolCall
+            && metadata?.sourceType == "mcpToolCall"
+            && metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines) == "Tool progress"
     }
 
     var timelineItemID: ReviewTimelineItem.ID {

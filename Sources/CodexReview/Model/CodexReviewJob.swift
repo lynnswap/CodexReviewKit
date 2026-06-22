@@ -585,7 +585,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
         legacyProjectionSuppressionCount: Int,
         at timestamp: Date
     ) {
-        let directEvents = events.filter(\.appliesFromDirectTimelineSource)
+        let directEvents = events.filter {
+            $0.appliesFromDirectTimelineSource && shouldApplyDirectTimelineEvent($0)
+        }
         guard directEvents.isEmpty == false else {
             return
         }
@@ -599,6 +601,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
                 directTimelineTextItemIDs.insert(itemID)
             }
             timeline.apply(event, at: timestamp)
+        }
+    }
+
+    private func shouldApplyDirectTimelineEvent(_ event: ReviewDomainEvent) -> Bool {
+        switch event {
+        case .textDelta(let itemID, _, let family, _, _)
+            where family == .message && completedAgentMessageItemIDs.contains(itemID.rawValue):
+            false
+        default:
+            true
         }
     }
 
