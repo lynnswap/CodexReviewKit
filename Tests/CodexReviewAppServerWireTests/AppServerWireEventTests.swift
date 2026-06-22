@@ -637,6 +637,59 @@ struct AppServerWireEventTests {
         }
     }
 
+    @Test @MainActor func commandOnlyCompletionPreservesStreamedOutputAndCompletesItem() throws {
+        let started = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test"
+            }
+          }
+        }
+        """)
+
+        let delta = try decodeNotification("""
+        {
+          "method": "item/commandExecution/outputDelta",
+          "params": {
+            "itemId": "cmd-1",
+            "delta": "streamed output"
+          }
+        }
+        """)
+
+        let completed = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "cmd-1",
+              "type": "commandExecution",
+              "command": "swift test"
+            }
+          }
+        }
+        """)
+
+        let timeline = ReviewTimeline()
+        for event in started.domainEvents() + delta.domainEvents() + completed.domainEvents() {
+            timeline.apply(event)
+        }
+
+        let item = try #require(timeline.item(for: "cmd-1"))
+        #expect(item.phase == .completed)
+        if case .command(let command) = item.content {
+            #expect(command.command == "swift test")
+            #expect(command.output == "streamed output")
+            #expect(command.exitCode == nil)
+        } else {
+            Issue.record("expected command content")
+        }
+    }
+
     @Test func preservesReasoningDeltaIndexesInItemIDs() throws {
         let summary = try decodeNotification("""
         {

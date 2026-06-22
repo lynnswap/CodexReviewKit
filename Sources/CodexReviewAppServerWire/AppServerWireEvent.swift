@@ -1254,7 +1254,7 @@ public extension AppServerWireReviewNotification {
                 && fallbackDelta?.nilIfEmpty == nil
                 && phase == .completed
                 && hasCompletionMetadata == false
-                && hasCommandLifecycleMetadata == false
+                && hasCommandCompletionSnapshot == false
         }
 
         func hasReasoningParentContent(fallbackDelta: String?) -> Bool {
@@ -1272,11 +1272,15 @@ public extension AppServerWireReviewNotification {
                 )
         }
 
-        var hasCommandLifecycleMetadata: Bool {
+        var hasCommandCompletionSnapshot: Bool {
             exitCode != nil
                 || durationMs != nil
                 || status?.nilIfEmpty != nil
                 || success != nil
+                || command?.nilIfEmpty != nil
+                || cwd?.nilIfEmpty != nil
+                || processID?.nilIfEmpty != nil
+                || source?.nilIfEmpty != nil
         }
 
         private var joinedContentText: String? {
