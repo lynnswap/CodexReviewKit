@@ -429,6 +429,42 @@ struct AppServerWireEventTests {
         #expect(processItemID.rawValue == "process-1")
     }
 
+    @Test func preservesReasoningDeltaIndexesInItemIDs() throws {
+        let summary = try decodeNotification("""
+        {
+          "method": "item/reasoning/summaryTextDelta",
+          "params": {
+            "itemId": "reasoning-1",
+            "summaryIndex": 2,
+            "delta": "summary"
+          }
+        }
+        """)
+
+        guard case .textDelta(let summaryItemID, _, _, _, _) = try #require(summary.domainEvents().first) else {
+            Issue.record("expected summary reasoning delta")
+            return
+        }
+        #expect(summaryItemID.rawValue == "reasoning-1:summary:2")
+
+        let raw = try decodeNotification("""
+        {
+          "method": "item/reasoning/textDelta",
+          "params": {
+            "itemId": "reasoning-1",
+            "contentIndex": 3,
+            "delta": "raw"
+          }
+        }
+        """)
+
+        guard case .textDelta(let rawItemID, _, _, _, _) = try #require(raw.domainEvents().first) else {
+            Issue.record("expected raw reasoning delta")
+            return
+        }
+        #expect(rawItemID.rawValue == "reasoning-1:content:3")
+    }
+
     @Test func mapsPartialProgressUpdatesToScopedItems() throws {
         let toolProgress = try decodeNotification("""
         {

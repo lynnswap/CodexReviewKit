@@ -206,13 +206,15 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
             return payload.deltaDomainEvent(
                 kind: .reasoning,
                 family: .reasoning,
-                content: .reasoning(.init(text: "", style: .summary))
+                content: .reasoning(.init(text: "", style: .summary)),
+                itemID: payload.reasoningSummaryItemID
             )
         case .reasoningTextDelta:
             return payload.deltaDomainEvent(
                 kind: .reasoning,
                 family: .reasoning,
-                content: .reasoning(.init(text: "", style: .raw))
+                content: .reasoning(.init(text: "", style: .raw)),
+                itemID: payload.rawReasoningItemID
             )
         case .reasoningSummaryPartAdded:
             return []
@@ -298,6 +300,8 @@ public extension AppServerWireReviewNotification {
         public var status: Status?
         public var startedAtMs: Int64?
         public var completedAtMs: Int64?
+        public var summaryIndex: Int?
+        public var contentIndex: Int?
         public var plan: [PlanStep]
         public var verifications: [String]
         public var changes: [FileChange]
@@ -333,6 +337,8 @@ public extension AppServerWireReviewNotification {
             status: Status? = nil,
             startedAtMs: Int64? = nil,
             completedAtMs: Int64? = nil,
+            summaryIndex: Int? = nil,
+            contentIndex: Int? = nil,
             plan: [PlanStep] = [],
             verifications: [String] = [],
             changes: [FileChange] = [],
@@ -363,6 +369,8 @@ public extension AppServerWireReviewNotification {
             self.status = status
             self.startedAtMs = startedAtMs
             self.completedAtMs = completedAtMs
+            self.summaryIndex = summaryIndex
+            self.contentIndex = contentIndex
             self.plan = plan
             self.verifications = verifications
             self.changes = changes
@@ -395,6 +403,8 @@ public extension AppServerWireReviewNotification {
             case status
             case startedAtMs
             case completedAtMs
+            case summaryIndex
+            case contentIndex
             case plan
             case verifications
             case changes
@@ -428,6 +438,8 @@ public extension AppServerWireReviewNotification {
             self.status = try? container.decodeIfPresent(Status.self, forKey: .status)
             self.startedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .startedAtMs)
             self.completedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
+            self.summaryIndex = try? container.decodeIfPresent(Int.self, forKey: .summaryIndex)
+            self.contentIndex = try? container.decodeIfPresent(Int.self, forKey: .contentIndex)
             self.plan = (try? container.decodeIfPresent([PlanStep].self, forKey: .plan)) ?? []
             self.verifications = (try? container.decodeIfPresent([String].self, forKey: .verifications)) ?? []
             self.changes = (try? container.decodeIfPresent([FileChange].self, forKey: .changes)) ?? []
@@ -465,6 +477,14 @@ public extension AppServerWireReviewNotification {
 
         var outputItemID: String? {
             itemID ?? processID ?? processHandle ?? item?.id.nilIfEmpty ?? item?.processID
+        }
+
+        var reasoningSummaryItemID: String? {
+            itemID.map { "\($0):summary:\(summaryIndex ?? 0)" }
+        }
+
+        var rawReasoningItemID: String? {
+            itemID.map { "\($0):content:\(contentIndex ?? 0)" }
         }
 
         var decodedBase64Output: String? {
