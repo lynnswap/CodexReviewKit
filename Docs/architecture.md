@@ -1,99 +1,170 @@
 # CodexReviewKit Architecture
 
 CodexReviewKit provides ReviewMonitor, a native macOS app for running and
-observing Codex review. The package has one observable review store, one Codex
-app-server gateway, and an internal MCP adapter owned by the app.
+observing Codex review. The package is organized so app-server protocol bytes,
+semantic review events, observable timeline state, UI rendering, and MCP
+responses each have a clear owner.
 
-The package is organized around four ownership boundaries:
+The important architectural invariant is that review progress flows in one
+direction:
 
-- `CodexReview` owns review behavior and observable product state.
-- `CodexReviewAppServer` owns all `codex app-server` JSON-RPC I/O.
-- `CodexReviewMCPServer` converts app-managed MCP tool calls to review commands.
-- `CodexReviewHost` assembles concrete live dependencies.
+```text
+raw app-server wire
+  -> domain review event
+  -> observable review timeline
+  -> UI / MCP / rendering / legacy log projections
+```
 
-`ReviewUI` renders the monitor state and forwards user intent. It does not own
-review rules, app-server protocol details, persistence, or process lifecycle.
+Raw JSON-RPC notifications are an input boundary only. They must not become the
+source of truth for ReviewMonitor UI, MCP responses, or legacy logs after they
+have been converted into domain events.
 
 ## Targets
 
 | Target | Responsibility |
 | --- | --- |
-| `CodexReview` | Review API, `CodexReviewStore`, observable state, and product invariants |
-| `CodexReviewAppServer` | `codex app-server` JSON-RPC protocol, process transport, request serialization, notifications |
-| `CodexReviewMCPServer` | Internal MCP tool request/response conversion and Streamable HTTP endpoint |
+| `CodexReviewDomain` | Semantic review identifiers, kinds, runs, jobs, `ReviewDomainEvent`, `ReviewTimeline`, and `ReviewTimelineItem` |
+| `CodexReviewApplication` | Observation-oriented application store/use-case primitives, including `ReviewStore` and `ReviewObservationAwaiter` |
+| `CodexReview` | Public ReviewMonitor API, `CodexReviewStore`, auth/settings/runtime product state, and legacy log compatibility projections |
+| `CodexReviewAppServerWire` | Raw `codex app-server` review notification DTO decode and conversion into domain events |
+| `CodexReviewAppServer` | Live `codex app-server` process, JSON-RPC transport, request serialization, notification routing, and runtime conversion |
+| `CodexReviewMCPAdapter` | MCP-facing projections from observable review/domain state |
+| `CodexReviewMCPServer` | Internal MCP protocol request/response conversion and Streamable HTTP endpoint |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
-| `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
+| `ReviewMonitorRendering` | Domain timeline rendering helpers that do not know AppKit/SwiftUI or app-server wire |
 | `ReviewUI` | Native monitor UI rendering and user-intent forwarding |
+| `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
+| `TextTransitions` | UI text transition view support |
 
-ReviewMonitor is the product entry point. Review behavior, Codex protocol
-handling, MCP conversion, and UI rendering remain in their owning targets.
+ReviewMonitor is the product entry point. The host target wires the concrete
+runtime together; lower targets do not import the host.
 
-## Runtime Flow
+## Source Of Truth
+
+`CodexReviewDomain` owns the semantic timeline vocabulary. It defines the
+review item kinds, timeline item content, and `ReviewDomainEvent` values that
+describe review progress independently of any transport, UI, or MCP protocol.
+
+`CodexReviewAppServerWire` owns raw app-server notification shapes. Its job is
+to decode wire payloads and expose domain events. It may depend on
+`CodexReviewDomain`, but it must not import `CodexReviewApplication`, UI,
+rendering, or MCP targets.
+
+`CodexReviewAppServer` owns the live process and JSON-RPC connection. It is the
+runtime boundary that consumes app-server requests/notifications and hands
+application-facing review events to the store. App-server wire details stop at
+this boundary.
+
+`ReviewTimeline` and application/store state are the observable source of truth
+after conversion. UI views, rendering helpers, MCP adapters, and legacy log
+support project from the timeline; they do not parse raw app-server events and
+do not make string logs authoritative again.
+
+Legacy log support exists for compatibility with older ReviewMonitor surfaces:
+
+- `ReviewLogEntryTimelineProjection` rebuilds semantic timeline state from
+  existing log entries during migration or compatibility paths.
+- `ReviewTimelineLegacyLogProjection` derives legacy log entries from timeline
+  items when old APIs need them.
+
+Those projections are compatibility edges. New behavior should prefer domain
+events and timeline state as the owner.
+
+## Target Graph
 
 ```mermaid
 flowchart TB
-    subgraph Entry["Entry points"]
-        Monitor["ReviewMonitor.app"]
+    subgraph Domain["CodexReviewDomain"]
+        DomainEvents["ReviewDomainEvent"]
+        Timeline["ReviewTimeline"]
     end
 
-    subgraph Core["CodexReview"]
-        ReviewAPI["ReviewAPI"]
-        Store["CodexReviewStore"]
-        Backend["CodexReviewBackend"]
-        StoreBackend["CodexReviewStoreBackend"]
+    subgraph Application["CodexReviewApplication"]
+        AppStore["ReviewStore"]
+        Awaiter["ReviewObservationAwaiter"]
+    end
+
+    subgraph Product["CodexReview"]
+        PublicStore["CodexReviewStore"]
+        LegacyProjection["Legacy log projections"]
+    end
+
+    subgraph Wire["CodexReviewAppServerWire"]
+        WireDTO["Raw app-server DTOs"]
     end
 
     subgraph AppServer["CodexReviewAppServer"]
-        AppServerBackend["AppServerCodexReviewBackend"]
-        Client["AppServerClient"]
-        Serializer["Request serialization"]
-        Transport["JSON-RPC transport"]
+        Client["JSON-RPC client"]
+        Runtime["Review runtime"]
         Process["codex app-server"]
+    end
+
+    subgraph MCP["MCP"]
+        MCPAdapter["CodexReviewMCPAdapter"]
+        MCPServer["CodexReviewMCPServer"]
+    end
+
+    subgraph Monitor["Monitor surfaces"]
+        Renderer["ReviewMonitorRendering"]
+        UI["ReviewUI"]
     end
 
     subgraph Host["CodexReviewHost"]
         Composition["Composition root"]
-        ToolAdapter["CodexReviewMCPServer"]
-        LiveMonitorBackend["Live monitor backend"]
     end
 
-    subgraph UI["ReviewUI"]
-        Views["AppKit / SwiftUI views"]
-    end
-
-    Monitor --> Views
-    Monitor --> ToolAdapter
-    ToolAdapter --> Store
-    Views --> Store
-    Store --> StoreBackend
-    StoreBackend --> Backend
-    Backend --> AppServerBackend
-    AppServerBackend --> Client
-    Client --> Serializer
-    Client --> Transport
-    Transport --> Process
-    Composition --> ToolAdapter
-    Composition --> LiveMonitorBackend
+    WireDTO --> DomainEvents
+    DomainEvents --> Timeline
+    Timeline --> AppStore
+    Timeline --> PublicStore
+    Timeline --> LegacyProjection
+    Timeline --> MCPAdapter
+    Timeline --> Renderer
+    PublicStore --> UI
+    Renderer --> UI
+    MCPAdapter --> MCPServer
+    Runtime --> WireDTO
+    Runtime --> PublicStore
+    Client --> Process
+    Runtime --> Client
+    Composition --> Runtime
+    Composition --> MCPServer
+    Composition --> PublicStore
 ```
+
+The diagram describes ownership direction, not every SwiftPM dependency.
+Compatibility targets may currently expose older store APIs, but new code
+should not create reverse imports from Domain, Wire, Application, Rendering, UI,
+or MCP adapter targets back into runtime/protocol owners.
+
+## Observation Ownership
+
+ObservationBridge is a subscription primitive. It is not storage, cache, or a
+source of truth.
+
+- The observable owner keeps semantic state: domain timelines, application
+  stores, and product stores.
+- Subscription tokens live with the subscriber that created them. A view
+  controller, awaiter, or driver that starts observation is responsible for
+  cancelling its token when that owner ends.
+- `ReviewObservationAwaiter` belongs in `CodexReviewApplication` because it is a
+  use-case-level awaiter over observable domain state.
+- UI observation tokens are view/controller lifetime details. Any UI projection
+  derived from observed state is transient and can be rebuilt from the timeline.
+- MCP and rendering projections are value snapshots over timeline state. They
+  must not retain ObservationBridge tokens or persist their projection as model
+  state.
 
 ## CodexReview
 
-`CodexReview` is organized by product responsibility. It avoids generic layer
-names when the responsibility is more specific.
+`CodexReview` is the public product surface used by existing ReviewMonitor code.
+It owns review commands, auth/settings/runtime state, network recovery policy,
+diagnostics, and legacy store APIs through `CodexReviewStore`.
 
-| Folder | Contents |
-| --- | --- |
-| `ReviewAPI` | Review request, target, result, selection, and review-facing error types |
-| root files | Backend protocol and app-server-facing DTOs |
-| `Model` | Observable account, settings, workspace, job, log, and parsed finding state |
-| `Store` | `CodexReviewStore`, store backend protocol, preview backend, review commands, ordering, diagnostics |
-| `Settings` | Settings persistence service and settings backend boundary |
-| `Support` | Small module-local utilities |
-
-`CodexReviewStore` is the single source of truth for review, runtime, auth,
-settings, workspace, job, and log state. It is also the command owner for
-`review_start`, `review_await`, `review_read`, `review_list`, `review_cancel`, session close,
-auth actions, and settings updates. UI and MCP both use the same store API.
+`CodexReviewStore` remains the command owner for `review_start`,
+`review_await`, `review_read`, `review_list`, `review_cancel`, session close,
+auth actions, and settings updates. It depends on domain timeline types and
+application awaiters instead of owning app-server wire shapes.
 
 `CodexReviewStoreBackend` is the dependency boundary below the store. Live,
 preview, and test backends all implement that boundary; product state remains in
@@ -101,7 +172,7 @@ the store.
 
 ## App-Server Gateway
 
-`CodexReviewAppServer` treats raw JSON-RPC as the only I/O boundary.
+`CodexReviewAppServer` treats raw JSON-RPC as the only live I/O boundary.
 
 - One live `codex app-server` process maps to one shared connection.
 - `initialize` and `initialized` run once per connection.
@@ -121,9 +192,13 @@ Fake and live tests use the same transport protocol.
 
 ## MCP Boundary
 
-`CodexReviewMCPServer` knows MCP tool names, request arguments, and response
-shape. It calls `CodexReviewStore` commands and does not know Codex JSON-RPC
-details.
+`CodexReviewMCPServer` knows MCP tool names, request arguments, response shape,
+session headers, and Streamable HTTP behavior. It calls store commands and
+adapter projections. It does not know Codex JSON-RPC details.
+
+`CodexReviewMCPAdapter` may depend on domain/product state to build MCP-facing
+value snapshots. It must not import ReviewUI, the app-server runtime, or
+app-server wire DTOs.
 
 ReviewMonitor owns the default Streamable HTTP endpoint at
 `http://localhost:9417/mcp`. The HTTP boundary follows current MCP session
@@ -141,14 +216,20 @@ The public tool surface is:
 
 ## Monitor UI Boundary
 
-`ReviewUI` observes `CodexReviewStore` directly.
+`ReviewUI` observes product/domain state and forwards user intent.
 
 - Views and view controllers render observable state.
 - User actions call store methods.
+- UI rendering may use `ReviewMonitorRendering` helpers over `ReviewTimeline`.
+- UI code must not import app-server runtime, app-server wire, MCP adapter, or
+  MCP server targets.
 - UI tests cover layout, selection, rendering, accessibility-facing text, and
   user-intent forwarding.
-- Review/auth/settings semantics are tested in `CodexReviewTests` and
-  `CodexReviewAppServerTests`.
+- Review/auth/settings semantics are tested in lower target tests.
+
+`ReviewMonitorRendering` is intentionally lower than UI. It can render domain
+timeline values, but it must not import AppKit/SwiftUI UI, app-server, wire, or
+MCP targets.
 
 ## Testing
 
@@ -156,9 +237,13 @@ Default tests are deterministic and do not start a live `codex app-server`.
 
 | Test area | Uses | Verifies |
 | --- | --- | --- |
+| `CodexReviewDomainTests` | Domain timelines and events | Semantic timeline mutation and terminal state |
+| `CodexReviewApplicationTests` | Domain timelines and ObservationBridge awaiters | Use-case observation behavior |
+| `CodexReviewAppServerWireTests` | Raw notification JSON | Wire decode and domain event conversion |
 | `CodexReviewTests` | Fake `CodexReviewStoreBackend` | Review/auth/settings state machines, cancellation, result retention |
 | `CodexReviewAppServerTests` | Fake JSON-RPC transport | App-server schema, serialization, notification buffering, interrupt/cleanup |
-| `CodexReviewMCPServerTests` | Fake review store | MCP conversion and response shape |
+| `CodexReviewMCPAdapterTests` | Domain timeline projections | MCP adapter snapshots |
+| `CodexReviewMCPServerTests` | Fake review store | MCP protocol conversion and response shape |
 | `CodexReviewHostTests` | Fake runtime dependencies | Composition, startup, shutdown |
 | `ReviewUITests` | Preview/test monitor backend | Native UI behavior and user-intent forwarding |
 | `ArchitectureFenceTests` | Source scan | Target ownership and forbidden implementation imports |
@@ -170,3 +255,5 @@ Forbidden test patterns:
 - Starting a live `codex app-server` in default CI tests.
 - Testing behavior only because another implementation happened to behave
   differently.
+- Parsing raw app-server wire or string logs from UI/MCP tests when a domain
+  timeline or store projection can express the behavior.
