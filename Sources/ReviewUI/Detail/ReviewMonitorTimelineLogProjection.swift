@@ -254,6 +254,15 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         if block.phase.isTerminal {
             return block.phase.rawValue
         }
+        if let status = command.status?.rawValue,
+           ReviewItemPhase.normalized(status).isTerminal {
+            return status
+        }
+        if let exitCode = command.exitCode {
+            return exitCode == 0
+                ? ReviewCommandStatus.completed.rawValue
+                : ReviewCommandStatus.failed.rawValue
+        }
         if let status = command.status?.rawValue {
             return status
         }

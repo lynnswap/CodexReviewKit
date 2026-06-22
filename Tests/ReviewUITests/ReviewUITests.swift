@@ -3629,6 +3629,51 @@ struct ReviewUITests {
         #expect(metadata.durationMs == 4_000)
     }
 
+    @Test func timelineProjectionTreatsExitCodeAsTerminalBeforeActiveFallback() throws {
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-active-exited"],
+            activeBlockIDs: ["cmd-active-exited"],
+            activeBlockCount: 1,
+            latestActivityBlockID: "cmd-active-exited",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-active-exited",
+                    sourceItemID: "cmd-active-exited",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    isActive: true,
+                    primaryText: "Running swift test",
+                    rawTranscriptText: "$ swift test\nTests failed",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "swift test",
+                        output: "Tests failed",
+                        exitCode: 1
+                    )),
+                    createdAt: Date(timeIntervalSince1970: 400),
+                    updatedAt: Date(timeIntervalSince1970: 400)
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran swift test")
+        #expect(panel.exitText == "exit 1")
+        #expect(metadata.status == "failed")
+        #expect(metadata.commandStatus == "failed")
+    }
+
     @Test func directTimelineFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-direct-timeline-file-change",
