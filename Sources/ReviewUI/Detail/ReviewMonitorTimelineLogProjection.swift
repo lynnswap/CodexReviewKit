@@ -264,13 +264,13 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                 ? ReviewCommandStatus.completed.rawValue
                 : ReviewCommandStatus.failed.rawValue
         }
-        if let status = command.status?.rawValue {
-            return status
-        }
         if block.isActive {
+            if let status = command.status?.rawValue {
+                return status
+            }
             return block.phase.rawValue
         }
-        return command.output.isEmpty ? block.phase.rawValue : "completed"
+        return ReviewCommandStatus.completed.rawValue
     }
 
     private static func outputOnlyCommandMetadata(

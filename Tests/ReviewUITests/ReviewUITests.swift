@@ -3725,6 +3725,49 @@ struct ReviewUITests {
         #expect(metadata.commandStatus == "failed")
     }
 
+    @Test func timelineProjectionMarksInactiveRunningCommandCompleted() throws {
+        var projection = ReviewMonitorTimelineLogProjection()
+        let document = ReviewTimelineDocument(
+            timelineRevision: .init(rawValue: 1),
+            orderedBlockIDs: ["cmd-inactive-running"],
+            activeBlockIDs: [],
+            activeBlockCount: 0,
+            latestActivityBlockID: "cmd-inactive-running",
+            terminalStatus: nil,
+            terminalSummary: nil,
+            terminalResult: nil,
+            blocks: [
+                .init(
+                    id: "cmd-inactive-running",
+                    sourceItemID: "cmd-inactive-running",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    isActive: false,
+                    primaryText: "Running swift test",
+                    rawTranscriptText: "$ swift test",
+                    content: .command(.init(
+                        title: "Command",
+                        command: "swift test",
+                        status: .inProgress
+                    )),
+                    createdAt: Date(timeIntervalSince1970: 400),
+                    updatedAt: Date(timeIntervalSince1970: 400)
+                ),
+            ]
+        )
+
+        let sourceLog = projection.render(timelineDocument: document)
+        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
+        let panel = try #require(renderedLog.commandOutputPanels.first)
+        let metadata = try #require(sourceLog.blocks.first?.metadata)
+
+        #expect(panel.isActive == false)
+        #expect(panel.title == "Ran swift test")
+        #expect(metadata.status == "completed")
+        #expect(metadata.commandStatus == "completed")
+    }
+
     @Test func directTimelineFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-direct-timeline-file-change",
