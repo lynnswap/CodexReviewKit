@@ -189,14 +189,14 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexReviewTests",
-            dependencies: ["CodexReview", "CodexReviewTesting"],
+            dependencies: ["CodexReview", "CodexReviewDomain", "CodexReviewTesting"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
         ),
         .testTarget(
             name: "CodexReviewAppServerTests",
-            dependencies: ["CodexReviewAppServer", "CodexReviewTesting"],
+            dependencies: ["CodexReviewAppServer", "CodexReviewDomain", "CodexReviewTesting"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

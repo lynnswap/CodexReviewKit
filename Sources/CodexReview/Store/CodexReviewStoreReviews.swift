@@ -571,7 +571,11 @@ extension CodexReviewStore {
         job.core.lifecycle.endedAt = endedAt
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
-        job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
+        let suppressErrorLogTimelineProjection = job.consumeTerminalFailureLogTimelineProjectionSuppression()
+        job.appendLogEntry(
+            .init(kind: .error, text: message, timestamp: endedAt),
+            suppressTimelineProjection: suppressErrorLogTimelineProjection
+        )
         job.timeline.apply(.reviewFailed(message), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
@@ -839,6 +843,16 @@ extension CodexReviewStore {
         }
         var updatedRun = currentRun
         switch event {
+        case .domainEvents(let events, let legacyProjectionSuppressionCount):
+            job.applyDirectTimelineEvents(
+                events,
+                legacyProjectionSuppressionCount: legacyProjectionSuppressionCount,
+                at: clock.now()
+            )
+        case .suppressNextLegacyTimelineProjection:
+            job.suppressNextLegacyTimelineProjection()
+        case .suppressNextTerminalFailureLogTimelineProjection:
+            job.suppressNextTerminalFailureLogTimelineProjection()
         case .started(let turnID, let reviewThreadID, let model):
             job.core.run.turnID = turnID
             job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
@@ -859,6 +873,7 @@ extension CodexReviewStore {
             job.appendLogEntry(.init(kind: .agentMessage, text: text, timestamp: clock.now()))
         case .messageDelta(let text, let itemID):
             guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
+                job.discardPendingLegacyTimelineProjectionSuppression()
                 return updatedRun
             }
             job.core.output.lastAgentMessage = updatedMessage
@@ -1052,7 +1067,14 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .message,
+             .messageDelta,
+             .log,
+             .logEntry:
             false
         }
     }
@@ -1091,7 +1113,7 @@ private extension CodexReviewJob {
         core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
-        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage })
+        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage }, resetDirectTimeline: true)
     }
 }
 

@@ -4,6 +4,9 @@ import CodexReviewDomain
 @MainActor
 extension CodexReviewJob {
     package func rebuildTimelineFromLogEntries(keepingTerminal: Bool = true) {
+        guard usesDirectTimelineEvents == false else {
+            return
+        }
         timeline.reset(keepingTerminal: keepingTerminal)
         for entry in logEntries {
             applyTimelineEntry(entry)
@@ -47,9 +50,92 @@ extension CodexReviewJob {
             timeline.apply(.itemUpdated(seed), at: entry.timestamp)
         }
     }
+
+    package func trimTimelineTextContentToLogEntries() {
+        guard directTimelineTextItemIDs.isEmpty == false
+            || legacyProjectedTimelineTextItemIDs.isEmpty == false else {
+            return
+        }
+        var textByItemID: [ReviewTimelineItem.ID: String] = [:]
+        for entry in logEntries where entry.canProvideDirectTimelineText {
+            for itemID in entry.directTimelineTextCandidateIDs {
+                if entry.shouldApplyAsTimelineDelta {
+                    textByItemID[itemID, default: ""] += entry.text
+                } else {
+                    textByItemID[itemID] = entry.text
+                }
+            }
+        }
+        for itemID in directTimelineTextItemIDs {
+            let text: String
+            if let retainedText = textByItemID[itemID] {
+                text = retainedText
+            } else if directTimelineTextItemIDsWithCompatibilityLog.contains(itemID) {
+                text = ""
+            } else {
+                continue
+            }
+            guard let item = timeline.item(for: itemID),
+                  let trimmedContent = item.content.replacingTimelineText(text)
+            else {
+                continue
+            }
+            timeline.updateItemContent(trimmedContent, for: itemID)
+        }
+        for itemID in legacyProjectedTimelineTextItemIDs {
+            guard let item = timeline.item(for: itemID),
+                  let trimmedContent = item.content.replacingTimelineText(textByItemID[itemID] ?? "")
+            else {
+                continue
+            }
+            timeline.updateItemContent(trimmedContent, for: itemID)
+        }
+    }
 }
 
-private extension ReviewLogEntry {
+package extension ReviewLogEntry {
+    var canProvideDirectTimelineText: Bool {
+        switch kind {
+        case .agentMessage,
+             .commandOutput,
+             .diagnostic,
+             .error,
+             .plan,
+             .rawReasoning,
+             .reasoning,
+             .reasoningSummary,
+             .todoList,
+             .toolCall:
+            true
+        case .command,
+             .contextCompaction,
+             .event,
+             .progress:
+            false
+        }
+    }
+
+    var directTimelineTextCandidateIDs: [ReviewTimelineItem.ID] {
+        var ids: [ReviewTimelineItem.ID] = []
+        if let rawID = metadata?.itemID?.nilIfEmpty ?? groupID?.nilIfEmpty {
+            ids.append(.init(rawValue: rawID))
+            if kind == .rawReasoning,
+               let directRawReasoningID = rawID.rawReasoningDirectTimelineItemID {
+                ids.append(.init(rawValue: directRawReasoningID))
+            }
+            if kind == .todoList {
+                ids.append(.init(rawValue: "\(rawID):turn/plan/updated"))
+            }
+            if kind == .toolCall,
+               metadata?.sourceType == "mcpToolCall" {
+                ids.append(.init(rawValue: "\(rawID):progress"))
+            }
+        }
+        ids.append(timelineItemID)
+        var seen: Set<ReviewTimelineItem.ID> = []
+        return ids.filter { seen.insert($0).inserted }
+    }
+
     var timelineItemID: ReviewTimelineItem.ID {
         let rawID: String = if shouldUseSemanticTimelineID {
             semanticTimelineItemID
@@ -295,6 +381,52 @@ private extension ReviewTimelineItem.CommandAction {
             path: action.path,
             query: action.query
         )
+    }
+}
+
+private extension ReviewTimelineItem.Content {
+    func replacingTimelineText(_ text: String) -> Self? {
+        switch self {
+        case .command(var command):
+            command.output = text
+            return .command(command)
+        case .diagnostic(var diagnostic):
+            diagnostic.message = text
+            return .diagnostic(diagnostic)
+        case .fileChange(var fileChange):
+            fileChange.output = text
+            return .fileChange(fileChange)
+        case .message:
+            return .message(.init(text: text))
+        case .plan:
+            return .plan(.init(markdown: text))
+        case .reasoning(let reasoning):
+            return .reasoning(.init(text: text, style: reasoning.style))
+        case .toolCall(var toolCall):
+            if toolCall.progress != nil {
+                toolCall.progress = text
+            } else {
+                toolCall.result = text
+            }
+            return .toolCall(toolCall)
+        case .approval, .contextCompaction, .search, .unknown:
+            return nil
+        }
+    }
+}
+
+private extension String {
+    var rawReasoningDirectTimelineItemID: String? {
+        guard let separator = lastIndex(of: ":") else {
+            return nil
+        }
+        let contentIndex = self[index(after: separator)...]
+        guard contentIndex.isEmpty == false,
+              contentIndex.allSatisfy(\.isNumber)
+        else {
+            return nil
+        }
+        return "\(self[..<separator]):content:\(contentIndex)"
     }
 }
 
