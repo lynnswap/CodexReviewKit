@@ -58,6 +58,7 @@ private extension ReviewLogEntry {
                 .joined(separator: ".")
             let text = toolCall.error
                 ?? toolCall.result
+                ?? toolCall.progress
                 ?? label.nilIfEmpty
                 ?? "Tool call"
             return [entry(

@@ -718,6 +718,9 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(toolCall.progress == "Reading review job")
+            #expect(try store.readReview(jobID: "job-1", logFilter: .all).logs.contains {
+                $0.kind == .toolCall && $0.text == "Reading review job"
+            })
         }
     }
 
