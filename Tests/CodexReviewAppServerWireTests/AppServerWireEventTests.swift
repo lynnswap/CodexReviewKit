@@ -383,6 +383,59 @@ struct AppServerWireEventTests {
             Issue.record("expected plan content")
         }
     }
+
+    @Test func mapsTerminalThreadNotificationsBeforeUnknownFallback() throws {
+        let closed = try decodeNotification("""
+        {
+          "method": "thread/closed",
+          "params": {
+            "threadId": "thread-1"
+          }
+        }
+        """)
+
+        guard case .reviewFailed(let closedMessage) = try #require(closed.domainEvents().first) else {
+            Issue.record("expected thread closed failure")
+            return
+        }
+        #expect(closedMessage.isEmpty)
+
+        let notLoaded = try decodeNotification("""
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-1",
+            "status": {
+              "type": "notLoaded"
+            }
+          }
+        }
+        """)
+
+        guard case .reviewFailed(let notLoadedMessage) = try #require(notLoaded.domainEvents().first) else {
+            Issue.record("expected notLoaded failure")
+            return
+        }
+        #expect(notLoadedMessage == "notLoaded")
+
+        let interrupted = try decodeNotification("""
+        {
+          "method": "thread/status/changed",
+          "params": {
+            "threadId": "thread-1",
+            "status": {
+              "type": "interrupted"
+            }
+          }
+        }
+        """)
+
+        guard case .reviewCancelled(let interruptedMessage) = try #require(interrupted.domainEvents().first) else {
+            Issue.record("expected interrupted cancellation")
+            return
+        }
+        #expect(interruptedMessage == "interrupted")
+    }
 }
 
 private func decodeNotification(_ json: String) throws -> AppServerWireReviewNotification {

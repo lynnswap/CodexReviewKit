@@ -238,6 +238,10 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
             return payload.planUpdateEvent(method: method)
         case .threadCompacted:
             return payload.contextCompactionEvent(method: method)
+        case .threadClosed:
+            return [.reviewFailed(payload.terminalMessage ?? payload.status?.type ?? "")]
+        case .threadStatusChanged:
+            return payload.threadStatusEvents(method: method)
         case .error:
             return payload.errorEvents(method: method)
         case .warning, .guardianWarning, .deprecationNotice, .configWarning, .diagnostic:
@@ -528,6 +532,17 @@ public extension AppServerWireReviewNotification {
                 phase: .completed,
                 content: .contextCompaction(.init(title: status?.type ?? ""))
             ))]
+        }
+
+        func threadStatusEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+            switch normalizedStatus(status?.type) {
+            case "notloaded", "systemerror", "closed":
+                return [.reviewFailed(terminalMessage ?? status?.type ?? "")]
+            case "cancelled", "canceled", "interrupted", "aborted":
+                return [.reviewCancelled(terminalMessage ?? status?.type ?? "")]
+            default:
+                return unknownEvent(method: method)
+            }
         }
 
         func errorEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
@@ -1010,6 +1025,8 @@ private extension ReviewWireEventKind {
     static let configWarning: Self = "configWarning"
     static let diagnostic: Self = "diagnostic"
     static let threadCompacted: Self = "thread/compacted"
+    static let threadClosed: Self = "thread/closed"
+    static let threadStatusChanged: Self = "thread/status/changed"
 }
 
 private extension KeyedDecodingContainer {
