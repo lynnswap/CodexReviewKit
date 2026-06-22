@@ -601,6 +601,59 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func fileChangeStatusCompatibilityLogDoesNotTrimDirectPatchText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "file-1:patch")
+            let patchText = String(repeating: "diff --git a/Sources/App.swift b/Sources/App.swift\n", count: 8_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .fileChange,
+                    family: .fileChange,
+                    phase: .running,
+                    content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "File changes updated.",
+                groupID: "file-1",
+                replacesGroup: false,
+                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 2
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .fileChange(let fileChange) = item.content else {
+                Issue.record("expected file-change timeline content")
+                return
+            }
+            #expect(fileChange.output == patchText)
+        }
+    }
+
     @Test func directRawReasoningTimelineTextTrimUsesLegacyGroupIDAndBumpsRevision() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

@@ -1188,12 +1188,12 @@ private extension ReviewTimelineItem.Content {
             command.output.isEmpty == false
         case .diagnostic(let diagnostic):
             diagnostic.message.isEmpty == false
-        case .fileChange(let fileChange):
-            fileChange.output.isEmpty == false
         case .message,
              .plan,
              .reasoning:
             true
+        case .fileChange:
+            false
         case .toolCall(let toolCall):
             toolCall.progress?.isEmpty == false
                 || toolCall.result?.isEmpty == false
