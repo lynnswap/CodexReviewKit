@@ -453,6 +453,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
     @ObservationIgnored
     private var pendingDirectTimelineTextItemIDsForCompatibilityLog: [ReviewTimelineItem.ID]
     @ObservationIgnored
+    private var latestDirectTimelineTextItemIDs: [ReviewTimelineItem.ID]
+    @ObservationIgnored
     package var legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     public private(set) var logEntries: [ReviewLogEntry]
     public private(set) var logText: String
@@ -505,6 +507,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.directTimelineTextItemIDsWithCompatibilityLog = []
         self.directTimelineTextCompatibilityItemIDsByLogEntryID = [:]
         self.pendingDirectTimelineTextItemIDsForCompatibilityLog = []
+        self.latestDirectTimelineTextItemIDs = []
         self.legacyProjectedTimelineTextItemIDs = []
         self.logState = initialState.logState
         self.logEntries = initialState.entries
@@ -541,6 +544,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             directTimelineTextItemIDsWithCompatibilityLog.removeAll(keepingCapacity: true)
             directTimelineTextCompatibilityItemIDsByLogEntryID.removeAll(keepingCapacity: true)
             pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll(keepingCapacity: true)
+            latestDirectTimelineTextItemIDs.removeAll(keepingCapacity: true)
             legacyProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
         }
         if usesDirectTimelineEvents {
@@ -561,7 +565,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
             logState = LogState(entries: logEntries)
         }
         if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
-            recordDirectTimelineTextCompatibilityLog(for: entry)
+            recordDirectTimelineTextCompatibilityLog(
+                for: entry,
+                allowsPendingFallback: suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
+            )
         }
         if suppressTimelineProjection == false,
            consumeLegacyTimelineProjectionSuppression() == false {
@@ -612,6 +619,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             }
             timeline.apply(event, at: timestamp)
         }
+        latestDirectTimelineTextItemIDs = directTextItemIDsApplied
         if legacyProjectionSuppressionCount > 0 {
             appendPendingDirectTimelineTextItemIDsForCompatibilityLog(directTextItemIDsApplied)
         }
@@ -627,13 +635,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
     }
 
-    private func recordDirectTimelineTextCompatibilityLog(for entry: ReviewLogEntry) {
+    private func recordDirectTimelineTextCompatibilityLog(
+        for entry: ReviewLogEntry,
+        allowsPendingFallback: Bool
+    ) {
         var itemIDs: Set<ReviewTimelineItem.ID> = []
         for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
             itemIDs.insert(itemID)
         }
         if itemIDs.isEmpty,
-           pendingLegacyTimelineProjectionSuppressions > 0,
+           allowsPendingFallback,
            let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
             itemIDs.insert(pendingItemID)
         }
@@ -676,10 +687,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     package func suppressNextLegacyTimelineProjection() {
         pendingLegacyTimelineProjectionSuppressions += 1
+        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
     }
 
     package func suppressNextTerminalFailureLogTimelineProjection() {
         pendingTerminalFailureLogTimelineProjectionSuppressions += 1
+        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
     }
 
     package func discardPendingLegacyTimelineProjectionSuppression() {
@@ -1071,6 +1084,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         .rawReasoning,
         .diagnostic,
         .error,
+        .progress,
+        .event,
     ]
 
     private nonisolated static let prefixTrimmableCappedKinds = cappedLogKinds.subtracting([.rawReasoning, .diagnostic, .error])

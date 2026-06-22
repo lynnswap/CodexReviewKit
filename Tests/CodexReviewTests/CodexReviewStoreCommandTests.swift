@@ -286,24 +286,30 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "error:turn-1")
+            let longError = String(repeating: "App-server failed.", count: 20_000)
             await backend.yield(.domainEvents([
                 .itemUpdated(.init(
                     id: itemID,
                     kind: .init(rawValue: "error"),
                     family: .diagnostic,
                     phase: .failed,
-                    content: .diagnostic(.init(message: "App-server failed."))
+                    content: .diagnostic(.init(message: longError))
                 )),
             ], legacyProjectionSuppressionCount: 0))
             await backend.yield(.suppressNextTerminalFailureLogTimelineProjection)
-            await backend.yield(.failed("App-server failed."))
+            await backend.yield(.failed(longError))
 
             #expect(await waitUntil {
                 store.job(id: "job-1")?.core.lifecycle.status == .failed
             })
             let job = try #require(store.job(id: "job-1"))
-            #expect(job.logEntries.contains { $0.kind == .error && $0.text == "App-server failed." })
-            #expect(job.timeline.item(for: itemID) != nil)
+            #expect(job.logEntries.contains { $0.kind == .error })
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .diagnostic(let diagnostic) = item.content else {
+                Issue.record("expected diagnostic timeline content")
+                return
+            }
+            #expect(diagnostic.message.count < longError.count)
             #expect(job.timeline.items.count == 1)
         }
     }
@@ -544,6 +550,54 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(message.text.count < longText.count)
+        }
+    }
+
+    @Test func eventCompatibilityLogTrimsDirectDiagnosticTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "diff-1")
+            let longText = String(repeating: "diff --git\n", count: 40_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .init(rawValue: "turn/diff/updated"),
+                    family: .diagnostic,
+                    phase: .completed,
+                    content: .diagnostic(.init(message: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .event,
+                text: longText,
+                groupID: itemID.rawValue,
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .event && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .diagnostic(let diagnostic) = item.content else {
+                Issue.record("expected diagnostic timeline content")
+                return
+            }
+            #expect(diagnostic.message.count < longText.count)
         }
     }
 

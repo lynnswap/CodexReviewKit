@@ -109,7 +109,9 @@ package extension ReviewLogEntry {
              .commandOutput,
              .diagnostic,
              .error,
+             .event,
              .plan,
+             .progress,
              .rawReasoning,
              .reasoning,
              .reasoningSummary,
@@ -117,9 +119,7 @@ package extension ReviewLogEntry {
              .toolCall:
             true
         case .command,
-             .contextCompaction,
-             .event,
-             .progress:
+             .contextCompaction:
             false
         }
     }
