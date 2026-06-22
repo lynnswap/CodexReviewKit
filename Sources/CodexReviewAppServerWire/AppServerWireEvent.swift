@@ -471,7 +471,7 @@ public extension AppServerWireReviewNotification {
                 return unknownEvent(method: method)
             }
             return [.itemUpdated(ReviewTimelineItemSeed(
-                id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+                id: .init(rawValue: itemID.map { "\($0):progress" } ?? syntheticItemID(method: method.rawValue)),
                 kind: .mcpToolCall,
                 family: .tool,
                 phase: .running,
@@ -480,11 +480,15 @@ public extension AppServerWireReviewNotification {
         }
 
         func fileChangeUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
-            let item = item ?? Item(id: itemID ?? syntheticItemID(method: method.rawValue), type: .fileChange)
-            return [.itemUpdated(seed(
-                for: item,
-                phase: item.phase(default: .running),
-                content: .fileChange(.init(title: item.path ?? "", output: message ?? delta ?? diff ?? ""))
+            let updateItemID = item?.path?.nilIfEmpty == nil
+                ? itemID.map { "\($0):patch" }
+                : item?.id.nilIfEmpty ?? itemID
+            return [.itemUpdated(ReviewTimelineItemSeed(
+                id: .init(rawValue: updateItemID ?? syntheticItemID(method: method.rawValue)),
+                kind: .fileChange,
+                family: .fileChange,
+                phase: item?.phase(default: .running) ?? .running,
+                content: .fileChange(.init(title: item?.path ?? "", output: message ?? delta ?? diff ?? ""))
             ))]
         }
 

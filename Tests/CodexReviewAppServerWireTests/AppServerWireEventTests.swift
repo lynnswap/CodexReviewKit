@@ -252,6 +252,55 @@ struct AppServerWireEventTests {
         }
     }
 
+    @Test func mapsPartialProgressUpdatesToScopedItems() throws {
+        let toolProgress = try decodeNotification("""
+        {
+          "method": "item/mcpToolCall/progress",
+          "params": {
+            "itemId": "tool-1",
+            "message": "Reading review job"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let toolSeed) = try #require(toolProgress.domainEvents().first) else {
+            Issue.record("expected tool progress update")
+            return
+        }
+        #expect(toolSeed.id.rawValue == "tool-1:progress")
+        #expect(toolSeed.family == .tool)
+        if case .toolCall(let tool) = toolSeed.content {
+            #expect(tool.result == "Reading review job")
+            #expect(tool.server == nil)
+            #expect(tool.tool == nil)
+        } else {
+            Issue.record("expected tool progress content")
+        }
+
+        let filePatch = try decodeNotification("""
+        {
+          "method": "item/fileChange/patchUpdated",
+          "params": {
+            "itemId": "file-1",
+            "message": "patch"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let fileSeed) = try #require(filePatch.domainEvents().first) else {
+            Issue.record("expected file patch update")
+            return
+        }
+        #expect(fileSeed.id.rawValue == "file-1:patch")
+        #expect(fileSeed.family == .fileChange)
+        if case .fileChange(let fileChange) = fileSeed.content {
+            #expect(fileChange.title.isEmpty)
+            #expect(fileChange.output == "patch")
+        } else {
+            Issue.record("expected file patch content")
+        }
+    }
+
     @Test func mapsTerminalAndDiagnosticNotificationsWithoutFallbackDisplayText() throws {
         let completed = try decodeNotification("""
         {
