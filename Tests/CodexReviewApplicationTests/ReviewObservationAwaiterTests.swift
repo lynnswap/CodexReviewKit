@@ -30,6 +30,30 @@ struct ReviewObservationAwaiterTests {
         #expect(result)
     }
 
+    @Test func resumesWhenTimelineCancellationReachesTerminalState() async throws {
+        let timeline = ReviewTimeline()
+        timeline.apply(.itemStarted(.init(
+            id: "cmd-1",
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(.init(command: "swift test"))
+        )))
+
+        let task = Task { @MainActor in
+            await ReviewObservationAwaiter.waitUntilTerminal(
+                timeline: timeline,
+                timeout: .seconds(1)
+            )
+        }
+        await Task.yield()
+
+        timeline.apply(.reviewCancelled("Stop"))
+
+        let result = await task.value
+        #expect(result)
+    }
+
     @Test func returnsFalseOnTimeout() async throws {
         let timeline = ReviewTimeline()
         timeline.apply(.itemStarted(.init(

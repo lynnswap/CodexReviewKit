@@ -4,12 +4,6 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
-    package struct ReviewTerminalWaiter {
-        package var id: UUID
-        package var continuation: CheckedContinuation<Void, Never>
-        package var timeoutTask: Task<Void, Never>?
-    }
-
     public package(set) var serverState: CodexReviewServerState = .stopped
     public let auth: CodexReviewAuthModel
     package let settings: SettingsStore
@@ -34,7 +28,6 @@ public final class CodexReviewStore {
     @ObservationIgnored package var startupCancellations: [String: ReviewCancellation] = [:]
     @ObservationIgnored package var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored package var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored package var reviewTerminalWaiters: [String: [ReviewTerminalWaiter]] = [:]
     @ObservationIgnored package var closedSessions: Set<String> = []
     @ObservationIgnored package var accountRateLimitAutoRefreshDriver: CodexReviewStoreRateLimitAutoRefreshDriver?
 
@@ -83,12 +76,6 @@ public final class CodexReviewStore {
         }
         for task in runtimeStopDetachedReviewWorkerTasks.values {
             task.cancel()
-        }
-        for waiters in reviewTerminalWaiters.values {
-            for waiter in waiters {
-                waiter.timeoutTask?.cancel()
-                waiter.continuation.resume()
-            }
         }
     }
 

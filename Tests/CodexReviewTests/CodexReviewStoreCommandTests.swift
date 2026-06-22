@@ -123,6 +123,61 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func awaitReviewReturnsCurrentSnapshotOnTimeout() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let start = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await start
+
+            let snapshot = try await store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .milliseconds(10)
+            )
+
+            #expect(snapshot.core.lifecycle.status == .running)
+            #expect(snapshot.core.output.hasFinalReview == false)
+        }
+    }
+
+    @Test func awaitReviewReturnsWhenLocalTerminationUpdatesTimeline() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let start = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await start
+
+            async let awaited = store.awaitReview(
+                sessionID: "session-1",
+                jobID: "job-1",
+                timeout: .seconds(1)
+            )
+            await Task.yield()
+            store.terminateAllRunningJobsLocally(
+                failureMessage: "Review runtime stopped."
+            )
+            let final = try await awaited
+
+            #expect(final.core.lifecycle.status == .failed)
+            #expect(final.core.output.summary == "Failed to cancel review: Review runtime stopped.")
+        }
+    }
+
     @Test func forceStartWhileRunningInvokesBackendRestartPath() async {
         let reviewBackend = FakeCodexReviewBackend()
         let backend = TestingCodexReviewStoreBackend(reviewBackend: reviewBackend)

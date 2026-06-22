@@ -98,12 +98,5 @@ extension CodexReviewStore {
         startupCancellations.removeAll(keepingCapacity: false)
         activeRuns.removeAll(keepingCapacity: false)
         reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
-
-        let waiters = reviewTerminalWaiters.values.flatMap { $0 }
-        reviewTerminalWaiters.removeAll(keepingCapacity: false)
-        for waiter in waiters {
-            waiter.timeoutTask?.cancel()
-            waiter.continuation.resume()
-        }
     }
 }
