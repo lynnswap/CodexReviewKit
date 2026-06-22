@@ -3193,8 +3193,30 @@ struct ReviewUITests {
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
             logEntries: [
-                .init(kind: .command, groupID: "cmd_1", text: "$ git diff --stat"),
-                .init(kind: .commandOutput, groupID: "cmd_1", text: "README.md | 1 +"),
+                .init(
+                    kind: .command,
+                    groupID: "cmd_1",
+                    text: "$ git diff --stat",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "cmd_1",
+                        command: "git diff --stat",
+                        commandStatus: "completed"
+                    )
+                ),
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd_1",
+                    text: "README.md | 1 +",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "cmd_1",
+                        command: "git diff --stat",
+                        commandStatus: "completed"
+                    )
+                ),
                 .init(kind: .agentMessage, text: "No correctness issues found.")
             ]
         )
@@ -3834,10 +3856,10 @@ struct ReviewUITests {
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
-            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Running swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3846,7 +3868,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -3856,7 +3878,7 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }
     }
