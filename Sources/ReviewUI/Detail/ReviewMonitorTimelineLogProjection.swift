@@ -126,7 +126,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                 text: fileChange.output.isEmpty ? fileChange.title : fileChange.output,
                 metadata: fileChangeMetadata(
                     title: fileChange.title,
-                    status: fileChange.status?.rawValue ?? block.phase.rawValue,
+                    status: fileChangeStatus(for: block, fileChange: fileChange),
                     path: fileChange.paths.first
                 )
             )]
@@ -286,6 +286,16 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             status: status,
             path: path
         )
+    }
+
+    private static func fileChangeStatus(
+        for block: ReviewTimelineDocument.Block,
+        fileChange: ReviewTimelineDocument.FileChange
+    ) -> String {
+        if block.phase.isTerminal {
+            return block.phase.rawValue
+        }
+        return fileChange.status?.rawValue ?? block.phase.rawValue
     }
 
     private static func commandAction(

@@ -3611,7 +3611,8 @@ struct ReviewUITests {
             content: .fileChange(.init(
                 title: "Updated Sources/App.swift",
                 output: "Sources/App.swift | 12 ++++++------",
-                paths: ["Sources/App.swift"]
+                paths: ["Sources/App.swift"],
+                status: .started
             ))
         )))
 
