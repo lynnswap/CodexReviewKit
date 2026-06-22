@@ -3361,6 +3361,119 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests failed") == true)
     }
 
+    @Test func directTimelineRunningCommandOutputStaysActive() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-running-command",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemStarted(.init(
+            id: "cmd-running-direct",
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(.init(
+                command: "swift test",
+                output: "Building..."
+            )),
+            startedAt: Date(timeIntervalSince1970: 300)
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Running swift test")
+        }
+        #expect(snapshot.log.contains("Running swift test"))
+        #expect(snapshot.log.contains("Ran swift test") == false)
+        #expect(snapshot.log.contains("Building...") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-running-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(transport.logCommandOutputPanelResultTextForTesting == "running")
+        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Building...") == true)
+    }
+
+    @Test func directTimelineFileChangePreservesPanelTitle() async throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-direct-timeline-file-change",
+            cwd: "/tmp/workspace-alpha",
+            targetSummary: "Uncommitted changes",
+            threadID: UUID().uuidString,
+            turnID: UUID().uuidString,
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            summary: "Running review.",
+            logEntries: []
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [job])
+        )
+        let backend = makeWindowHarness(
+            store: store,
+            contentSize: NSSize(width: 860, height: 520)
+        )
+        let viewController = backend.viewController
+        let window = backend.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        _ = try await awaitTransportRender(transport)
+
+        job.timeline.apply(.itemCompleted(.init(
+            id: "file-change-direct",
+            kind: .fileChange,
+            family: .fileChange,
+            phase: .completed,
+            content: .fileChange(.init(
+                title: "Updated Sources/App.swift",
+                output: "Sources/App.swift | 12 ++++++------",
+                paths: ["Sources/App.swift"],
+                status: .completed
+            ))
+        )))
+
+        let snapshot = try await awaitTransportRender(transport) {
+            $0.log.contains("Updated Sources/App.swift")
+        }
+        #expect(snapshot.log.contains("Updated Sources/App.swift"))
+        #expect(snapshot.log.contains("Ran command") == false)
+        #expect(snapshot.log.contains("Sources/App.swift | 12") == false)
+        #expect(transport.logCommandOutputPanelCountForTesting == 1)
+
+        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:file-change-direct")
+        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
+        await awaitNativeLayoutTurn()
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?
+                .contains("Sources/App.swift | 12 ++++++------") == true
+        )
+    }
+
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-context-compaction-marker",

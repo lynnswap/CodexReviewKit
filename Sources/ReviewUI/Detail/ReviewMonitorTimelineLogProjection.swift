@@ -256,7 +256,10 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         if block.phase.isTerminal {
             return block.phase.rawValue
         }
-        return block.phase.rawValue
+        if block.isActive, block.startedAt != nil {
+            return block.phase.rawValue
+        }
+        return command.output.isEmpty ? block.phase.rawValue : "completed"
     }
 
     private static func genericCommandOutputMetadata(
@@ -265,7 +268,9 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         .init(
             sourceType: "command",
             title: "Command output",
-            status: block.phase.isTerminal ? block.phase.rawValue : "completed"
+            status: block.phase.isTerminal || (block.isActive && block.startedAt != nil)
+                ? block.phase.rawValue
+                : "completed"
         )
     }
 
