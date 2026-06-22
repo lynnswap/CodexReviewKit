@@ -1,5 +1,7 @@
 import Foundation
 import CodexReview
+import CodexReviewAppServerWire
+import CodexReviewDomain
 import OSLog
 
 private let appServerBackendLogger = Logger(
@@ -726,6 +728,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let routed = AppServerRoutedReviewNotification(
             sequence: reviewNotificationSequence,
             method: notification.method,
+            params: notification.params,
             payload: payload
         )
         if let threadID = payload.threadID {
@@ -800,6 +803,7 @@ package struct AppServerReviewEventSessionMetrics: Equatable, Sendable {
 private struct AppServerRoutedReviewNotification: Sendable {
     var sequence: Int
     var method: String
+    var params: Data
     var payload: TurnNotificationPayload
 }
 
@@ -808,6 +812,7 @@ private struct DecodedReviewNotification {
     var turnID: String?
     var startsReviewMode: Bool
     var finishesReviewMode: Bool
+    var hasDirectTimelineEvents: Bool
 
     var reviewExitResult: String? {
         guard finishesReviewMode else {
@@ -839,6 +844,7 @@ private struct PendingStreamedLogEntry: Sendable {
     var text: String
     var groupID: String
     var metadata: ReviewLogEntry.Metadata?
+    var suppressesTimelineProjection: Bool
 
     var key: Key {
         .init(
@@ -849,17 +855,20 @@ private struct PendingStreamedLogEntry: Sendable {
         )
     }
 
-    var event: CodexReviewBackendModel.Review.Event {
-        .logEntry(
+    var events: [CodexReviewBackendModel.Review.Event] {
+        let logEntry = CodexReviewBackendModel.Review.Event.logEntry(
             kind: kind,
             text: text,
             groupID: groupID,
             replacesGroup: false,
             metadata: metadata
         )
+        return suppressesTimelineProjection
+            ? [.suppressNextLegacyTimelineProjection, logEntry]
+            : [logEntry]
     }
 
-    init?(_ event: CodexReviewBackendModel.Review.Event) {
+    init?(_ event: CodexReviewBackendModel.Review.Event, suppressesTimelineProjection: Bool = false) {
         guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
               text.isEmpty == false,
               replacesGroup == false,
@@ -883,10 +892,15 @@ private struct PendingStreamedLogEntry: Sendable {
         self.text = text
         self.groupID = groupID
         self.metadata = metadata
+        self.suppressesTimelineProjection = suppressesTimelineProjection
     }
 
     mutating func append(_ suffix: String) {
         text += suffix
+    }
+
+    mutating func suppressTimelineProjection() {
+        suppressesTimelineProjection = true
     }
 }
 
@@ -1134,7 +1148,7 @@ private actor AppServerReviewEventSession {
                     return
                 }
             }
-            if decoded.events.contains(where: { $0.isTerminal == false }),
+            if decoded.events.contains(where: \.triggersSyntheticStartedTurn),
                emittedStartedTurnIDs.contains(turnID) == false
             {
                 emittedStartedTurnIDs.insert(turnID)
@@ -1186,8 +1200,26 @@ private actor AppServerReviewEventSession {
             }
         }
 
-        for event in decoded.events {
-            if bufferStreamedLog(event) {
+        for index in decoded.events.indices {
+            let event = decoded.events[index]
+            if case .domainEvents = event {
+                let followingEvents = decoded.events[decoded.events.index(after: index)...]
+                if shouldFlushPendingStreamedLogBeforeDomainEvent(
+                    followingEvents: followingEvents,
+                    suppressTimelineProjection: decoded.hasDirectTimelineEvents
+                ),
+                   await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+                    return
+                }
+                if await emit(event, controlThreadID: controlThreadID) {
+                    return
+                }
+                continue
+            }
+            if bufferStreamedLog(
+                event,
+                suppressTimelineProjection: decoded.hasDirectTimelineEvents
+            ) {
                 continue
             }
             if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
@@ -1296,6 +1328,11 @@ private actor AppServerReviewEventSession {
         switch event {
         case .started, .message, .messageDelta, .log:
             return true
+        case .domainEvents(let events, _):
+            return events.contains(where: \.isCommandProgressBoundary)
+        case .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection:
+            return false
         case .logEntry(let kind, _, _, _, _):
             return kind != .command && kind != .commandOutput
         case .completed, .failed, .cancelled:
@@ -1338,12 +1375,49 @@ private actor AppServerReviewEventSession {
         return false
     }
 
-    private func bufferStreamedLog(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        guard let entry = PendingStreamedLogEntry(event) else {
+    private func shouldFlushPendingStreamedLogBeforeDomainEvent(
+        followingEvents: ArraySlice<CodexReviewBackendModel.Review.Event>,
+        suppressTimelineProjection: Bool
+    ) -> Bool {
+        guard pendingStreamedLogEntries.isEmpty == false else {
+            return false
+        }
+        return followingEvents.contains {
+            canCoalescePendingStreamedLog(
+                with: $0,
+                suppressTimelineProjection: suppressTimelineProjection
+            )
+        } == false
+    }
+
+    private func canCoalescePendingStreamedLog(
+        with event: CodexReviewBackendModel.Review.Event,
+        suppressTimelineProjection: Bool
+    ) -> Bool {
+        guard let entry = PendingStreamedLogEntry(
+            event,
+            suppressesTimelineProjection: suppressTimelineProjection
+        ) else {
+            return false
+        }
+        return pendingStreamedLogIndexByKey[entry.key] != nil
+    }
+
+    private func bufferStreamedLog(
+        _ event: CodexReviewBackendModel.Review.Event,
+        suppressTimelineProjection: Bool = false
+    ) -> Bool {
+        guard let entry = PendingStreamedLogEntry(
+            event,
+            suppressesTimelineProjection: suppressTimelineProjection
+        ) else {
             return false
         }
         if let index = pendingStreamedLogIndexByKey[entry.key] {
             pendingStreamedLogEntries[index].append(entry.text)
+            if suppressTimelineProjection {
+                pendingStreamedLogEntries[index].suppressTimelineProjection()
+            }
         } else {
             pendingStreamedLogIndexByKey[entry.key] = pendingStreamedLogEntries.count
             pendingStreamedLogEntries.append(entry)
@@ -1388,7 +1462,7 @@ private actor AppServerReviewEventSession {
     }
 
     private func drainPendingStreamedLogEvents() -> [CodexReviewBackendModel.Review.Event] {
-        let events = pendingStreamedLogEntries.map(\.event)
+        let events = pendingStreamedLogEntries.flatMap(\.events)
         pendingStreamedLogEntries.removeAll(keepingCapacity: true)
         pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         return events
@@ -1420,7 +1494,13 @@ private actor AppServerReviewEventSession {
             appServerBackendLogger.debug(
                 "Review event session finished for \(self.run.threadID, privacy: .public): emitted=\(self.metrics.emitted, privacy: .public) buffered=\(self.metrics.buffered, privacy: .public) ignored=\(self.metrics.ignored, privacy: .public) timeoutWarnings=\(self.metrics.commandTimeoutWarnings, privacy: .public)"
             )
-        case .message, .messageDelta, .log, .logEntry:
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .message,
+             .messageDelta,
+             .log,
+             .logEntry:
             break
         }
     }
@@ -1475,10 +1555,32 @@ private actor AppServerReviewEventSession {
 
 private extension CodexReviewBackendModel.Review.Event {
     var isTerminal: Bool {
-        switch self {
+        return switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .message,
+             .messageDelta,
+             .log,
+             .logEntry:
+            false
+        }
+    }
+
+    var triggersSyntheticStartedTurn: Bool {
+        return switch self {
+        case .message, .messageDelta, .log, .logEntry:
+            true
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .completed,
+             .failed,
+             .cancelled:
             false
         }
     }
@@ -1498,8 +1600,122 @@ private extension CodexReviewBackendModel.Review.Event {
             return "failed"
         case .cancelled:
             return "canceled"
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .message,
+             .messageDelta,
+             .log,
+             .logEntry:
             return nil
+        }
+    }
+}
+
+private extension Array where Element == CodexReviewBackendModel.Review.Event {
+    var legacyTimelineProjectionCount: Int {
+        reduce(0) { count, event in
+            count + (event.createsImmediateLegacyTimelineProjection ? 1 : 0)
+        }
+    }
+
+    var addingTerminalFailureLogProjectionSuppressionIfNeeded: [Element] {
+        flatMap { event -> [Element] in
+            if case .failed = event {
+                return [.suppressNextTerminalFailureLogTimelineProjection, event]
+            }
+            return [event]
+        }
+    }
+}
+
+private extension CodexReviewBackendModel.Review.Event {
+    var createsImmediateLegacyTimelineProjection: Bool {
+        guard PendingStreamedLogEntry(self) == nil else {
+            return false
+        }
+        return switch self {
+        case .message, .messageDelta, .log, .logEntry:
+            true
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .completed,
+             .failed,
+             .cancelled:
+            false
+        }
+    }
+}
+
+private extension ReviewDomainEvent {
+    var isDirectTimelineEvent: Bool {
+        switch self {
+        case .itemStarted(let seed),
+             .itemUpdated(let seed),
+             .itemCompleted(let seed):
+            seed.family.hasEquivalentDirectTimelineProjection
+        case .textDelta(_, _, let family, _, _):
+            family.hasEquivalentDirectTimelineProjection
+        case .runStarted, .reviewCompleted, .reviewFailed, .reviewCancelled:
+            false
+        }
+    }
+
+    var isCommandProgressBoundary: Bool {
+        switch self {
+        case .itemStarted(let seed),
+             .itemUpdated(let seed),
+             .itemCompleted(let seed):
+            return seed.family.isCommandProgressBoundary
+        case .textDelta(_, _, let family, _, _):
+            return family.isCommandProgressBoundary
+        case .runStarted, .reviewCompleted, .reviewFailed, .reviewCancelled:
+            return false
+        }
+    }
+}
+
+private extension ReviewItemFamily {
+    var hasEquivalentDirectTimelineProjection: Bool {
+        switch self {
+        case .approval,
+             .command,
+             .diagnostic,
+             .fileChange,
+             .message,
+             .plan,
+             .reasoning,
+             .search,
+             .tool:
+            true
+        case .contextCompaction,
+             .lifecycle,
+             .unknown:
+            false
+        }
+    }
+}
+
+private extension ReviewItemFamily {
+    var isCommandProgressBoundary: Bool {
+        switch self {
+        case .approval,
+             .contextCompaction,
+             .fileChange,
+             .message,
+             .plan,
+             .reasoning,
+             .search,
+             .tool,
+             .unknown:
+            true
+        case .command,
+             .diagnostic,
+             .lifecycle:
+            false
         }
     }
 }
@@ -1801,6 +2017,8 @@ private func decodeReviewNotification(
         } else {
             events = payload.item?.startedEvents(startedAt: payload.startedAt, lifecycle: nil) ?? []
         }
+    case "item/updated":
+        events = payload.item?.updatedEvents() ?? []
     case "item/completed":
         if let item = payload.item,
            item.type == "commandExecution" {
@@ -1974,12 +2192,52 @@ private func decodeReviewNotification(
     default:
         return nil
     }
+    let directEvents = directTimelineDomainEvents(
+        for: notification,
+        fallbackReviewThreadID: fallbackReviewThreadID
+    )
+    let orderedEvents: [CodexReviewBackendModel.Review.Event] = if directEvents.isEmpty {
+        events
+    } else {
+        [.domainEvents(
+            directEvents,
+            legacyProjectionSuppressionCount: events.legacyTimelineProjectionCount
+        )] + events.addingTerminalFailureLogProjectionSuppressionIfNeeded
+    }
     return .init(
-        events: events,
+        events: orderedEvents,
         turnID: payload.resolvedTurnID,
         startsReviewMode: notification.method == "item/started" && payload.item?.type == "enteredReviewMode",
-        finishesReviewMode: notification.method == "item/completed" && payload.item?.type == "exitedReviewMode"
+        finishesReviewMode: notification.method == "item/completed" && payload.item?.type == "exitedReviewMode",
+        hasDirectTimelineEvents: directEvents.isEmpty == false
     )
+}
+
+private func directTimelineDomainEvents(
+    for notification: AppServerRoutedReviewNotification,
+    fallbackReviewThreadID: String
+) -> [ReviewDomainEvent] {
+    guard let wireNotification = try? wireReviewNotification(from: notification) else {
+        return []
+    }
+    return wireNotification
+        .domainEvents(fallbackReviewThreadID: .init(rawValue: fallbackReviewThreadID))
+        .filter(\.isDirectTimelineEvent)
+}
+
+private func wireReviewNotification(
+    from notification: AppServerRoutedReviewNotification
+) throws -> AppServerWireReviewNotification {
+    let paramsObject = try JSONSerialization.jsonObject(
+        with: notification.params,
+        options: [.fragmentsAllowed]
+    )
+    let envelope: [String: Any] = [
+        "method": notification.method,
+        "params": paramsObject,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: envelope)
+    return try JSONDecoder().decode(AppServerWireReviewNotification.self, from: data)
 }
 
 private func isReviewNotificationMethod(_ method: String) -> Bool {
@@ -1993,6 +2251,7 @@ private func isReviewNotificationMethod(_ method: String) -> Bool {
         "turn/diff/updated",
         "turn/plan/updated",
         "item/started",
+        "item/updated",
         "item/completed",
         "item/autoApprovalReview/started",
         "item/autoApprovalReview/completed",
@@ -2450,6 +2709,19 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return []
         default:
             return [.logEntry(kind: .event, text: "App-server item started: \(type).", groupID: id, replacesGroup: true)]
+        }
+    }
+
+    func updatedEvents() -> [CodexReviewBackendModel.Review.Event] {
+        switch type {
+        case "agentMessage":
+            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+        case "plan":
+            return text.map { [.logEntry(kind: .plan, text: $0, groupID: id, replacesGroup: true)] } ?? []
+        case "reasoning":
+            return reasoningCompletionEvents(replacesGroup: true)
+        default:
+            return []
         }
     }
 

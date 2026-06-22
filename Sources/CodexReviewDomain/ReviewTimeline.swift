@@ -144,6 +144,22 @@ public final class ReviewTimeline {
     }
 
     @discardableResult
+    package func updateItemContent(
+        _ content: ReviewTimelineItem.Content,
+        for id: ReviewTimelineItem.ID,
+        updatedAt: Date? = nil
+    ) -> Bool {
+        guard let item = itemsByID[id],
+              item.content != content
+        else {
+            return false
+        }
+        item.update(content: content, updatedAt: updatedAt ?? item.updatedAt)
+        bumpRevision()
+        return true
+    }
+
+    @discardableResult
     private func upsert(_ seed: ReviewTimelineItemSeed, timestamp: Date) -> ReviewTimelineItem {
         if let item = itemsByID[seed.id] {
             return item

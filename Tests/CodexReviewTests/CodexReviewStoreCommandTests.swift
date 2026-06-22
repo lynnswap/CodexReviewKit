@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReview
+import CodexReviewDomain
 import CodexReviewTesting
 
 @Suite("Codex review store", .serialized)
@@ -63,6 +64,1016 @@ struct CodexReviewStoreCommandTests {
 
             #expect(final.core.lifecycle.status == .succeeded)
             #expect(final.core.output.lastAgentMessage == "review text")
+        }
+    }
+
+    @Test func domainEventsMutateTimelineAndSuppressLegacyLogProjection() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            clock: .init(now: { Date(timeIntervalSince1970: 10) }),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            await backend.yield(.domainEvents([
+                .itemStarted(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .running,
+                    content: .message(.init(text: ""))
+                )),
+            ], legacyProjectionSuppressionCount: 0))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.item(for: itemID) != nil
+            })
+            let originalItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+
+            await backend.yield(.domainEvents([
+                .textDelta(
+                    itemID: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    content: .message(.init(text: "")),
+                    delta: "domain text"
+                ),
+            ], legacyProjectionSuppressionCount: 1))
+            #expect(await waitUntil {
+                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                      case .message(let message) = item.content
+                else {
+                    return false
+                }
+                return message.text == "domain text"
+            })
+            let updatedItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            #expect(originalItem === updatedItem)
+
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: " legacy text",
+                groupID: "msg-1",
+                replacesGroup: false
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains { $0.text == " legacy text" } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.timeline.items.count == 1)
+            #expect(job.timeline.item(for: itemID) === originalItem)
+            guard case .message(let message) = job.timeline.item(for: itemID)?.content else {
+                Issue.record("expected direct message timeline content")
+                return
+            }
+            #expect(message.text == "domain text")
+
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: "legacy-only diagnostic",
+                groupID: nil,
+                replacesGroup: false
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.items.count == 2
+            })
+            #expect(store.job(id: "job-1")?.timeline.item(for: itemID) === originalItem)
+        }
+    }
+
+    @Test func terminalCommandCompatibilityLogUpdatesDirectTimelineItem() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "cmd-1")
+            await backend.yield(.domainEvents([
+                .itemStarted(.init(
+                    id: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    content: .command(.init(command: "swift test"))
+                )),
+            ], legacyProjectionSuppressionCount: 0))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == true
+            })
+            let originalItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+
+            await backend.yield(.logEntry(
+                kind: .command,
+                text: "$ swift test",
+                groupID: "cmd-1",
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd-1",
+                    command: "swift test",
+                    commandStatus: "completed"
+                )
+            ))
+            #expect(await waitUntil {
+                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID) else {
+                    return false
+                }
+                return item.phase == .completed
+                    && store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == false
+            })
+
+            let updatedItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            #expect(originalItem === updatedItem)
+        }
+    }
+
+    @Test func skippedLegacyDeltaConsumesDirectProjectionSuppression() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: "final"))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: "final",
+                groupID: "msg-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains { $0.text == "final" } == true
+            })
+
+            await backend.yield(.domainEvents([
+                .textDelta(
+                    itemID: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    content: .message(.init(text: "")),
+                    delta: "late"
+                ),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.messageDelta("late", itemID: "msg-1"))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains { $0.text == "late" } == false
+            })
+            let messageItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            guard case .message(let message) = messageItem.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text == "final")
+
+            let timelineCount = try #require(store.job(id: "job-1")?.timeline.items.count)
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: "legacy-only diagnostic",
+                groupID: nil,
+                replacesGroup: false
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.items.count == timelineCount + 1
+            })
+        }
+    }
+
+    @Test func directTerminalErrorSuppressesCompatibleErrorLogTimelineProjection() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "error:turn-1")
+            let longError = String(repeating: "App-server failed.", count: 20_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .init(rawValue: "error"),
+                    family: .diagnostic,
+                    phase: .failed,
+                    content: .diagnostic(.init(message: longError))
+                )),
+            ], legacyProjectionSuppressionCount: 0))
+            await backend.yield(.suppressNextTerminalFailureLogTimelineProjection)
+            await backend.yield(.failed(longError))
+
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.lifecycle.status == .failed
+            })
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.logEntries.contains { $0.kind == .error })
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .diagnostic(let diagnostic) = item.content else {
+                Issue.record("expected diagnostic timeline content")
+                return
+            }
+            #expect(diagnostic.message.count < longError.count)
+            #expect(job.timeline.items.count == 1)
+        }
+    }
+
+    @Test func directTimelineTextIsTrimmedWhenReviewLogLimitApplies() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            let longText = String(repeating: "x", count: 300_000)
+            await backend.yield(.domainEvents([
+                .itemStarted(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .running,
+                    content: .message(.init(text: ""))
+                )),
+                .textDelta(
+                    itemID: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    content: .message(.init(text: "")),
+                    delta: longText
+                ),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: longText,
+                groupID: "msg-1",
+                replacesGroup: false
+            ))
+            #expect(await waitUntil {
+                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                      case .message(let message) = item.content
+                else {
+                    return false
+                }
+                return message.text.count == longText.count
+            })
+
+            await backend.yield(.failed("Failed."))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.lifecycle.status == .failed
+            })
+            let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            guard case .message(let message) = item.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text.count < longText.count)
+        }
+    }
+
+    @Test func directFullItemTimelineTextIsTrimmedWhenReviewLogLimitApplies() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            let longText = String(repeating: "x", count: 300_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: longText,
+                groupID: "msg-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                      case .message(let message) = item.content
+                else {
+                    return false
+                }
+                return message.text.count == longText.count
+            })
+
+            await backend.yield(.failed("Failed."))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.lifecycle.status == .failed
+            })
+            let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            guard case .message(let message) = item.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text.count < longText.count)
+        }
+    }
+
+    @Test func retainedCommandOutputChunksAppendWhenTrimmingDirectTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "cmd-1")
+            let firstChunk = "first retained chunk\n"
+            let secondChunk = "second retained chunk\n"
+            await backend.yield(.domainEvents([
+                .itemStarted(.init(
+                    id: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    content: .command(.init(command: "swift test"))
+                )),
+                .textDelta(
+                    itemID: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    content: .command(.init(command: "swift test")),
+                    delta: firstChunk
+                ),
+                .textDelta(
+                    itemID: itemID,
+                    kind: .commandExecution,
+                    family: .command,
+                    content: .command(.init(command: "swift test")),
+                    delta: secondChunk
+                ),
+            ], legacyProjectionSuppressionCount: 2))
+            let outputMetadata = ReviewLogEntry.Metadata(
+                sourceType: "commandExecution",
+                title: "Command output",
+                itemID: itemID.rawValue,
+                command: "swift test"
+            )
+            await backend.yield(.logEntry(
+                kind: .commandOutput,
+                text: firstChunk,
+                groupID: itemID.rawValue,
+                replacesGroup: false,
+                metadata: outputMetadata
+            ))
+            await backend.yield(.logEntry(
+                kind: .commandOutput,
+                text: secondChunk,
+                groupID: itemID.rawValue,
+                replacesGroup: false,
+                metadata: outputMetadata
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 3
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .command(let command) = item.content else {
+                Issue.record("expected command timeline content")
+                return
+            }
+            #expect(command.output == firstChunk + secondChunk)
+        }
+    }
+
+    @Test func syntheticDirectTimelineTextIsTrimmedThroughSuppressedCompatibilityLog() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            let longText = String(repeating: "x", count: 300_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: longText,
+                groupID: nil,
+                replacesGroup: true
+            ))
+
+            await backend.yield(.failed("Failed."))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.lifecycle.status == .failed
+            })
+            let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
+            guard case .message(let message) = item.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text.count < longText.count)
+        }
+    }
+
+    @Test func eventCompatibilityLogTrimsDirectDiagnosticTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "diff-1")
+            let longText = String(repeating: "diff --git\n", count: 40_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .init(rawValue: "turn/diff/updated"),
+                    family: .diagnostic,
+                    phase: .completed,
+                    content: .diagnostic(.init(message: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .event,
+                text: longText,
+                groupID: itemID.rawValue,
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .event && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .diagnostic(let diagnostic) = item.content else {
+                Issue.record("expected diagnostic timeline content")
+                return
+            }
+            #expect(diagnostic.message.count < longText.count)
+        }
+    }
+
+    @Test func fileChangeStatusCompatibilityLogDoesNotTrimDirectPatchText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "file-1:patch")
+            let patchText = String(repeating: "diff --git a/Sources/App.swift b/Sources/App.swift\n", count: 8_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .fileChange,
+                    family: .fileChange,
+                    phase: .running,
+                    content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "File changes updated.",
+                groupID: "file-1",
+                replacesGroup: false,
+                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 2
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .fileChange(let fileChange) = item.content else {
+                Issue.record("expected file-change timeline content")
+                return
+            }
+            #expect(fileChange.output == patchText)
+        }
+    }
+
+    @Test func directRawReasoningTimelineTextTrimUsesLegacyGroupIDAndBumpsRevision() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "reasoning-1:content:0")
+            let longText = String(repeating: "r", count: 300_000)
+            await backend.yield(.domainEvents([
+                .textDelta(
+                    itemID: itemID,
+                    kind: .reasoning,
+                    family: .reasoning,
+                    content: .reasoning(.init(text: "", style: .raw)),
+                    delta: longText
+                ),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .rawReasoning,
+                text: longText,
+                groupID: "reasoning-1:0",
+                replacesGroup: false
+            ))
+            #expect(await waitUntil {
+                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                      case .reasoning(let reasoning) = item.content
+                else {
+                    return false
+                }
+                return reasoning.text.count == longText.count
+                    && store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .rawReasoning && $0.groupID == "reasoning-1:0"
+                    } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            let revisionBeforeTrim = job.timeline.revision
+            #expect(job.applyReviewLogLimit())
+            #expect(job.timeline.revision > revisionBeforeTrim)
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .reasoning(let reasoning) = item.content else {
+                Issue.record("expected reasoning timeline content")
+                return
+            }
+            #expect(reasoning.text.count < longText.count)
+        }
+    }
+
+    @Test func directPlanTimelineTextTrimUsesSyntheticTurnPlanID() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "turn-1:turn/plan/updated")
+            let longText = String(repeating: "- [pending] Review file\n", count: 15_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .plan,
+                    family: .plan,
+                    phase: .running,
+                    content: .plan(.init(markdown: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .todoList,
+                text: longText,
+                groupID: "turn-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .todoList && $0.groupID == "turn-1"
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .plan(let plan) = item.content else {
+                Issue.record("expected plan timeline content")
+                return
+            }
+            #expect(plan.markdown.count < longText.count)
+        }
+    }
+
+    @Test func mcpToolCompletionLogDoesNotReplaceDirectProgressTextDuringTrim() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let progressItemID = ReviewTimelineItem.ID(rawValue: "tool-1:progress")
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: progressItemID,
+                    kind: .mcpToolCall,
+                    family: .tool,
+                    phase: .running,
+                    content: .toolCall(.init(
+                        server: "codex_review",
+                        tool: "review_read",
+                        progress: "Reading review job"
+                    ))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "Reading review job",
+                groupID: "tool-1",
+                replacesGroup: false,
+                metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+            ))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "codex_review.review_read completed. Result: ok",
+                groupID: "tool-1",
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "mcpToolCall",
+                    title: "codex_review.review_read",
+                    status: "completed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    resultText: "ok"
+                )
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 3
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: progressItemID))
+            guard case .toolCall(let toolCall) = item.content else {
+                Issue.record("expected tool progress timeline content")
+                return
+            }
+            #expect(toolCall.progress == "Reading review job")
+            #expect(try store.readReview(jobID: "job-1", logFilter: .all).logs.contains {
+                $0.kind == .toolCall && $0.text == "Reading review job"
+            })
+        }
+    }
+
+    @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "tool-error-1")
+            let longError = String(repeating: "error", count: 60_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .mcpToolCall,
+                    family: .tool,
+                    phase: .failed,
+                    content: .toolCall(.init(
+                        server: "codex_review",
+                        tool: "review_read",
+                        error: longError
+                    ))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: longError,
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "mcpToolCall",
+                    title: "codex_review.review_read",
+                    status: "failed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    errorText: longError
+                )
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .toolCall(let toolCall) = item.content else {
+                Issue.record("expected tool call timeline content")
+                return
+            }
+            #expect((toolCall.error ?? "").count < longError.count)
+        }
+    }
+
+    @Test func mappedDirectTimelineTextClearsWhenCompatibilityLogIsRemovedByLimit() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let firstItemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            let secondItemID = ReviewTimelineItem.ID(rawValue: "msg-2")
+            let firstText = String(repeating: "a", count: 300_000)
+            let secondText = String(repeating: "b", count: 300_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: firstItemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: firstText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: firstText,
+                groupID: "msg-1",
+                replacesGroup: true
+            ))
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: secondItemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: secondText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: secondText,
+                groupID: "msg-2",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 2
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let firstItem = try #require(job.timeline.item(for: firstItemID))
+            let secondItem = try #require(job.timeline.item(for: secondItemID))
+            guard case .message(let firstMessage) = firstItem.content,
+                  case .message(let secondMessage) = secondItem.content
+            else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(firstMessage.text.isEmpty)
+            #expect(secondMessage.text.count < secondText.count)
+        }
+    }
+
+    @Test func legacyTimelineTextFromBeforeDirectEventsIsTrimmed() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let longText = String(repeating: "legacy", count: 60_000)
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: longText,
+                groupID: "legacy-message",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.items.contains { item in
+                    guard case .message(let message) = item.content else {
+                        return false
+                    }
+                    return message.text == longText
+                } == true
+            })
+            let legacyItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
+                guard case .message(let message) = item.content else {
+                    return false
+                }
+                return message.text == longText
+            }?.id)
+
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: .init(rawValue: "direct-message"),
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: "direct"))
+                )),
+            ], legacyProjectionSuppressionCount: 0))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.item(for: .init(rawValue: "direct-message")) != nil
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: legacyItemID))
+            guard case .message(let message) = item.content else {
+                Issue.record("expected message timeline content")
+                return
+            }
+            #expect(message.text.count < longText.count)
+        }
+    }
+
+    @Test func legacyProjectedTimelineTextIsTrimmedAfterDirectEvents() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: .init(rawValue: "msg-1"),
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: "direct"))
+                )),
+            ], legacyProjectionSuppressionCount: 0))
+
+            let longText = String(repeating: "y", count: 300_000)
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: longText,
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.timeline.items.contains { item in
+                    guard case .diagnostic(let diagnostic) = item.content else {
+                        return false
+                    }
+                    return diagnostic.message == longText
+                } == true
+            })
+            let legacyItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
+                guard case .diagnostic(let diagnostic) = item.content else {
+                    return false
+                }
+                return diagnostic.message == longText
+            }?.id)
+
+            await backend.yield(.failed("Failed."))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.core.lifecycle.status == .failed
+            })
+            let item = try #require(store.job(id: "job-1")?.timeline.item(for: legacyItemID))
+            guard case .diagnostic(let diagnostic) = item.content else {
+                Issue.record("expected diagnostic timeline content")
+                return
+            }
+            #expect(diagnostic.message.count < longText.count)
         }
     }
 

@@ -588,7 +588,11 @@ public extension AppServerWireReviewNotification {
                 kind: .mcpToolCall,
                 family: .tool,
                 phase: .running,
-                content: .toolCall(.init(result: message))
+                content: .toolCall(.init(
+                    server: item?.server,
+                    tool: item?.tool,
+                    progress: message
+                ))
             ))]
         }
 
