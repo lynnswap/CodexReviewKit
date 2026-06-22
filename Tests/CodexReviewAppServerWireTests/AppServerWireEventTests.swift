@@ -41,6 +41,37 @@ struct AppServerWireEventTests {
         }
     }
 
+    @Test func preservesNonObjectRawParams() throws {
+        let arrayParams = try decodeNotification("""
+        {
+          "method": "future/positional",
+          "params": ["alpha", 2]
+        }
+        """)
+
+        #expect(arrayParams.rawPayload == .array([.string("alpha"), .int(2)]))
+        #expect(arrayParams.payload.rawValue == .array([.string("alpha"), .int(2)]))
+        guard case .itemUpdated(let arraySeed) = try #require(arrayParams.domainEvents().first) else {
+            Issue.record("expected unknown event for array params")
+            return
+        }
+        if case .unknown(let unknown) = arraySeed.content {
+            #expect(unknown.detail == "[\"alpha\",2]")
+        } else {
+            Issue.record("expected unknown array content")
+        }
+
+        let scalarParams = try decodeNotification("""
+        {
+          "method": "future/scalar",
+          "params": "raw"
+        }
+        """)
+
+        #expect(scalarParams.rawPayload == .string("raw"))
+        #expect(scalarParams.payload.rawValue == .string("raw"))
+    }
+
     @Test func preservesUnknownItemKindRawValueAndRawFields() throws {
         let notification = try decodeNotification("""
         {

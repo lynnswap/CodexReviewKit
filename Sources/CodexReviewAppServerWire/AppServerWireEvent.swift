@@ -153,8 +153,13 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawMethod = try container.decode(String.self, forKey: .method)
         self.method = ReviewWireEventKind(rawValue: rawMethod)
-        self.payload = try container.decodeIfPresent(Payload.self, forKey: .payload) ?? Payload()
         self.rawPayload = try container.decodeIfPresent(AppServerWireJSONValue.self, forKey: .payload)
+        if rawPayload?.objectValue != nil,
+           let payload = try? container.decodeIfPresent(Payload.self, forKey: .payload) {
+            self.payload = payload
+        } else {
+            self.payload = Payload(rawValue: rawPayload)
+        }
     }
 
     public func domainEvents(fallbackReviewThreadID: ReviewThread.ID? = nil) -> [ReviewDomainEvent] {
