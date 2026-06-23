@@ -1,7 +1,5 @@
 import Foundation
-import CodexAppServerKit
 import CodexReview
-import CodexReviewAppServer
 import CodexReviewMCPServer
 
 private typealias ReviewCodexAccount = CodexReview.CodexAccount
@@ -29,21 +27,6 @@ package final class CodexReviewHost {
         )
         self.store = store
         self.mcpServer = CodexReviewMCPServer(store: store)
-    }
-
-    package convenience init(
-        appServerTransport: any JSONRPC.Transport,
-        endpoint: URL? = nil
-    ) {
-        let client = AppServerClient(transport: appServerTransport)
-        let backend = AppServerCodexReviewBackend(client: client)
-        self.init(
-            backend: backend,
-            endpoint: endpoint,
-            shutdown: {
-                await client.close()
-            }
-        )
     }
 
     package func start(endpoint: URL? = nil) async {

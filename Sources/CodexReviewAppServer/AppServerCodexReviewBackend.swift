@@ -39,6 +39,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var notificationRouterMetrics = AppServerNotificationRouterMetrics()
     private var reviewStartRequestsInFlight = 0
 
+    package init(appServer: CodexAppServer) {
+        self.client = appServer.appServerClient
+        self.threadStartPermissionStrategy = appServer.threadStartPermissionStrategy
+    }
+
     package init(
         client: AppServerClient,
         threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions

@@ -66,6 +66,15 @@ public actor CodexAppServer {
 
     private let client: AppServerClient
     private let router: CodexAppServerNotificationRouter
+    private let reviewThreadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
+
+    package nonisolated var appServerClient: AppServerClient {
+        client
+    }
+
+    package nonisolated var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy {
+        reviewThreadStartPermissionStrategy
+    }
 
     /// Starts a Codex app-server process and initializes the client session.
     ///
@@ -92,11 +101,33 @@ public actor CodexAppServer {
         await router.start()
         self.client = client
         self.router = router
+        self.reviewThreadStartPermissionStrategy = transportConfiguration.threadStartPermissionStrategy
     }
 
-    package init(client: AppServerClient, router: CodexAppServerNotificationRouter) {
+    package init(
+        client: AppServerClient,
+        router: CodexAppServerNotificationRouter,
+        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+    ) {
         self.client = client
         self.router = router
+        self.reviewThreadStartPermissionStrategy = threadStartPermissionStrategy
+    }
+
+    package init(
+        transport: any JSONRPC.Transport,
+        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+    ) async throws {
+        let client = AppServerClient(transport: transport)
+        _ = try await client.initialize(
+            clientName: Configuration.default.clientName,
+            clientVersion: Configuration.default.clientVersion
+        )
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        self.client = client
+        self.router = router
+        self.reviewThreadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
     /// Closes the app-server connection and stops notification routing.
@@ -106,6 +137,10 @@ public actor CodexAppServer {
     public func close() async {
         await router.stop()
         await client.close()
+    }
+
+    package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {
+        await client.notificationStream()
     }
 
     /// Creates a new Codex thread in a workspace.
