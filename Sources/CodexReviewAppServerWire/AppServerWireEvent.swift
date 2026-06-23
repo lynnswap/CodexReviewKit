@@ -604,7 +604,7 @@ public extension AppServerWireReviewNotification {
                 : item?.id.nilIfEmpty ?? itemID
             return [.itemUpdated(ReviewTimelineItemSeed(
                 id: .init(rawValue: updateItemID ?? syntheticItemID(method: method.rawValue)),
-                kind: .fileChange,
+                kind: ReviewItemKind(rawValue: method.rawValue),
                 family: .fileChange,
                 phase: item?.phase(default: .running) ?? .running,
                 content: .fileChange(.init(title: item?.path ?? changePath ?? "", output: message ?? delta ?? diff ?? changesOutput ?? ""))
@@ -617,7 +617,7 @@ public extension AppServerWireReviewNotification {
             }
             return [.itemUpdated(ReviewTimelineItemSeed(
                 id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
-                kind: .fileChange,
+                kind: ReviewItemKind(rawValue: method.rawValue),
                 family: .fileChange,
                 phase: .running,
                 content: .fileChange(.init(title: "", output: diff))

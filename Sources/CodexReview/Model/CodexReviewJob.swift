@@ -565,10 +565,18 @@ public final class CodexReviewJob: Identifiable, Hashable {
             logState = LogState(entries: logEntries)
         }
         if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
-            recordDirectTimelineTextCompatibilityLog(
-                for: entry,
-                allowsPendingFallback: suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
-            )
+            let allowsPendingFallback = suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
+            if entry.retainedTimelineText != nil {
+                recordDirectTimelineTextCompatibilityLog(
+                    for: entry,
+                    allowsPendingFallback: allowsPendingFallback
+                )
+            } else {
+                discardDirectTimelineTextCompatibilityLog(
+                    for: entry,
+                    allowsPendingFallback: allowsPendingFallback
+                )
+            }
         }
         if suppressTimelineProjection == false,
            consumeLegacyTimelineProjectionSuppression() == false {
@@ -656,6 +664,22 @@ public final class CodexReviewJob: Identifiable, Hashable {
         removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
     }
 
+    private func discardDirectTimelineTextCompatibilityLog(
+        for entry: ReviewLogEntry,
+        allowsPendingFallback: Bool
+    ) {
+        var itemIDs: Set<ReviewTimelineItem.ID> = []
+        for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
+            itemIDs.insert(itemID)
+        }
+        if itemIDs.isEmpty,
+           allowsPendingFallback,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+            itemIDs.insert(pendingItemID)
+        }
+        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+    }
+
     private func appendPendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: [ReviewTimelineItem.ID]) {
         for itemID in itemIDs where pendingDirectTimelineTextItemIDsForCompatibilityLog.contains(itemID) == false {
             pendingDirectTimelineTextItemIDsForCompatibilityLog.append(itemID)
@@ -677,7 +701,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private func recordLegacyProjectedTimelineTextItemIDsFromLogEntries() {
-        for entry in logEntries where entry.canProvideDirectTimelineText {
+        for entry in logEntries where entry.retainedTimelineText != nil {
             let itemID = entry.timelineItemID
             if timeline.item(for: itemID) != nil {
                 legacyProjectedTimelineTextItemIDs.insert(itemID)
@@ -1172,11 +1196,23 @@ private extension ReviewDomainEvent {
         case .itemStarted(let seed),
              .itemUpdated(let seed),
              .itemCompleted(let seed):
-            seed.content.hasTrimmableTimelineText ? seed.id : nil
+            seed.hasTrimmableTimelineText ? seed.id : nil
         case .textDelta(let itemID, _, _, _, _):
             itemID
         case .runStarted, .reviewCompleted, .reviewFailed, .reviewCancelled:
             nil
+        }
+    }
+}
+
+private extension ReviewTimelineItemSeed {
+    var hasTrimmableTimelineText: Bool {
+        switch content {
+        case .fileChange(let fileChange):
+            fileChange.output.isEmpty == false
+                && kind.rawValue != "item/fileChange/patchUpdated"
+        default:
+            content.hasTrimmableTimelineText
         }
     }
 }
@@ -1192,15 +1228,16 @@ private extension ReviewTimelineItem.Content {
              .plan,
              .reasoning:
             true
-        case .fileChange:
-            false
+        case .search(let search):
+            search.result?.isEmpty == false
         case .toolCall(let toolCall):
             toolCall.progress?.isEmpty == false
                 || toolCall.result?.isEmpty == false
                 || toolCall.error?.isEmpty == false
+        case .fileChange:
+            false
         case .approval,
              .contextCompaction,
-             .search,
              .unknown:
             false
         }

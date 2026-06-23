@@ -2222,7 +2222,107 @@ private func directTimelineDomainEvents(
     }
     return wireNotification
         .domainEvents(fallbackReviewThreadID: .init(rawValue: fallbackReviewThreadID))
-        .filter(\.isDirectTimelineEvent)
+        .filter { wireNotification.allowsDirectTimelineEvent($0) }
+}
+
+private extension AppServerWireReviewNotification {
+    func allowsDirectTimelineEvent(_ event: ReviewDomainEvent) -> Bool {
+        guard event.isDirectTimelineEvent else {
+            return false
+        }
+        switch event {
+        case .itemStarted(let seed),
+             .itemUpdated(let seed),
+             .itemCompleted(let seed):
+            return allowsDirectTimelineSeed(seed)
+        case .textDelta(let itemID, _, let family, _, _):
+            return family.hasEquivalentDirectTimelineProjection
+                && allowsDirectTimelineTextDelta(itemID: itemID, family: family)
+        case .runStarted,
+             .reviewCompleted,
+             .reviewFailed,
+             .reviewCancelled:
+            return false
+        }
+    }
+
+    private func allowsDirectTimelineSeed(_ seed: ReviewTimelineItemSeed) -> Bool {
+        if payload.item?.type.rawValue == "userMessage" || seed.kind.rawValue == "userMessage" {
+            return false
+        }
+        if seed.family == .message,
+           method.rawValue == "agent/message",
+           payload.itemID?.nilIfEmpty == nil {
+            return false
+        }
+        if seed.family == .message,
+           isItemLifecycleMethod,
+           payload.item?.type == .agentMessage,
+           payload.item?.id.nilIfEmpty == nil,
+           payload.itemID?.nilIfEmpty == nil {
+            return false
+        }
+        if seed.family == .diagnostic,
+           shouldKeepSyntheticDiagnosticOnLegacyPath {
+            return false
+        }
+        if seed.family == .search,
+           seed.hasSearchResultText,
+           payload.item?.result == nil {
+            return false
+        }
+        return seed.family.hasEquivalentDirectTimelineProjection
+    }
+
+    private func allowsDirectTimelineTextDelta(
+        itemID: ReviewTimelineItem.ID,
+        family: ReviewItemFamily
+    ) -> Bool {
+        if family == .message,
+           method.rawValue == "agent/message",
+           payload.itemID?.nilIfEmpty == nil {
+            return false
+        }
+        return itemID.rawValue.isEmpty == false
+    }
+
+    private var isItemLifecycleMethod: Bool {
+        switch method.rawValue {
+        case "item/started", "item/updated", "item/completed":
+            true
+        default:
+            false
+        }
+    }
+
+    private var shouldKeepSyntheticDiagnosticOnLegacyPath: Bool {
+        guard payload.itemID?.nilIfEmpty == nil else {
+            return false
+        }
+        switch method.rawValue {
+        case "log",
+             "warning",
+             "guardianWarning",
+             "deprecationNotice",
+             "configWarning",
+             "diagnostic",
+             "model/rerouted",
+             "model/verification",
+             "thread/status/changed":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+private extension ReviewTimelineItemSeed {
+    var hasSearchResultText: Bool {
+        guard case .search(let search) = content else {
+            return false
+        }
+        return search.result?.nilIfEmpty != nil
+    }
 }
 
 private func wireReviewNotification(
@@ -2716,10 +2816,58 @@ private struct AppServerThreadItem: Decodable, Sendable {
         switch type {
         case "agentMessage":
             return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+        case "commandExecution":
+            guard let output = aggregatedOutput?.nilIfEmpty else {
+                return []
+            }
+            return [logEntry(
+                kind: .commandOutput,
+                text: output,
+                replacesGroup: true,
+                title: nil,
+                status: status
+            )]
+        case "fileChange":
+            guard let output = aggregatedOutput?.nilIfEmpty ?? text?.nilIfEmpty else {
+                return []
+            }
+            return [logEntry(
+                kind: .commandOutput,
+                text: output,
+                replacesGroup: true,
+                title: "File changes",
+                status: status
+            )]
         case "plan":
             return text.map { [.logEntry(kind: .plan, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
+        case "mcpToolCall",
+             "dynamicToolCall",
+             "collabAgentToolCall",
+             "imageGeneration",
+             "imageView":
+            guard let text = error?.nonNullDebugText?.nilIfEmpty ?? result?.nonNullDebugText?.nilIfEmpty else {
+                return []
+            }
+            return [logEntry(
+                kind: .toolCall,
+                text: text,
+                replacesGroup: true,
+                title: toolLabel,
+                status: status
+            )]
+        case "webSearch":
+            guard let result = result?.nonNullDebugText?.nilIfEmpty else {
+                return []
+            }
+            return [logEntry(
+                kind: .toolCall,
+                text: result,
+                replacesGroup: true,
+                title: "Web search",
+                status: status
+            )]
         default:
             return []
         }
@@ -2781,18 +2929,39 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "reasoning":
             return reasoningCompletionEvents(replacesGroup: true)
         case "mcpToolCall":
+            if let text = toolResultOrErrorText {
+                return [logEntry(kind: .toolCall, text: text, replacesGroup: true, title: toolLabel, status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "\(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "dynamicToolCall":
+            if let text = toolResultOrErrorText {
+                return [logEntry(kind: .toolCall, text: text, replacesGroup: true, title: toolLabel, status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "Dynamic tool \(toolLabel) \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus)]
         case "collabAgentToolCall":
+            if let text = toolResultOrErrorText {
+                return [logEntry(kind: .toolCall, text: text, replacesGroup: true, title: toolLabel, status: completedStatus, detail: prompt)]
+            }
             return [logEntry(kind: .toolCall, text: "Collab tool \(toolLabel) \(status ?? "completed").\(promptSuffix)", replacesGroup: true, title: toolLabel, status: completedStatus, detail: prompt)]
         case "webSearch":
+            if let result = result?.nonNullDebugText?.nilIfEmpty {
+                return [logEntry(kind: .toolCall, text: result, replacesGroup: true, title: "Web search", status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "Web search completed: \(query ?? "search").", replacesGroup: true, title: "Web search", status: completedStatus)]
         case "imageView":
+            if let text = toolResultOrErrorText {
+                return [logEntry(kind: .toolCall, text: text, replacesGroup: true, title: "Image view", status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "Image viewed: \(path ?? "image").", replacesGroup: true, title: "Image view", status: completedStatus)]
         case "imageGeneration":
+            if let text = toolResultOrErrorText {
+                return [logEntry(kind: .toolCall, text: text, replacesGroup: true, title: "Image generation", status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "Image generation \(status ?? "completed").\(resultSuffix)", replacesGroup: true, title: "Image generation", status: completedStatus)]
         case "fileChange":
+            if let output = aggregatedOutput?.nilIfEmpty ?? text?.nilIfEmpty {
+                return [logEntry(kind: .commandOutput, text: output, replacesGroup: true, title: "File changes", status: completedStatus)]
+            }
             return [logEntry(kind: .toolCall, text: "File changes \(status ?? "completed").", replacesGroup: true, title: "File changes", status: completedStatus)]
         case "contextCompaction":
             let resolvedStatus = completedStatus
@@ -2895,6 +3064,10 @@ private struct AppServerThreadItem: Decodable, Sendable {
             return nil
         }
         return commandActions.map(\.metadataAction)
+    }
+
+    private var toolResultOrErrorText: String? {
+        error?.nonNullDebugText?.nilIfEmpty ?? result?.nonNullDebugText?.nilIfEmpty
     }
 
     private static func durationMs(startedAt: Date?, completedAt: Date?) -> Int? {
