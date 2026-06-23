@@ -186,6 +186,10 @@ public actor CodexAppServerTestTransport {
     /// Creates an in-memory app-server transport.
     public init() {}
 
+    package init(responses: [String: [Data]]) {
+        self.responses = responses.mapValues { $0.map(QueuedResponse.success) }
+    }
+
     /// Enqueues a raw Encodable response for `method`.
     public func enqueue<Response: Encodable & Sendable>(
         _ response: Response,
@@ -205,6 +209,10 @@ public actor CodexAppServerTestTransport {
             code: code,
             message: message
         )))
+    }
+
+    package func enqueueFailure(_ error: JSONRPC.Error, for method: String) {
+        responses[method, default: []].append(.failure(error))
     }
 
     /// Enqueues an empty JSON object response for `method`.
@@ -412,6 +420,14 @@ public actor CodexAppServerTestTransport {
     /// Returns the maximum number of in-flight requests observed for `method`.
     public func maxActiveCount(for method: String) -> Int {
         maxActiveByMethod[method] ?? 0
+    }
+
+    package func notificationStreamCount() -> Int {
+        serverNotificationContinuations.count
+    }
+
+    package func isClosedForTesting() -> Bool {
+        closed
     }
 
     /// Emits a server notification to all attached app-server notification streams.
