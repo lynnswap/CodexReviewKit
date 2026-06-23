@@ -722,7 +722,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func routeReviewNotification(_ notification: JSONRPC.Notification) async {
         notificationRouterMetrics.received += 1
-        guard isReviewNotificationMethod(notification.method) else {
+        let method = AppServerReviewEventKind(rawValue: notification.method)
+        guard method.isReviewNotificationMethod else {
             notificationRouterMetrics.ignored += 1
             return
         }
@@ -756,7 +757,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
             notificationRouterMetrics.routed += 1
             await session.receive(routed)
-        } else if isThreadlessBroadcastMethod(notification.method) {
+        } else if wireNotification.method.isThreadlessReviewBroadcast {
             let sessions = Array(reviewEventSessionsByAttemptID.values)
             guard sessions.isEmpty == false else {
                 notificationRouterMetrics.ignored += 1
@@ -2126,8 +2127,8 @@ private func decodeReviewNotification(
     return .init(
         events: orderedEvents,
         turnID: payload.resolvedTurnID,
-        startsReviewMode: notification.method == "item/started" && payload.item?.type.rawValue == "enteredReviewMode",
-        finishesReviewMode: notification.method == "item/completed" && payload.item?.type.rawValue == "exitedReviewMode",
+        startsReviewMode: notification.wireNotification.startsReviewMode,
+        finishesReviewMode: notification.wireNotification.finishesReviewMode,
         hasDirectTimelineEvents: directEvents.isEmpty == false
     )
 }
@@ -2251,60 +2252,6 @@ private extension ReviewTimelineItemSeed {
             return false
         }
         return search.result?.nilIfEmpty != nil
-    }
-}
-
-private func isReviewNotificationMethod(_ method: String) -> Bool {
-    switch method {
-    case "thread/closed",
-        "thread/status/changed",
-        "turn/started",
-        "turn/completed",
-        "turn/failed",
-        "turn/cancelled",
-        "turn/aborted",
-        "turn/diff/updated",
-        "turn/plan/updated",
-        "item/started",
-        "item/updated",
-        "item/completed",
-        "item/autoApprovalReview/started",
-        "item/autoApprovalReview/completed",
-        "item/agentMessage/delta",
-        "item/plan/delta",
-        "item/reasoning/summaryTextDelta",
-        "item/reasoning/summaryPartAdded",
-        "item/reasoning/textDelta",
-        "item/commandExecution/outputDelta",
-        "item/commandExecution/terminalInteraction",
-        "command/exec/outputDelta",
-        "process/outputDelta",
-        "item/fileChange/outputDelta",
-        "item/fileChange/patchUpdated",
-        "item/mcpToolCall/progress",
-        "agent/message",
-        "log",
-        "error",
-        "model/rerouted",
-        "model/verification",
-        "thread/compacted",
-        "warning",
-        "guardianWarning",
-        "deprecationNotice",
-        "configWarning",
-        "diagnostic":
-        true
-    default:
-        false
-    }
-}
-
-private func isThreadlessBroadcastMethod(_ method: String) -> Bool {
-    switch method {
-    case "warning", "deprecationNotice", "configWarning", "error":
-        true
-    default:
-        false
     }
 }
 

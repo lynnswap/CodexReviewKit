@@ -5,6 +5,41 @@ import CodexReviewDomain
 
 @Suite("app-server wire events")
 struct AppServerWireEventTests {
+    @Test func classifiesReviewNotificationsAndReviewModeMarkers() throws {
+        #expect(AppServerReviewEventKind(rawValue: "turn/started").isReviewNotificationMethod)
+        #expect(AppServerReviewEventKind(rawValue: "warning").isThreadlessReviewBroadcast)
+        #expect(AppServerReviewEventKind(rawValue: "future/event").isReviewNotificationMethod == false)
+        #expect(AppServerReviewEventKind(rawValue: "diagnostic").isThreadlessReviewBroadcast == false)
+
+        let entered = try decodeNotification("""
+        {
+          "method": "item/started",
+          "params": {
+            "item": {
+              "id": "review-mode",
+              "type": "enteredReviewMode"
+            }
+          }
+        }
+        """)
+        #expect(entered.startsReviewMode)
+        #expect(entered.finishesReviewMode == false)
+
+        let exited = try decodeNotification("""
+        {
+          "method": "item/completed",
+          "params": {
+            "item": {
+              "id": "review-mode",
+              "type": "exitedReviewMode"
+            }
+          }
+        }
+        """)
+        #expect(exited.finishesReviewMode)
+        #expect(exited.startsReviewMode == false)
+    }
+
     @Test func preservesUnknownNotificationRawPayloadAndEmitsUnknownContent() throws {
         let notification = try decodeNotification("""
         {

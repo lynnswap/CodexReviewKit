@@ -281,6 +281,72 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
     }
 }
 
+public extension AppServerReviewEventKind {
+    var isReviewNotificationMethod: Bool {
+        switch self {
+        case .threadClosed,
+             .threadStatusChanged,
+             .turnStarted,
+             .turnCompleted,
+             .turnFailed,
+             .turnCancelled,
+             .turnAborted,
+             .turnDiffUpdated,
+             .turnPlanUpdated,
+             .itemStarted,
+             .itemUpdated,
+             .itemCompleted,
+             .autoApprovalReviewStarted,
+             .autoApprovalReviewCompleted,
+             .agentMessageDelta,
+             .planDelta,
+             .reasoningSummaryTextDelta,
+             .reasoningSummaryPartAdded,
+             .reasoningTextDelta,
+             .commandExecutionOutputDelta,
+             .commandExecutionTerminalInteraction,
+             .commandExecOutputDelta,
+             .processOutputDelta,
+             .fileChangeOutputDelta,
+             .fileChangePatchUpdated,
+             .mcpToolCallProgress,
+             .agentMessage,
+             .log,
+             .error,
+             .modelRerouted,
+             .modelVerification,
+             .threadCompacted,
+             .warning,
+             .guardianWarning,
+             .deprecationNotice,
+             .configWarning,
+             .diagnostic:
+            true
+        default:
+            false
+        }
+    }
+
+    var isThreadlessReviewBroadcast: Bool {
+        switch self {
+        case .warning, .deprecationNotice, .configWarning, .error:
+            true
+        default:
+            false
+        }
+    }
+}
+
+public extension AppServerWireReviewNotification {
+    var startsReviewMode: Bool {
+        method == .itemStarted && payload.item?.type.rawValue == "enteredReviewMode"
+    }
+
+    var finishesReviewMode: Bool {
+        method == .itemCompleted && payload.item?.type.rawValue == "exitedReviewMode"
+    }
+}
+
 public extension AppServerWireReviewNotification {
     struct Payload: Decodable, Equatable, Sendable {
         public var threadID: String?
