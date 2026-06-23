@@ -144,6 +144,19 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
         self.rawPayload = rawPayload
     }
 
+    public init(method: String, paramsData: Data) throws {
+        let paramsObject = try JSONSerialization.jsonObject(
+            with: paramsData,
+            options: [.fragmentsAllowed]
+        )
+        let envelope: [String: Any] = [
+            "method": method,
+            "params": paramsObject,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: envelope)
+        self = try JSONDecoder().decode(Self.self, from: data)
+    }
+
     public enum CodingKeys: String, CodingKey {
         case method
         case payload = "params"
@@ -440,7 +453,7 @@ public extension AppServerWireReviewNotification {
             self.item = try? container.decodeIfPresent(Item.self, forKey: .item)
         }
 
-        var resolvedTurnID: String? {
+        public var resolvedTurnID: String? {
             turn?.id.nilIfEmpty ?? turnID
         }
 
@@ -807,11 +820,11 @@ public extension AppServerWireReviewNotification {
             }
         }
 
-        private var startedAt: Date? {
+        public var startedAt: Date? {
             startedAtMs.map(Self.date(millisecondsSince1970:))
         }
 
-        private var completedAt: Date? {
+        public var completedAt: Date? {
             completedAtMs.map(Self.date(millisecondsSince1970:))
         }
 

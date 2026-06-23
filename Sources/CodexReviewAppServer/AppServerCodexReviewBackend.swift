@@ -719,10 +719,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             notificationRouterMetrics.ignored += 1
             return
         }
-        guard let payload = try? JSONDecoder().decode(TurnNotificationPayload.self, from: notification.params) else {
+        guard let wireNotification = try? AppServerWireReviewNotification(
+            method: notification.method,
+            paramsData: notification.params
+        ) else {
             notificationRouterMetrics.ignored += 1
             return
         }
+        let payload = wireNotification.payload
         notificationRouterMetrics.decoded += 1
         if let turnID = payload.resolvedTurnID,
            abandonedTurnIDs.contains(turnID) {
@@ -733,9 +737,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewNotificationSequence += 1
         let routed = AppServerRoutedReviewNotification(
             sequence: reviewNotificationSequence,
-            method: notification.method,
-            params: notification.params,
-            payload: payload
+            wireNotification: wireNotification
         )
         if let threadID = payload.threadID {
             guard let session = reviewEventSession(forThreadID: threadID) else {
@@ -808,9 +810,15 @@ package struct AppServerReviewEventSessionMetrics: Equatable, Sendable {
 
 private struct AppServerRoutedReviewNotification: Sendable {
     var sequence: Int
-    var method: String
-    var params: Data
-    var payload: TurnNotificationPayload
+    var wireNotification: AppServerWireReviewNotification
+
+    var method: String {
+        wireNotification.rawMethod
+    }
+
+    var payload: TurnNotificationPayload {
+        wireNotification.payload
+    }
 }
 
 private struct DecodedReviewNotification {
@@ -1309,7 +1317,7 @@ private actor AppServerReviewEventSession {
             return false
         }
         let startsNewCommand = notification.method == "item/started"
-            && notification.payload.item?.type == "commandExecution"
+            && notification.payload.item?.type == .commandExecution
         let reachesModelProgress = decoded.events.contains(where: Self.isCommandProgressBoundary(_:))
         guard startsNewCommand || reachesModelProgress else {
             return false
@@ -1321,7 +1329,7 @@ private actor AppServerReviewEventSession {
             "process/outputDelta",
             "item/commandExecution/terminalInteraction":
             return false
-        case "item/completed" where notification.payload.item?.type == "commandExecution":
+        case "item/completed" where notification.payload.item?.type == .commandExecution:
             return false
         case "turn/completed", "turn/failed", "turn/cancelled", "thread/closed":
             return false
@@ -1875,154 +1883,9 @@ private extension AppServerAPI.Account.Login.Response {
     }
 }
 
-private struct TurnNotificationPayload: Decodable, Sendable {
-    var threadID: String?
-    var turn: AppServerNotificationTurn?
-    var turnID: String?
-    var itemID: String?
-    var item: AppServerThreadItem?
-    var startedAtMs: Int64?
-    var completedAtMs: Int64?
-    var reviewThreadID: String?
-    var model: String?
-    var fromModel: String?
-    var toModel: String?
-    var reason: String?
-    var message: String?
-    var stdin: String?
-    var processID: String?
-    var processHandle: String?
-    var summary: String?
-    var details: String?
-    var delta: String?
-    var deltaBase64: String?
-    var diff: String?
-    var result: String?
-    var error: AppServerAPI.Turn.Error?
-    var willRetry: Bool?
-    var status: AppServerThreadStatus?
-    var summaryIndex: Int?
-    var contentIndex: Int?
-    var plan: [AppServerTurnPlanStep]
-    var verifications: [String]
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turn
-        case turnID = "turnId"
-        case itemID = "itemId"
-        case item
-        case startedAtMs
-        case completedAtMs
-        case reviewThreadID = "reviewThreadId"
-        case model
-        case fromModel
-        case toModel
-        case reason
-        case message
-        case stdin
-        case processID = "processId"
-        case processHandle
-        case summary
-        case details
-        case delta
-        case deltaBase64
-        case diff
-        case result
-        case error
-        case willRetry
-        case status
-        case summaryIndex
-        case contentIndex
-        case plan
-        case verifications
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.threadID = try container.decodeStringIfPresent(forKey: .threadID)
-        self.turn = try? container.decodeIfPresent(AppServerNotificationTurn.self, forKey: .turn)
-        self.turnID = try container.decodeStringIfPresent(forKey: .turnID)
-        self.itemID = try container.decodeStringIfPresent(forKey: .itemID)
-        self.item = try? container.decodeIfPresent(AppServerThreadItem.self, forKey: .item)
-        self.startedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .startedAtMs)
-        self.completedAtMs = try? container.decodeIfPresent(Int64.self, forKey: .completedAtMs)
-        self.reviewThreadID = try container.decodeStringIfPresent(forKey: .reviewThreadID)
-        self.model = try container.decodeStringIfPresent(forKey: .model)
-        self.fromModel = try container.decodeStringIfPresent(forKey: .fromModel)
-        self.toModel = try container.decodeStringIfPresent(forKey: .toModel)
-        self.reason = try container.decodeStringIfPresent(forKey: .reason)
-        self.message = try container.decodeStringIfPresent(forKey: .message)
-        self.stdin = try container.decodeStringIfPresent(forKey: .stdin)
-        self.processID = try container.decodeStringIfPresent(forKey: .processID)
-        self.processHandle = try container.decodeStringIfPresent(forKey: .processHandle)
-        self.summary = try container.decodeStringIfPresent(forKey: .summary)
-        self.details = try container.decodeStringIfPresent(forKey: .details)
-        self.delta = try container.decodeStringIfPresent(forKey: .delta)
-        self.deltaBase64 = try container.decodeStringIfPresent(forKey: .deltaBase64)
-        self.diff = try container.decodeStringIfPresent(forKey: .diff)
-        self.result = try container.decodeStringIfPresent(forKey: .result)
-        self.error = try? container.decodeIfPresent(AppServerAPI.Turn.Error.self, forKey: .error)
-        self.willRetry = try? container.decodeIfPresent(Bool.self, forKey: .willRetry)
-        self.status = try? container.decodeIfPresent(AppServerThreadStatus.self, forKey: .status)
-        self.summaryIndex = try? container.decodeIfPresent(Int.self, forKey: .summaryIndex)
-        self.contentIndex = try? container.decodeIfPresent(Int.self, forKey: .contentIndex)
-        self.plan = (try? container.decodeIfPresent([AppServerTurnPlanStep].self, forKey: .plan)) ?? []
-        self.verifications = (try? container.decodeIfPresent([String].self, forKey: .verifications)) ?? []
-    }
-
-    var resolvedTurnID: String? {
-        turn?.id ?? turnID
-    }
-
-    var startedAt: Date? {
-        startedAtMs.map(Self.date(millisecondsSince1970:))
-    }
-
-    var completedAt: Date? {
-        completedAtMs.map(Self.date(millisecondsSince1970:))
-    }
-
-    private static func date(millisecondsSince1970 milliseconds: Int64) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
-    }
-}
-
-private struct AppServerNotificationTurn: Decodable, Sendable {
-    var id: String
-    var status: String?
-    var error: AppServerNotificationTurnError?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case status
-        case error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decodeStringIfPresent(forKey: .id) ?? ""
-        self.status = try container.decodeStringIfPresent(forKey: .status)
-        self.error = try? container.decodeIfPresent(AppServerNotificationTurnError.self, forKey: .error)
-    }
-}
-
-private struct AppServerNotificationTurnError: Decodable, Sendable {
-    var message: String?
-
-    enum CodingKeys: String, CodingKey {
-        case message
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.message = try container.decodeStringIfPresent(forKey: .message)
-    }
-}
-
-private struct AppServerThreadStatus: Decodable, Sendable {
-    var type: String
-}
+private typealias TurnNotificationPayload = AppServerWireReviewNotification.Payload
+private typealias AppServerCommandAction = AppServerWireReviewNotification.CommandAction
+private typealias AppServerThreadItem = AppServerWireReviewNotification.Item
 
 private let appServerContextCompactionStartedText = "Automatically compacting context"
 private let appServerContextCompactionCompletedText = "Context automatically compacted"
@@ -2045,7 +1908,7 @@ private func decodeReviewNotification(
         )]
     case "item/started":
         if let item = payload.item,
-           item.type == "commandExecution" {
+           item.type == .commandExecution {
             let lifecycle = AppServerCommandLifecycle(
                 item: item,
                 startedAt: payload.startedAt,
@@ -2060,7 +1923,7 @@ private func decodeReviewNotification(
         events = payload.item?.updatedEvents() ?? []
     case "item/completed":
         if let item = payload.item,
-           item.type == "commandExecution" {
+           item.type == .commandExecution {
             let previous = commandLifecycleByItemID[item.id]
             let lifecycle = AppServerCommandLifecycle(
                 item: item,
@@ -2186,7 +2049,7 @@ private func decodeReviewNotification(
         default:
             events = [.completed(
                 summary: payload.message ?? "Succeeded.",
-                result: payload.result
+                result: payload.result?.nonNullText
             )]
         }
     case "error":
@@ -2256,8 +2119,8 @@ private func decodeReviewNotification(
     return .init(
         events: orderedEvents,
         turnID: payload.resolvedTurnID,
-        startsReviewMode: notification.method == "item/started" && payload.item?.type == "enteredReviewMode",
-        finishesReviewMode: notification.method == "item/completed" && payload.item?.type == "exitedReviewMode",
+        startsReviewMode: notification.method == "item/started" && payload.item?.type.rawValue == "enteredReviewMode",
+        finishesReviewMode: notification.method == "item/completed" && payload.item?.type.rawValue == "exitedReviewMode",
         hasDirectTimelineEvents: directEvents.isEmpty == false
     )
 }
@@ -2266,9 +2129,7 @@ private func directTimelineDomainEvents(
     for notification: AppServerRoutedReviewNotification,
     fallbackReviewThreadID: String
 ) -> [ReviewDomainEvent] {
-    guard let wireNotification = try? wireReviewNotification(from: notification) else {
-        return []
-    }
+    let wireNotification = notification.wireNotification
     return wireNotification
         .domainEvents(fallbackReviewThreadID: .init(rawValue: fallbackReviewThreadID))
         .filter { wireNotification.allowsDirectTimelineEvent($0) }
@@ -2384,21 +2245,6 @@ private extension ReviewTimelineItemSeed {
         }
         return search.result?.nilIfEmpty != nil
     }
-}
-
-private func wireReviewNotification(
-    from notification: AppServerRoutedReviewNotification
-) throws -> AppServerWireReviewNotification {
-    let paramsObject = try JSONSerialization.jsonObject(
-        with: notification.params,
-        options: [.fragmentsAllowed]
-    )
-    let envelope: [String: Any] = [
-        "method": notification.method,
-        "params": paramsObject,
-    ]
-    let data = try JSONSerialization.data(withJSONObject: envelope)
-    return try JSONDecoder().decode(AppServerWireReviewNotification.self, from: data)
 }
 
 private func isReviewNotificationMethod(_ method: String) -> Bool {
@@ -2595,30 +2441,7 @@ private extension TurnNotificationPayload {
     }
 }
 
-private struct AppServerCommandAction: Decodable, Sendable {
-    var type: String
-    var command: String?
-    var name: String?
-    var path: String?
-    var query: String?
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case command
-        case name
-        case path
-        case query
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decodeStringIfPresent(forKey: .type) ?? "unknown"
-        self.command = try container.decodeStringIfPresent(forKey: .command)
-        self.name = try container.decodeStringIfPresent(forKey: .name)
-        self.path = try container.decodeStringIfPresent(forKey: .path)
-        self.query = try container.decodeStringIfPresent(forKey: .query)
-    }
-
+private extension AppServerCommandAction {
     var metadataAction: ReviewLogEntry.Metadata.CommandAction {
         .init(
             kind: metadataKind,
@@ -2630,7 +2453,7 @@ private struct AppServerCommandAction: Decodable, Sendable {
     }
 
     private var metadataKind: ReviewLogEntry.Metadata.CommandAction.Kind {
-        switch type {
+        switch kind.rawValue {
         case "read":
             .read
         case "listFiles":
@@ -2775,92 +2598,12 @@ private extension Dictionary where Key == String, Value == AppServerCommandLifec
     }
 }
 
-private struct AppServerThreadItem: Decodable, Sendable {
-    var type: String
-    var id: String
-    var text: String?
-    var command: String?
-    var cwd: String?
-    var processID: String?
-    var source: String?
-    var aggregatedOutput: String?
-    var exitCode: Int?
-    var durationMs: Int?
-    var commandActions: [AppServerCommandAction]
-    var status: String?
-    var server: String?
-    var tool: String?
-    var namespace: String?
-    var query: String?
-    var path: String?
-    var review: String?
-    var summary: [String]?
-    var content: [String]?
-    var result: AppServerNotificationValue?
-    var error: AppServerNotificationValue?
-    var success: Bool?
-    var prompt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case id
-        case text
-        case command
-        case cwd
-        case processID = "processId"
-        case source
-        case aggregatedOutput
-        case exitCode
-        case durationMs
-        case commandActions
-        case status
-        case server
-        case tool
-        case namespace
-        case query
-        case path
-        case review
-        case summary
-        case content
-        case result
-        case error
-        case success
-        case prompt
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decodeStringIfPresent(forKey: .type) ?? "unknown"
-        self.id = try container.decodeStringIfPresent(forKey: .id) ?? UUID().uuidString
-        self.text = try container.decodeStringIfPresent(forKey: .text)
-        self.command = try container.decodeStringIfPresent(forKey: .command)
-        self.cwd = try container.decodeStringIfPresent(forKey: .cwd)
-        self.processID = try container.decodeStringIfPresent(forKey: .processID)
-        self.source = try container.decodeStringIfPresent(forKey: .source)
-        self.aggregatedOutput = try container.decodeStringIfPresent(forKey: .aggregatedOutput)
-        self.exitCode = try? container.decodeIfPresent(Int.self, forKey: .exitCode)
-        self.durationMs = try? container.decodeIfPresent(Int.self, forKey: .durationMs)
-        self.commandActions = (try? container.decodeIfPresent([AppServerCommandAction].self, forKey: .commandActions)) ?? []
-        self.status = try container.decodeStringIfPresent(forKey: .status)
-        self.server = try container.decodeStringIfPresent(forKey: .server)
-        self.tool = try container.decodeStringIfPresent(forKey: .tool)
-        self.namespace = try container.decodeStringIfPresent(forKey: .namespace)
-        self.query = try container.decodeStringIfPresent(forKey: .query)
-        self.path = try container.decodeStringIfPresent(forKey: .path)
-        self.review = try container.decodeStringIfPresent(forKey: .review)
-        self.summary = (try? container.decodeIfPresent([String].self, forKey: .summary)) ?? []
-        self.content = (try? container.decodeIfPresent([String].self, forKey: .content)) ?? []
-        self.result = try? container.decodeIfPresent(AppServerNotificationValue.self, forKey: .result)
-        self.error = try? container.decodeIfPresent(AppServerNotificationValue.self, forKey: .error)
-        self.success = try? container.decodeIfPresent(Bool.self, forKey: .success)
-        self.prompt = try container.decodeStringIfPresent(forKey: .prompt)
-    }
-
+private extension AppServerThreadItem {
     func startedEvents(
         startedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
     ) -> [CodexReviewBackendModel.Review.Event] {
-        switch type {
+        switch type.rawValue {
         case "userMessage":
             return []
         case "enteredReviewMode":
@@ -2915,7 +2658,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     func updatedEvents() -> [CodexReviewBackendModel.Review.Event] {
-        switch type {
+        switch type.rawValue {
         case "agentMessage":
             return text.map {
                 [logEntry(
@@ -2987,7 +2730,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         completedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
     ) -> [CodexReviewBackendModel.Review.Event] {
-        switch type {
+        switch type.rawValue {
         case "userMessage":
             return []
         case "agentMessage":
@@ -3143,10 +2886,10 @@ private struct AppServerThreadItem: Decodable, Sendable {
         let itemStatus = self.status?.nilIfEmpty
         let resolvedStatus: String? = explicitStatusValue ?? itemStatus
         let resolvedCommandStatus: String? = itemStatus ?? explicitStatusValue ?? lifecycle?.commandStatus
-        let isCommandExecution = type == "commandExecution"
-        let isLifecycleItem = isCommandExecution || type == "contextCompaction"
+        let isCommandExecution = type == .commandExecution
+        let isLifecycleItem = isCommandExecution || type == .contextCompaction
         return .init(
-            sourceType: type,
+            sourceType: type.rawValue,
             title: title?.nilIfEmpty,
             status: resolvedStatus,
             detail: detail?.nilIfEmpty,
@@ -3239,7 +2982,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
         [namespace, server, tool]
             .compactMap { $0?.nilIfEmpty }
             .joined(separator: ".")
-            .nilIfEmpty ?? type
+            .nilIfEmpty ?? type.rawValue
     }
 
     private var resultSuffix: String {
@@ -3257,7 +3000,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 
     private func reasoningCompletionEvents(replacesGroup: Bool) -> [CodexReviewBackendModel.Review.Event] {
-        let summaryEvents = (summary ?? []).enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
+        let summaryEvents = summary.enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
             guard text.isEmpty == false else {
                 return nil
             }
@@ -3268,7 +3011,7 @@ private struct AppServerThreadItem: Decodable, Sendable {
                 replacesGroup: replacesGroup
             )
         }
-        let rawEvents = (content ?? []).enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
+        let rawEvents = content.enumerated().compactMap { index, text -> CodexReviewBackendModel.Review.Event? in
             guard text.isEmpty == false else {
                 return nil
             }
@@ -3283,102 +3026,8 @@ private struct AppServerThreadItem: Decodable, Sendable {
     }
 }
 
-private struct AppServerTurnPlanStep: Decodable, Sendable {
-    var step: String
-    var status: String
-}
-
-private enum AppServerNotificationValue: Decodable, Sendable {
-    case string(String)
-    case int(Int)
-    case double(Double)
-    case bool(Bool)
-    case object([String: AppServerNotificationValue])
-    case array([AppServerNotificationValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .int(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .double(value)
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode([String: AppServerNotificationValue].self) {
-            self = .object(value)
-        } else {
-            self = .array(try container.decode([AppServerNotificationValue].self))
-        }
-    }
-
+private extension AppServerWireJSONValue {
     var nonNullDebugText: String? {
-        if case .null = self {
-            return nil
-        }
-        return debugText
-    }
-
-    private var debugText: String {
-        switch self {
-        case .string(let value):
-            value
-        case .int(let value):
-            String(value)
-        case .double(let value):
-            String(value)
-        case .bool(let value):
-            String(value)
-        case .object(let value):
-            Self.jsonText(value.mapValues(\.foundationObject), fallback: "{}")
-        case .array(let value):
-            Self.jsonText(value.map(\.foundationObject), fallback: "[]")
-        case .null:
-            "null"
-        }
-    }
-
-    private var foundationObject: Any {
-        switch self {
-        case .string(let value):
-            value
-        case .int(let value):
-            value
-        case .double(let value):
-            value
-        case .bool(let value):
-            value
-        case .object(let value):
-            value.mapValues(\.foundationObject)
-        case .array(let value):
-            value.map(\.foundationObject)
-        case .null:
-            NSNull()
-        }
-    }
-
-    private static func jsonText(_ object: Any, fallback: String) -> String {
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: object,
-            options: [.sortedKeys]
-        ),
-              let text = String(data: data, encoding: .utf8)
-        else {
-            return fallback
-        }
-        return text
-    }
-}
-
-private extension KeyedDecodingContainer {
-    func decodeStringIfPresent(forKey key: Key) throws -> String? {
-        if let value = try? decodeIfPresent(String.self, forKey: key) {
-            return value
-        }
-        return nil
+        nonNullText
     }
 }

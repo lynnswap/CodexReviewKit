@@ -651,7 +651,7 @@ struct AppServerClientTests {
         let request = try #require(await transport.recordedRequests().first)
         let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
         let clientInfo = try #require(params["clientInfo"] as? [String: Any])
-        #expect(clientInfo["name"] as? String == "CodexReviewKit")
+        #expect(clientInfo["name"] as? String == "CodexAppServerKit")
         #expect(clientInfo["version"] as? String == "2")
         let capabilities = try #require(params["capabilities"] as? [String: Any])
         #expect(capabilities["experimentalApi"] as? Bool == true)
