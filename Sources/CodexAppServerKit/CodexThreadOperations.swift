@@ -23,7 +23,7 @@ extension CodexThread {
         .init(events: events)
     }
 
-    public var transcript: CodexThreadTranscriptSequence {
+    public var transcriptUpdates: CodexThreadTranscriptSequence {
         .init(events: events)
     }
 
@@ -33,51 +33,61 @@ extension CodexThread {
 
     public func respond(
         to prompt: CodexPrompt,
-        options: CodexTurn.Options = .init()
-    ) async throws -> CodexTurnResult {
-        let turn = try await startTurn(prompt, options: options)
-        return try await turn.result()
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponse {
+        try await streamResponse(to: prompt, options: options).collect()
     }
 
     public func respond(
         to prompt: String,
-        options: CodexTurn.Options = .init()
-    ) async throws -> CodexTurnResult {
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponse {
         try await respond(to: CodexPrompt(prompt), options: options)
     }
 
-    public func startTurn(
-        _ prompt: CodexPrompt,
-        options: CodexTurn.Options = .init()
-    ) async throws -> CodexTurn {
-        let response = try await client.send(
-            AppServerAPI.Turn.Start.Request(
-                params: .init(
-                    threadID: id.rawValue,
-                    input: prompt.appServerInput,
-                    approvalPolicy: options.approvalMode?.approvalPolicy,
-                    approvalsReviewer: options.approvalMode?.approvalsReviewer,
-                    cwd: options.cwd?.path,
-                    effort: options.effort,
-                    model: options.model,
-                    sandboxPolicy: options.sandbox?.turnSandboxPolicy,
-                    serviceTier: options.serviceTier,
-                    summary: options.summary
-                )
-            ))
-        return CodexTurn(
-            id: .init(rawValue: response.turn.id),
-            threadID: id,
-            client: client,
-            router: router
+    public func respond(
+        options: CodexGenerationOptions = .init(),
+        @CodexPromptBuilder prompt: () throws -> CodexPrompt
+    ) async throws -> CodexResponse {
+        try await respond(to: try prompt(), options: options)
+    }
+
+    public func streamResponse(
+        to prompt: CodexPrompt,
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponseStream {
+        let turn = try await startTurn(prompt, options: options)
+        return .init(
+            turn: turn,
+            transcriptErrorHandlingPolicy: options.transcriptErrorHandlingPolicy
         )
     }
 
-    public func startTurn(
-        _ prompt: String,
-        options: CodexTurn.Options = .init()
+    public func streamResponse(
+        to prompt: String,
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponseStream {
+        try await streamResponse(to: CodexPrompt(prompt), options: options)
+    }
+
+    public func streamResponse(
+        options: CodexGenerationOptions = .init(),
+        @CodexPromptBuilder prompt: () throws -> CodexPrompt
+    ) async throws -> CodexResponseStream {
+        try await streamResponse(to: try prompt(), options: options)
+    }
+
+    package func startTurn(
+        _ prompt: CodexPrompt,
+        options: CodexGenerationOptions = .init()
     ) async throws -> CodexTurn {
-        try await startTurn(CodexPrompt(prompt), options: options)
+        try await startCodexTurn(
+            threadID: id,
+            prompt: prompt,
+            options: options,
+            client: client,
+            router: router
+        )
     }
 
     public func read(includeTurns: Bool = false) async throws -> CodexThreadSnapshot {
@@ -144,8 +154,38 @@ extension CodexThread {
     }
 }
 
+package func startCodexTurn(
+    threadID: CodexThreadID,
+    prompt: CodexPrompt,
+    options: CodexGenerationOptions = .init(),
+    client: AppServerClient,
+    router: CodexAppServerNotificationRouter
+) async throws -> CodexTurn {
+    let response = try await client.send(
+        AppServerAPI.Turn.Start.Request(
+            params: .init(
+                threadID: threadID.rawValue,
+                input: prompt.appServerInput,
+                approvalPolicy: options.approvalMode?.approvalPolicy,
+                approvalsReviewer: options.approvalMode?.approvalsReviewer,
+                cwd: options.cwd?.path,
+                effort: options.effort,
+                model: options.model,
+                sandboxPolicy: options.sandbox?.turnSandboxPolicy,
+                serviceTier: options.serviceTier,
+                summary: options.summary
+            )
+        ))
+    return CodexTurn(
+        id: .init(rawValue: response.turn.id),
+        threadID: threadID,
+        client: client,
+        router: router
+    )
+}
+
 extension CodexTurn {
-    public var events: CodexTurnEventSequence {
+    package var events: CodexTurnEventSequence {
         .init {
             AsyncThrowingStream { continuation in
                 Task {
@@ -163,15 +203,15 @@ extension CodexTurn {
         }
     }
 
-    public var progress: CodexTurnProgressSequence {
+    package var progress: CodexTurnProgressSequence {
         .init(events: events)
     }
 
-    public func result() async throws -> CodexTurnResult {
-        try await CodexTurnResultCollector.collect(from: events)
+    package func result() async throws -> CodexResponse {
+        try await CodexResponseCollector.collect(from: events)
     }
 
-    public func steer(with prompt: CodexPrompt) async throws {
+    package func steer(with prompt: CodexPrompt) async throws {
         let _: AppServerAPI.Turn.Steer.Response = try await client.send(
             AppServerAPI.Turn.Steer.Request(
                 params: .init(
@@ -182,11 +222,11 @@ extension CodexTurn {
             ))
     }
 
-    public func steer(with prompt: String) async throws {
+    package func steer(with prompt: String) async throws {
         try await steer(with: CodexPrompt(prompt))
     }
 
-    public func interrupt() async throws {
+    package func interrupt() async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Turn.Interrupt.Request(
                 params: .init(threadID: threadID.rawValue, turnID: id.rawValue)

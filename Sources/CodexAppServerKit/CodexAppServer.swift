@@ -92,7 +92,7 @@ public actor CodexAppServer {
     }
 
     public func resumeThread(
-        _ id: CodexThread.ID,
+        _ id: CodexThreadID,
         options: CodexThread.ResumeOptions = .init()
     ) async throws -> CodexThread {
         let response = try await client.send(
@@ -104,7 +104,7 @@ public actor CodexAppServer {
     }
 
     public func forkThread(
-        _ id: CodexThread.ID,
+        _ id: CodexThreadID,
         options: CodexThread.Options = .init()
     ) async throws -> CodexThread {
         let response = try await client.send(
@@ -115,7 +115,7 @@ public actor CodexAppServer {
         return thread(from: response.thread)
     }
 
-    public func unarchiveThread(_ id: CodexThread.ID) async throws -> CodexThread {
+    public func unarchiveThread(_ id: CodexThreadID) async throws -> CodexThread {
         let response = try await client.send(
             AppServerAPI.Thread.Unarchive.Request(
                 params: .init(threadID: id.rawValue)
@@ -123,7 +123,7 @@ public actor CodexAppServer {
         return thread(from: response.thread)
     }
 
-    public func deleteThread(_ id: CodexThread.ID) async throws {
+    public func deleteThread(_ id: CodexThreadID) async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Delete.Request(
                 params: .init(threadID: id.rawValue)
@@ -256,8 +256,7 @@ public actor CodexAppServer {
         let _: EmptyResponse = try await client.send(AppServerAPI.Account.Logout.Request())
     }
 
-    private func threadStartParams(options: CodexThread.Options) -> AppServerAPI.Thread.Start.Params
-    {
+    private func threadStartParams(options: CodexThread.Options) -> AppServerAPI.Thread.Start.Params {
         .init(
             model: options.model,
             modelProvider: options.modelProvider,
@@ -296,9 +295,7 @@ public actor CodexAppServer {
         )
     }
 
-    private nonisolated static func account(from snapshot: AppServerAPI.Account.Snapshot)
-        -> CodexAccount
-    {
+    private nonisolated static func account(from snapshot: AppServerAPI.Account.Snapshot) -> CodexAccount {
         .init(
             id: snapshot.id,
             kind: .init(rawValue: snapshot.kind.rawValue) ?? .chatGPT,
@@ -335,15 +332,12 @@ public actor CodexAppServer {
     }
 
     private nonisolated static func defaultCodexHomeURL(environment: [String: String]) -> URL {
-        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(
-            in: .whitespacesAndNewlines),
-            codexHome.isEmpty == false
-        {
+        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            codexHome.isEmpty == false {
             return URL(fileURLWithPath: codexHome, isDirectory: true)
         }
         if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-            home.isEmpty == false
-        {
+            home.isEmpty == false {
             return URL(fileURLWithPath: home, isDirectory: true)
                 .appendingPathComponent(".codex", isDirectory: true)
         }

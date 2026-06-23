@@ -148,8 +148,8 @@ public struct CodexThreadLogSequence: AsyncSequence, Sendable {
     }
 }
 
-public struct CodexTurnEventSequence: AsyncSequence, Sendable {
-    public typealias Element = CodexTurnEvent
+package struct CodexTurnEventSequence: AsyncSequence, Sendable {
+    package typealias Element = CodexTurnEvent
 
     private let makeStream: @Sendable () -> AsyncThrowingStream<CodexTurnEvent, Error>
 
@@ -157,13 +157,13 @@ public struct CodexTurnEventSequence: AsyncSequence, Sendable {
         self.makeStream = makeStream
     }
 
-    public func makeAsyncIterator() -> AsyncThrowingStream<CodexTurnEvent, Error>.Iterator {
+    package func makeAsyncIterator() -> AsyncThrowingStream<CodexTurnEvent, Error>.Iterator {
         makeStream().makeAsyncIterator()
     }
 }
 
-public struct CodexTurnProgressSequence: AsyncSequence, Sendable {
-    public typealias Element = CodexTurnProgress
+package struct CodexTurnProgressSequence: AsyncSequence, Sendable {
+    package typealias Element = CodexTurnProgress
 
     private let events: CodexTurnEventSequence
 
@@ -171,11 +171,11 @@ public struct CodexTurnProgressSequence: AsyncSequence, Sendable {
         self.events = events
     }
 
-    public func makeAsyncIterator() -> Iterator {
+    package func makeAsyncIterator() -> Iterator {
         Iterator(events: events.makeAsyncIterator())
     }
 
-    public struct Iterator: AsyncIteratorProtocol {
+    package struct Iterator: AsyncIteratorProtocol {
         private var events: AsyncThrowingStream<CodexTurnEvent, Error>.Iterator
         private var accumulator = CodexTranscriptAccumulator()
         private var usage: CodexTokenUsage?
@@ -184,7 +184,7 @@ public struct CodexTurnProgressSequence: AsyncSequence, Sendable {
             self.events = events
         }
 
-        public mutating func next() async throws -> CodexTurnProgress? {
+        package mutating func next() async throws -> CodexTurnProgress? {
             guard let event = try await events.next() else {
                 return nil
             }
@@ -222,7 +222,7 @@ public struct CodexTurnProgressSequence: AsyncSequence, Sendable {
             }
         }
 
-        private func finalizedResult(_ result: CodexTurnResult) -> CodexTurnResult {
+        private func finalizedResult(_ result: CodexResponse) -> CodexResponse {
             var result = result
             if result.finalAnswer == nil {
                 result.finalAnswer = accumulator.transcript.finalAnswer
@@ -238,8 +238,8 @@ public struct CodexTurnProgressSequence: AsyncSequence, Sendable {
     }
 }
 
-package struct CodexTurnResultCollector {
-    static func collect(from events: CodexTurnEventSequence) async throws -> CodexTurnResult {
+package struct CodexResponseCollector {
+    static func collect(from events: CodexTurnEventSequence) async throws -> CodexResponse {
         var accumulator = CodexTranscriptAccumulator()
         var usage: CodexTokenUsage?
         for try await event in events {

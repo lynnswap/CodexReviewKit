@@ -44,7 +44,8 @@ visible.
 `CodexAppServerKit` is the Swift library product for working with a local
 `codex app-server` process. It owns the stdio JSON-RPC transport, app-server
 handshake, typed request DTOs, and a domain-oriented public API for sessions,
-threads, turns, prompts, transcripts, models, accounts, and login flows.
+thread IDs, turn IDs, prompts, responses, response streams, transcripts, models,
+accounts, and login flows.
 
 The public API is centered on a `CodexAppServer` value that is initialized and
 kept for the lifetime of the app-server connection:
@@ -64,7 +65,8 @@ conversion.
 
 See [CodexAppServerKit README](Sources/CodexAppServerKit/README.md) for the
 standalone SDK surface, including thread-level streams for messages,
-transcripts, log entries, and progress events.
+transcripts, log entries, and in-flight response controls such as steer, queue,
+and interrupt.
 
 ## Timeout Setup
 

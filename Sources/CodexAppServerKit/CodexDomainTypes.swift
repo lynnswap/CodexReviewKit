@@ -7,6 +7,10 @@ public struct CodexPrompt: ExpressibleByStringLiteral, Equatable, Sendable {
         self.parts = parts
     }
 
+    public init(@CodexPromptBuilder _ content: () throws -> CodexPrompt) rethrows {
+        self = try content()
+    }
+
     public init(stringLiteral value: String) {
         self.parts = [.text(value)]
     }
@@ -24,6 +28,45 @@ public struct CodexPrompt: ExpressibleByStringLiteral, Equatable, Sendable {
     }
 }
 
+@resultBuilder
+public enum CodexPromptBuilder {
+    public static func buildBlock(_ components: CodexPrompt...) -> CodexPrompt {
+        .init(parts: components.flatMap(\.parts))
+    }
+
+    public static func buildExpression(_ expression: CodexPrompt) -> CodexPrompt {
+        expression
+    }
+
+    public static func buildExpression(_ expression: CodexPrompt.Part) -> CodexPrompt {
+        .init(parts: [expression])
+    }
+
+    public static func buildExpression(_ expression: String) -> CodexPrompt {
+        .init(expression)
+    }
+
+    public static func buildOptional(_ component: CodexPrompt?) -> CodexPrompt {
+        component ?? .init(parts: [])
+    }
+
+    public static func buildEither(first component: CodexPrompt) -> CodexPrompt {
+        component
+    }
+
+    public static func buildEither(second component: CodexPrompt) -> CodexPrompt {
+        component
+    }
+
+    public static func buildArray(_ components: [CodexPrompt]) -> CodexPrompt {
+        .init(parts: components.flatMap(\.parts))
+    }
+
+    public static func buildLimitedAvailability(_ component: CodexPrompt) -> CodexPrompt {
+        component
+    }
+}
+
 public struct CodexInstructions: Equatable, Sendable {
     public var base: String?
     public var developer: String?
@@ -33,12 +76,51 @@ public struct CodexInstructions: Equatable, Sendable {
         self.developer = developer
     }
 
+    public init(_ developer: String) {
+        self.init(developer: developer)
+    }
+
+    public init(@CodexInstructionsBuilder _ developer: () throws -> String) rethrows {
+        self.init(developer: try developer())
+    }
+
     public static func base(_ text: String) -> Self {
         .init(base: text)
     }
 
     public static func developer(_ text: String) -> Self {
         .init(developer: text)
+    }
+}
+
+@resultBuilder
+public enum CodexInstructionsBuilder {
+    public static func buildBlock(_ components: String...) -> String {
+        components.filter { $0.isEmpty == false }.joined(separator: "\n")
+    }
+
+    public static func buildExpression(_ expression: String) -> String {
+        expression
+    }
+
+    public static func buildOptional(_ component: String?) -> String {
+        component ?? ""
+    }
+
+    public static func buildEither(first component: String) -> String {
+        component
+    }
+
+    public static func buildEither(second component: String) -> String {
+        component
+    }
+
+    public static func buildArray(_ components: [String]) -> String {
+        components.filter { $0.isEmpty == false }.joined(separator: "\n")
+    }
+
+    public static func buildLimitedAvailability(_ component: String) -> String {
+        component
     }
 }
 
@@ -98,19 +180,70 @@ public enum CodexApprovalMode: String, Codable, Equatable, Sendable {
     }
 }
 
-public struct CodexThread: Identifiable, Sendable {
-    public struct ID: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
-        public var rawValue: String
+public struct CodexGenerationOptions: Equatable, Sendable {
+    public var model: String?
+    public var approvalMode: CodexApprovalMode?
+    public var sandbox: CodexSandbox?
+    public var cwd: URL?
+    public var effort: String?
+    public var serviceTier: String?
+    public var summary: String?
+    public var transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
 
-        public init(rawValue: String) {
-            self.rawValue = rawValue
-        }
+    public init(
+        model: String? = nil,
+        approvalMode: CodexApprovalMode? = nil,
+        sandbox: CodexSandbox? = nil,
+        cwd: URL? = nil,
+        effort: String? = nil,
+        serviceTier: String? = nil,
+        summary: String? = nil,
+        transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy = .preserveTranscript
+    ) {
+        self.model = model
+        self.approvalMode = approvalMode
+        self.sandbox = sandbox
+        self.cwd = cwd
+        self.effort = effort
+        self.serviceTier = serviceTier
+        self.summary = summary
+        self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
+    }
+}
 
-        public init(stringLiteral value: String) {
-            self.rawValue = value
-        }
+public struct CodexTranscriptErrorHandlingPolicy: Equatable, Sendable {
+    private enum Kind: Equatable, Sendable {
+        case preserveTranscript
+        case revertTranscript
     }
 
+    private var kind: Kind
+
+    private init(kind: Kind) {
+        self.kind = kind
+    }
+
+    public static let preserveTranscript = Self(kind: .preserveTranscript)
+    public static let revertTranscript = Self(kind: .revertTranscript)
+
+    package var shouldRevertTranscript: Bool {
+        kind == .revertTranscript
+    }
+}
+
+public struct CodexThreadID: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+}
+
+public struct CodexThread: Identifiable, Sendable {
     public struct Options: Equatable, Sendable {
         public var model: String?
         public var modelProvider: String?
@@ -138,7 +271,7 @@ public struct CodexThread: Identifiable, Sendable {
 
     public typealias ResumeOptions = Options
 
-    public let id: ID
+    public let id: CodexThreadID
     public let workspace: URL?
     public let model: String?
 
@@ -146,7 +279,7 @@ public struct CodexThread: Identifiable, Sendable {
     package let router: CodexAppServerNotificationRouter
 
     package init(
-        id: ID,
+        id: CodexThreadID,
         workspace: URL? = nil,
         model: String? = nil,
         client: AppServerClient,
@@ -160,56 +293,28 @@ public struct CodexThread: Identifiable, Sendable {
     }
 }
 
-public struct CodexTurn: Identifiable, Sendable {
-    public struct ID: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
-        public var rawValue: String
+public struct CodexTurnID: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
 
-        public init(rawValue: String) {
-            self.rawValue = rawValue
-        }
-
-        public init(stringLiteral value: String) {
-            self.rawValue = value
-        }
+    public init(rawValue: String) {
+        self.rawValue = rawValue
     }
 
-    public struct Options: Equatable, Sendable {
-        public var model: String?
-        public var approvalMode: CodexApprovalMode?
-        public var sandbox: CodexSandbox?
-        public var cwd: URL?
-        public var effort: String?
-        public var serviceTier: String?
-        public var summary: String?
-
-        public init(
-            model: String? = nil,
-            approvalMode: CodexApprovalMode? = nil,
-            sandbox: CodexSandbox? = nil,
-            cwd: URL? = nil,
-            effort: String? = nil,
-            serviceTier: String? = nil,
-            summary: String? = nil
-        ) {
-            self.model = model
-            self.approvalMode = approvalMode
-            self.sandbox = sandbox
-            self.cwd = cwd
-            self.effort = effort
-            self.serviceTier = serviceTier
-            self.summary = summary
-        }
+    public init(stringLiteral value: String) {
+        self.rawValue = value
     }
+}
 
-    public let id: ID
-    public let threadID: CodexThread.ID
+package struct CodexTurn: Identifiable, Sendable {
+    package let id: CodexTurnID
+    package let threadID: CodexThreadID
 
     package let client: AppServerClient
     package let router: CodexAppServerNotificationRouter
 
     package init(
-        id: ID,
-        threadID: CodexThread.ID,
+        id: CodexTurnID,
+        threadID: CodexThreadID,
         client: AppServerClient,
         router: CodexAppServerNotificationRouter
     ) {
@@ -221,14 +326,14 @@ public struct CodexTurn: Identifiable, Sendable {
 }
 
 public struct CodexThreadSnapshot: Identifiable, Equatable, Sendable {
-    public var id: CodexThread.ID
+    public var id: CodexThreadID
     public var workspace: URL?
     public var name: String?
     public var preview: String?
     public var turns: [CodexTurnSnapshot]
 
     public init(
-        id: CodexThread.ID,
+        id: CodexThreadID,
         workspace: URL? = nil,
         name: String? = nil,
         preview: String? = nil,
@@ -243,12 +348,12 @@ public struct CodexThreadSnapshot: Identifiable, Equatable, Sendable {
 }
 
 public struct CodexTurnSnapshot: Identifiable, Equatable, Sendable {
-    public var id: CodexTurn.ID
+    public var id: CodexTurnID
     public var status: CodexTurnStatus?
     public var errorMessage: String?
 
     public init(
-        id: CodexTurn.ID,
+        id: CodexTurnID,
         status: CodexTurnStatus? = nil,
         errorMessage: String? = nil
     ) {
@@ -318,6 +423,10 @@ public struct CodexTranscript: Equatable, Sendable {
             }
         }
         return fallback
+    }
+
+    public var responseText: String? {
+        messages.reversed().first { $0.role == .assistant }?.text
     }
 }
 
@@ -441,15 +550,18 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
     public var id: String
     public var kind: Kind
     public var content: Content
+    public var rawPayload: Data?
 
     public init(
         id: String,
         kind: Kind,
-        content: Content
+        content: Content,
+        rawPayload: Data? = nil
     ) {
         self.id = id
         self.kind = kind
         self.content = content
+        self.rawPayload = rawPayload
     }
 
     public var text: String? {
@@ -690,28 +802,239 @@ public enum CodexTurnStatus: Equatable, Sendable {
     }
 }
 
-public struct CodexTurnResult: Identifiable, Equatable, Sendable {
-    public var id: CodexTurn.ID
+public struct CodexResponse: Identifiable, Equatable, Sendable {
+    public var turnID: CodexTurnID
     public var status: CodexTurnStatus?
     public var errorMessage: String?
     public var finalAnswer: String?
     public var transcript: CodexTranscript
     public var usage: CodexTokenUsage?
 
+    public var id: CodexTurnID {
+        turnID
+    }
+
     public init(
-        id: CodexTurn.ID,
+        turnID: CodexTurnID,
         status: CodexTurnStatus? = nil,
         errorMessage: String? = nil,
         finalAnswer: String? = nil,
         transcript: CodexTranscript = .init(),
         usage: CodexTokenUsage? = nil
     ) {
-        self.id = id
+        self.turnID = turnID
         self.status = status
         self.errorMessage = errorMessage
         self.finalAnswer = finalAnswer
         self.transcript = transcript
         self.usage = usage
+    }
+}
+
+public struct CodexResponseStream: AsyncSequence, Sendable {
+    public enum SubmissionMode: Equatable, Sendable {
+        case queueAfterCurrentResponse
+        case interruptCurrentResponse
+    }
+
+    public struct Snapshot: Equatable, Sendable {
+        public var turnID: CodexTurnID
+        public var content: String?
+        public var transcript: CodexTranscript
+        public var usage: CodexTokenUsage?
+        public var response: CodexResponse?
+
+        public init(
+            turnID: CodexTurnID,
+            content: String? = nil,
+            transcript: CodexTranscript = .init(),
+            usage: CodexTokenUsage? = nil,
+            response: CodexResponse? = nil
+        ) {
+            self.turnID = turnID
+            self.content = content
+            self.transcript = transcript
+            self.usage = usage
+            self.response = response
+        }
+    }
+
+    private let turn: CodexTurn
+    private let transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
+
+    package init(
+        turn: CodexTurn,
+        transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
+    ) {
+        self.turn = turn
+        self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(
+            turn: turn,
+            transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy,
+            progress: turn.progress.makeAsyncIterator()
+        )
+    }
+
+    public func collect() async throws -> CodexResponse {
+        try await withTaskCancellationHandler {
+            do {
+                return try await turn.result()
+            } catch {
+                try await handleFailure()
+                throw error
+            }
+        } onCancel: {
+            let turn = turn
+            Task {
+                try? await turn.interrupt()
+            }
+        }
+    }
+
+    public func interrupt() async throws {
+        try await turn.interrupt()
+    }
+
+    public func steer(with prompt: CodexPrompt) async throws {
+        try await turn.steer(with: prompt)
+    }
+
+    public func steer(with prompt: String) async throws {
+        try await steer(with: CodexPrompt(prompt))
+    }
+
+    public func steer(@CodexPromptBuilder prompt: () throws -> CodexPrompt) async throws {
+        try await steer(with: try prompt())
+    }
+
+    public func submit(
+        _ prompt: CodexPrompt,
+        mode: SubmissionMode,
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponseStream {
+        switch mode {
+        case .queueAfterCurrentResponse:
+            _ = try await collect()
+            return try await startFollowUp(to: prompt, options: options)
+        case .interruptCurrentResponse:
+            try await interrupt()
+            try await waitForInterruptedResponse()
+            return try await startFollowUp(to: prompt, options: options)
+        }
+    }
+
+    public func submit(
+        _ prompt: String,
+        mode: SubmissionMode,
+        options: CodexGenerationOptions = .init()
+    ) async throws -> CodexResponseStream {
+        try await submit(CodexPrompt(prompt), mode: mode, options: options)
+    }
+
+    public func submit(
+        mode: SubmissionMode,
+        options: CodexGenerationOptions = .init(),
+        @CodexPromptBuilder prompt: () throws -> CodexPrompt
+    ) async throws -> CodexResponseStream {
+        try await submit(try prompt(), mode: mode, options: options)
+    }
+
+    private func startFollowUp(
+        to prompt: CodexPrompt,
+        options: CodexGenerationOptions
+    ) async throws -> CodexResponseStream {
+        let turn = try await startCodexTurn(
+            threadID: turn.threadID,
+            prompt: prompt,
+            options: options,
+            client: turn.client,
+            router: turn.router
+        )
+        return .init(
+            turn: turn,
+            transcriptErrorHandlingPolicy: options.transcriptErrorHandlingPolicy
+        )
+    }
+
+    private func waitForInterruptedResponse() async throws {
+        for try await event in turn.events {
+            switch event {
+            case .completed(let response):
+                if let message = response.errorMessage {
+                    throw CodexAppServerError.turnFailed(message)
+                }
+                switch response.status {
+                case .interrupted, .cancelled:
+                    return
+                case .failed:
+                    throw CodexAppServerError.turnFailed(CodexTurnStatus.failed.rawValue)
+                case .running, .completed, .unknown, nil:
+                    return
+                }
+            case .failed(let message):
+                throw CodexAppServerError.turnFailed(message)
+            case .started, .itemStarted, .itemUpdated, .itemCompleted, .messageDelta,
+                .tokenUsageUpdated, .unknown:
+                continue
+            }
+        }
+        throw CodexAppServerError.transportClosed
+    }
+
+    private func handleFailure() async throws {
+        guard transcriptErrorHandlingPolicy.shouldRevertTranscript else {
+            return
+        }
+        let _: EmptyResponse = try await turn.client.send(
+            AppServerAPI.Thread.Rollback.Request(
+                params: .init(threadID: turn.threadID.rawValue, numTurns: 1)
+            ))
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private let turn: CodexTurn
+        private let transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
+        private var progress: CodexTurnProgressSequence.Iterator
+
+        fileprivate init(
+            turn: CodexTurn,
+            transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy,
+            progress: CodexTurnProgressSequence.Iterator
+        ) {
+            self.turn = turn
+            self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
+            self.progress = progress
+        }
+
+        public mutating func next() async throws -> Snapshot? {
+            guard let progress = try await progress.next() else {
+                return nil
+            }
+            if case .failed(let error) = progress.phase {
+                try await handleFailure()
+                throw error
+            }
+            return Snapshot(
+                turnID: turn.id,
+                content: progress.result?.finalAnswer ?? progress.transcript.responseText,
+                transcript: progress.transcript,
+                usage: progress.result?.usage,
+                response: progress.result
+            )
+        }
+
+        private func handleFailure() async throws {
+            guard transcriptErrorHandlingPolicy.shouldRevertTranscript else {
+                return
+            }
+            let _: EmptyResponse = try await turn.client.send(
+                AppServerAPI.Thread.Rollback.Request(
+                    params: .init(threadID: turn.threadID.rawValue, numTurns: 1)
+                ))
+        }
     }
 }
 
@@ -752,28 +1075,28 @@ public struct CodexMessageDelta: Equatable, Sendable {
     }
 }
 
-public enum CodexTurnEvent: Equatable, Sendable {
-    case started(CodexTurn.ID)
+package enum CodexTurnEvent: Equatable, Sendable {
+    case started(CodexTurnID)
     case itemStarted(CodexThreadItem)
     case itemUpdated(CodexThreadItem)
     case itemCompleted(CodexThreadItem)
     case messageDelta(CodexMessageDelta)
     case tokenUsageUpdated(CodexTokenUsage)
-    case completed(CodexTurnResult)
+    case completed(CodexResponse)
     case failed(String)
     case unknown(CodexRawNotification)
 }
 
 public enum CodexThreadEvent: Equatable, Sendable {
-    case turnStarted(CodexTurn.ID)
-    case turnCompleted(CodexTurnResult)
-    case turnFailed(turnID: CodexTurn.ID?, message: String)
-    case itemStarted(CodexThreadItem, turnID: CodexTurn.ID?)
-    case itemUpdated(CodexThreadItem, turnID: CodexTurn.ID?)
-    case itemCompleted(CodexThreadItem, turnID: CodexTurn.ID?)
-    case message(CodexMessage, turnID: CodexTurn.ID?)
-    case messageDelta(CodexMessageDelta, turnID: CodexTurn.ID?)
-    case tokenUsageUpdated(CodexTokenUsage, turnID: CodexTurn.ID?)
+    case turnStarted(CodexTurnID)
+    case turnCompleted(CodexResponse)
+    case turnFailed(turnID: CodexTurnID?, message: String)
+    case itemStarted(CodexThreadItem, turnID: CodexTurnID?)
+    case itemUpdated(CodexThreadItem, turnID: CodexTurnID?)
+    case itemCompleted(CodexThreadItem, turnID: CodexTurnID?)
+    case message(CodexMessage, turnID: CodexTurnID?)
+    case messageDelta(CodexMessageDelta, turnID: CodexTurnID?)
+    case tokenUsageUpdated(CodexTokenUsage, turnID: CodexTurnID?)
     case statusChanged(CodexThreadStatus)
     case closed
     case unknown(CodexRawNotification)
@@ -788,14 +1111,14 @@ public struct CodexThreadLogEntry: Identifiable, Equatable, Sendable {
     }
 
     public var id: String
-    public var turnID: CodexTurn.ID?
+    public var turnID: CodexTurnID?
     public var phase: Phase
     public var item: CodexThreadItem?
     public var messageDelta: CodexMessageDelta?
 
     public init(
         id: String,
-        turnID: CodexTurn.ID? = nil,
+        turnID: CodexTurnID? = nil,
         phase: Phase,
         item: CodexThreadItem? = nil,
         messageDelta: CodexMessageDelta? = nil
@@ -836,21 +1159,21 @@ public enum CodexThreadStatus: Equatable, Sendable {
     }
 }
 
-public struct CodexTurnProgress: Equatable, Sendable {
-    public enum Phase: Equatable, Sendable {
+package struct CodexTurnProgress: Equatable, Sendable {
+    package enum Phase: Equatable, Sendable {
         case running
         case completed
         case failed(CodexAppServerError)
     }
 
-    public var phase: Phase
-    public var transcript: CodexTranscript
-    public var result: CodexTurnResult?
+    package var phase: Phase
+    package var transcript: CodexTranscript
+    package var result: CodexResponse?
 
-    public init(
+    package init(
         phase: Phase,
         transcript: CodexTranscript = .init(),
-        result: CodexTurnResult? = nil
+        result: CodexResponse? = nil
     ) {
         self.phase = phase
         self.transcript = transcript
@@ -861,14 +1184,14 @@ public struct CodexTurnProgress: Equatable, Sendable {
 public struct CodexRawNotification: Equatable, Sendable {
     public var method: String
     public var params: Data
-    public var threadID: CodexThread.ID?
-    public var turnID: CodexTurn.ID?
+    public var threadID: CodexThreadID?
+    public var turnID: CodexTurnID?
 
     public init(
         method: String,
         params: Data,
-        threadID: CodexThread.ID? = nil,
-        turnID: CodexTurn.ID? = nil
+        threadID: CodexThreadID? = nil,
+        turnID: CodexTurnID? = nil
     ) {
         self.method = method
         self.params = params

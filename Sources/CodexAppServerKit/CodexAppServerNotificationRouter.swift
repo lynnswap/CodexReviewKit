@@ -6,18 +6,18 @@ package actor CodexAppServerNotificationRouter {
     }
 
     private struct NotificationContext {
-        var threadID: CodexThread.ID?
-        var turnID: CodexTurn.ID?
+        var threadID: CodexThreadID?
+        var turnID: CodexTurnID?
     }
 
     private let client: AppServerClient
     private var routerTask: Task<Void, Never>?
-    private var threadIDByTurnID: [CodexTurn.ID: CodexThread.ID] = [:]
-    private var turnHistoryByTurnID: [CodexTurn.ID: [CodexTurnEvent]] = [:]
-    private var threadHistoryByThreadID: [CodexThread.ID: [CodexThreadEvent]] = [:]
-    private var turnSubscribersByTurnID: [CodexTurn.ID: [UUID: Subscriber<CodexTurnEvent>]] = [:]
-    private var threadSubscribersByThreadID:
-        [CodexThread.ID: [UUID: Subscriber<CodexThreadEvent>]] = [:]
+    private var threadIDByTurnID: [CodexTurnID: CodexThreadID] = [:]
+    private var turnHistoryByTurnID: [CodexTurnID: [CodexTurnEvent]] = [:]
+    private var threadHistoryByThreadID: [CodexThreadID: [CodexThreadEvent]] = [:]
+    private var turnSubscribersByTurnID: [CodexTurnID: [UUID: Subscriber<CodexTurnEvent>]] = [:]
+    private var threadSubscribersByThreadID: [CodexThreadID: [UUID: Subscriber<CodexThreadEvent>]] =
+        [:]
     private let decoder = JSONDecoder()
 
     package init(client: AppServerClient) {
@@ -40,7 +40,7 @@ package actor CodexAppServerNotificationRouter {
         }
     }
 
-    package func events(for turnID: CodexTurn.ID) -> AsyncThrowingStream<CodexTurnEvent, Error> {
+    package func events(for turnID: CodexTurnID) -> AsyncThrowingStream<CodexTurnEvent, Error> {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             let subscriptionID = UUID()
             Task {
@@ -53,7 +53,7 @@ package actor CodexAppServerNotificationRouter {
         }
     }
 
-    package func events(for threadID: CodexThread.ID) -> AsyncThrowingStream<
+    package func events(for threadID: CodexThreadID) -> AsyncThrowingStream<
         CodexThreadEvent, Error
     > {
         AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
@@ -111,7 +111,7 @@ package actor CodexAppServerNotificationRouter {
 
     private func addTurnSubscriber(
         _ subscriptionID: UUID,
-        turnID: CodexTurn.ID,
+        turnID: CodexTurnID,
         continuation: AsyncThrowingStream<CodexTurnEvent, Error>.Continuation
     ) {
         let history = turnHistoryByTurnID[turnID] ?? []
@@ -128,7 +128,7 @@ package actor CodexAppServerNotificationRouter {
 
     private func addThreadSubscriber(
         _ subscriptionID: UUID,
-        threadID: CodexThread.ID,
+        threadID: CodexThreadID,
         continuation: AsyncThrowingStream<CodexThreadEvent, Error>.Continuation
     ) {
         let history = threadHistoryByThreadID[threadID] ?? []
@@ -267,21 +267,21 @@ package actor CodexAppServerNotificationRouter {
         }
     }
 
-    private func removeTurnSubscriber(_ subscriptionID: UUID, turnID: CodexTurn.ID) {
+    private func removeTurnSubscriber(_ subscriptionID: UUID, turnID: CodexTurnID) {
         turnSubscribersByTurnID[turnID]?.removeValue(forKey: subscriptionID)
         if turnSubscribersByTurnID[turnID]?.isEmpty == true {
             turnSubscribersByTurnID.removeValue(forKey: turnID)
         }
     }
 
-    private func removeThreadSubscriber(_ subscriptionID: UUID, threadID: CodexThread.ID) {
+    private func removeThreadSubscriber(_ subscriptionID: UUID, threadID: CodexThreadID) {
         threadSubscribersByThreadID[threadID]?.removeValue(forKey: subscriptionID)
         if threadSubscribersByThreadID[threadID]?.isEmpty == true {
             threadSubscribersByThreadID.removeValue(forKey: threadID)
         }
     }
 
-    private func finishTurnSubscribers(turnID: CodexTurn.ID) {
+    private func finishTurnSubscribers(turnID: CodexTurnID) {
         let subscribers =
             turnSubscribersByTurnID.removeValue(forKey: turnID).map {
                 Array($0.values)
@@ -291,7 +291,7 @@ package actor CodexAppServerNotificationRouter {
         }
     }
 
-    private func finishThreadSubscribers(threadID: CodexThread.ID) {
+    private func finishThreadSubscribers(threadID: CodexThreadID) {
         let subscribers =
             threadSubscribersByThreadID.removeValue(forKey: threadID).map {
                 Array($0.values)
@@ -344,20 +344,21 @@ package actor CodexAppServerNotificationRouter {
     }
 
     private func threadStatus(from data: Data) -> CodexThreadStatus? {
-        if let payload = try? decoder.decode(ThreadStatusPayload.self, from: data),
+        guard
+            let payload = try? decoder.decode(ThreadStatusPayload.self, from: data),
             let type = payload.status?.type
-        {
-            return .init(rawValue: type)
+        else {
+            return nil
         }
-        return nil
+        return .init(rawValue: type)
     }
 
-    private func turnResult(from data: Data, context: NotificationContext) -> CodexTurnResult {
+    private func turnResult(from data: Data, context: NotificationContext) -> CodexResponse {
         let payload = try? decoder.decode(TurnCompletedPayload.self, from: data)
         let turn = payload?.turn
         let status = turn?.status.map(CodexTurnStatus.init(rawValue:))
         return .init(
-            id: turn.map { .init(rawValue: $0.id) } ?? context.turnID ?? .init(rawValue: ""),
+            turnID: turn.map { .init(rawValue: $0.id) } ?? context.turnID ?? .init(rawValue: ""),
             status: status,
             errorMessage: turn?.error?.message
         )
@@ -384,8 +385,8 @@ package actor CodexAppServerNotificationRouter {
             stringValue(named: "turnId", in: object)
             ?? objectValue(named: "turn", in: object).flatMap { stringValue(named: "id", in: $0) }
         return .init(
-            threadID: threadID.map(CodexThread.ID.init(rawValue:)),
-            turnID: turnID.map(CodexTurn.ID.init(rawValue:))
+            threadID: threadID.map(CodexThreadID.init(rawValue:)),
+            turnID: turnID.map(CodexTurnID.init(rawValue:))
         )
     }
 
@@ -393,8 +394,7 @@ package actor CodexAppServerNotificationRouter {
         object[name] as? String
     }
 
-    private static func objectValue(named name: String, in object: [String: Any]) -> [String: Any]?
-    {
+    private static func objectValue(named name: String, in object: [String: Any]) -> [String: Any]? {
         object[name] as? [String: Any]
     }
 }
@@ -559,7 +559,8 @@ private struct RawThreadItem: Decodable {
         return .init(
             id: itemID,
             kind: kind,
-            content: content(kind: kind, id: itemID, rawType: rawType)
+            content: content(kind: kind, id: itemID, rawType: rawType),
+            rawPayload: rawPayload
         )
     }
 

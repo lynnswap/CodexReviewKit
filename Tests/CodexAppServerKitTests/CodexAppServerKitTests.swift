@@ -129,7 +129,7 @@ struct CodexAppServerKitTests {
                     false
                 }
             })
-        let result = try await CodexTurnResultCollector.collect(
+        let result = try await CodexResponseCollector.collect(
             from: .init {
                 AsyncThrowingStream { continuation in
                     for event in events {
@@ -138,7 +138,7 @@ struct CodexAppServerKitTests {
                     continuation.finish()
                 }
             })
-        #expect(result.id == "turn-1")
+        #expect(result.turnID == "turn-1")
         #expect(result.status == .completed)
         #expect(result.finalAnswer == "Done")
     }
@@ -217,7 +217,7 @@ struct CodexAppServerKitTests {
         #expect(messages.map(\.text) == ["Interim", "Final"])
         #expect(messages.last?.phase == .finalAnswer)
 
-        let transcripts = try await collect(thread.transcript)
+        let transcripts = try await collect(thread.transcriptUpdates)
         #expect(transcripts.last?.finalAnswer == "Final")
         #expect(transcripts.last?.items.count == 3)
 
@@ -234,6 +234,218 @@ struct CodexAppServerKitTests {
                     false
                 }
             })
+    }
+
+    @Test func responseStreamYieldsSnapshotsAndCollectsFinalResponse() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse {
+            "Summarize this."
+            CodexPrompt.Part.mention(name: "repo", path: URL(fileURLWithPath: "/tmp/repo"))
+        }
+
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TurnDeltaParams(turnID: "turn-1", delta: "Final")
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TurnCompletedParams(turn: .init(id: "turn-1", status: "completed"))
+        )
+
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        #expect(first?.turnID == "turn-1")
+        #expect(first?.content == "Final")
+
+        let response = try await stream.collect()
+        #expect(response.turnID == "turn-1")
+        #expect(response.finalAnswer == "Final")
+
+        let request = try #require(await transport.recordedRequests().first)
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Turn.Start.Params.self, from: request.params)
+        #expect(
+            params.input == [
+                .text("Summarize this."),
+                .mention(name: "repo", path: "/tmp/repo"),
+            ])
+    }
+
+    @Test func responseStreamInterruptSendsTurnInterrupt() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse(to: "Run the slow checks.")
+        try await stream.interrupt()
+
+        #expect(
+            await transport.recordedRequests().map(\.method) == [
+                "turn/start",
+                "turn/interrupt",
+            ])
+        let request = try #require(await transport.recordedRequests().last)
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Turn.Interrupt.Params.self, from: request.params)
+        #expect(params.threadID == "thread-1")
+        #expect(params.turnID == "turn-1")
+    }
+
+    @Test func responseStreamSteerSubmitsInputToCurrentTurn() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Turn.Steer.Response(turnID: "turn-1"),
+            for: "turn/steer"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse(to: "Run the slow checks.")
+        try await stream.steer(with: "Prefer the smallest fix.")
+
+        #expect(
+            await transport.recordedRequests().map(\.method) == [
+                "turn/start",
+                "turn/steer",
+            ])
+        let request = try #require(await transport.recordedRequests().last)
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Turn.Steer.Params.self, from: request.params)
+        #expect(params.threadID == "thread-1")
+        #expect(params.expectedTurnID == "turn-1")
+        #expect(params.input == [.text("Prefer the smallest fix.")])
+    }
+
+    @Test func responseStreamQueueStartsFollowUpAfterCurrentResponse() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-2", status: "running")),
+            for: "turn/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse(to: "First request.")
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TurnCompletedParams(turn: .init(id: "turn-1", status: "completed"))
+        )
+
+        _ = try await stream.submit(
+            "Second request.",
+            mode: .queueAfterCurrentResponse,
+            options: .init(model: "gpt-5")
+        )
+
+        #expect(
+            await transport.recordedRequests().map(\.method) == [
+                "turn/start",
+                "turn/start",
+            ])
+        let request = try #require(await transport.recordedRequests().last)
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Turn.Start.Params.self, from: request.params)
+        #expect(params.threadID == "thread-1")
+        #expect(params.input == [.text("Second request.")])
+        #expect(params.model == "gpt-5")
+    }
+
+    @Test func responseStreamInterruptStartsFollowUpAfterServerTerminalEvent() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-2", status: "running")),
+            for: "turn/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse(to: "Long request.")
+        let followUpTask = Task {
+            try await stream.submit(
+                "Use the shorter path.",
+                mode: .interruptCurrentResponse
+            )
+        }
+        await transport.waitForRequestCount(2)
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TurnCompletedParams(turn: .init(id: "turn-1", status: "interrupted"))
+        )
+        _ = try await followUpTask.value
+
+        #expect(
+            await transport.recordedRequests().map(\.method) == [
+                "turn/start",
+                "turn/interrupt",
+                "turn/start",
+            ])
+        let interruptRequest = try #require(await transport.recordedRequests().dropLast().last)
+        let interruptParams = try JSONDecoder().decode(
+            AppServerAPI.Turn.Interrupt.Params.self, from: interruptRequest.params)
+        #expect(interruptParams.threadID == "thread-1")
+        #expect(interruptParams.turnID == "turn-1")
+
+        let followUpRequest = try #require(await transport.recordedRequests().last)
+        let followUpParams = try JSONDecoder().decode(
+            AppServerAPI.Turn.Start.Params.self, from: followUpRequest.params)
+        #expect(followUpParams.threadID == "thread-1")
+        #expect(followUpParams.input == [.text("Use the shorter path.")])
     }
 }
 
@@ -259,6 +471,7 @@ private actor FakeJSONRPCTransport: JSONRPC.Transport {
     private var notificationContinuations:
         [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
     private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
     private var closed = false
 
     func enqueue<Response: Encodable & Sendable>(_ response: Response, for method: String) throws {
@@ -274,6 +487,7 @@ private actor FakeJSONRPCTransport: JSONRPC.Transport {
             throw JSONRPC.Error.closed
         }
         requests.append(request)
+        resumeRequestCountWaiters()
         let queued =
             responses[request.method, default: []].isEmpty
             ? nil
@@ -315,6 +529,19 @@ private actor FakeJSONRPCTransport: JSONRPC.Transport {
         notifications
     }
 
+    func waitForRequestCount(_ count: Int) async {
+        if requests.count >= count {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if requests.count >= count {
+                continuation.resume()
+            } else {
+                requestCountWaiters.append((count, continuation))
+            }
+        }
+    }
+
     func waitForNotificationStreamCount(_ count: Int) async {
         if notificationContinuations.count >= count {
             return
@@ -351,6 +578,18 @@ private actor FakeJSONRPCTransport: JSONRPC.Transport {
             }
         }
         notificationStreamCountWaiters = remaining
+    }
+
+    private func resumeRequestCountWaiters() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for waiter in requestCountWaiters {
+            if requests.count >= waiter.0 {
+                waiter.1.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        requestCountWaiters = remaining
     }
 }
 

@@ -146,10 +146,9 @@ flowchart TB
     Composition --> PublicStore
 ```
 
-The diagram describes ownership direction, not every SwiftPM dependency.
-Compatibility targets may currently expose older store APIs, but new code
-should not create reverse imports from Domain, Wire, Application, Rendering, UI,
-or MCP adapter targets back into runtime/protocol owners.
+The diagram describes ownership direction, not every SwiftPM dependency. New
+code should not create reverse imports from Domain, Wire, Application,
+Rendering, UI, or MCP adapter targets back into runtime/protocol owners.
 
 ## Observation Ownership
 
@@ -192,10 +191,14 @@ the store.
 - `initialize` and `initialized` run once per connection.
 - `config/read`, `account/read`, login, model, thread, and turn methods are
   typed requests in the generic Kit boundary.
-- The public Kit API is expressed as `CodexAppServer`, `CodexThread`,
-  `CodexTurn`, `CodexPrompt`, thread event streams, messages, transcript/log
-  values, progress values, model values, account values, and login handles.
-- Same-thread mutating requests are serialized.
+- The public Kit API is expressed as `CodexAppServer`, `CodexThreadID`,
+  `CodexTurnID`, `CodexThread`, `CodexPrompt`, Foundation Models-style
+  `respond` / `streamResponse` / `CodexResponseStream.collect()` calls,
+  Codex-specific response stream controls, thread event streams, messages,
+  transcript/log values, model values, account values, and login handles.
+- Same-thread mutating requests are serialized. `turn/interrupt` is the
+  intentional control-path exception so an in-flight response can be stopped
+  without waiting behind queued same-thread work.
 - Different-thread requests may run concurrently.
 - Notifications are routed by turn ID, early turn notifications are replayed to
   later consumers, and schema-new notifications are preserved as unknown domain

@@ -4,8 +4,9 @@ CodexAppServerKit is a Swift library for working with a local
 `codex app-server` process from macOS apps and tools.
 
 The package hides JSON-RPC framing and app-server DTOs behind Swift domain
-types. Callers work with an app-server container, threads, turns, prompts,
-messages, transcript items, log entries, models, accounts, and login handles.
+types. Callers work with an app-server container, sessions, prompts,
+responses, response streams, transcript items, log entries, models, accounts,
+and login handles.
 
 ## Container
 
@@ -17,8 +18,8 @@ import CodexAppServerKit
 let appServer = try await CodexAppServer()
 let thread = try await appServer.startThread(in: workspaceURL)
 
-let result = try await thread.respond(to: "Review this workspace.")
-print(result.finalAnswer ?? "")
+let response = try await thread.respond(to: "Review this workspace.")
+print(response.finalAnswer ?? "")
 
 await appServer.close()
 ```
@@ -30,8 +31,9 @@ notifications as unknown domain events.
 
 ## Threads
 
-`CodexThread` is the long-lived handle for a Codex conversation in a workspace.
-It supports high-level commands:
+`CodexThread` is the long-lived session handle for a Codex conversation in a
+workspace. It mirrors the Foundation Models session style: use `respond` for a
+single final response, or `streamResponse` when the UI needs partial snapshots.
 
 ```swift
 let thread = try await appServer.startThread(
@@ -40,9 +42,10 @@ let thread = try await appServer.startThread(
     options: .init(model: "gpt-5", approvalMode: .autoReview)
 )
 
-let turn = try await thread.startTurn("Run the checks.")
-try await turn.steer(with: "Focus on failing tests.")
-let result = try await turn.result()
+let response = try await thread.respond {
+    "Run the checks."
+    "Focus on failing tests."
+}
 ```
 
 Thread management is exposed without requiring raw request DTOs:
@@ -59,9 +62,68 @@ try await thread.delete()
 
 ## Streaming
 
-Threads expose async sequences for chat, transcript, and log-style consumers.
-This is the API surface intended for higher-level products that need to render
-Codex output continuously.
+Use `streamResponse` for the Foundation Models-style streaming surface. The
+stream yields snapshots of the accumulated response state and can be collected
+into the final `CodexResponse`.
+
+```swift
+let stream = try await thread.streamResponse(to: "Summarize the changes.")
+
+for try await snapshot in stream {
+    render(snapshot.transcript.items)
+}
+
+let response = try await stream.collect()
+```
+
+Codex also supports explicit interruption for an in-flight response. Foundation
+Models normally relies on task cancellation, but app-server has real
+`turn/steer` and `turn/interrupt` control paths, so `CodexResponseStream`
+exposes them directly:
+
+```swift
+let stream = try await thread.streamResponse(to: "Run the slow checks.")
+try await stream.steer(with: "Prefer the smallest fix.")
+try await stream.interrupt()
+```
+
+If the task awaiting `stream.collect()` is cancelled, the stream also sends the
+same interrupt request to app-server.
+
+When a UI needs to accept another prompt while a response is in flight, submit
+it with an explicit follow-up mode:
+
+```swift
+let next = try await stream.submit(
+    "Now update the tests.",
+    mode: .queueAfterCurrentResponse
+)
+
+let urgent = try await stream.submit(
+    "Stop and try the shorter path.",
+    mode: .interruptCurrentResponse
+)
+```
+
+Use `steer(with:)` when the new input should modify the current turn.
+`.queueAfterCurrentResponse` waits for the current response to finish before
+starting the next turn. `.interruptCurrentResponse` sends `turn/interrupt`,
+waits for app-server's terminal event, and then starts the next turn in the
+same thread.
+
+`CodexGenerationOptions` includes `transcriptErrorHandlingPolicy`, matching the
+Foundation Models policy shape:
+
+```swift
+let stream = try await thread.streamResponse(
+    to: "Try the risky change.",
+    options: .init(transcriptErrorHandlingPolicy: .revertTranscript)
+)
+```
+
+Threads also expose async sequences for chat, transcript updates, and log-style
+consumers. This is the API surface intended for higher-level products that need
+to render Codex output continuously outside a single response stream.
 
 ```swift
 for try await message in thread.messages {
@@ -70,7 +132,7 @@ for try await message in thread.messages {
 ```
 
 ```swift
-for try await transcript in thread.transcript {
+for try await transcript in thread.transcriptUpdates {
     render(transcript.items)
 }
 ```
@@ -113,23 +175,15 @@ This lets CodexReviewKit and similar clients build review logs from
 CodexAppServerKit domain events instead of parsing JSON-RPC notifications or
 string logs directly.
 
-## Turns
+Known `CodexThreadItem` values keep their high-level `content` projection and
+the original `rawPayload`. Use the raw payload when a product needs
+full-fidelity rendering for app-server fields that the current Kit version does
+not yet model directly.
 
-`CodexTurn` is a handle for one in-flight turn. It has turn-scoped streams and
-result aggregation:
+## Responses
 
-```swift
-let turn = try await thread.startTurn("Summarize the changes.")
-
-for try await progress in turn.progress {
-    render(progress.transcript)
-}
-
-let result = try await turn.result()
-```
-
-`CodexThread.respond(to:)` is the convenience form for starting a turn,
-consuming its events, and returning the final `CodexTurnResult`.
+`CodexResponse` is the final result from `respond` or `ResponseStream.collect()`.
+It carries the final answer, transcript, status, token usage, and `turnID`.
 
 Final answers are derived from assistant messages whose phase is
 `.finalAnswer`. If no final-answer phase is present, the last normal assistant
@@ -151,6 +205,19 @@ String literals are supported for simple prompts:
 
 ```swift
 try await thread.respond(to: "What changed?")
+```
+
+For dynamic prompts, use the result-builder initializer or the builder overloads
+on `respond` and `streamResponse`:
+
+```swift
+let response = try await thread.respond {
+    "Explain this screenshot."
+    CodexPrompt.Part.localImage(screenshotURL)
+    if includeRepository {
+        CodexPrompt.Part.mention(name: "repo", path: workspaceURL)
+    }
+}
 ```
 
 ## Models, Account, And Login
@@ -184,15 +251,17 @@ request DTOs. Those remain package-level implementation details.
 The public boundary is:
 
 - `CodexAppServer`
+- `CodexThreadID`
+- `CodexTurnID`
 - `CodexThread`
-- `CodexTurn`
+- `CodexResponse`
+- `CodexResponseStream`
+- `CodexGenerationOptions`
+- `CodexTranscriptErrorHandlingPolicy`
 - `CodexPrompt`
 - `CodexTranscript`
 - `CodexThreadItem`
 - `CodexThreadEvent`
-- `CodexTurnEvent`
-- `CodexTurnProgress`
-- `CodexTurnResult`
 - `CodexModel`
 - `CodexAccount`
 - `CodexLoginHandle`
