@@ -7,10 +7,11 @@ extension CodexReviewJob {
         guard usesDirectTimelineEvents == false else {
             return
         }
-        timeline.reset(keepingTerminal: keepingTerminal)
+        timeline.reset(keepingTerminal: keepingTerminal && core.lifecycle.status.isTerminal)
         for entry in logEntries {
             applyTimelineEntry(entry)
         }
+        syncTimelineTerminalStateFromCore()
     }
 
     package func applyTimelineEntry(_ entry: ReviewLogEntry) {
@@ -92,6 +93,36 @@ extension CodexReviewJob {
                 continue
             }
             timeline.updateItemContent(trimmedContent, for: itemID)
+        }
+    }
+
+    package func syncTimelineTerminalStateFromCore() {
+        guard core.lifecycle.status.isTerminal else {
+            return
+        }
+        let timestamp = core.lifecycle.endedAt ?? logEntries.last?.timestamp ?? Date()
+        switch core.lifecycle.status {
+        case .succeeded:
+            timeline.apply(
+                .reviewCompleted(
+                    summary: core.output.summary,
+                    result: core.output.hasFinalReview ? core.output.lastAgentMessage?.nilIfEmpty : nil
+                ),
+                at: timestamp
+            )
+        case .failed:
+            timeline.apply(.reviewFailed(core.lifecycle.errorMessage?.nilIfEmpty ?? core.output.summary), at: timestamp)
+        case .cancelled:
+            timeline.apply(
+                .reviewCancelled(
+                    core.lifecycle.cancellation?.message.nilIfEmpty
+                        ?? core.lifecycle.errorMessage?.nilIfEmpty
+                        ?? core.output.summary
+                ),
+                at: timestamp
+            )
+        case .queued, .running:
+            break
         }
     }
 
