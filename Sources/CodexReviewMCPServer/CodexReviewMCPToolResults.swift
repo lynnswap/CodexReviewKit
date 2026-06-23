@@ -8,15 +8,15 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
     let text: String
     let isError: Bool
     switch response {
-    case .reviewStart(let result, let timeline),
-         .reviewAwait(let result, let timeline):
-        value = result.structuredContentForStartOrAwait(timeline: timeline)
-        text = result.textContentForStartOrAwait()
-        isError = result.core.lifecycle.status == .failed
-    case .reviewRead(let result, let timeline, let timelinePage):
-        value = result.structuredContentForRead(timeline: timeline, timelinePage: timelinePage)
-        text = result.textContentForRead()
-        isError = result.core.lifecycle.status == .failed
+    case .reviewStart(let snapshot),
+         .reviewAwait(let snapshot):
+        value = snapshot.result.structuredContentForStartOrAwait(timeline: snapshot.timeline)
+        text = snapshot.result.textContentForStartOrAwait()
+        isError = snapshot.result.core.lifecycle.status == .failed
+    case .reviewRead(let snapshot, let timelinePage):
+        value = snapshot.result.structuredContentForRead(timeline: snapshot.timeline, timelinePage: timelinePage)
+        text = snapshot.result.textContentForRead()
+        isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
         text = "Listed \(result.items.count) review job(s)."

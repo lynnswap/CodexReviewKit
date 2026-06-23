@@ -7,60 +7,58 @@ package enum CodexReviewMCP {
 }
 
 package extension CodexReviewMCP.Tool {
-enum Name: String, Codable, Equatable, Sendable, CaseIterable {
-    case reviewStart = "review_start"
-    case reviewAwait = "review_await"
-    case reviewRead = "review_read"
-    case reviewList = "review_list"
-    case reviewCancel = "review_cancel"
-}
-}
-
-
-package extension CodexReviewMCP.Tool {
-struct Descriptor: Codable, Equatable, Sendable {
-    package var name: CodexReviewMCP.Tool.Name
-    package var description: String
-
-    package init(name: CodexReviewMCP.Tool.Name, description: String) {
-        self.name = name
-        self.description = description
+    enum Name: String, Codable, Equatable, Sendable, CaseIterable {
+        case reviewStart = "review_start"
+        case reviewAwait = "review_await"
+        case reviewRead = "review_read"
+        case reviewList = "review_list"
+        case reviewCancel = "review_cancel"
     }
 }
-}
-
 
 package extension CodexReviewMCP.Tool {
-enum Request: Equatable, Sendable {
-    case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
-    case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
-    case reviewRead(sessionID: String?, jobID: String, logFilter: CodexReviewAPI.Log.Filter, logPage: CodexReviewAPI.Log.PageRequest)
-    case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
-    case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
-}
-}
+    struct Descriptor: Codable, Equatable, Sendable {
+        package var name: CodexReviewMCP.Tool.Name
+        package var description: String
 
+        package init(name: CodexReviewMCP.Tool.Name, description: String) {
+            self.name = name
+            self.description = description
+        }
+    }
+}
 
 package extension CodexReviewMCP.Tool {
-enum Response: Equatable, Sendable {
-    case reviewStart(
-        CodexReviewAPI.Read.Result,
-        timeline: ReviewMCPProjection
-    )
-    case reviewAwait(
-        CodexReviewAPI.Read.Result,
-        timeline: ReviewMCPProjection
-    )
-    case reviewRead(
-        CodexReviewAPI.Read.Result,
-        timeline: ReviewMCPProjection,
-        timelinePage: CodexReviewAPI.Log.PageRequest
-    )
-    case reviewList(CodexReviewAPI.List.Result)
-    case reviewCancel(CodexReviewAPI.Cancel.Outcome)
-}
+    enum Request: Equatable, Sendable {
+        case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
+        case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
+        case reviewRead(sessionID: String?, jobID: String, logFilter: CodexReviewAPI.Log.Filter, logPage: CodexReviewAPI.Log.PageRequest)
+        case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
+        case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
+    }
 }
 
+package extension CodexReviewMCP.Tool {
+    struct ReviewSnapshot: Equatable, Sendable {
+        package var result: CodexReviewAPI.Read.Result
+        package var timeline: ReviewMCPProjection
+
+        package init(result: CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection) {
+            self.result = result
+            self.timeline = timeline
+        }
+    }
+}
+
+package extension CodexReviewMCP.Tool {
+    enum Response: Equatable, Sendable {
+        case reviewStart(ReviewSnapshot)
+        case reviewAwait(ReviewSnapshot)
+        case reviewRead(ReviewSnapshot, timelinePage: CodexReviewAPI.Log.PageRequest)
+        case reviewList(CodexReviewAPI.List.Result)
+        case reviewCancel(CodexReviewAPI.Cancel.Outcome)
+    }
+}
 
 @MainActor
 package final class CodexReviewMCPServer {
@@ -97,7 +95,7 @@ package final class CodexReviewMCPServer {
                 result,
                 sessionID: sessionID
             )
-            return .reviewStart(snapshot.result, timeline: snapshot.timeline)
+            return .reviewStart(snapshot)
         case .reviewAwait(let sessionID, let jobID, let waitTimeout):
             let snapshot = try reviewSnapshot(
                 try await store.awaitReview(
@@ -107,7 +105,7 @@ package final class CodexReviewMCPServer {
                 ),
                 sessionID: sessionID
             )
-            return .reviewAwait(snapshot.result, timeline: snapshot.timeline)
+            return .reviewAwait(snapshot)
         case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
             let snapshot = try reviewSnapshot(
                 try store.readReview(
@@ -118,7 +116,7 @@ package final class CodexReviewMCPServer {
                 ),
                 sessionID: sessionID
             )
-            return .reviewRead(snapshot.result, timeline: snapshot.timeline, timelinePage: logPage)
+            return .reviewRead(snapshot, timelinePage: logPage)
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
                 sessionID: sessionID,
@@ -141,12 +139,12 @@ package final class CodexReviewMCPServer {
     private func reviewSnapshot(
         _ result: CodexReviewAPI.Read.Result,
         sessionID: String?
-    ) throws -> ReviewSnapshot {
+    ) throws -> CodexReviewMCP.Tool.ReviewSnapshot {
         let job = try store.resolveJob(
             sessionID: sessionID,
             selector: .init(jobID: result.jobID)
         )
-        return ReviewSnapshot(result: result, timeline: ReviewMCPProjection(timeline: job.timeline))
+        return .init(result: result, timeline: ReviewMCPProjection(timeline: job.timeline))
     }
 
     package func closeSession(_ sessionID: String) async {
@@ -156,11 +154,6 @@ package final class CodexReviewMCPServer {
     package func hasActiveReviews(in sessionID: String) -> Bool {
         store.activeJobIDs(for: sessionID).isEmpty == false
     }
-}
-
-private struct ReviewSnapshot: Equatable, Sendable {
-    var result: CodexReviewAPI.Read.Result
-    var timeline: ReviewMCPProjection
 }
 
 private extension CodexReviewAPI.Job.Selector {

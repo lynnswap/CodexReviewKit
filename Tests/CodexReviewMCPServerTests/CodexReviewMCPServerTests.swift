@@ -38,10 +38,12 @@ struct CodexReviewMCPServerTests {
         await backend.yield(.completed(summary: "Done", result: "review"))
         let resolved = try await response
 
-        guard case .reviewStart(let read, let timeline) = resolved else {
+        guard case .reviewStart(let snapshot) = resolved else {
             Issue.record("Expected reviewStart response")
             return
         }
+        let read = snapshot.result
+        let timeline = snapshot.timeline
         #expect(read.jobID == "job-1")
         #expect(read.core.lifecycle.status == .succeeded)
         #expect(timeline.terminalSummary == "Done")
