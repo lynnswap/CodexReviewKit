@@ -1,4 +1,5 @@
 import Foundation
+import CodexAppServerKit
 import CodexReview
 
 package struct AppServerReviewInterruption: Equatable, Sendable {

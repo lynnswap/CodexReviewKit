@@ -18,10 +18,13 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             environment: [String: String] = ProcessInfo.processInfo.environment,
             codexHomeURL: URL? = nil
         ) {
-            let resolvedCodexHomeURL = codexHomeURL ?? AppServerCodexHome.url(environment: environment)
-            let resolvedExecutable = executable ?? CodexAppServerExecutable.resolveExecutable(
-                environment: environment
-            )
+            let resolvedCodexHomeURL =
+                codexHomeURL ?? AppServerCodexHome.url(environment: environment)
+            let resolvedExecutable =
+                executable
+                ?? CodexAppServerExecutable.resolveExecutable(
+                    environment: environment
+                )
             let supportsSessionSource: Bool
             if let arguments {
                 supportsSessionSource = arguments.contains("--session-source")
@@ -32,15 +35,18 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 )
             }
             self.executable = resolvedExecutable
-            self.arguments = arguments ?? CodexAppServerExecutable.appServerArguments(
-                supportsSessionSource: supportsSessionSource
-            )
+            self.arguments =
+                arguments
+                ?? CodexAppServerExecutable.appServerArguments(
+                    supportsSessionSource: supportsSessionSource
+                )
             self.environment = AppServerCodexHome.environment(
                 environment,
                 codexHomeURL: resolvedCodexHomeURL
             )
             self.codexHomeURL = resolvedCodexHomeURL
-            self.threadStartPermissionStrategy = supportsSessionSource
+            self.threadStartPermissionStrategy =
+                supportsSessionSource
                 ? .modernPermissions
                 : .legacySandbox
         }
@@ -58,7 +64,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private let stderrEvents: AppServerPipeReadEventSource
     private var framer = JSONRPC.Framer()
     private var pending: [Int: PendingResponse] = [:]
-    private var notificationContinuations: [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
+    private var notificationContinuations:
+        [UUID: AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = [:]
     private var stderrLogFilter = AppServerStderrLogFilter()
     private var closed = false
 
@@ -93,9 +100,13 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         )
         self.stdoutEvents = stdoutEvents
         self.stderrEvents = stderrEvents
-        logger.info("Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)")
-        logger.info("Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
-        logger.info("codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
+        logger.info(
+            "Launching codex app-server: \(configuration.executable, privacy: .public) \(configuration.arguments.joined(separator: " "), privacy: .public)"
+        )
+        logger.info(
+            "Using codex app-server home: \(configuration.codexHomeURL.path, privacy: .public)")
+        logger.info(
+            "codex app-server launched with pid \(process.processIdentifier, privacy: .public)")
         Task { [weak self, events = stdoutEvents.events] in
             for await event in events {
                 await self?.receiveStdout(event)
@@ -163,7 +174,9 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         stderrEvents.cancel()
         try? stdin.fileHandleForWriting.close()
         if terminateProcess {
-            logger.info("Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)")
+            logger.info(
+                "Terminating codex app-server pid \(self.process.processIdentifier, privacy: .public)"
+            )
             await process.terminateAndWait()
         }
         finishAll(throwing: JSONRPC.Error.closed)
@@ -237,7 +250,9 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             )
             try stdin.fileHandleForWriting.write(contentsOf: response)
         } catch {
-            logger.error("Failed to reject unsupported app-server request \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.error(
+                "Failed to reject unsupported app-server request \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
@@ -248,10 +263,11 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         if let errorObject = object["error"] as? [String: Any] {
             let code = errorObject["code"] as? Int ?? -1
             let message = errorObject["message"] as? String ?? "JSON-RPC request failed."
-            pendingResponse.continuation.resume(throwing: JSONRPC.Error.responseError(
-                code: code,
-                message: message
-            ))
+            pendingResponse.continuation.resume(
+                throwing: JSONRPC.Error.responseError(
+                    code: code,
+                    message: message
+                ))
             return
         }
         let result = object["result"] ?? [:]
@@ -271,13 +287,14 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     }
 
     package static func unsupportedServerRequestPayload(id: Any, method: String) throws -> Data {
-        var data = try JSONSerialization.data(withJSONObject: [
-            "id": id,
-            "error": [
-                "code": -32601,
-                "message": "Unsupported app-server request: \(method)",
-            ],
-        ] as [String: Any])
+        var data = try JSONSerialization.data(
+            withJSONObject: [
+                "id": id,
+                "error": [
+                    "code": -32601,
+                    "message": "Unsupported app-server request: \(method)",
+                ],
+            ] as [String: Any])
         data.append(0x0A)
         return data
     }
@@ -353,10 +370,12 @@ package struct AppServerStderrLogFilter: Sendable {
 
     package mutating func append(_ data: Data) -> [Event] {
         guard let text = String(data: data, encoding: .utf8) else {
-            return [.init(
-                level: .error,
-                message: "emitted \(data.count) undecodable bytes"
-            )]
+            return [
+                .init(
+                    level: .error,
+                    message: "emitted \(data.count) undecodable bytes"
+                )
+            ]
         }
         return append(text)
     }
@@ -378,8 +397,9 @@ package struct AppServerStderrLogFilter: Sendable {
                 events.append(contentsOf: processLine(line))
                 let nextIndex = bufferedText.index(after: index)
                 if bufferedText[index] == "\r",
-                   nextIndex < bufferedText.endIndex,
-                   bufferedText[nextIndex] == "\n" {
+                    nextIndex < bufferedText.endIndex,
+                    bufferedText[nextIndex] == "\n"
+                {
                     lineStart = bufferedText.index(after: nextIndex)
                     index = lineStart
                 } else {
@@ -464,23 +484,22 @@ package struct AppServerStderrLogFilter: Sendable {
 
     private static func isStructuredLogLine(_ line: String) -> Bool {
         line.range(
-            of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:ERROR|WARN|INFO|DEBUG|TRACE)\s+"#,
+            of:
+                #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:ERROR|WARN|INFO|DEBUG|TRACE)\s+"#,
             options: .regularExpression
         ) != nil
     }
 
     private static func isTimeoutSummaryLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        return trimmed.hasPrefix("command timed out after ") ||
-            trimmed.hasPrefix("Wall time: ") ||
-            trimmed.hasPrefix("Exit code: ")
+        return trimmed.hasPrefix("command timed out after ") || trimmed.hasPrefix("Wall time: ")
+            || trimmed.hasPrefix("Exit code: ")
     }
 
     private static func canBeFollowedByCommandOutput(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        return trimmed.contains("codex_core::tools::router: error=") ||
-            trimmed.hasPrefix("Wall time: ") ||
-            trimmed.hasPrefix("Exit code: ")
+        return trimmed.contains("codex_core::tools::router: error=")
+            || trimmed.hasPrefix("Wall time: ") || trimmed.hasPrefix("Exit code: ")
     }
 }
 
@@ -572,21 +591,24 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
             posix_spawnattr_destroy(&attributes)
         }
 
-        try check(posix_spawn_file_actions_adddup2(
-            &fileActions,
-            stdin.fileHandleForReading.fileDescriptor,
-            STDIN_FILENO
-        ))
-        try check(posix_spawn_file_actions_adddup2(
-            &fileActions,
-            stdout.fileHandleForWriting.fileDescriptor,
-            STDOUT_FILENO
-        ))
-        try check(posix_spawn_file_actions_adddup2(
-            &fileActions,
-            stderr.fileHandleForWriting.fileDescriptor,
-            STDERR_FILENO
-        ))
+        try check(
+            posix_spawn_file_actions_adddup2(
+                &fileActions,
+                stdin.fileHandleForReading.fileDescriptor,
+                STDIN_FILENO
+            ))
+        try check(
+            posix_spawn_file_actions_adddup2(
+                &fileActions,
+                stdout.fileHandleForWriting.fileDescriptor,
+                STDOUT_FILENO
+            ))
+        try check(
+            posix_spawn_file_actions_adddup2(
+                &fileActions,
+                stderr.fileHandleForWriting.fileDescriptor,
+                STDERR_FILENO
+            ))
         for fileDescriptor in [
             stdin.fileHandleForReading.fileDescriptor,
             stdin.fileHandleForWriting.fileDescriptor,
@@ -601,7 +623,8 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         try check(posix_spawnattr_setpgroup(&attributes, 0))
 
         let argv = [executable] + arguments
-        let envp = environment
+        let envp =
+            environment
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
 
@@ -609,14 +632,15 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
         try executable.withCString { executablePointer in
             try withCStringArray(argv) { argvPointers in
                 try withCStringArray(envp) { envPointers in
-                    try check(posix_spawn(
-                        &processIdentifier,
-                        executablePointer,
-                        &fileActions,
-                        &attributes,
-                        argvPointers,
-                        envPointers
-                    ))
+                    try check(
+                        posix_spawn(
+                            &processIdentifier,
+                            executablePointer,
+                            &fileActions,
+                            &attributes,
+                            argvPointers,
+                            envPointers
+                        ))
                 }
             }
         }
@@ -642,7 +666,10 @@ private final class AppServerSpawnedProcess: @unchecked Sendable {
             return
         }
         signalProcessTree(SIGTERM, trackedProcessIDs: trackedProcessIDs)
-        guard await waitUntilExit(timeout: graceDuration, trackedProcessIDs: trackedProcessIDs) == false else {
+        guard
+            await waitUntilExit(timeout: graceDuration, trackedProcessIDs: trackedProcessIDs)
+                == false
+        else {
             return
         }
         signalProcessTree(SIGKILL, trackedProcessIDs: trackedProcessIDs)
@@ -813,18 +840,20 @@ package enum AppServerCodexHome {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectoryForCurrentUser: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> URL {
-        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           codexHome.isEmpty == false
+        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(
+            in: .whitespacesAndNewlines),
+            codexHome.isEmpty == false
         {
             return URL(fileURLWithPath: codexHome, isDirectory: true)
         }
         if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           home.isEmpty == false
+            home.isEmpty == false
         {
             return URL(fileURLWithPath: home, isDirectory: true)
                 .appendingPathComponent(".codex_review", isDirectory: true)
         }
-        return homeDirectoryForCurrentUser
+        return
+            homeDirectoryForCurrentUser
             .appendingPathComponent(".codex_review", isDirectory: true)
     }
 
@@ -871,7 +900,9 @@ package enum CodexAppServerExecutable {
 
     package static let fileBackedAuthConfiguration = #"cli_auth_credentials_store="file""#
 
-    package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> Command {
+    package static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment)
+        -> Command
+    {
         let executable = resolveExecutable(environment: environment)
         return .init(
             executable: executable,
@@ -882,10 +913,12 @@ package enum CodexAppServerExecutable {
     package static func resolveExecutable(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String {
-        let requestedCommand = [
-            environment["CODEX_REVIEW_CODEX_EXECUTABLE"],
-            environment["CODEX_EXECUTABLE"],
-        ].compactMap(\.self).first ?? "codex"
+        let requestedCommand =
+            [
+                environment["CODEX_APP_SERVER_CODEX_EXECUTABLE"],
+                environment["CODEX_REVIEW_CODEX_EXECUTABLE"],
+                environment["CODEX_EXECUTABLE"],
+            ].compactMap(\.self).first ?? "codex"
 
         if let candidate = findExecutable(
             requestedCommand,
@@ -930,7 +963,8 @@ package enum CodexAppServerExecutable {
             return nil
         }
         if trimmedCommand.contains("/") {
-            return FileManager.default.isExecutableFile(atPath: trimmedCommand) ? trimmedCommand : nil
+            return FileManager.default.isExecutableFile(atPath: trimmedCommand)
+                ? trimmedCommand : nil
         }
         for directory in pathSearchDirectories(environment: environment) {
             let candidate = URL(fileURLWithPath: directory, isDirectory: true)

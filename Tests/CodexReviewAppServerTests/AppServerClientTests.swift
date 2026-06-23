@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import CodexAppServerKit
 @testable import CodexReviewAppServer
 import CodexReview
 import CodexReviewDomain
@@ -686,7 +687,6 @@ struct AppServerClientTests {
         #expect(response.account?.kind == .chatGPT)
         #expect(response.account?.label == "review@example.com")
         #expect(response.account?.planType == "pro")
-        #expect(response.account?.capabilities.supportsRateLimitRefresh == true)
     }
 
     @Test func accountReadResponseNormalizesProviderAccountCapabilities() throws {
@@ -703,11 +703,9 @@ struct AppServerClientTests {
         #expect(apiKeyResponse.account?.id == .init("api-key"))
         #expect(apiKeyResponse.account?.kind == .apiKey)
         #expect(apiKeyResponse.account?.label == "API Key")
-        #expect(apiKeyResponse.account?.capabilities.supportsRateLimitRefresh == false)
         #expect(bedrockResponse.account?.id == .init("amazon-bedrock"))
         #expect(bedrockResponse.account?.kind == .amazonBedrock)
         #expect(bedrockResponse.account?.label == "Amazon Bedrock")
-        #expect(bedrockResponse.account?.capabilities.supportsRateLimitRefresh == false)
     }
 
     @Test func accountRateLimitsResponseResolvesCodexLimitWindows() throws {
@@ -5815,15 +5813,15 @@ private func enqueueInitialize(_ transport: FakeJSONRPCTransport) async throws {
 private func makeModelCatalogItem(
     model: String,
     isDefault: Bool = false
-) -> CodexReviewSettings.ModelCatalogItem {
+) -> CodexModel {
     .init(
         id: model,
         model: model,
         displayName: model,
         hidden: false,
-        supportedReasoningEfforts: [.init(reasoningEffort: .medium, description: "Balanced")],
-        defaultReasoningEffort: .medium,
-        supportedServiceTiers: [.fast],
+        supportedReasoningEfforts: [.init(reasoningEffort: "medium", description: "Balanced")],
+        defaultReasoningEffort: "medium",
+        supportedServiceTiers: ["fast"],
         isDefault: isDefault
     )
 }

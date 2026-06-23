@@ -23,8 +23,11 @@ package actor AppServerClient {
 
     package init(
         transport: any JSONRPC.Transport,
-        overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient.defaultOverloadRetryDelay,
-        retrySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        overloadRetryDelay: @escaping @Sendable (Int) -> Duration? = AppServerClient
+            .defaultOverloadRetryDelay,
+        retrySleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        }
     ) {
         self.transport = transport
         self.overloadRetryDelay = overloadRetryDelay
@@ -60,16 +63,21 @@ package actor AppServerClient {
         clientName: String,
         clientVersion: String
     ) async throws -> AppServerAPI.Initialize.Response {
-        logger.info("Initializing codex app-server connection as \(clientName, privacy: .public) \(clientVersion, privacy: .public)")
-        let response: AppServerAPI.Initialize.Response = try await send(AppServerAPI.Initialize.Request(
-            params: .init(clientName: clientName, clientVersion: clientVersion)
-        ))
+        logger.info(
+            "Initializing codex app-server connection as \(clientName, privacy: .public) \(clientVersion, privacy: .public)"
+        )
+        let response: AppServerAPI.Initialize.Response = try await send(
+            AppServerAPI.Initialize.Request(
+                params: .init(clientName: clientName, clientVersion: clientVersion)
+            ))
         try await notify(method: "initialized", params: EmptyResponse())
         logger.info("codex app-server connection initialized")
         return response
     }
 
-    package func send<Request: AppServerAPI.Request>(_ request: Request) async throws -> Request.Response {
+    package func send<Request: AppServerAPI.Request>(_ request: Request) async throws
+        -> Request.Response
+    {
         try await send(
             method: Request.method,
             params: request.params,
@@ -89,28 +97,39 @@ package actor AppServerClient {
             var retryAttempt = 0
             while true {
                 let requestID = await self.allocateRequestID()
-                logger.debug("JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)")
+                logger.debug(
+                    "JSON-RPC request \(requestID, privacy: .public) -> \(method, privacy: .public)"
+                )
                 do {
-                    let rawResponse = try await transport.send(.init(
-                        id: requestID,
-                        method: method,
-                        params: encodedParams
-                    ))
+                    let rawResponse = try await transport.send(
+                        .init(
+                            id: requestID,
+                            method: method,
+                            params: encodedParams
+                        ))
                     let response = try decoder.decode(responseType, from: rawResponse)
-                    logger.debug("JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)")
+                    logger.debug(
+                        "JSON-RPC response \(requestID, privacy: .public) <- \(method, privacy: .public)"
+                    )
                     return response
                 } catch let error as JSONRPC.Error {
                     guard Self.isAppServerOverload(error),
-                          let delay = overloadRetryDelay(retryAttempt)
+                        let delay = overloadRetryDelay(retryAttempt)
                     else {
-                        logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        logger.error(
+                            "JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                        )
                         throw error
                     }
                     retryAttempt += 1
-                    logger.warning("JSON-RPC request \(requestID, privacy: .public) overloaded for \(method, privacy: .public); retrying in \(String(describing: delay), privacy: .public)")
+                    logger.warning(
+                        "JSON-RPC request \(requestID, privacy: .public) overloaded for \(method, privacy: .public); retrying in \(String(describing: delay), privacy: .public)"
+                    )
                     try await retrySleep(delay)
                 } catch {
-                    logger.error("JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    logger.error(
+                        "JSON-RPC request \(requestID, privacy: .public) failed for \(method, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                    )
                     throw error
                 }
             }
@@ -123,10 +142,11 @@ package actor AppServerClient {
     ) async throws {
         let encodedParams = try encoder.encode(params)
         logger.debug("JSON-RPC notification -> \(method, privacy: .public)")
-        try await transport.notify(.init(
-            method: method,
-            params: encodedParams
-        ))
+        try await transport.notify(
+            .init(
+                method: method,
+                params: encodedParams
+            ))
     }
 
     package func notificationStream() async -> AsyncThrowingStream<JSONRPC.Notification, Error> {

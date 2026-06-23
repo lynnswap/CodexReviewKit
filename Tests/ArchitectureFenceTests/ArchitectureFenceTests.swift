@@ -19,7 +19,7 @@ struct ArchitectureFenceTests {
                     "ReviewServiceRuntimeTestSupport",
                     "ReviewAppServerAdapter",
                 ]
-            ),
+            )
         ])
 
         Self.expectNoViolations(violations)
@@ -59,16 +59,23 @@ struct ArchitectureFenceTests {
             for file in try Self.swiftSourceFiles(in: root) {
                 let url = root.appending(path: file)
                 let text = try String(contentsOf: url, encoding: .utf8)
-                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
+                    .enumerated()
+                {
                     let lineText = String(line)
-                    guard forbiddenAssignments.contains(where: {
-                        let range = NSRange(lineText.startIndex..<lineText.endIndex, in: lineText)
-                        return $0.firstMatch(in: lineText, range: range) != nil
-                    }) else {
+                    guard
+                        forbiddenAssignments.contains(where: {
+                            let range = NSRange(
+                                lineText.startIndex..<lineText.endIndex, in: lineText)
+                            return $0.firstMatch(in: lineText, range: range) != nil
+                        })
+                    else {
                         continue
                     }
                     let relativePath = url.path.replacingOccurrences(of: repo.path + "/", with: "")
-                    violations.append("\(relativePath):\(offset + 1): \(lineText.trimmingCharacters(in: .whitespaces))")
+                    violations.append(
+                        "\(relativePath):\(offset + 1): \(lineText.trimmingCharacters(in: .whitespaces))"
+                    )
                 }
             }
         }
@@ -79,8 +86,24 @@ struct ArchitectureFenceTests {
     @Test func observationTimelineTargetsKeepOneWayDependencies() throws {
         let violations = try Self.importViolations(in: [
             .init(
+                root: "Sources/CodexAppServerKit",
+                forbiddenImports: [
+                    "CodexReview",
+                    "CodexReviewApplication",
+                    "CodexReviewAppServer",
+                    "CodexReviewAppServerWire",
+                    "CodexReviewDomain",
+                    "CodexReviewHost",
+                    "CodexReviewMCPAdapter",
+                    "CodexReviewMCPServer",
+                    "ReviewMonitorRendering",
+                    "ReviewUI",
+                ]
+            ),
+            .init(
                 root: "Sources/CodexReviewAppServerWire",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReview",
                     "CodexReviewApplication",
                     "CodexReviewAppServer",
@@ -94,6 +117,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/CodexReviewDomain",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReview",
                     "CodexReviewApplication",
                     "CodexReviewAppServer",
@@ -108,6 +132,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/CodexReviewApplication",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReview",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
@@ -121,6 +146,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/CodexReview",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
                     "CodexReviewHost",
@@ -143,6 +169,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/ReviewUI",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
                     "CodexReviewHost",
@@ -154,6 +181,7 @@ struct ArchitectureFenceTests {
                 root: "Sources/ReviewMonitorRendering",
                 forbiddenImports: [
                     "AppKit",
+                    "CodexAppServerKit",
                     "CodexReview",
                     "CodexReviewApplication",
                     "CodexReviewAppServer",
@@ -168,6 +196,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/CodexReviewMCPAdapter",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
                     "CodexReviewHost",
@@ -179,6 +208,7 @@ struct ArchitectureFenceTests {
             .init(
                 root: "Sources/CodexReviewMCPServer",
                 forbiddenImports: [
+                    "CodexAppServerKit",
                     "CodexReviewAppServer",
                     "CodexReviewAppServerWire",
                     "CodexReviewHost",
@@ -193,14 +223,16 @@ struct ArchitectureFenceTests {
 
     @Test func importScannerHandlesSwiftImportForms() {
         let imports = Self.importedModules(
-            from: "import Foundation; @testable import CodexReviewAppServer; import let CodexReviewAppServerWire.someConstant"
+            from:
+                "import Foundation; @testable import CodexReviewAppServer; import let CodexReviewAppServerWire.someConstant"
         )
 
-        #expect(imports == [
-            "Foundation",
-            "CodexReviewAppServer",
-            "CodexReviewAppServerWire",
-        ])
+        #expect(
+            imports == [
+                "Foundation",
+                "CodexReviewAppServer",
+                "CodexReviewAppServerWire",
+            ])
         #expect(Self.importedModules(from: #"let text = "import CodexReviewAppServer""#).isEmpty)
     }
 
@@ -230,11 +262,15 @@ struct ArchitectureFenceTests {
             for file in try swiftSourceFiles(in: root) {
                 let url = root.appending(path: file)
                 let text = try String(contentsOf: url, encoding: .utf8)
-                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
+                    .enumerated()
+                {
                     let forbiddenImports = importedModules(from: line)
                         .filter { rule.forbiddenImports.contains($0) }
                     for _ in forbiddenImports {
-                        violations.append("\(rule.root)/\(file):\(offset + 1): \(line.trimmingCharacters(in: .whitespaces))")
+                        violations.append(
+                            "\(rule.root)/\(file):\(offset + 1): \(line.trimmingCharacters(in: .whitespaces))"
+                        )
                     }
                 }
             }
@@ -249,7 +285,7 @@ struct ArchitectureFenceTests {
     private static func importedModule(fromImportStatement statement: Substring) -> String? {
         let trimmed = statement.trimmingCharacters(in: .whitespaces)
         guard trimmed.isEmpty == false,
-              trimmed.hasPrefix("//") == false
+            trimmed.hasPrefix("//") == false
         else {
             return nil
         }

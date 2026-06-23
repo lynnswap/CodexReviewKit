@@ -1,4 +1,5 @@
 import Foundation
+import CodexAppServerKit
 import CodexReview
 import CodexReviewAppServerWire
 import CodexReviewDomain
@@ -770,7 +771,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             let response = try await client.send(AppServerAPI.Model.List.Request(
                 params: .init(cursor: cursor, includeHidden: true)
             ))
-            models.append(contentsOf: response.data)
+            models.append(contentsOf: response.data.map(\.reviewModelCatalogItem))
             cursor = response.nextCursor?.nilIfEmpty
         } while cursor != nil
         return models
@@ -1794,13 +1795,40 @@ private extension AppServerCodexReviewBackend {
 
 private extension AppServerAPI.Account.Snapshot {
     var backendAccount: CodexReviewBackendModel.Account.Snapshot {
-        .init(
-            id: id,
-            kind: kind,
+        let backendKind: CodexReviewBackendModel.Account.Kind =
+            CodexReviewBackendModel.Account.Kind(rawValue: kind.rawValue) ?? .chatGPT
+        return .init(
+            id: CodexReviewBackendModel.Account.ID(id),
+            kind: backendKind,
             label: label,
             isActive: true,
             planType: planType,
-            capabilities: capabilities
+            capabilities: backendKind.capabilities
+        )
+    }
+}
+
+private extension CodexModel {
+    var reviewModelCatalogItem: CodexReviewSettings.ModelCatalogItem {
+        let reasoningOptions = supportedReasoningEfforts.compactMap { option in
+            CodexReviewSettings.ReasoningEffort(rawValue: option.reasoningEffort).map {
+                CodexReviewSettings.ReasoningOption(reasoningEffort: $0, description: option.description)
+            }
+        }
+        let defaultReasoningEffort = defaultReasoningEffort
+            .flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:))
+            ?? reasoningOptions.first?.reasoningEffort
+            ?? .medium
+        let serviceTiers = supportedServiceTiers.compactMap(CodexReviewSettings.ServiceTier.init(rawValue:))
+        return .init(
+            id: id,
+            model: model,
+            displayName: displayName,
+            hidden: hidden,
+            supportedReasoningEfforts: reasoningOptions,
+            defaultReasoningEffort: defaultReasoningEffort,
+            supportedServiceTiers: serviceTiers,
+            isDefault: isDefault
         )
     }
 }
