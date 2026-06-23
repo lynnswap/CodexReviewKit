@@ -4895,6 +4895,117 @@ struct AppServerClientTests {
         ))
     }
 
+    @Test func backendAttachesProcessOutputDeltasToCommandLifecycleByProcessID() async throws {
+        let run = CodexReviewBackendModel.Review.Run(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await eventSequence(backend, run)
+        let execOutput = "exec output\n"
+        let processOutput = "process output\n"
+        let combinedOutput = execOutput + processOutput
+
+        try await transport.emitServerNotification(
+            method: "item/started",
+            params: TestCommandExecutionItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(id: "cmd-1", command: "swift test", processID: "proc-1"),
+                startedAtMs: 2_000
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "command/exec/outputDelta",
+            params: TestBase64OutputNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                processID: "proc-1",
+                deltaBase64: Data(execOutput.utf8).base64EncodedString()
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "process/outputDelta",
+            params: TestBase64OutputNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                processHandle: "proc-1",
+                deltaBase64: Data(processOutput.utf8).base64EncodedString()
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestCommandExecutionItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(id: "cmd-1", command: "swift test", processID: "proc-1", exitCode: 0),
+                completedAtMs: 5_250
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1", status: "completed"))
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "inProgress",
+                itemID: "cmd-1",
+                command: "swift test",
+                startedAt: Date(timeIntervalSince1970: 2),
+                commandStatus: "inProgress"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: combinedOutput,
+            groupID: "cmd-1",
+            replacesGroup: false,
+            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: "cmd-1")
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "succeeded",
+                itemID: "cmd-1",
+                command: "swift test",
+                exitCode: 0,
+                startedAt: Date(timeIntervalSince1970: 2),
+                completedAt: Date(timeIntervalSince1970: 5.25),
+                durationMs: 3_250,
+                commandStatus: "succeeded"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: combinedOutput,
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "succeeded",
+                itemID: "cmd-1",
+                command: "swift test",
+                exitCode: 0,
+                startedAt: Date(timeIntervalSince1970: 2),
+                completedAt: Date(timeIntervalSince1970: 5.25),
+                durationMs: 3_250,
+                commandStatus: "succeeded"
+            )
+        ))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await iterator.next() == nil)
+    }
+
     @Test func backendFlushesPendingStreamedCommandOutputBeforeNotificationStreamFinishes() async throws {
         let run = CodexReviewBackendModel.Review.Run(threadID: "thread-1", turnID: "turn-1")
         let transport = FakeJSONRPCTransport()
@@ -5799,6 +5910,24 @@ private struct TestDeltaNotification: Encodable, Sendable {
     }
 }
 
+private struct TestBase64OutputNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String?
+    var processID: String?
+    var processHandle: String?
+    var deltaBase64: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case processID = "processId"
+        case processHandle
+        case deltaBase64
+    }
+}
+
 private struct TestTerminalInteractionNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
@@ -5860,6 +5989,38 @@ private struct TestItemNotification: Encodable, Sendable {
         case threadID = "threadId"
         case turnID = "turnId"
         case itemID = "itemId"
+        case item
+        case startedAtMs
+        case completedAtMs
+    }
+}
+
+private struct TestCommandExecutionItemNotification: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var item: Item
+    var startedAtMs: Int64?
+    var completedAtMs: Int64?
+
+    struct Item: Encodable, Sendable {
+        var type = "commandExecution"
+        var id: String
+        var command: String
+        var processID: String?
+        var exitCode: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case id
+            case command
+            case processID = "processId"
+            case exitCode
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
         case item
         case startedAtMs
         case completedAtMs

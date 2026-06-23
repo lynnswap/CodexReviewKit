@@ -1857,6 +1857,8 @@ private struct TurnNotificationPayload: Decodable, Sendable {
     var reason: String?
     var message: String?
     var stdin: String?
+    var processID: String?
+    var processHandle: String?
     var summary: String?
     var details: String?
     var delta: String?
@@ -1886,6 +1888,8 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         case reason
         case message
         case stdin
+        case processID = "processId"
+        case processHandle
         case summary
         case details
         case delta
@@ -1917,6 +1921,8 @@ private struct TurnNotificationPayload: Decodable, Sendable {
         self.reason = try container.decodeStringIfPresent(forKey: .reason)
         self.message = try container.decodeStringIfPresent(forKey: .message)
         self.stdin = try container.decodeStringIfPresent(forKey: .stdin)
+        self.processID = try container.decodeStringIfPresent(forKey: .processID)
+        self.processHandle = try container.decodeStringIfPresent(forKey: .processHandle)
         self.summary = try container.decodeStringIfPresent(forKey: .summary)
         self.details = try container.decodeStringIfPresent(forKey: .details)
         self.delta = try container.decodeStringIfPresent(forKey: .delta)
@@ -2056,14 +2062,18 @@ private func decodeReviewNotification(
             groupID: payload.rawReasoningGroupKey
         ).map { [$0] } ?? []
     case "item/commandExecution/outputDelta":
-        if let itemID = payload.itemID,
-           let output = payload.delta,
-           output.isEmpty == false {
-            commandLifecycleByItemID[itemID]?.appendOutput(output)
-        }
-        events = payload.deltaLog(
+        let commandOutputItemID = commandLifecycleByItemID.appendCommandOutput(
+            payload.commandOutputText,
+            outputID: payload.commandOutputID
+        )
+        events = payload.commandOutputLog(
             kind: .commandOutput,
-            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: payload.itemID)
+            groupID: commandOutputItemID,
+            metadata: .init(
+                sourceType: "commandExecution",
+                title: "Command output",
+                itemID: commandOutputItemID ?? payload.commandOutputID
+            )
         ).map { [$0] } ?? []
     case "item/fileChange/outputDelta":
         events = payload.deltaLog(
@@ -2072,14 +2082,18 @@ private func decodeReviewNotification(
         ).map { [$0] } ?? []
     case "command/exec/outputDelta",
         "process/outputDelta":
-        if let itemID = payload.itemID,
-           let output = payload.decodedBase64Output,
-           output.isEmpty == false {
-            commandLifecycleByItemID[itemID]?.appendOutput(output)
-        }
-        events = payload.base64OutputLog(
+        let commandOutputItemID = commandLifecycleByItemID.appendCommandOutput(
+            payload.commandOutputText,
+            outputID: payload.commandOutputID
+        )
+        events = payload.commandOutputLog(
             kind: .commandOutput,
-            metadata: .init(sourceType: "commandExecution", title: "Command output", itemID: payload.itemID)
+            groupID: commandOutputItemID,
+            metadata: .init(
+                sourceType: "commandExecution",
+                title: "Command output",
+                itemID: commandOutputItemID ?? payload.commandOutputID
+            )
         ).map { [$0] } ?? []
     case "item/mcpToolCall/progress":
         events = payload.messageLog(
@@ -2238,6 +2252,9 @@ private extension AppServerWireReviewNotification {
              .itemCompleted(let seed):
             return allowsDirectTimelineSeed(seed)
         case .textDelta(let itemID, _, let family, _, _):
+            if isStandaloneProcessOutputDelta {
+                return false
+            }
             return family.hasEquivalentDirectTimelineProjection
                 && allowsDirectTimelineTextDelta(itemID: itemID, family: family)
         case .runStarted,
@@ -2291,6 +2308,15 @@ private extension AppServerWireReviewNotification {
     private var isItemLifecycleMethod: Bool {
         switch method.rawValue {
         case "item/started", "item/updated", "item/completed":
+            true
+        default:
+            false
+        }
+    }
+
+    private var isStandaloneProcessOutputDelta: Bool {
+        switch method.rawValue {
+        case "command/exec/outputDelta", "process/outputDelta":
             true
         default:
             false
@@ -2405,6 +2431,20 @@ private func rawReasoningGroupID(itemID: String, contentIndex: Int) -> String {
 }
 
 private extension TurnNotificationPayload {
+    var commandOutputID: String? {
+        itemID?.nilIfEmpty ?? processID?.nilIfEmpty ?? processHandle?.nilIfEmpty
+    }
+
+    var commandOutputText: String? {
+        if let delta, delta.isEmpty == false {
+            return delta
+        }
+        if let decodedBase64Output, decodedBase64Output.isEmpty == false {
+            return decodedBase64Output
+        }
+        return nil
+    }
+
     func deltaLog(
         kind: ReviewLogEntry.Kind,
         groupID explicitGroupID: String? = nil,
@@ -2424,19 +2464,19 @@ private extension TurnNotificationPayload {
         )
     }
 
-    func base64OutputLog(
+    func commandOutputLog(
         kind: ReviewLogEntry.Kind,
+        groupID explicitGroupID: String? = nil,
         metadata: ReviewLogEntry.Metadata? = nil
     ) -> CodexReviewBackendModel.Review.Event? {
-        guard let text = decodedBase64Output,
-              text.isEmpty == false
+        guard let text = commandOutputText
         else {
             return nil
         }
         return .logEntry(
             kind: kind,
             text: text,
-            groupID: itemID,
+            groupID: explicitGroupID ?? commandOutputID,
             replacesGroup: false,
             metadata: metadata
         )
@@ -2448,7 +2488,7 @@ private extension TurnNotificationPayload {
         else {
             return nil
         }
-        return String(data: data, encoding: .utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 
     func messageLog(
@@ -2574,6 +2614,7 @@ private struct AppServerCommandLifecycle: Sendable {
     var itemID: String
     var command: String?
     var cwd: String?
+    var processID: String?
     var startedAt: Date?
     var completedAt: Date?
     var durationMs: Int?
@@ -2594,6 +2635,7 @@ private struct AppServerCommandLifecycle: Sendable {
         self.itemID = item.id
         self.command = item.command ?? fallback?.command
         self.cwd = item.cwd ?? fallback?.cwd
+        self.processID = item.processID?.nilIfEmpty ?? fallback?.processID
         self.startedAt = startedAt ?? fallback?.startedAt
         self.completedAt = completedAt ?? fallback?.completedAt
         self.durationMs = item.durationMs ?? fallback?.durationMs
@@ -2656,6 +2698,29 @@ private struct AppServerCommandLifecycle: Sendable {
 }
 
 private extension Dictionary where Key == String, Value == AppServerCommandLifecycle {
+    mutating func appendCommandOutput(_ output: String?, outputID: String?) -> String? {
+        guard let outputID = outputID?.nilIfEmpty else {
+            return nil
+        }
+        guard let output, output.isEmpty == false else {
+            return commandLifecycleItemID(forOutputID: outputID) ?? outputID
+        }
+        if let lifecycleItemID = commandLifecycleItemID(forOutputID: outputID) {
+            self[lifecycleItemID]?.appendOutput(output)
+            return lifecycleItemID
+        }
+        return outputID
+    }
+
+    private func commandLifecycleItemID(forOutputID outputID: String) -> String? {
+        if self[outputID] != nil {
+            return outputID
+        }
+        return first { _, lifecycle in
+            lifecycle.processID == outputID
+        }?.key
+    }
+
     func closeActiveCommands(for terminalEvent: CodexReviewBackendModel.Review.Event) -> [CodexReviewBackendModel.Review.Event] {
         guard let status = terminalEvent.activeCommandTerminalStatus else {
             return []

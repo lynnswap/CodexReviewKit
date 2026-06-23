@@ -487,7 +487,7 @@ public extension AppServerWireReviewNotification {
             else {
                 return nil
             }
-            return String(data: data, encoding: .utf8)
+            return String(decoding: data, as: UTF8.self)
         }
 
         func turnCompletedEvents() -> [ReviewDomainEvent] {
