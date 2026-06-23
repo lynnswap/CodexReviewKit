@@ -271,6 +271,62 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func inProgressAgentMessageReplacementAllowsFollowingDelta() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .running,
+                    content: .message(.init(text: "partial"))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .agentMessage,
+                text: "partial",
+                groupID: "msg-1",
+                replacesGroup: true,
+                metadata: .init(sourceType: "agentMessage", status: "inProgress")
+            ))
+            await backend.yield(.domainEvents([
+                .textDelta(
+                    itemID: itemID,
+                    kind: .agentMessage,
+                    family: .message,
+                    content: .message(.init(text: "")),
+                    delta: " delta"
+                ),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.messageDelta(" delta", itemID: "msg-1"))
+
+            #expect(await waitUntil {
+                guard let job = store.job(id: "job-1"),
+                      let item = job.timeline.item(for: itemID),
+                      case .message(let message) = item.content
+                else {
+                    return false
+                }
+                return message.text == "partial delta"
+                    && job.core.output.lastAgentMessage == "partial delta"
+                    && job.logEntries.contains { $0.kind == .agentMessage && $0.text == " delta" }
+            })
+        }
+    }
+
     @Test func directTerminalErrorSuppressesCompatibleErrorLogTimelineProjection() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

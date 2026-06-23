@@ -889,7 +889,11 @@ extension CodexReviewStore {
         case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
             if kind == .agentMessage {
                 if let groupID, replacesGroup {
-                    job.noteCompletedAgentMessage(itemID: groupID, text: text)
+                    job.noteAgentMessageSnapshot(
+                        itemID: groupID,
+                        text: text,
+                        isCompleted: shouldCompleteAgentMessageReplacement(metadata: metadata)
+                    )
                 }
                 job.core.output.lastAgentMessage = text
                 job.core.output.summary = text
@@ -1062,6 +1066,13 @@ private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bo
     }
 }
 
+private func shouldCompleteAgentMessageReplacement(metadata: ReviewLogEntry.Metadata?) -> Bool {
+    guard let status = metadata?.status?.nilIfEmpty else {
+        return true
+    }
+    return ReviewItemPhase.normalized(status).isTerminal
+}
+
 private extension CodexReviewBackendModel.Review.Event {
     var completesReviewRun: Bool {
         switch self {
@@ -1102,9 +1113,13 @@ private extension CodexReviewJob {
         return updated
     }
 
-    func noteCompletedAgentMessage(itemID: String, text: String) {
+    func noteAgentMessageSnapshot(itemID: String, text: String, isCompleted: Bool) {
         agentMessagesByItemID[itemID] = text
-        completedAgentMessageItemIDs.insert(itemID)
+        if isCompleted {
+            completedAgentMessageItemIDs.insert(itemID)
+        } else {
+            completedAgentMessageItemIDs.remove(itemID)
+        }
     }
 
     func resetReviewAttemptOutputForRecovery() {

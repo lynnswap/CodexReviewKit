@@ -2153,6 +2153,8 @@ private func decodeReviewNotification(
         events = [.failed(payload.message ?? "Failed.")]
     case "turn/cancelled":
         events = [.cancelled(payload.message ?? "Cancellation requested.")]
+    case "turn/aborted":
+        events = [.cancelled(payload.message ?? "Cancellation requested.")]
     case "thread/closed":
         events = [.failed("Review thread closed.")]
     case "thread/status/changed":
@@ -2348,6 +2350,7 @@ private func isReviewNotificationMethod(_ method: String) -> Bool {
         "turn/completed",
         "turn/failed",
         "turn/cancelled",
+        "turn/aborted",
         "turn/diff/updated",
         "turn/plan/updated",
         "item/started",
@@ -2816,7 +2819,15 @@ private struct AppServerThreadItem: Decodable, Sendable {
     func updatedEvents() -> [CodexReviewBackendModel.Review.Event] {
         switch type {
         case "agentMessage":
-            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+            return text.map {
+                [logEntry(
+                    kind: .agentMessage,
+                    text: $0,
+                    replacesGroup: true,
+                    title: nil,
+                    status: "inProgress"
+                )]
+            } ?? []
         case "commandExecution":
             guard let output = aggregatedOutput?.nilIfEmpty else {
                 return []
@@ -2882,9 +2893,25 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "userMessage":
             return []
         case "agentMessage":
-            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+            return text.map {
+                [logEntry(
+                    kind: .agentMessage,
+                    text: $0,
+                    replacesGroup: true,
+                    title: nil,
+                    status: completedStatus
+                )]
+            } ?? []
         case "exitedReviewMode":
-            return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
+            return review.map {
+                [logEntry(
+                    kind: .agentMessage,
+                    text: $0,
+                    replacesGroup: true,
+                    title: nil,
+                    status: completedStatus
+                )]
+            } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty ?? lifecycle?.streamedOutputIfAvailable {
                 var events: [CodexReviewBackendModel.Review.Event] = []

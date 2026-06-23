@@ -1329,6 +1329,95 @@ struct AppServerClientTests {
         #expect(metadata?.commandActions == [action])
     }
 
+    @Test func backendKeepsAgentMessageUpdateOpenForFollowingDelta() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "parent-thread", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/updated",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(type: "agentMessage", id: "msg-1", text: "partial")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "msg-1",
+                delta: " delta"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: nil))
+        guard case .domainEvents(let updateEvents, let updateSuppressionCount) = try await iterator.next() else {
+            Issue.record("expected agent message update domain event")
+            return
+        }
+        #expect(updateSuppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(updateEvents.first) else {
+            Issue.record("expected itemUpdated")
+            return
+        }
+        #expect(seed.id.rawValue == "msg-1")
+        #expect(seed.phase == .running)
+        guard case .message(let message) = seed.content else {
+            Issue.record("expected message content")
+            return
+        }
+        #expect(message.text == "partial")
+
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next() else {
+            Issue.record("expected compatible agent message log entry")
+            return
+        }
+        #expect(kind == .agentMessage)
+        #expect(text == "partial")
+        #expect(groupID == "msg-1")
+        #expect(replacesGroup)
+        #expect(metadata?.status == "inProgress")
+
+        guard case .domainEvents(let deltaEvents, let deltaSuppressionCount) = try await iterator.next() else {
+            Issue.record("expected agent message delta domain event")
+            return
+        }
+        #expect(deltaSuppressionCount == 1)
+        guard case .textDelta(let itemID, _, _, _, let delta) = try #require(deltaEvents.first) else {
+            Issue.record("expected text delta")
+            return
+        }
+        #expect(itemID.rawValue == "msg-1")
+        #expect(delta == " delta")
+        #expect(try await iterator.next() == .messageDelta(" delta", itemID: "msg-1"))
+    }
+
+    @Test func backendRoutesTurnAbortedAsCancellation() async throws {
+        let run = CodexReviewBackendModel.Review.Run(threadID: "thread-1", turnID: "turn-1")
+        let transport = FakeJSONRPCTransport()
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+        let events = await eventSequence(backend, run)
+
+        try await transport.emitServerNotification(
+            method: "turn/aborted",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", message: "Stop")
+        )
+
+        var iterator = events.makeAsyncIterator()
+        #expect(try await iterator.next() == .cancelled("Stop"))
+    }
+
     @Test func backendFlushesPendingStreamedLogsBeforeFollowingDomainEvents() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
