@@ -413,6 +413,180 @@ struct CodexAppServerKitTests {
             ])
     }
 
+    @Test func responseStreamSerializesReasoningOptions() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
+            for: "turn/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        _ = try await thread.streamResponse(
+            to: "Explain the patch.",
+            options: .init(effort: .high, summary: .detailed)
+        )
+
+        let request = try #require(await transport.recordedRequests().first)
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Turn.Start.Params.self,
+            from: request.params
+        )
+        #expect(params.effort == "high")
+        #expect(params.summary == "detailed")
+    }
+
+    @Test func reasoningNotificationsRouteAsTypedEventsLogsAndTranscript() async throws {
+        let transport = CodexAppServerTestTransport()
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+
+        try await transport.emitServerNotification(
+            method: "item/reasoning/summaryPartAdded",
+            params: ReasoningSummaryPartParams(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                summaryIndex: 0
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/reasoning/summaryTextDelta",
+            params: ReasoningSummaryDeltaParams(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                summaryIndex: 0,
+                delta: "Checking"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/reasoning/textDelta",
+            params: ReasoningTextDeltaParams(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "reasoning-1",
+                contentIndex: 1,
+                delta: "Raw trace"
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: ThreadItemParams(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    id: "reasoning-1",
+                    type: "reasoning",
+                    summary: ["Final summary"],
+                    content: ["Final raw"]
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TurnCompletedParams(turn: .init(id: "turn-1", status: "completed"))
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: ThreadIDParams(threadID: "thread-1")
+        )
+
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+        let events = try await collect(thread.events)
+        #expect(
+            events.contains {
+                if case .reasoningSummaryPartAdded(let part, let turnID) = $0 {
+                    part.id == "reasoning-1:summary:0" && turnID == "turn-1"
+                } else {
+                    false
+                }
+            })
+        #expect(
+            events.contains {
+                if case .reasoningDelta(let delta, let turnID) = $0 {
+                    delta.id == "reasoning-1:content:1"
+                        && delta.delta == "Raw trace"
+                        && turnID == "turn-1"
+                } else {
+                    false
+                }
+            })
+
+        let logs = try await collect(thread.logEntries)
+        #expect(logs.contains { $0.id == "reasoning-1:summary:0" && $0.phase == .started })
+        #expect(
+            logs.contains {
+                $0.reasoningDelta?.id == "reasoning-1:summary:0"
+                    && $0.reasoningDelta?.delta == "Checking"
+            })
+        #expect(
+            logs.contains {
+                $0.reasoningDelta?.id == "reasoning-1:content:1"
+                    && $0.reasoningDelta?.delta == "Raw trace"
+            })
+
+        let transcripts = try await collect(thread.transcriptUpdates)
+        let finalTranscript = try #require(transcripts.last)
+        #expect(finalTranscript.items.map(\.id) == ["reasoning-1"])
+        #expect(finalTranscript.items.first?.content == .reasoning("Final summary"))
+    }
+
+    @Test func modelAndConfigurationDecodeReasoningTypes() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueueJSON(
+            """
+            {
+              "data": [
+                {
+                  "id": "gpt-5-codex",
+                  "model": "gpt-5-codex",
+                  "displayName": "GPT-5 Codex",
+                  "hidden": false,
+                  "supportedReasoningEfforts": [
+                    {"reasoningEffort": "medium", "description": "Balanced"},
+                    {"reasoningEffort": "xhigh", "description": "Maximum"}
+                  ],
+                  "defaultReasoningEffort": "xhigh",
+                  "additionalSpeedTiers": [],
+                  "isDefault": true
+                }
+              ],
+              "nextCursor": null
+            }
+            """,
+            for: "model/list"
+        )
+        try await transport.enqueueJSON(
+            """
+            {
+              "config": {
+                "model": "gpt-5-codex",
+                "model_reasoning_effort": "high",
+                "service_tier": "flex"
+              }
+            }
+            """,
+            for: "config/read"
+        )
+        let client = AppServerClient(transport: transport)
+        let server = CodexAppServer(
+            client: client,
+            router: CodexAppServerNotificationRouter(client: client)
+        )
+
+        let models = try await server.models()
+        let reasoningEfforts = models.first?.supportedReasoningEfforts.map(\.reasoningEffort)
+        #expect(reasoningEfforts == [.medium, .xhigh])
+        #expect(models.first?.defaultReasoningEffort == .xhigh)
+
+        let configuration = try await server.configuration()
+        #expect(configuration.reasoningEffort == .high)
+    }
+
     @Test func responseStreamInterruptSendsTurnInterrupt() async throws {
         let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
@@ -636,6 +810,8 @@ private struct ThreadItemParams: Encodable, Sendable {
         var command: String?
         var aggregatedOutput: String?
         var status: String?
+        var summary: [String]?
+        var content: [String]?
 
         init(
             id: String,
@@ -644,7 +820,9 @@ private struct ThreadItemParams: Encodable, Sendable {
             phase: String? = nil,
             command: String? = nil,
             aggregatedOutput: String? = nil,
-            status: String? = nil
+            status: String? = nil,
+            summary: [String]? = nil,
+            content: [String]? = nil
         ) {
             self.id = id
             self.type = type
@@ -653,7 +831,55 @@ private struct ThreadItemParams: Encodable, Sendable {
             self.command = command
             self.aggregatedOutput = aggregatedOutput
             self.status = status
+            self.summary = summary
+            self.content = content
         }
+    }
+}
+
+private struct ReasoningSummaryPartParams: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var summaryIndex: Int
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case summaryIndex
+    }
+}
+
+private struct ReasoningSummaryDeltaParams: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var summaryIndex: Int
+    var delta: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case summaryIndex
+        case delta
+    }
+}
+
+private struct ReasoningTextDeltaParams: Encodable, Sendable {
+    var threadID: String
+    var turnID: String
+    var itemID: String
+    var contentIndex: Int
+    var delta: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
+        case turnID = "turnId"
+        case itemID = "itemId"
+        case contentIndex
+        case delta
     }
 }
 

@@ -268,11 +268,11 @@ package func startCodexTurn(
                 approvalPolicy: options.approvalMode?.approvalPolicy,
                 approvalsReviewer: options.approvalMode?.approvalsReviewer,
                 cwd: options.cwd?.path,
-                effort: options.effort,
+                effort: options.effort?.rawValue,
                 model: options.model,
                 sandboxPolicy: options.sandbox?.turnSandboxPolicy,
                 serviceTier: options.serviceTier,
-                summary: options.summary
+                summary: options.summary?.rawValue
             )
         ))
     return CodexTurn(

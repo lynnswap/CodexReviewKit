@@ -53,8 +53,8 @@ public struct CodexThreadMessageSequence: AsyncSequence, Sendable {
                         phase: delta.phase,
                         text: delta.text
                     )
-                case .turnStarted, .turnCompleted, .turnFailed, .tokenUsageUpdated,
-                    .statusChanged, .closed, .unknown:
+                case .turnStarted, .turnCompleted, .turnFailed, .reasoningSummaryPartAdded,
+                    .reasoningDelta, .tokenUsageUpdated, .statusChanged, .closed, .unknown:
                     continue
                 }
             }
@@ -138,8 +138,22 @@ public struct CodexThreadLogSequence: AsyncSequence, Sendable {
                         phase: .delta,
                         messageDelta: delta
                     )
-                case .turnStarted, .turnCompleted, .turnFailed, .tokenUsageUpdated,
-                    .statusChanged, .closed, .unknown:
+                case .reasoningSummaryPartAdded(let part, let turnID):
+                    return .init(
+                        id: part.id,
+                        turnID: turnID,
+                        phase: .started,
+                        item: .init(id: part.id, kind: .reasoning, content: .reasoning(""))
+                    )
+                case .reasoningDelta(let delta, let turnID):
+                    return .init(
+                        id: delta.id,
+                        turnID: turnID,
+                        phase: .delta,
+                        reasoningDelta: delta
+                    )
+                case .turnStarted, .turnCompleted, .turnFailed, .tokenUsageUpdated, .statusChanged,
+                    .closed, .unknown:
                     continue
                 }
             }
@@ -191,7 +205,8 @@ package struct CodexTurnProgressSequence: AsyncSequence, Sendable {
             switch event {
             case .started, .unknown:
                 return .init(phase: .running, transcript: accumulator.transcript)
-            case .itemStarted, .itemUpdated, .itemCompleted, .messageDelta:
+            case .itemStarted, .itemUpdated, .itemCompleted, .messageDelta,
+                .reasoningSummaryPartAdded, .reasoningDelta:
                 _ = accumulator.apply(event)
                 return .init(phase: .running, transcript: accumulator.transcript)
             case .tokenUsageUpdated(let newUsage):
@@ -246,7 +261,8 @@ package struct CodexResponseCollector {
             switch event {
             case .started, .unknown:
                 continue
-            case .itemStarted, .itemUpdated, .itemCompleted, .messageDelta:
+            case .itemStarted, .itemUpdated, .itemCompleted, .messageDelta,
+                .reasoningSummaryPartAdded, .reasoningDelta:
                 _ = accumulator.apply(event)
             case .tokenUsageUpdated(let newUsage):
                 usage = newUsage
@@ -279,6 +295,7 @@ private struct CodexTranscriptAccumulator {
     private var items: [CodexThreadItem] = []
     private var itemIndexesByID: [String: Int] = [:]
     private var messageDeltaTextByItemID: [String: String] = [:]
+    private var reasoningDeltaTextByPartID: [String: String] = [:]
 
     var transcript: CodexTranscript {
         .init(items: items)
@@ -290,6 +307,12 @@ private struct CodexTranscriptAccumulator {
             upsert(item)
             return true
         case .messageDelta(let delta):
+            append(delta)
+            return true
+        case .reasoningSummaryPartAdded(let part):
+            start(part)
+            return true
+        case .reasoningDelta(let delta):
             append(delta)
             return true
         case .started, .tokenUsageUpdated, .completed, .failed, .unknown:
@@ -313,6 +336,12 @@ private struct CodexTranscriptAccumulator {
         case .messageDelta(let delta, _):
             append(delta)
             return true
+        case .reasoningSummaryPartAdded(let part, _):
+            start(part)
+            return true
+        case .reasoningDelta(let delta, _):
+            append(delta)
+            return true
         case .turnStarted, .turnCompleted, .turnFailed, .tokenUsageUpdated, .statusChanged,
             .closed, .unknown:
             return false
@@ -320,6 +349,11 @@ private struct CodexTranscriptAccumulator {
     }
 
     private mutating func upsert(_ item: CodexThreadItem) {
+        if item.kind == .reasoning && item.id.contains(":summary:") == false
+            && item.id.contains(":content:") == false
+        {
+            removeReasoningParts(parentItemID: item.id)
+        }
         if let index = itemIndexesByID[item.id] {
             items[index] = item
         } else {
@@ -339,5 +373,28 @@ private struct CodexTranscriptAccumulator {
             text: text
         )
         upsert(.init(id: itemID, kind: .agentMessage, content: .message(message)))
+    }
+
+    private mutating func start(_ part: CodexReasoningPart) {
+        upsert(.init(id: part.id, kind: .reasoning, content: .reasoning("")))
+    }
+
+    private mutating func append(_ delta: CodexReasoningDelta) {
+        let text = (reasoningDeltaTextByPartID[delta.id] ?? "") + delta.delta
+        reasoningDeltaTextByPartID[delta.id] = text
+        upsert(.init(id: delta.id, kind: .reasoning, content: .reasoning(text)))
+    }
+
+    private mutating func removeReasoningParts(parentItemID: String) {
+        let prefixes = ["\(parentItemID):summary:", "\(parentItemID):content:"]
+        items.removeAll { item in
+            prefixes.contains { item.id.hasPrefix($0) }
+        }
+        reasoningDeltaTextByPartID = reasoningDeltaTextByPartID.filter { id, _ in
+            prefixes.contains { id.hasPrefix($0) } == false
+        }
+        itemIndexesByID = Dictionary(
+            uniqueKeysWithValues: items.enumerated().map { index, item in (item.id, index) }
+        )
     }
 }

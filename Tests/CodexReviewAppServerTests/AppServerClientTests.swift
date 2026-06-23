@@ -5830,8 +5830,8 @@ private func makeModelCatalogItem(
         model: model,
         displayName: model,
         hidden: false,
-        supportedReasoningEfforts: [.init(reasoningEffort: "medium", description: "Balanced")],
-        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [.init(reasoningEffort: .medium, description: "Balanced")],
+        defaultReasoningEffort: .medium,
         supportedServiceTiers: ["fast"],
         isDefault: isDefault
     )

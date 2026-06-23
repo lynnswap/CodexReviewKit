@@ -277,7 +277,7 @@ public actor CodexAppServerTestTransport {
             AppServerAPI.Config.Read.Response(config: .init(
                 model: configuration.model,
                 reviewModel: configuration.reviewModel,
-                modelReasoningEffort: configuration.reasoningEffort,
+                modelReasoningEffort: configuration.reasoningEffort?.rawValue,
                 serviceTier: configuration.serviceTier
             )),
             for: "config/read"

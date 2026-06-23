@@ -407,10 +407,13 @@ public actor CodexAppServer {
     /// - Throws: A transport, JSON-RPC, or app-server request error.
     public func configuration() async throws -> CodexConfiguration {
         let response = try await client.send(AppServerAPI.Config.Read.Request())
+        let reasoningEffort = response.config.modelReasoningEffort.map {
+            CodexReasoningEffort(rawValue: $0)
+        }
         return .init(
             model: response.config.model,
             reviewModel: response.config.reviewModel,
-            reasoningEffort: response.config.modelReasoningEffort,
+            reasoningEffort: reasoningEffort,
             serviceTier: response.config.serviceTier
         )
     }

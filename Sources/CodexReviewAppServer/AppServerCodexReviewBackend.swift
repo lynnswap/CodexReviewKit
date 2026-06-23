@@ -63,7 +63,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             return .init(
                 model: configuration.reviewModel?.nilIfEmpty,
                 fallbackModel: configuration.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
-                reasoningEffort: configuration.reasoningEffort,
+                reasoningEffort: configuration.reasoningEffort?.rawValue,
                 serviceTier: configuration.serviceTier,
                 models: models
             )
@@ -1898,12 +1898,12 @@ private extension AppServerAPI.Account.Snapshot {
 private extension CodexModel {
     var reviewModelCatalogItem: CodexReviewSettings.ModelCatalogItem {
         let reasoningOptions = supportedReasoningEfforts.compactMap { option in
-            CodexReviewSettings.ReasoningEffort(rawValue: option.reasoningEffort).map {
+            CodexReviewSettings.ReasoningEffort(rawValue: option.reasoningEffort.rawValue).map {
                 CodexReviewSettings.ReasoningOption(reasoningEffort: $0, description: option.description)
             }
         }
         let defaultReasoningEffort = defaultReasoningEffort
-            .flatMap(CodexReviewSettings.ReasoningEffort.init(rawValue:))
+            .flatMap { CodexReviewSettings.ReasoningEffort(rawValue: $0.rawValue) }
             ?? reasoningOptions.first?.reasoningEffort
             ?? .medium
         let serviceTiers = supportedServiceTiers.compactMap(CodexReviewSettings.ServiceTier.init(rawValue:))

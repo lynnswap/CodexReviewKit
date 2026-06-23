@@ -138,6 +138,17 @@ let stream = try await thread.streamResponse(
 )
 ```
 
+It also exposes reasoning controls with domain values instead of raw strings:
+
+```swift
+let response = try await thread.respond(
+    to: "Find the risky part of this change.",
+    options: .init(effort: .high, summary: .detailed)
+)
+
+print(response.usage?.reasoningOutputTokens ?? 0)
+```
+
 Threads also expose async sequences for chat, transcript updates, and log-style
 consumers. This is the API surface intended for higher-level products that need
 to render Codex output continuously outside a single response stream.
@@ -156,9 +167,16 @@ for try await transcript in thread.transcriptUpdates {
 
 ```swift
 for try await entry in thread.logEntries {
+    if let delta = entry.reasoningDelta {
+        renderReasoningDelta(delta)
+        continue
+    }
+
     switch entry.item?.content {
     case .message(let message):
         renderMessage(message)
+    case .reasoning(let text):
+        renderReasoning(text)
     case .command(let command):
         renderCommand(command.command, output: command.output)
     case .toolCall(let tool):
@@ -178,6 +196,8 @@ unknown notifications:
 ```swift
 for try await event in thread.events {
     switch event {
+    case .reasoningDelta(let delta, _):
+        renderReasoningDelta(delta)
     case .tokenUsageUpdated(let usage, _):
         updateUsage(usage.totalTokens)
     case .unknown(let raw):

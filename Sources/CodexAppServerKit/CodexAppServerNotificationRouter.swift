@@ -148,7 +148,7 @@ package actor CodexAppServerNotificationRouter {
         case .completed, .failed:
             true
         case .started, .itemStarted, .itemUpdated, .itemCompleted, .messageDelta,
-            .tokenUsageUpdated, .unknown:
+            .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .unknown:
             false
         }
     }
@@ -195,6 +195,21 @@ package actor CodexAppServerNotificationRouter {
         case "item/agentMessage/delta":
             if let delta = messageDelta(from: notification.params) {
                 return .messageDelta(delta)
+            }
+            return .unknown(raw)
+        case "item/reasoning/summaryPartAdded":
+            if let part = reasoningSummaryPart(from: notification.params) {
+                return .reasoningSummaryPartAdded(part)
+            }
+            return .unknown(raw)
+        case "item/reasoning/summaryTextDelta":
+            if let delta = reasoningSummaryDelta(from: notification.params) {
+                return .reasoningDelta(delta)
+            }
+            return .unknown(raw)
+        case "item/reasoning/textDelta":
+            if let delta = reasoningTextDelta(from: notification.params) {
+                return .reasoningDelta(delta)
             }
             return .unknown(raw)
         case "thread/tokenUsage/updated":
@@ -248,6 +263,21 @@ package actor CodexAppServerNotificationRouter {
         case "item/agentMessage/delta":
             if let delta = messageDelta(from: notification.params) {
                 return .messageDelta(delta, turnID: context.turnID)
+            }
+            return .unknown(raw)
+        case "item/reasoning/summaryPartAdded":
+            if let part = reasoningSummaryPart(from: notification.params) {
+                return .reasoningSummaryPartAdded(part, turnID: context.turnID)
+            }
+            return .unknown(raw)
+        case "item/reasoning/summaryTextDelta":
+            if let delta = reasoningSummaryDelta(from: notification.params) {
+                return .reasoningDelta(delta, turnID: context.turnID)
+            }
+            return .unknown(raw)
+        case "item/reasoning/textDelta":
+            if let delta = reasoningTextDelta(from: notification.params) {
+                return .reasoningDelta(delta, turnID: context.turnID)
             }
             return .unknown(raw)
         case "thread/tokenUsage/updated":
@@ -334,6 +364,46 @@ package actor CodexAppServerNotificationRouter {
             itemID: payload.itemID,
             phase: payload.phase.map(CodexMessagePhase.init(rawValue:))
         )
+    }
+
+    private func reasoningSummaryPart(from data: Data) -> CodexReasoningPart? {
+        guard let payload = try? decoder.decode(
+            ReasoningSummaryPartPayload.self,
+            from: data
+        ) else {
+            return nil
+        }
+        return .init(itemID: payload.itemID, kind: .summary, index: payload.summaryIndex)
+    }
+
+    private func reasoningSummaryDelta(from data: Data) -> CodexReasoningDelta? {
+        guard let payload = try? decoder.decode(
+            ReasoningSummaryTextDeltaPayload.self,
+            from: data
+        ) else {
+            return nil
+        }
+        let part = CodexReasoningPart(
+            itemID: payload.itemID,
+            kind: .summary,
+            index: payload.summaryIndex
+        )
+        return .init(part: part, delta: payload.delta)
+    }
+
+    private func reasoningTextDelta(from data: Data) -> CodexReasoningDelta? {
+        guard let payload = try? decoder.decode(
+            ReasoningTextDeltaPayload.self,
+            from: data
+        ) else {
+            return nil
+        }
+        let part = CodexReasoningPart(
+            itemID: payload.itemID,
+            kind: .text,
+            index: payload.contentIndex
+        )
+        return .init(part: part, delta: payload.delta)
     }
 
     private func tokenUsage(from data: Data) -> CodexTokenUsage? {
@@ -423,6 +493,40 @@ private struct AgentMessageDeltaPayload: Decodable {
         case delta
         case text
         case phase
+    }
+}
+
+private struct ReasoningSummaryPartPayload: Decodable {
+    var itemID: String
+    var summaryIndex: Int
+
+    enum CodingKeys: String, CodingKey {
+        case itemID = "itemId"
+        case summaryIndex
+    }
+}
+
+private struct ReasoningSummaryTextDeltaPayload: Decodable {
+    var itemID: String
+    var summaryIndex: Int
+    var delta: String
+
+    enum CodingKeys: String, CodingKey {
+        case itemID = "itemId"
+        case summaryIndex
+        case delta
+    }
+}
+
+private struct ReasoningTextDeltaPayload: Decodable {
+    var itemID: String
+    var contentIndex: Int
+    var delta: String
+
+    enum CodingKeys: String, CodingKey {
+        case itemID = "itemId"
+        case contentIndex
+        case delta
     }
 }
 

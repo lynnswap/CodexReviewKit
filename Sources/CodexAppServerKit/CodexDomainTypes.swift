@@ -180,14 +180,76 @@ public enum CodexApprovalMode: String, Codable, Equatable, Sendable {
     }
 }
 
+/// The amount of model reasoning requested for a Codex turn.
+public struct CodexReasoningEffort: RawRepresentable, Hashable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+
+    public static let none = Self(rawValue: "none")
+    public static let minimal = Self(rawValue: "minimal")
+    public static let low = Self(rawValue: "low")
+    public static let medium = Self(rawValue: "medium")
+    public static let high = Self(rawValue: "high")
+    public static let xhigh = Self(rawValue: "xhigh")
+}
+
+extension CodexReasoningEffort: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        rawValue = try container.decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
+/// The reasoning summary mode requested for a Codex turn.
+public struct CodexReasoningSummary: RawRepresentable, Hashable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+
+    public static let none = Self(rawValue: "none")
+    public static let auto = Self(rawValue: "auto")
+    public static let concise = Self(rawValue: "concise")
+    public static let detailed = Self(rawValue: "detailed")
+}
+
+extension CodexReasoningSummary: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        rawValue = try container.decode(String.self)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 public struct CodexGenerationOptions: Equatable, Sendable {
     public var model: String?
     public var approvalMode: CodexApprovalMode?
     public var sandbox: CodexSandbox?
     public var cwd: URL?
-    public var effort: String?
+    public var effort: CodexReasoningEffort?
     public var serviceTier: String?
-    public var summary: String?
+    public var summary: CodexReasoningSummary?
     public var transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
 
     public init(
@@ -195,9 +257,9 @@ public struct CodexGenerationOptions: Equatable, Sendable {
         approvalMode: CodexApprovalMode? = nil,
         sandbox: CodexSandbox? = nil,
         cwd: URL? = nil,
-        effort: String? = nil,
+        effort: CodexReasoningEffort? = nil,
         serviceTier: String? = nil,
-        summary: String? = nil,
+        summary: CodexReasoningSummary? = nil,
         transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy = .preserveTranscript
     ) {
         self.model = model
@@ -1135,7 +1197,7 @@ public struct CodexResponseStream: AsyncSequence, Sendable {
             case .failed(let message):
                 throw CodexAppServerError.turnFailed(message)
             case .started, .itemStarted, .itemUpdated, .itemCompleted, .messageDelta,
-                .tokenUsageUpdated, .unknown:
+                .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .unknown:
                 continue
             }
         }
@@ -1233,12 +1295,56 @@ public struct CodexMessageDelta: Equatable, Sendable {
     }
 }
 
+/// A reasoning summary or raw reasoning text part emitted by app-server.
+public struct CodexReasoningPart: Identifiable, Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case summary
+        case text
+    }
+
+    public var itemID: String
+    public var kind: Kind
+    public var index: Int
+
+    public var id: String {
+        switch kind {
+        case .summary:
+            "\(itemID):summary:\(index)"
+        case .text:
+            "\(itemID):content:\(index)"
+        }
+    }
+
+    public init(itemID: String, kind: Kind, index: Int) {
+        self.itemID = itemID
+        self.kind = kind
+        self.index = index
+    }
+}
+
+/// Incremental text for a reasoning summary or raw reasoning text part.
+public struct CodexReasoningDelta: Identifiable, Equatable, Sendable {
+    public var part: CodexReasoningPart
+    public var delta: String
+
+    public var id: String {
+        part.id
+    }
+
+    public init(part: CodexReasoningPart, delta: String) {
+        self.part = part
+        self.delta = delta
+    }
+}
+
 package enum CodexTurnEvent: Equatable, Sendable {
     case started(CodexTurnID)
     case itemStarted(CodexThreadItem)
     case itemUpdated(CodexThreadItem)
     case itemCompleted(CodexThreadItem)
     case messageDelta(CodexMessageDelta)
+    case reasoningSummaryPartAdded(CodexReasoningPart)
+    case reasoningDelta(CodexReasoningDelta)
     case tokenUsageUpdated(CodexTokenUsage)
     case completed(CodexResponse)
     case failed(String)
@@ -1254,6 +1360,8 @@ public enum CodexThreadEvent: Equatable, Sendable {
     case itemCompleted(CodexThreadItem, turnID: CodexTurnID?)
     case message(CodexMessage, turnID: CodexTurnID?)
     case messageDelta(CodexMessageDelta, turnID: CodexTurnID?)
+    case reasoningSummaryPartAdded(CodexReasoningPart, turnID: CodexTurnID?)
+    case reasoningDelta(CodexReasoningDelta, turnID: CodexTurnID?)
     case tokenUsageUpdated(CodexTokenUsage, turnID: CodexTurnID?)
     case statusChanged(CodexThreadStatus)
     case closed
@@ -1273,19 +1381,22 @@ public struct CodexThreadLogEntry: Identifiable, Equatable, Sendable {
     public var phase: Phase
     public var item: CodexThreadItem?
     public var messageDelta: CodexMessageDelta?
+    public var reasoningDelta: CodexReasoningDelta?
 
     public init(
         id: String,
         turnID: CodexTurnID? = nil,
         phase: Phase,
         item: CodexThreadItem? = nil,
-        messageDelta: CodexMessageDelta? = nil
+        messageDelta: CodexMessageDelta? = nil,
+        reasoningDelta: CodexReasoningDelta? = nil
     ) {
         self.id = id
         self.turnID = turnID
         self.phase = phase
         self.item = item
         self.messageDelta = messageDelta
+        self.reasoningDelta = reasoningDelta
     }
 }
 
@@ -1361,13 +1472,13 @@ public struct CodexRawNotification: Equatable, Sendable {
 public struct CodexConfiguration: Equatable, Sendable {
     public var model: String?
     public var reviewModel: String?
-    public var reasoningEffort: String?
+    public var reasoningEffort: CodexReasoningEffort?
     public var serviceTier: String?
 
     public init(
         model: String? = nil,
         reviewModel: String? = nil,
-        reasoningEffort: String? = nil,
+        reasoningEffort: CodexReasoningEffort? = nil,
         serviceTier: String? = nil
     ) {
         self.model = model
@@ -1416,10 +1527,10 @@ package extension CodexRateLimits {
 
 public struct CodexModel: Codable, Identifiable, Equatable, Sendable {
     public struct ReasoningOption: Codable, Equatable, Sendable {
-        public var reasoningEffort: String
+        public var reasoningEffort: CodexReasoningEffort
         public var description: String
 
-        public init(reasoningEffort: String, description: String) {
+        public init(reasoningEffort: CodexReasoningEffort, description: String) {
             self.reasoningEffort = reasoningEffort
             self.description = description
         }
@@ -1434,7 +1545,7 @@ public struct CodexModel: Codable, Identifiable, Equatable, Sendable {
     public var displayName: String
     public var hidden: Bool
     public var supportedReasoningEfforts: [ReasoningOption]
-    public var defaultReasoningEffort: String?
+    public var defaultReasoningEffort: CodexReasoningEffort?
     public var supportedServiceTiers: [String]
     public var isDefault: Bool
 
@@ -1456,7 +1567,7 @@ public struct CodexModel: Codable, Identifiable, Equatable, Sendable {
         displayName: String,
         hidden: Bool = false,
         supportedReasoningEfforts: [ReasoningOption] = [],
-        defaultReasoningEffort: String? = nil,
+        defaultReasoningEffort: CodexReasoningEffort? = nil,
         supportedServiceTiers: [String] = [],
         isDefault: Bool = false
     ) {
@@ -1482,7 +1593,7 @@ public struct CodexModel: Codable, Identifiable, Equatable, Sendable {
                 forKey: .supportedReasoningEfforts
             ) ?? []
         self.defaultReasoningEffort = try container.decodeIfPresent(
-            String.self, forKey: .defaultReasoningEffort)
+            CodexReasoningEffort.self, forKey: .defaultReasoningEffort)
         let additionalSpeedTiers =
             try container.decodeIfPresent([String].self, forKey: .supportedServiceTiers) ?? []
         let serviceTierIDs =
