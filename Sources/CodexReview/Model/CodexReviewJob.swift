@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CodexReviewDomain
 
 @MainActor
 @Observable
@@ -423,6 +424,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
     private var logState: LogState
 
     public nonisolated let id: String
+    public let domainJob: ReviewJob
+    public var timeline: ReviewTimeline {
+        domainJob.timeline
+    }
     public let sessionID: String
     public let cwd: String
     public internal(set) var sortOrder: Double
@@ -433,6 +438,24 @@ public final class CodexReviewJob: Identifiable, Hashable {
     package var agentMessagesByItemID: [String: String]
     @ObservationIgnored
     package var completedAgentMessageItemIDs: Set<String>
+    @ObservationIgnored
+    package private(set) var usesDirectTimelineEvents: Bool
+    @ObservationIgnored
+    private var pendingLegacyTimelineProjectionSuppressions: Int
+    @ObservationIgnored
+    private var pendingTerminalFailureLogTimelineProjectionSuppressions: Int
+    @ObservationIgnored
+    package var directTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
+    @ObservationIgnored
+    package var directTimelineTextItemIDsWithCompatibilityLog: Set<ReviewTimelineItem.ID>
+    @ObservationIgnored
+    package var directTimelineTextCompatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
+    @ObservationIgnored
+    private var pendingDirectTimelineTextItemIDsForCompatibilityLog: [ReviewTimelineItem.ID]
+    @ObservationIgnored
+    private var latestDirectTimelineTextItemIDs: [ReviewTimelineItem.ID]
+    @ObservationIgnored
+    package var legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     public private(set) var logEntries: [ReviewLogEntry]
     public private(set) var logText: String
     public private(set) var rawLogText: String
@@ -468,6 +491,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     ) {
         let initialState = Self.trimmedLogState(entries: logEntries)
         self.id = id
+        self.domainJob = ReviewJob(id: .init(rawValue: id))
         self.sessionID = sessionID
         self.cwd = cwd
         self.sortOrder = sortOrder
@@ -476,6 +500,15 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.cancellationRequested = cancellationRequested
         self.agentMessagesByItemID = [:]
         self.completedAgentMessageItemIDs = []
+        self.usesDirectTimelineEvents = false
+        self.pendingLegacyTimelineProjectionSuppressions = 0
+        self.pendingTerminalFailureLogTimelineProjectionSuppressions = 0
+        self.directTimelineTextItemIDs = []
+        self.directTimelineTextItemIDsWithCompatibilityLog = []
+        self.directTimelineTextCompatibilityItemIDsByLogEntryID = [:]
+        self.pendingDirectTimelineTextItemIDsForCompatibilityLog = []
+        self.latestDirectTimelineTextItemIDs = []
+        self.legacyProjectedTimelineTextItemIDs = []
         self.logState = initialState.logState
         self.logEntries = initialState.entries
         self.logText = initialState.logState.logText
@@ -486,6 +519,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.cappedLogBytes = initialState.logState.cappedBytes
         self.logRevision = 0
         self.lastLogMutation = .reload
+        if usesDirectTimelineEvents == false {
+            rebuildTimelineFromLogEntries()
+        }
     }
 
     public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
@@ -496,14 +532,34 @@ public final class CodexReviewJob: Identifiable, Hashable {
         hasher.combine(id)
     }
 
-    package func replaceLogEntries(_ entries: [ReviewLogEntry]) {
-        let trimmedState = Self.trimmedLogState(entries: entries)
+    package func replaceLogEntries(_ entries: [ReviewLogEntry], resetDirectTimeline: Bool = false) {
+        let normalizedEntries = entries.map {
+            $0.clampingUnownedRetainedMetadata(maxBytes: Self.logLimitBytes)
+        }
+        let trimmedState = Self.trimmedLogState(entries: normalizedEntries)
         logEntries = trimmedState.entries
         logState = trimmedState.logState
+        if resetDirectTimeline {
+            usesDirectTimelineEvents = false
+            pendingLegacyTimelineProjectionSuppressions = 0
+            pendingTerminalFailureLogTimelineProjectionSuppressions = 0
+            directTimelineTextItemIDs.removeAll(keepingCapacity: true)
+            directTimelineTextItemIDsWithCompatibilityLog.removeAll(keepingCapacity: true)
+            directTimelineTextCompatibilityItemIDsByLogEntryID.removeAll(keepingCapacity: true)
+            pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll(keepingCapacity: true)
+            latestDirectTimelineTextItemIDs.removeAll(keepingCapacity: true)
+            legacyProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
+        }
+        if usesDirectTimelineEvents {
+            trimTimelineTextContentToLogEntries()
+        } else {
+            rebuildTimelineFromLogEntries()
+        }
         syncLogState(mutation: .reload)
     }
 
-    package func appendLogEntry(_ entry: ReviewLogEntry) {
+    package func appendLogEntry(_ entry: ReviewLogEntry, suppressTimelineProjection: Bool = false) {
+        let entry = entry.clampingUnownedRetainedMetadata(maxBytes: Self.logLimitBytes)
         let supportsIncrementalAppend = logState.supportsIncrementalAppend(entry)
         if supportsIncrementalAppend {
             logState.append(entry)
@@ -512,7 +568,31 @@ public final class CodexReviewJob: Identifiable, Hashable {
         if supportsIncrementalAppend == false {
             logState = LogState(entries: logEntries)
         }
+        if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
+            let allowsPendingFallback = suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
+            if entry.retainedTimelineText != nil {
+                recordDirectTimelineTextCompatibilityLog(
+                    for: entry,
+                    allowsPendingFallback: allowsPendingFallback
+                )
+            } else {
+                discardDirectTimelineTextCompatibilityLog(
+                    for: entry,
+                    allowsPendingFallback: allowsPendingFallback
+                )
+            }
+        }
+        if suppressTimelineProjection == false,
+           consumeLegacyTimelineProjectionSuppression() == false {
+            applyTimelineEntry(entry)
+            if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
+                legacyProjectedTimelineTextItemIDs.insert(entry.timelineItemID)
+            }
+        }
         let didTrim = core.lifecycle.status.isTerminal ? trimReviewLogToLimit() : false
+        if didTrim {
+            rebuildTimelineFromLogEntries()
+        }
         syncLogState(mutation: didTrim || supportsIncrementalAppend == false ? .reload : .append)
     }
 
@@ -525,6 +605,142 @@ public final class CodexReviewJob: Identifiable, Hashable {
         for replacement in replacements {
             appendLogEntry(replacement)
         }
+    }
+
+    package func applyDirectTimelineEvents(
+        _ events: [ReviewDomainEvent],
+        legacyProjectionSuppressionCount: Int,
+        at timestamp: Date
+    ) {
+        let directEvents = events.filter {
+            $0.appliesFromDirectTimelineSource && shouldApplyDirectTimelineEvent($0)
+        }
+        guard directEvents.isEmpty == false else {
+            return
+        }
+        if usesDirectTimelineEvents == false {
+            recordLegacyProjectedTimelineTextItemIDsFromLogEntries()
+        }
+        usesDirectTimelineEvents = true
+        pendingLegacyTimelineProjectionSuppressions += max(0, legacyProjectionSuppressionCount)
+        var directTextItemIDsApplied: [ReviewTimelineItem.ID] = []
+        for event in directEvents {
+            if let itemID = event.directTimelineTextItemID {
+                directTimelineTextItemIDs.insert(itemID)
+                directTextItemIDsApplied.append(itemID)
+            }
+            timeline.apply(event, at: timestamp)
+        }
+        latestDirectTimelineTextItemIDs = directTextItemIDsApplied
+        if legacyProjectionSuppressionCount > 0 {
+            appendPendingDirectTimelineTextItemIDsForCompatibilityLog(directTextItemIDsApplied)
+        }
+    }
+
+    private func shouldApplyDirectTimelineEvent(_ event: ReviewDomainEvent) -> Bool {
+        switch event {
+        case .textDelta(let itemID, _, let family, _, _)
+            where family == .message && completedAgentMessageItemIDs.contains(itemID.rawValue):
+            false
+        default:
+            true
+        }
+    }
+
+    private func recordDirectTimelineTextCompatibilityLog(
+        for entry: ReviewLogEntry,
+        allowsPendingFallback: Bool
+    ) {
+        var itemIDs: Set<ReviewTimelineItem.ID> = []
+        for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
+            itemIDs.insert(itemID)
+        }
+        if itemIDs.isEmpty,
+           allowsPendingFallback,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+            itemIDs.insert(pendingItemID)
+        }
+        guard itemIDs.isEmpty == false else {
+            return
+        }
+        directTimelineTextItemIDsWithCompatibilityLog.formUnion(itemIDs)
+        directTimelineTextCompatibilityItemIDsByLogEntryID[entry.id, default: []].formUnion(itemIDs)
+        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+    }
+
+    private func discardDirectTimelineTextCompatibilityLog(
+        for entry: ReviewLogEntry,
+        allowsPendingFallback: Bool
+    ) {
+        var itemIDs: Set<ReviewTimelineItem.ID> = []
+        for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
+            itemIDs.insert(itemID)
+        }
+        if itemIDs.isEmpty,
+           allowsPendingFallback,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+            itemIDs.insert(pendingItemID)
+        }
+        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+    }
+
+    private func appendPendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: [ReviewTimelineItem.ID]) {
+        for itemID in itemIDs where pendingDirectTimelineTextItemIDsForCompatibilityLog.contains(itemID) == false {
+            pendingDirectTimelineTextItemIDsForCompatibilityLog.append(itemID)
+        }
+    }
+
+    private func popPendingDirectTimelineTextItemIDForCompatibilityLog() -> ReviewTimelineItem.ID? {
+        guard pendingDirectTimelineTextItemIDsForCompatibilityLog.isEmpty == false else {
+            return nil
+        }
+        return pendingDirectTimelineTextItemIDsForCompatibilityLog.removeFirst()
+    }
+
+    private func removePendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: Set<ReviewTimelineItem.ID>) {
+        guard itemIDs.isEmpty == false else {
+            return
+        }
+        pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll { itemIDs.contains($0) }
+    }
+
+    private func recordLegacyProjectedTimelineTextItemIDsFromLogEntries() {
+        for entry in logEntries where entry.retainedTimelineText != nil {
+            let itemID = entry.timelineItemID
+            if timeline.item(for: itemID) != nil {
+                legacyProjectedTimelineTextItemIDs.insert(itemID)
+            }
+        }
+    }
+
+    package func suppressNextLegacyTimelineProjection() {
+        pendingLegacyTimelineProjectionSuppressions += 1
+        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
+    }
+
+    package func suppressNextTerminalFailureLogTimelineProjection() {
+        pendingTerminalFailureLogTimelineProjectionSuppressions += 1
+        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
+    }
+
+    package func discardPendingLegacyTimelineProjectionSuppression() {
+        _ = consumeLegacyTimelineProjectionSuppression()
+    }
+
+    package func consumeTerminalFailureLogTimelineProjectionSuppression() -> Bool {
+        guard pendingTerminalFailureLogTimelineProjectionSuppressions > 0 else {
+            return false
+        }
+        pendingTerminalFailureLogTimelineProjectionSuppressions -= 1
+        return true
+    }
+
+    private func consumeLegacyTimelineProjectionSuppression() -> Bool {
+        guard pendingLegacyTimelineProjectionSuppressions > 0 else {
+            return false
+        }
+        pendingLegacyTimelineProjectionSuppressions -= 1
+        return true
     }
 
     @discardableResult
@@ -548,6 +764,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
         logEntries = trimmedState.entries
         logState = trimmedState.logState
+        if usesDirectTimelineEvents {
+            trimTimelineTextContentToLogEntries()
+        } else {
+            rebuildTimelineFromLogEntries()
+        }
         return true
     }
 
@@ -598,7 +819,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private nonisolated static func trimmedLogState(entries initialEntries: [ReviewLogEntry]) -> TrimmedLogState {
-        var entries = initialEntries
+        var entries = initialEntries.map {
+            $0.clampingUnownedRetainedMetadata(maxBytes: logLimitBytes)
+        }
         var logState = LogState(entries: entries)
 
         while logState.cappedBytes > logLimitBytes {
@@ -715,7 +938,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             groupID: entry.groupID,
             replacesGroup: entry.replacesGroup,
             text: truncatedText,
-            metadata: entry.metadata,
+            metadata: entry.metadata?.truncatingRetainedText(from: entry.text, to: truncatedText),
             timestamp: entry.timestamp
         )
         return trimmedEntries
@@ -886,10 +1109,13 @@ public final class CodexReviewJob: Identifiable, Hashable {
         .commandOutput,
         .toolCall,
         .plan,
+        .todoList,
         .reasoningSummary,
         .rawReasoning,
         .diagnostic,
         .error,
+        .progress,
+        .event,
     ]
 
     private nonisolated static let prefixTrimmableCappedKinds = cappedLogKinds.subtracting([.rawReasoning, .diagnostic, .error])
@@ -898,6 +1124,25 @@ public final class CodexReviewJob: Identifiable, Hashable {
 }
 
 private extension ReviewLogEntry {
+    func clampingUnownedRetainedMetadata(maxBytes: Int) -> ReviewLogEntry {
+        guard let metadata else {
+            return self
+        }
+        let clampedMetadata = metadata.clampingUnownedRetainedText(entryText: text, maxBytes: maxBytes)
+        guard clampedMetadata != metadata else {
+            return self
+        }
+        return ReviewLogEntry(
+            id: id,
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: replacesGroup,
+            text: text,
+            metadata: clampedMetadata,
+            timestamp: timestamp
+        )
+    }
+
     var isActiveCommandEntry: Bool {
         guard kind == .command else {
             return false
@@ -958,5 +1203,132 @@ private extension ReviewLogEntry {
             return trimmed.nilIfEmpty
         }
         return String(trimmed.dropFirst(2)).nilIfEmpty
+    }
+}
+
+private extension ReviewLogEntry.Metadata {
+    func clampingUnownedRetainedText(entryText: String, maxBytes: Int) -> Self {
+        Self(
+            sourceType: sourceType,
+            title: title,
+            status: status,
+            detail: detail,
+            itemID: itemID,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs,
+            commandActions: commandActions,
+            commandStatus: commandStatus,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: Self.clampedUnownedRetainedText(resultText, entryText: entryText, maxBytes: maxBytes),
+            errorText: Self.clampedUnownedRetainedText(errorText, entryText: entryText, maxBytes: maxBytes)
+        )
+    }
+
+    func truncatingRetainedText(from originalText: String, to truncatedText: String) -> Self {
+        Self(
+            sourceType: sourceType,
+            title: title,
+            status: status,
+            detail: detail,
+            itemID: itemID,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs,
+            commandActions: commandActions,
+            commandStatus: commandStatus,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: resultText == originalText ? truncatedText : resultText,
+            errorText: errorText == originalText ? truncatedText : errorText
+        )
+    }
+
+    private static func clampedUnownedRetainedText(_ text: String?, entryText: String, maxBytes: Int) -> String? {
+        guard let text else {
+            return nil
+        }
+        guard text != entryText,
+              text.utf8.count > maxBytes
+        else {
+            return text
+        }
+        return nil
+    }
+}
+
+private extension ReviewDomainEvent {
+    var appliesFromDirectTimelineSource: Bool {
+        switch self {
+        case .itemStarted, .itemUpdated, .itemCompleted, .textDelta:
+            true
+        case .runStarted, .reviewCompleted, .reviewFailed, .reviewCancelled:
+            false
+        }
+    }
+
+    var directTimelineTextItemID: ReviewTimelineItem.ID? {
+        switch self {
+        case .itemStarted(let seed),
+             .itemUpdated(let seed),
+             .itemCompleted(let seed):
+            seed.hasTrimmableTimelineText ? seed.id : nil
+        case .textDelta(let itemID, _, _, _, _):
+            itemID
+        case .runStarted, .reviewCompleted, .reviewFailed, .reviewCancelled:
+            nil
+        }
+    }
+}
+
+private extension ReviewTimelineItemSeed {
+    var hasTrimmableTimelineText: Bool {
+        switch content {
+        case .fileChange(let fileChange):
+            fileChange.output.isEmpty == false
+                && kind.rawValue != "item/fileChange/patchUpdated"
+        default:
+            content.hasTrimmableTimelineText
+        }
+    }
+}
+
+private extension ReviewTimelineItem.Content {
+    var hasTrimmableTimelineText: Bool {
+        switch self {
+        case .command(let command):
+            command.output.isEmpty == false
+        case .diagnostic(let diagnostic):
+            diagnostic.message.isEmpty == false
+        case .message,
+             .plan,
+             .reasoning:
+            true
+        case .search(let search):
+            search.result?.isEmpty == false
+        case .toolCall(let toolCall):
+            toolCall.progress?.isEmpty == false
+                || toolCall.result?.isEmpty == false
+                || toolCall.error?.isEmpty == false
+        case .fileChange:
+            false
+        case .approval,
+             .contextCompaction,
+             .unknown:
+            false
+        }
     }
 }

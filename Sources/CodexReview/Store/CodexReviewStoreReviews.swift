@@ -1,4 +1,6 @@
 import Foundation
+import CodexReviewApplication
+import CodexReviewDomain
 
 private let networkRecoveryUnavailableMessage = "Network unavailable; waiting to reconnect."
 private let networkRecoveryRestoredMessage = "Network restored; restarting review."
@@ -102,7 +104,6 @@ extension CodexReviewStore {
         guard let job = job(id: jobID) else {
             startingJobIDs.remove(jobID)
             reviewWorkerTasks.removeValue(forKey: jobID)
-            resumeReviewWaiters(for: jobID)
             return
         }
         let startRequest = CodexReviewBackendModel.Review.Start(
@@ -195,9 +196,6 @@ extension CodexReviewStore {
         }
         reviewWorkerTasks.removeValue(forKey: jobID)
         runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
-        if job.isTerminal {
-            resumeReviewWaiters(for: jobID)
-        }
     }
 
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
@@ -300,7 +298,9 @@ extension CodexReviewStore {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         let pageRequest = try logPage.validated()
-        let filteredLogs = projectedLogsForReviewRead(job.logEntries).filter(logFilter.includes)
+        let timelineLogs = job.timelineLogEntries
+        let logSource = timelineLogs.isEmpty ? job.logEntries : timelineLogs
+        let filteredLogs = projectedLogsForReviewRead(logSource).filter(logFilter.includes)
         let page = pageRequest.page(total: filteredLogs.count)
         return CodexReviewAPI.Read.Result(
             jobID: job.id,
@@ -553,6 +553,11 @@ extension CodexReviewStore {
         job.core.lifecycle.status = .running
         job.core.lifecycle.startedAt = startedAt
         job.core.output.summary = "Review started."
+        job.timeline.apply(.runStarted(
+            turnID: .init(rawValue: job.core.run.turnID ?? job.id),
+            reviewThreadID: job.core.run.reviewThreadID.map(ReviewThread.ID.init(rawValue:)),
+            model: job.core.run.model
+        ), at: startedAt)
         writeDiagnosticsIfNeeded()
     }
 
@@ -566,10 +571,14 @@ extension CodexReviewStore {
         job.core.lifecycle.endedAt = endedAt
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
-        job.appendLogEntry(.init(kind: .error, text: message, timestamp: endedAt))
+        let suppressErrorLogTimelineProjection = job.consumeTerminalFailureLogTimelineProjectionSuppression()
+        job.appendLogEntry(
+            .init(kind: .error, text: message, timestamp: endedAt),
+            suppressTimelineProjection: suppressErrorLogTimelineProjection
+        )
+        job.timeline.apply(.reviewFailed(message), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
-        resumeReviewWaiters(for: job.id)
     }
 
     private func consumeReviewEvents(
@@ -834,6 +843,16 @@ extension CodexReviewStore {
         }
         var updatedRun = currentRun
         switch event {
+        case .domainEvents(let events, let legacyProjectionSuppressionCount):
+            job.applyDirectTimelineEvents(
+                events,
+                legacyProjectionSuppressionCount: legacyProjectionSuppressionCount,
+                at: clock.now()
+            )
+        case .suppressNextLegacyTimelineProjection:
+            job.suppressNextLegacyTimelineProjection()
+        case .suppressNextTerminalFailureLogTimelineProjection:
+            job.suppressNextTerminalFailureLogTimelineProjection()
         case .started(let turnID, let reviewThreadID, let model):
             job.core.run.turnID = turnID
             job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
@@ -843,12 +862,18 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             activeRuns[job.id] = updatedRun
             job.core.output.summary = "Review started."
+            job.timeline.apply(.runStarted(
+                turnID: .init(rawValue: turnID),
+                reviewThreadID: (reviewThreadID ?? job.core.run.reviewThreadID).map(ReviewThread.ID.init(rawValue:)),
+                model: model ?? job.core.run.model
+            ), at: clock.now())
         case .message(let text):
             job.core.output.lastAgentMessage = text
             job.core.output.summary = text
             job.appendLogEntry(.init(kind: .agentMessage, text: text, timestamp: clock.now()))
         case .messageDelta(let text, let itemID):
             guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
+                job.discardPendingLegacyTimelineProjectionSuppression()
                 return updatedRun
             }
             job.core.output.lastAgentMessage = updatedMessage
@@ -864,7 +889,11 @@ extension CodexReviewStore {
         case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
             if kind == .agentMessage {
                 if let groupID, replacesGroup {
-                    job.noteCompletedAgentMessage(itemID: groupID, text: text)
+                    job.noteAgentMessageSnapshot(
+                        itemID: groupID,
+                        text: text,
+                        isCompleted: shouldCompleteAgentMessageReplacement(metadata: metadata)
+                    )
                 }
                 job.core.output.lastAgentMessage = text
                 job.core.output.summary = text
@@ -929,71 +958,21 @@ extension CodexReviewStore {
            result != previousAgentMessage {
             job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
         }
+        job.timeline.apply(.reviewCompleted(summary: summary, result: finalReviewText), at: endedAt)
         job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
-        resumeReviewWaiters(for: job.id)
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard job(id: jobID)?.isTerminal == false else {
-            return
-        }
-        let waiterID = UUID()
-        let timeoutTask = timeout.map { duration in
-            Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: duration)
-                } catch {
-                    return
-                }
-                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
-            }
-        }
-
-        await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                if job(id: jobID)?.isTerminal != false {
-                    timeoutTask?.cancel()
-                    continuation.resume()
-                    return
-                }
-                reviewTerminalWaiters[jobID, default: []].append(.init(
-                    id: waiterID,
-                    continuation: continuation,
-                    timeoutTask: timeoutTask
-                ))
-            }
-        } onCancel: {
-            timeoutTask?.cancel()
-            Task { @MainActor [weak self] in
-                self?.resumeReviewWaiter(jobID: jobID, waiterID: waiterID)
-            }
-        }
-        timeoutTask?.cancel()
-    }
-
-    package func resumeReviewWaiters(for jobID: String) {
-        let waiters = reviewTerminalWaiters.removeValue(forKey: jobID) ?? []
-        for waiter in waiters {
-            waiter.timeoutTask?.cancel()
-            waiter.continuation.resume()
-        }
-    }
-
-    private func resumeReviewWaiter(jobID: String, waiterID: UUID) {
-        guard var waiters = reviewTerminalWaiters[jobID],
-              let index = waiters.firstIndex(where: { $0.id == waiterID })
+        guard let job = job(id: jobID),
+              job.isTerminal == false
         else {
             return
         }
-        let waiter = waiters.remove(at: index)
-        if waiters.isEmpty {
-            reviewTerminalWaiters.removeValue(forKey: jobID)
-        } else {
-            reviewTerminalWaiters[jobID] = waiters
-        }
-        waiter.timeoutTask?.cancel()
-        waiter.continuation.resume()
+        _ = await ReviewObservationAwaiter.waitUntilTerminal(
+            timeline: job.timeline,
+            timeout: timeout
+        )
     }
 
     private func nextJobSortOrder(inWorkspace cwd: String) -> Double {
@@ -1087,12 +1066,26 @@ private func shouldAppendReviewReadLogDelta(for kind: ReviewLogEntry.Kind) -> Bo
     }
 }
 
+private func shouldCompleteAgentMessageReplacement(metadata: ReviewLogEntry.Metadata?) -> Bool {
+    guard let status = metadata?.status?.nilIfEmpty else {
+        return true
+    }
+    return ReviewItemPhase.normalized(status).isTerminal
+}
+
 private extension CodexReviewBackendModel.Review.Event {
     var completesReviewRun: Bool {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started, .message, .messageDelta, .log, .logEntry:
+        case .domainEvents,
+             .suppressNextLegacyTimelineProjection,
+             .suppressNextTerminalFailureLogTimelineProjection,
+             .started,
+             .message,
+             .messageDelta,
+             .log,
+             .logEntry:
             false
         }
     }
@@ -1120,9 +1113,13 @@ private extension CodexReviewJob {
         return updated
     }
 
-    func noteCompletedAgentMessage(itemID: String, text: String) {
+    func noteAgentMessageSnapshot(itemID: String, text: String, isCompleted: Bool) {
         agentMessagesByItemID[itemID] = text
-        completedAgentMessageItemIDs.insert(itemID)
+        if isCompleted {
+            completedAgentMessageItemIDs.insert(itemID)
+        } else {
+            completedAgentMessageItemIDs.remove(itemID)
+        }
     }
 
     func resetReviewAttemptOutputForRecovery() {
@@ -1131,7 +1128,7 @@ private extension CodexReviewJob {
         core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
-        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage })
+        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage }, resetDirectTimeline: true)
     }
 }
 

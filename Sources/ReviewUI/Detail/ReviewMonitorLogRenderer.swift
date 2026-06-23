@@ -1,4 +1,5 @@
 import CodexReview
+import ReviewMonitorRendering
 
 struct ReviewMonitorRenderedLogDocument: Equatable, Sendable {
     var source: ReviewMonitorLog.Document
@@ -7,15 +8,21 @@ struct ReviewMonitorRenderedLogDocument: Equatable, Sendable {
 
 actor ReviewMonitorLogRenderer {
     private var projection = ReviewMonitorLog.Projection()
+    private var timelineProjection = ReviewMonitorTimelineLogProjection()
     private var displayDocument = ReviewMonitorLog.Document()
 
     func reset() {
         projection = ReviewMonitorLog.Projection()
+        timelineProjection = ReviewMonitorTimelineLogProjection()
         displayDocument = ReviewMonitorLog.Document()
     }
 
     func render(entries: [ReviewLogEntry]) -> ReviewMonitorRenderedLogDocument {
         renderedDocument(from: projection.render(entries: entries))
+    }
+
+    func render(timelineDocument: ReviewTimelineDocument) -> ReviewMonitorRenderedLogDocument {
+        renderedDocument(from: timelineProjection.render(timelineDocument: timelineDocument))
     }
 
     func append(

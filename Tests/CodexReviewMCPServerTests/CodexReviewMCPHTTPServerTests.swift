@@ -4,6 +4,7 @@ import MCP
 @preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReview
+import CodexReviewDomain
 import CodexReviewMCPServer
 import CodexReviewTesting
 
@@ -233,6 +234,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(awaited.value(for: ["result", "isError"]) as? Bool == false)
             #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String == "Done")
+            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String == "review text")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -476,6 +479,311 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect((denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "Job job-other-session was not found.")
+        }
+    }
+
+    @Test func streamableHTTPReviewReadAddsSemanticTimelineWithoutChangingLegacyShape() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let startedAt = Date(timeIntervalSince1970: 20)
+            let completedAt = Date(timeIntervalSince1970: 23)
+            let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
+            let commandMetadata = ReviewLogEntry.Metadata(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                cwd: "/tmp/project",
+                exitCode: 0,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: 3000,
+                commandStatus: "completed"
+            )
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-semantic",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Included",
+                        status: .succeeded,
+                        summary: "Done",
+                        logEntries: [
+                            .init(
+                                kind: .command,
+                                groupID: "cmd-1",
+                                text: "$ swift test",
+                                metadata: commandMetadata
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                groupID: "cmd-1",
+                                text: longOutput,
+                                metadata: commandMetadata
+                            ),
+                        ]
+                    ),
+                ]
+            )
+
+            let defaultResponse = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-semantic",
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+            let allResponse = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-semantic",
+                            "logFilter": "all",
+                            "logLimit": 2,
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-semantic")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) as? String != nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 1)
+            let defaultLogs = try #require(defaultResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            #expect(defaultLogs.compactMap { $0["kind"] as? String } == ["command"])
+
+            #expect(allResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
+            let allLogs = try #require(allResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
+            #expect(allLogs.compactMap { $0["kind"] as? String } == ["command", "commandOutput"])
+
+            let timeline = try #require(allResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            #expect(timeline["orderedItemIds"] as? [String] == ["cmd-1"])
+            #expect(timeline["activeItemIds"] as? [String] == [])
+            #expect(timeline["activeItemCount"] as? Int == 0)
+            #expect(timeline["latestActivityId"] as? String == "cmd-1")
+            let itemsPage = try #require(timeline["itemsPage"] as? [String: Any])
+            #expect(itemsPage["total"] as? Int == 1)
+            #expect(itemsPage["limit"] as? Int == 2)
+            #expect(itemsPage["returned"] as? Int == 1)
+            let items = try #require(timeline["items"] as? [[String: Any]])
+            let commandItem = try #require(items.first)
+            #expect(commandItem["id"] as? String == "cmd-1")
+            #expect(commandItem["kind"] as? String == "commandExecution")
+            #expect(commandItem["family"] as? String == "command")
+            #expect(commandItem["phase"] as? String == "completed")
+            #expect(commandItem["isActive"] as? Bool == false)
+            #expect(commandItem["durationMs"] as? Int == 3000)
+            let content = try #require(commandItem["content"] as? [String: Any])
+            #expect(content["type"] as? String == "command")
+            #expect(content["command"] as? String == "swift test")
+            #expect(content["cwd"] as? String == "/tmp/project")
+            #expect(content["exitCode"] as? Int == 0)
+            let timelineOutput = try #require(content["output"] as? String)
+            #expect(timelineOutput.hasPrefix("Tests passed"))
+            #expect(timelineOutput.hasSuffix("..."))
+            #expect(timelineOutput.count < longOutput.count)
+            #expect(content["truncatedFields"] as? [String] == ["output"])
+        }
+    }
+
+    @Test func streamableHTTPReviewReadIncludesToolProgressInTimelineContent() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let job = CodexReviewJob.makeForTesting(
+                id: "job-tool-progress",
+                sessionID: sessionID,
+                cwd: "/tmp/project",
+                targetSummary: "Included",
+                status: .running,
+                summary: "Running"
+            )
+            job.timeline.apply(.itemUpdated(.init(
+                id: "tool-1:progress",
+                kind: .mcpToolCall,
+                family: .tool,
+                phase: .running,
+                content: .toolCall(.init(
+                    namespace: "mcp",
+                    server: "codex_review",
+                    tool: "review_read",
+                    progress: "Reading review job"
+                ))
+            )))
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [job]
+            )
+
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-tool-progress",
+                            "logFilter": "all",
+                        ],
+                    ],
+                ]
+            )
+
+            let timeline = try #require(response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            #expect(timeline["activeItemIds"] as? [String] == ["tool-1:progress"])
+            #expect(timeline["activeItemCount"] as? Int == 1)
+            let items = try #require(timeline["items"] as? [[String: Any]])
+            let item = try #require(items.first)
+            #expect(item["id"] as? String == "tool-1:progress")
+            #expect(item["isActive"] as? Bool == true)
+            let content = try #require(item["content"] as? [String: Any])
+            #expect(content["type"] as? String == "toolCall")
+            #expect(content["namespace"] as? String == "mcp")
+            #expect(content["server"] as? String == "codex_review")
+            #expect(content["tool"] as? String == "review_read")
+            #expect(content["progress"] as? String == "Reading review job")
+        }
+    }
+
+    @Test func streamableHTTPReviewReadPagesTimelineFromRequestedOffsetWhenLogsAreFiltered() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [
+                    CodexReviewJob.makeForTesting(
+                        id: "job-filtered-timeline",
+                        sessionID: sessionID,
+                        cwd: "/tmp/project",
+                        targetSummary: "Included",
+                        status: .succeeded,
+                        summary: "Done",
+                        logEntries: [
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-0",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 0",
+                                    status: "completed",
+                                    itemID: "file-0"
+                                )
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-1",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 1",
+                                    status: "completed",
+                                    itemID: "file-1"
+                                )
+                            ),
+                            .init(
+                                kind: .commandOutput,
+                                text: "output-2",
+                                metadata: .init(
+                                    sourceType: "fileChange",
+                                    title: "File 2",
+                                    status: "completed",
+                                    itemID: "file-2"
+                                )
+                            ),
+                        ]
+                    ),
+                ]
+            )
+
+            let firstPage = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-filtered-timeline",
+                            "logOffset": 0,
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+            let secondPage = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-filtered-timeline",
+                            "logOffset": 1,
+                            "logLimit": 1,
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(firstPage.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 0)
+            let firstTimeline = try #require(firstPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let firstItemsPage = try #require(firstTimeline["itemsPage"] as? [String: Any])
+            #expect(firstItemsPage["total"] as? Int == 3)
+            #expect(firstItemsPage["offset"] as? Int == 0)
+            #expect(firstItemsPage["returned"] as? Int == 1)
+            #expect(firstItemsPage["nextOffset"] as? Int == 1)
+            let firstItems = try #require(firstTimeline["items"] as? [[String: Any]])
+            #expect(firstItems.first?["id"] as? String == "file-0")
+
+            let secondTimeline = try #require(secondPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let secondItemsPage = try #require(secondTimeline["itemsPage"] as? [String: Any])
+            #expect(secondItemsPage["offset"] as? Int == 1)
+            #expect(secondItemsPage["previousOffset"] as? Int == 0)
+            let secondItems = try #require(secondTimeline["items"] as? [[String: Any]])
+            #expect(secondItems.first?["id"] as? String == "file-1")
         }
     }
 

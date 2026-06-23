@@ -285,7 +285,7 @@ struct Document: Equatable, Sendable {
 }
 }
 
-private enum ReviewMonitorLogStyler {
+enum ReviewMonitorLogStyler {
     struct Presentation {
         var text: String
         var styleRuns: [ReviewMonitorLog.TextRun] = []

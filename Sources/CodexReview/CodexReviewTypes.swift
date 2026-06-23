@@ -1,4 +1,5 @@
 import Foundation
+import CodexReviewDomain
 
 package enum CodexReviewBackendModel {
     package enum Settings {}
@@ -304,6 +305,9 @@ struct RecoveryToken: Equatable, Sendable {
 
 package extension CodexReviewBackendModel.Review {
 enum Event: Equatable, Sendable {
+    case domainEvents([ReviewDomainEvent], legacyProjectionSuppressionCount: Int)
+    case suppressNextLegacyTimelineProjection
+    case suppressNextTerminalFailureLogTimelineProjection
     case started(turnID: String, reviewThreadID: String?, model: String?)
     case message(String)
     case messageDelta(String, itemID: String)
