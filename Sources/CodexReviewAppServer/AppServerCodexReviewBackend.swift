@@ -21,6 +21,7 @@ private func makeAppServerReviewAttemptID() -> String {
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
+    private let appServer: CodexAppServer?
     private let client: AppServerClient
     private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
@@ -40,6 +41,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var reviewStartRequestsInFlight = 0
 
     package init(appServer: CodexAppServer) {
+        self.appServer = appServer
         self.client = appServer.appServerClient
         self.threadStartPermissionStrategy = appServer.threadStartPermissionStrategy
     }
@@ -48,11 +50,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         client: AppServerClient,
         threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
     ) {
+        self.appServer = nil
         self.client = client
         self.threadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
+        if let appServer {
+            let configuration = try await appServer.configuration()
+            let models = try await appServer.models(includeHidden: true)
+                .map(\.reviewModelCatalogItem)
+            return .init(
+                model: configuration.reviewModel?.nilIfEmpty,
+                fallbackModel: configuration.model?.nilIfEmpty ?? models.first(where: \.isDefault)?.model,
+                reasoningEffort: configuration.reasoningEffort,
+                serviceTier: configuration.serviceTier,
+                models: models
+            )
+        }
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Config.Read.Request())
         let models = try await readModelCatalog()
@@ -77,6 +92,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot {
+        if let appServer {
+            guard let account = try await appServer.account() else {
+                return .init()
+            }
+            let backendAccount = account.backendAccount
+            return .init(accounts: [backendAccount], activeAccountID: backendAccount.id)
+        }
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Auth.Read.Request())
         guard let account = response.account?.backendAccount else {
@@ -86,12 +108,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func readRateLimits() async throws -> CodexRateLimits {
+        if let appServer {
+            return try await appServer.rateLimits()
+        }
         _ = try await client.initialize()
         let response = try await client.send(AppServerAPI.Account.RateLimits.Read.Request())
         return .init(appServer: response)
     }
 
     package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+        if let appServer {
+            let handle = try await appServer.loginChatGPT(
+                callbackURLScheme: request.nativeWebAuthenticationCallbackScheme
+            )
+            return try handle.backendChallenge(
+                nativeWebAuthenticationCallbackScheme: request.nativeWebAuthenticationCallbackScheme
+            )
+        }
         _ = try await client.initialize()
         let nativeWebAuthentication = request.nativeWebAuthenticationCallbackScheme
             .map(AppServerAPI.Account.Login.NativeWebAuthentication.init(callbackURLScheme:))
@@ -104,6 +137,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
+        if let appServer {
+            try await appServer.cancelLogin(id: .init(rawValue: challenge.id))
+            return
+        }
         _ = try await client.initialize()
         let _: AppServerAPI.Account.Login.Cancel.Response = try await client.send(
             method: "account/login/cancel",
@@ -114,6 +151,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         if let callbackURL = response.callbackURL {
+            if let appServer {
+                guard let url = URL(string: callbackURL) else {
+                    throw CodexReviewAPI.Error.io("Invalid ChatGPT authentication callback URL.")
+                }
+                try await appServer.completeLogin(
+                    id: .init(rawValue: response.challengeID),
+                    callbackURL: url
+                )
+                return try await readAuth()
+            }
             _ = try await client.initialize()
             let _: AppServerAPI.Account.Login.Complete.Response = try await client.send(
                 method: "account/login/complete",
@@ -125,6 +172,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func logout(_: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
+        if let appServer {
+            try await appServer.logout()
+            return try await readAuth()
+        }
         _ = try await client.initialize()
         let _: EmptyResponse = try await client.send(
             method: "account/logout",
@@ -1814,6 +1865,21 @@ private extension AppServerCodexReviewBackend {
     }
 }
 
+private extension CodexAppServerKit.CodexAccount {
+    var backendAccount: CodexReviewBackendModel.Account.Snapshot {
+        let backendKind: CodexReviewBackendModel.Account.Kind =
+            CodexReviewBackendModel.Account.Kind(rawValue: kind.rawValue) ?? .chatGPT
+        return .init(
+            id: CodexReviewBackendModel.Account.ID(id),
+            kind: backendKind,
+            label: label,
+            isActive: true,
+            planType: planType,
+            capabilities: backendKind.capabilities
+        )
+    }
+}
+
 private extension AppServerAPI.Account.Snapshot {
     var backendAccount: CodexReviewBackendModel.Account.Snapshot {
         let backendKind: CodexReviewBackendModel.Account.Kind =
@@ -1851,6 +1917,29 @@ private extension CodexModel {
             supportedServiceTiers: serviceTiers,
             isDefault: isDefault
         )
+    }
+}
+
+private extension CodexLoginHandle {
+    func backendChallenge(
+        nativeWebAuthenticationCallbackScheme: String?
+    ) throws -> CodexReviewBackendModel.Login.Challenge {
+        switch self {
+        case .apiKey:
+            return .init(id: "api-key")
+        case .chatGPT(let loginID, let authenticationURL):
+            return .init(
+                id: loginID.rawValue,
+                verificationURL: authenticationURL,
+                nativeWebAuthenticationCallbackScheme: nativeWebAuthenticationCallbackScheme
+            )
+        case .chatGPTDeviceCode(let loginID, let verificationURL, let userCode):
+            return .init(
+                id: loginID.rawValue,
+                verificationURL: verificationURL,
+                userCode: userCode
+            )
+        }
     }
 }
 
