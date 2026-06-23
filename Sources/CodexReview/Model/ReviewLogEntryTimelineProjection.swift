@@ -57,12 +57,15 @@ extension CodexReviewJob {
             return
         }
         var textByItemID: [ReviewTimelineItem.ID: String] = [:]
-        for entry in logEntries where entry.canProvideDirectTimelineText {
+        for entry in logEntries {
+            guard let retainedTimelineText = entry.retainedTimelineText else {
+                continue
+            }
             for itemID in directTimelineTextCandidateIDs(for: entry) {
                 if entry.shouldAppendRetainedTimelineText {
-                    textByItemID[itemID, default: ""] += entry.text
+                    textByItemID[itemID, default: ""] += retainedTimelineText
                 } else {
-                    textByItemID[itemID] = entry.text
+                    textByItemID[itemID] = retainedTimelineText
                 }
             }
         }
@@ -103,6 +106,36 @@ extension CodexReviewJob {
 }
 
 package extension ReviewLogEntry {
+    var retainedTimelineText: String? {
+        guard canProvideDirectTimelineText else {
+            return nil
+        }
+        switch timelineItemFamily {
+        case .fileChange:
+            return kind == .commandOutput ? text : nil
+        case .search:
+            if metadata?.resultText == text {
+                return text
+            }
+            return metadata?.sourceType == "webSearch" ? nil : text
+        case .tool:
+            if metadata?.resultText == text || metadata?.errorText == text {
+                return text
+            }
+            return metadata?.resultText == nil && metadata?.errorText == nil ? text : nil
+        case .approval,
+             .command,
+             .contextCompaction,
+             .diagnostic,
+             .lifecycle,
+             .message,
+             .plan,
+             .reasoning,
+             .unknown:
+            return text
+        }
+    }
+
     var canProvideDirectTimelineText: Bool {
         switch kind {
         case .agentMessage,
@@ -420,6 +453,9 @@ private extension ReviewTimelineItem.Content {
             return .plan(.init(markdown: text))
         case .reasoning(let reasoning):
             return .reasoning(.init(text: text, style: reasoning.style))
+        case .search(var search):
+            search.result = text.nilIfEmpty
+            return .search(search)
         case .toolCall(var toolCall):
             if toolCall.progress != nil {
                 toolCall.progress = text
@@ -429,7 +465,7 @@ private extension ReviewTimelineItem.Content {
                 toolCall.result = text
             }
             return .toolCall(toolCall)
-        case .approval, .contextCompaction, .search, .unknown:
+        case .approval, .contextCompaction, .unknown:
             return nil
         }
     }

@@ -1601,6 +1601,215 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .failed("App-server failed."))
     }
 
+    @Test func backendKeepsUserMessagesOutOfDirectTimelineEvents() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1"))
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(type: "userMessage", id: "user-1", text: "Please review this diff")
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1", status: "completed"))
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: nil))
+    }
+
+    @Test func backendPreservesBareAgentMessagesAsSeparateLegacyMessages() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "agent/message",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", message: "First message")
+        )
+        try await transport.emitServerNotification(
+            method: "agent/message",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", message: "Second message")
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .message("First message"))
+        #expect(try await iterator.next() == .message("Second message"))
+    }
+
+    @Test func backendAllowsAgentMessageLifecycleWhenTopLevelItemIDIsPresent() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "turn/started",
+            params: TestTurnNotification(threadID: "thread-1", turn: .init(id: "turn-1"))
+        )
+        try await transport.emitServerNotification(
+            method: "item/updated",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "agent-1",
+                item: .init(type: "agentMessage", id: "", text: "Scoped message")
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        guard case .domainEvents(let domainEvents, let suppressionCount) = try await iterator.next() else {
+            Issue.record("expected top-level itemID agent message domain event")
+            return
+        }
+        #expect(suppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(domainEvents.first) else {
+            Issue.record("expected agent message update")
+            return
+        }
+        #expect(seed.id.rawValue == "agent-1")
+        guard case .message(let message) = seed.content else {
+            Issue.record("expected message content")
+            return
+        }
+        #expect(message.text == "Scoped message")
+    }
+
+    @Test func backendPreservesSyntheticDiagnosticsAsSeparateLegacyLogs() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", message: "First warning")
+        )
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: TestMessageNotification(threadID: "thread-1", turnID: "turn-1", message: "Second warning")
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .diagnostic,
+            text: "First warning",
+            groupID: "turn-1",
+            replacesGroup: false
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .diagnostic,
+            text: "Second warning",
+            groupID: "turn-1",
+            replacesGroup: false
+        ))
+    }
+
+    @Test func backendRetainsCompatibilityLogForTextBearingToolUpdates() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "item/updated",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "mcpToolCall",
+                    id: "tool-1",
+                    status: "completed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    result: "large result"
+                )
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        guard case .domainEvents(let domainEvents, let suppressionCount) = try await iterator.next() else {
+            Issue.record("expected direct tool update")
+            return
+        }
+        #expect(suppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(domainEvents.first) else {
+            Issue.record("expected tool item update")
+            return
+        }
+        #expect(seed.id.rawValue == "tool-1")
+        guard case .toolCall(let toolCall) = seed.content else {
+            Issue.record("expected tool call content")
+            return
+        }
+        #expect(toolCall.result == "large result")
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "large result",
+            groupID: "tool-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "mcpToolCall",
+                title: "codex_review.review_read",
+                status: "completed",
+                server: "codex_review",
+                tool: "review_read",
+                resultText: "large result"
+            )
+        ))
+    }
+
     @Test func backendRoutesDetachedReviewThreadNotificationsToParentSession() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
@@ -3926,7 +4135,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "codex_review.review_read completed. Result: ok",
+            text: "ok",
             groupID: "tool-1",
             replacesGroup: true,
             metadata: .init(
@@ -5003,12 +5212,26 @@ struct AppServerClientTests {
                 )
             )
         )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                item: .init(
+                    type: "webSearch",
+                    id: "search-result",
+                    status: "completed",
+                    query: "ReviewTimeline",
+                    result: "search result"
+                )
+            )
+        )
 
         var iterator = events.makeAsyncIterator()
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "codex_review.review_read completed. Error: denied",
+            text: "denied",
             groupID: "tool-error",
             replacesGroup: true,
             metadata: .init(
@@ -5022,7 +5245,7 @@ struct AppServerClientTests {
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .toolCall,
-            text: "Dynamic tool web.search completed. Result: no matches",
+            text: "no matches",
             groupID: "tool-success-false",
             replacesGroup: true,
             metadata: .init(
@@ -5032,6 +5255,19 @@ struct AppServerClientTests {
                 namespace: "web",
                 tool: "search",
                 resultText: "no matches"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .toolCall,
+            text: "search result",
+            groupID: "search-result",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "webSearch",
+                title: "Web search",
+                status: "completed",
+                query: "ReviewTimeline",
+                resultText: "search result"
             )
         ))
     }
@@ -5440,6 +5676,7 @@ private struct TestPlanNotification: Encodable, Sendable {
 private struct TestItemNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
+    var itemID: String?
     var item: TestItem
     var startedAtMs: Int64?
     var completedAtMs: Int64?
@@ -5447,12 +5684,14 @@ private struct TestItemNotification: Encodable, Sendable {
     init(
         threadID: String,
         turnID: String,
+        itemID: String? = nil,
         item: TestItem,
         startedAtMs: Int64? = nil,
         completedAtMs: Int64? = nil
     ) {
         self.threadID = threadID
         self.turnID = turnID
+        self.itemID = itemID
         self.item = item
         self.startedAtMs = startedAtMs
         self.completedAtMs = completedAtMs
@@ -5461,6 +5700,7 @@ private struct TestItemNotification: Encodable, Sendable {
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
+        case itemID = "itemId"
         case item
         case startedAtMs
         case completedAtMs

@@ -1243,7 +1243,26 @@ struct AppServerWireEventTests {
             return
         }
         #expect(diffSeed.id.rawValue == "turn-1:turn/diff/updated")
+        #expect(diffSeed.kind.rawValue == "turn/diff/updated")
         #expect(diffSeed.id != seed.id)
+
+        let patch = try decodeNotification("""
+        {
+          "method": "item/fileChange/patchUpdated",
+          "params": {
+            "turnId": "turn-1",
+            "itemId": "file-1",
+            "diff": "diff --git"
+          }
+        }
+        """)
+
+        guard case .itemUpdated(let patchSeed) = try #require(patch.domainEvents().first) else {
+            Issue.record("expected file patch item update")
+            return
+        }
+        #expect(patchSeed.id.rawValue == "file-1:patch")
+        #expect(patchSeed.kind.rawValue == "item/fileChange/patchUpdated")
     }
 
     @Test func mapsTerminalThreadNotificationsBeforeUnknownFallback() throws {

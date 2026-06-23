@@ -601,6 +601,103 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func diffCompatibilityLogTrimsDirectFileChangeTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "turn-1:turn/diff/updated")
+            let longText = String(repeating: "diff --git\n", count: 40_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .init(rawValue: "turn/diff/updated"),
+                    family: .fileChange,
+                    phase: .running,
+                    content: .fileChange(.init(title: "", output: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .event,
+                text: longText,
+                groupID: "turn-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .event && $0.groupID == "turn-1"
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .fileChange(let fileChange) = item.content else {
+                Issue.record("expected file-change timeline content")
+                return
+            }
+            #expect(fileChange.output.count < longText.count)
+        }
+    }
+
+    @Test func fileChangeOutputCompatibilityLogTrimsDirectFileChangeTimelineText() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "file-1")
+            let longText = String(repeating: "Sources/App.swift | 1 +\n+ new line\n", count: 20_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .fileChange,
+                    family: .fileChange,
+                    phase: .running,
+                    content: .fileChange(.init(title: "Sources/App.swift", output: longText))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .commandOutput,
+                text: longText,
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .commandOutput && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .fileChange(let fileChange) = item.content else {
+                Issue.record("expected file-change timeline content")
+                return
+            }
+            #expect(fileChange.output.count < longText.count)
+        }
+    }
+
     @Test func fileChangeStatusCompatibilityLogDoesNotTrimDirectPatchText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
@@ -620,7 +717,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.domainEvents([
                 .itemUpdated(.init(
                     id: itemID,
-                    kind: .fileChange,
+                    kind: .init(rawValue: "item/fileChange/patchUpdated"),
                     family: .fileChange,
                     phase: .running,
                     content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
@@ -651,6 +748,134 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(fileChange.output == patchText)
+        }
+    }
+
+    @Test func searchCompatibilityLogTrimsDirectSearchResult() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "search-1")
+            let longResult = String(repeating: "Search result\n", count: 30_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .webSearch,
+                    family: .search,
+                    phase: .completed,
+                    content: .search(.init(query: "ReviewTimeline", result: longResult))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: longResult,
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "webSearch",
+                    title: "Web search",
+                    status: "completed",
+                    query: "ReviewTimeline",
+                    resultText: longResult
+                )
+            ))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "Web search completed: ReviewTimeline.",
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "webSearch",
+                    title: "Web search",
+                    status: "completed",
+                    query: "ReviewTimeline",
+                    resultText: longResult
+                )
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .search(let search) = item.content else {
+                Issue.record("expected search timeline content")
+                return
+            }
+            #expect(search.query == "ReviewTimeline")
+            #expect((search.result ?? "").count < longResult.count)
+            #expect(search.result != "Web search completed: ReviewTimeline.")
+        }
+    }
+
+    @Test func searchCompletionSummaryCompatibilityLogDoesNotClearDirectResult() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "search-1")
+            await backend.yield(.domainEvents([
+                .itemCompleted(.init(
+                    id: itemID,
+                    kind: .webSearch,
+                    family: .search,
+                    phase: .completed,
+                    content: .search(.init(query: "ReviewTimeline", result: "short result"))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "Web search completed: ReviewTimeline.",
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "webSearch",
+                    title: "Web search",
+                    status: "completed",
+                    query: "ReviewTimeline",
+                    resultText: "short result"
+                )
+            ))
+            await backend.yield(.logEntry(
+                kind: .diagnostic,
+                text: String(repeating: "x", count: 300_000),
+                groupID: "diagnostic-1",
+                replacesGroup: true
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 2
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .search(let search) = item.content else {
+                Issue.record("expected search timeline content")
+                return
+            }
+            #expect(search.result == "short result")
         }
     }
 
