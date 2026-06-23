@@ -455,6 +455,23 @@ struct AppServerWireEventTests {
         }
         #expect(processItemID.rawValue == "process-1")
 
+        let invalidUTF8Output = Data([0xff, 0x0a]).base64EncodedString()
+        let lossyProcessOutput = try decodeNotification("""
+        {
+          "method": "process/outputDelta",
+          "params": {
+            "processHandle": "process-1",
+            "deltaBase64": "\(invalidUTF8Output)"
+          }
+        }
+        """)
+
+        guard case .textDelta(_, _, _, _, let lossyDelta) = try #require(lossyProcessOutput.domainEvents().first) else {
+            Issue.record("expected lossy process output delta")
+            return
+        }
+        #expect(lossyDelta == String(decoding: [0xff, 0x0a], as: UTF8.self))
+
         let bareCompletion = try decodeNotification("""
         {
           "method": "item/completed",
