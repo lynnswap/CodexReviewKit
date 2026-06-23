@@ -1178,10 +1178,11 @@ struct CodexReviewStoreCommandTests {
         let defaultRead = try store.readReview(jobID: "job-1")
         let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
 
-        #expect(defaultRead.logs.map(\.kind) == [.command])
-        #expect(defaultRead.logs.map(\.text) == ["Build complete\n"])
-        #expect(defaultRead.logs.first?.metadata?.itemID == "process-1")
+        #expect(defaultRead.logs.isEmpty)
+        #expect(allRead.logs.map(\.kind) == [.commandOutput])
         #expect(allRead.logs.map(\.text) == ["Build complete\n"])
+        #expect(allRead.logs.first?.metadata?.itemID == "process-1")
+        #expect(allRead.logs.first?.metadata?.command == nil)
     }
 
     @Test func timelineProjectedReadReviewPreservesCommandActions() throws {

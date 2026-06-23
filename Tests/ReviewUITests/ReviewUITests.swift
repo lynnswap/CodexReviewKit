@@ -3650,8 +3650,8 @@ struct ReviewUITests {
                     primaryText: "Command output",
                     rawTranscriptText: "stderr",
                     content: .command(.init(
-                        title: "Command",
-                        command: "Command",
+                        title: "",
+                        command: "",
                         output: "stderr",
                         exitCode: 2,
                         status: .failed,
@@ -3671,6 +3671,8 @@ struct ReviewUITests {
         let panel = try #require(renderedLog.commandOutputPanels.first)
         let metadata = try #require(sourceLog.blocks.first?.metadata)
 
+        #expect(sourceLog.blocks.map(\.kind) == [.commandOutput])
+        #expect(sourceLog.text == "stderr")
         #expect(panel.isActive == false)
         #expect(panel.title == "Ran command for 4s")
         #expect(panel.exitText == "exit 2")

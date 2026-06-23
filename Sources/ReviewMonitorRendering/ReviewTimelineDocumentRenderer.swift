@@ -185,6 +185,9 @@ public struct ReviewTimelineDocumentRenderer: Sendable {
         case .approval(let approval):
             return [approval.title, approval.detail].compactMap { $0 }.joined(separator: "\n")
         case .command(let command):
+            guard command.command.isEmpty == false else {
+                return command.output
+            }
             return command.output.isEmpty ? "$ \(command.command)" : "$ \(command.command)\n\(command.output)"
         case .contextCompaction(let contextCompaction):
             return contextCompaction.title

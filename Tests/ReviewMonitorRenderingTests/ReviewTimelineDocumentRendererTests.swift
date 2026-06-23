@@ -399,6 +399,23 @@ struct ReviewTimelineDocumentRendererTests {
         raw detail
         """)
     }
+
+    @Test func outputOnlyCommandRawTranscriptDoesNotSynthesizeCommandPrompt() throws {
+        let timeline = ReviewTimeline()
+        complete(
+            timeline,
+            id: "process-1",
+            kind: .commandExecution,
+            family: .command,
+            content: .command(.init(command: "", output: "Build complete\n"))
+        )
+
+        let document = ReviewTimelineDocumentRenderer().document(from: timeline)
+        let block = try requireBlock(document, id: "process-1")
+
+        #expect(block.rawTranscriptText == "Build complete\n")
+        #expect(document.plainText == "Build complete\n")
+    }
 }
 
 @MainActor

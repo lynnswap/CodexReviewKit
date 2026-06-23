@@ -16,7 +16,8 @@ private extension ReviewLogEntry {
             return [entry(item: item, kind: .agentMessage, text: message.text)]
         case .command(let command):
             var entries: [ReviewLogEntry] = []
-            if let commandLine = command.command.nilIfEmpty {
+            let commandLine = command.command.nilIfEmpty
+            if let commandLine {
                 entries.append(entry(
                     item: item,
                     kind: .command,
@@ -27,7 +28,7 @@ private extension ReviewLogEntry {
             if command.output.isEmpty == false {
                 entries.append(entry(
                     item: item,
-                    kind: entries.isEmpty ? .command : .commandOutput,
+                    kind: .commandOutput,
                     text: command.output,
                     metadata: commandMetadata(item: item, command: command)
                 ))
@@ -205,7 +206,7 @@ private extension ReviewLogEntry {
             sourceType: "commandExecution",
             status: item.phase.rawValue,
             itemID: item.id.rawValue,
-            command: command.command,
+            command: command.command.nilIfEmpty,
             cwd: command.cwd,
             exitCode: command.exitCode,
             startedAt: item.startedAt,

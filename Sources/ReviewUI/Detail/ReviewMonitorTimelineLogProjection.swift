@@ -64,7 +64,8 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         case .command(let command):
             let groupID = block.id.rawValue
             let metadata = commandMetadata(for: block, command: command)
-            if command.command == "Command", command.output.isEmpty == false {
+            let commandLine = command.command.nilIfEmpty
+            if (commandLine == nil || command.command == "Command"), command.output.isEmpty == false {
                 return [
                     ProjectedBlock(
                         id: derivedBlockID(prefix: "commandOutput", from: block),
@@ -75,12 +76,15 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                     ),
                 ]
             }
+            guard let commandLine else {
+                return []
+            }
             var blocks = [
                 ProjectedBlock(
                     id: derivedBlockID(prefix: "command", from: block),
                     kind: .command,
                     groupID: groupID,
-                    text: "$ \(command.command)",
+                    text: "$ \(commandLine)",
                     metadata: metadata
                 ),
             ]
