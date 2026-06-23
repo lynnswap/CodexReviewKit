@@ -2184,7 +2184,7 @@ private func decodeReviewNotification(
                 status: "completed"
             )
         )]
-    case "warning", "guardianWarning", "deprecationNotice", "configWarning":
+    case "warning", "guardianWarning", "deprecationNotice", "configWarning", "diagnostic":
         guard let message = payload.diagnosticText?.nilIfEmpty else {
             return nil
         }
@@ -2376,7 +2376,8 @@ private func isReviewNotificationMethod(_ method: String) -> Bool {
         "warning",
         "guardianWarning",
         "deprecationNotice",
-        "configWarning":
+        "configWarning",
+        "diagnostic":
         true
     default:
         false

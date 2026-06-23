@@ -1150,6 +1150,40 @@ struct CodexReviewStoreCommandTests {
         #expect(Set(firstRead.logs.map(\.id)).count == firstRead.logs.count)
     }
 
+    @Test func timelineProjectedReadReviewUsesOutputOnlyCommandText() throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running"
+        )
+        job.timeline.apply(.textDelta(
+            itemID: "process-1",
+            kind: .commandExecution,
+            family: .command,
+            content: .command(.init(command: "")),
+            delta: "Build complete\n"
+        ))
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [job]
+        )
+
+        let defaultRead = try store.readReview(jobID: "job-1")
+        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
+
+        #expect(defaultRead.logs.map(\.kind) == [.command])
+        #expect(defaultRead.logs.map(\.text) == ["Build complete\n"])
+        #expect(defaultRead.logs.first?.metadata?.itemID == "process-1")
+        #expect(allRead.logs.map(\.text) == ["Build complete\n"])
+    }
+
     @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

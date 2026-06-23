@@ -15,18 +15,19 @@ private extension ReviewLogEntry {
         case .message(let message):
             return [entry(item: item, kind: .agentMessage, text: message.text)]
         case .command(let command):
-            var entries = [
-                entry(
+            var entries: [ReviewLogEntry] = []
+            if let commandLine = command.command.nilIfEmpty {
+                entries.append(entry(
                     item: item,
                     kind: .command,
-                    text: "$ \(command.command)",
+                    text: "$ \(commandLine)",
                     metadata: commandMetadata(item: item, command: command)
-                ),
-            ]
+                ))
+            }
             if command.output.isEmpty == false {
                 entries.append(entry(
                     item: item,
-                    kind: .commandOutput,
+                    kind: entries.isEmpty ? .command : .commandOutput,
                     text: command.output,
                     metadata: commandMetadata(item: item, command: command)
                 ))

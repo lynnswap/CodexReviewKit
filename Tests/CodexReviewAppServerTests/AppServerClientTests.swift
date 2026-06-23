@@ -1507,6 +1507,59 @@ struct AppServerClientTests {
         #expect(toolCall.result == nil)
     }
 
+    @Test func backendRoutesDiagnosticNotificationsToDomainTimeline() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
+        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
+        let backend = AppServerCodexReviewBackend(client: .init(transport: transport))
+
+        let run = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+        ))
+        var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+
+        try await transport.emitServerNotification(
+            method: "diagnostic",
+            params: TestMessageNotification(
+                threadID: "thread-1",
+                turnID: "turn-1",
+                itemID: "diagnostic-1",
+                message: "Sandbox degraded"
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
+        guard case .domainEvents(let domainEvents, let suppressionCount) = try await iterator.next() else {
+            Issue.record("expected diagnostic domain event")
+            return
+        }
+        #expect(suppressionCount == 1)
+        guard case .itemUpdated(let seed) = try #require(domainEvents.first) else {
+            Issue.record("expected diagnostic item update")
+            return
+        }
+        #expect(seed.id.rawValue == "diagnostic-1")
+        #expect(seed.kind.rawValue == "diagnostic")
+        #expect(seed.family == .diagnostic)
+        guard case .diagnostic(let diagnostic) = seed.content else {
+            Issue.record("expected diagnostic content")
+            return
+        }
+        #expect(diagnostic.message == "Sandbox degraded")
+
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, _) = try await iterator.next() else {
+            Issue.record("expected compatible diagnostic log entry")
+            return
+        }
+        #expect(kind == .diagnostic)
+        #expect(text == "Sandbox degraded")
+        #expect(groupID == "turn-1")
+        #expect(replacesGroup == false)
+    }
+
     @Test func backendClosesActiveCommandBeforeDirectOnlyProgressDomainEvents() async throws {
         let transport = FakeJSONRPCTransport()
         try await enqueueInitialize(transport)
