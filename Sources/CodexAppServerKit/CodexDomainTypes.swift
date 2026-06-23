@@ -93,6 +93,81 @@ public struct CodexInstructions: Equatable, Sendable {
     }
 }
 
+/// A JSON value used for app-server configuration and structured output schema.
+public enum CodexJSONValue: Codable, Equatable, Sendable, ExpressibleByStringLiteral {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case bool(Bool)
+    case array([CodexJSONValue])
+    case object([String: CodexJSONValue])
+    case null
+
+    public init(stringLiteral value: String) {
+        self = .string(value)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .double(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([CodexJSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: CodexJSONValue].self))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let value):
+            try container.encode(value)
+        case .int(let value):
+            try container.encode(value)
+        case .double(let value):
+            try container.encode(value)
+        case .bool(let value):
+            try container.encode(value)
+        case .array(let value):
+            try container.encode(value)
+        case .object(let value):
+            try container.encode(value)
+        case .null:
+            try container.encodeNil()
+        }
+    }
+}
+
+extension CodexJSONValue {
+    package var appServerJSONValue: AppServerJSONValue {
+        switch self {
+        case .string(let value):
+            .string(value)
+        case .int(let value):
+            .int(value)
+        case .double(let value):
+            .double(value)
+        case .bool(let value):
+            .bool(value)
+        case .array(let value):
+            .array(value.map(\.appServerJSONValue))
+        case .object(let value):
+            .object(value.mapValues(\.appServerJSONValue))
+        case .null:
+            .null
+        }
+    }
+}
+
 @resultBuilder
 public enum CodexInstructionsBuilder {
     public static func buildBlock(_ components: String...) -> String {
@@ -242,6 +317,59 @@ extension CodexReasoningSummary: Codable {
     }
 }
 
+/// The app-server personality to apply to a thread or turn.
+public struct CodexPersonality: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+
+    public static let none = Self(rawValue: "none")
+    public static let friendly = Self(rawValue: "friendly")
+    public static let pragmatic = Self(rawValue: "pragmatic")
+}
+
+/// The source that created a new app-server session.
+public enum CodexThreadStartSource: String, Codable, Equatable, Sendable {
+    case startup
+    case clear
+
+    package var appServerSource: AppServerAPI.Thread.Start.Source {
+        switch self {
+        case .startup:
+            .startup
+        case .clear:
+            .clear
+        }
+    }
+}
+
+/// Client-supplied analytics classification for a Codex thread.
+public struct CodexThreadSource: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+
+    public static let user = Self(rawValue: "user")
+    public static let subagent = Self(rawValue: "subagent")
+    public static let memoryConsolidation = Self(rawValue: "memory_consolidation")
+
+    package var appServerSource: AppServerAPI.Thread.Source {
+        .init(rawValue: rawValue)
+    }
+}
+
 public struct CodexGenerationOptions: Equatable, Sendable {
     public var model: String?
     public var approvalMode: CodexApprovalMode?
@@ -250,6 +378,9 @@ public struct CodexGenerationOptions: Equatable, Sendable {
     public var effort: CodexReasoningEffort?
     public var serviceTier: String?
     public var summary: CodexReasoningSummary?
+    public var outputSchema: CodexJSONValue?
+    public var personality: CodexPersonality?
+    public var clientUserMessageID: String?
     public var transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
 
     public init(
@@ -260,6 +391,9 @@ public struct CodexGenerationOptions: Equatable, Sendable {
         effort: CodexReasoningEffort? = nil,
         serviceTier: String? = nil,
         summary: CodexReasoningSummary? = nil,
+        outputSchema: CodexJSONValue? = nil,
+        personality: CodexPersonality? = nil,
+        clientUserMessageID: String? = nil,
         transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy = .preserveTranscript
     ) {
         self.model = model
@@ -269,6 +403,9 @@ public struct CodexGenerationOptions: Equatable, Sendable {
         self.effort = effort
         self.serviceTier = serviceTier
         self.summary = summary
+        self.outputSchema = outputSchema
+        self.personality = personality
+        self.clientUserMessageID = clientUserMessageID
         self.transcriptErrorHandlingPolicy = transcriptErrorHandlingPolicy
     }
 }
@@ -313,6 +450,11 @@ public struct CodexThread: Identifiable, Sendable {
         public var sandbox: CodexSandbox?
         public var serviceTier: String?
         public var ephemeral: Bool?
+        public var config: [String: CodexJSONValue]?
+        public var personality: CodexPersonality?
+        public var serviceName: String?
+        public var sessionStartSource: CodexThreadStartSource?
+        public var threadSource: CodexThreadSource?
 
         public init(
             model: String? = nil,
@@ -320,7 +462,12 @@ public struct CodexThread: Identifiable, Sendable {
             approvalMode: CodexApprovalMode? = nil,
             sandbox: CodexSandbox? = nil,
             serviceTier: String? = nil,
-            ephemeral: Bool? = nil
+            ephemeral: Bool? = nil,
+            config: [String: CodexJSONValue]? = nil,
+            personality: CodexPersonality? = nil,
+            serviceName: String? = nil,
+            sessionStartSource: CodexThreadStartSource? = nil,
+            threadSource: CodexThreadSource? = nil
         ) {
             self.model = model
             self.modelProvider = modelProvider
@@ -328,6 +475,11 @@ public struct CodexThread: Identifiable, Sendable {
             self.sandbox = sandbox
             self.serviceTier = serviceTier
             self.ephemeral = ephemeral
+            self.config = config
+            self.personality = personality
+            self.serviceName = serviceName
+            self.sessionStartSource = sessionStartSource
+            self.threadSource = threadSource
         }
     }
 
@@ -589,21 +741,75 @@ public struct CodexThreadQuery: Equatable, Sendable {
     public var workspace: URL?
     public var limit: Int?
     public var searchTerm: String?
+    public var modelProviders: [String]?
+    public var sortDirection: CodexSortDirection?
+    public var sortKey: CodexThreadSortKey?
+    public var sourceKinds: [CodexThreadSourceKind]?
+    public var useStateDBOnly: Bool?
 
     public init(
         archived: Bool? = nil,
         cursor: String? = nil,
         workspace: URL? = nil,
         limit: Int? = nil,
-        searchTerm: String? = nil
+        searchTerm: String? = nil,
+        modelProviders: [String]? = nil,
+        sortDirection: CodexSortDirection? = nil,
+        sortKey: CodexThreadSortKey? = nil,
+        sourceKinds: [CodexThreadSourceKind]? = nil,
+        useStateDBOnly: Bool? = nil
     ) {
         self.archived = archived
         self.cursor = cursor
         self.workspace = workspace
         self.limit = limit
         self.searchTerm = searchTerm
+        self.modelProviders = modelProviders
+        self.sortDirection = sortDirection
+        self.sortKey = sortKey
+        self.sourceKinds = sourceKinds
+        self.useStateDBOnly = useStateDBOnly
     }
 }
+
+/// Sort direction for thread list queries.
+public enum CodexSortDirection: String, Codable, Equatable, Sendable {
+    case ascending = "asc"
+    case descending = "desc"
+}
+
+/// Sort key for thread list queries.
+public enum CodexThreadSortKey: String, Codable, Equatable, Sendable {
+    case createdAt = "created_at"
+    case updatedAt = "updated_at"
+    case recencyAt = "recency_at"
+}
+
+/// Source-kind filter for thread list queries.
+public struct CodexThreadSourceKind: RawRepresentable, Hashable, Sendable, ExpressibleByStringLiteral {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    public init(stringLiteral value: String) {
+        self.rawValue = value
+    }
+
+    public static let cli = Self(rawValue: "cli")
+    public static let vscode = Self(rawValue: "vscode")
+    public static let exec = Self(rawValue: "exec")
+    public static let appServer = Self(rawValue: "appServer")
+    public static let subAgent = Self(rawValue: "subAgent")
+    public static let subAgentReview = Self(rawValue: "subAgentReview")
+    public static let subAgentCompact = Self(rawValue: "subAgentCompact")
+    public static let subAgentThreadSpawn = Self(rawValue: "subAgentThreadSpawn")
+    public static let subAgentOther = Self(rawValue: "subAgentOther")
+    public static let unknown = Self(rawValue: "unknown")
+}
+
+extension CodexThreadSourceKind: Codable {}
 
 public struct CodexThreadPage: Equatable, Sendable {
     public var threads: [CodexThreadSnapshot]
@@ -757,7 +963,7 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
     public enum Content: Equatable, Sendable {
         case message(CodexMessage)
         case plan(String)
-        case reasoning(String)
+        case reasoning(CodexReasoning)
         case command(CodexCommand)
         case fileChange(CodexFileChange)
         case toolCall(CodexToolCall)
@@ -788,8 +994,10 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
         switch content {
         case .message(let message):
             message.text
-        case .plan(let text), .reasoning(let text), .diagnostic(let text), .log(let text):
+        case .plan(let text), .diagnostic(let text), .log(let text):
             text
+        case .reasoning(let reasoning):
+            reasoning.text
         case .command(let command):
             command.output ?? command.command
         case .fileChange(let fileChange):
@@ -808,6 +1016,33 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
             return message
         }
         return nil
+    }
+}
+
+public struct CodexReasoning: Equatable, Sendable {
+    public var summary: [String]
+    public var content: [String]
+
+    public static let empty = Self(summary: [], content: [])
+
+    public init(summary: [String] = [], content: [String] = []) {
+        self.summary = summary
+        self.content = content
+    }
+
+    public init(summary: String, content: String? = nil) {
+        self.summary = [summary]
+        self.content = content.map { [$0] } ?? []
+    }
+
+    public init(content: String) {
+        self.summary = []
+        self.content = [content]
+    }
+
+    public var text: String {
+        let preferred = summary.isEmpty ? content : summary
+        return preferred.joined(separator: "\n")
     }
 }
 
@@ -1029,6 +1264,9 @@ public struct CodexResponse: Identifiable, Equatable, Sendable {
     public var finalAnswer: String?
     public var transcript: CodexTranscript
     public var usage: CodexTokenUsage?
+    public var startedAt: Date?
+    public var completedAt: Date?
+    public var duration: Duration?
 
     public var id: CodexTurnID {
         turnID
@@ -1040,7 +1278,10 @@ public struct CodexResponse: Identifiable, Equatable, Sendable {
         errorMessage: String? = nil,
         finalAnswer: String? = nil,
         transcript: CodexTranscript = .init(),
-        usage: CodexTokenUsage? = nil
+        usage: CodexTokenUsage? = nil,
+        startedAt: Date? = nil,
+        completedAt: Date? = nil,
+        duration: Duration? = nil
     ) {
         self.turnID = turnID
         self.status = status
@@ -1048,6 +1289,9 @@ public struct CodexResponse: Identifiable, Equatable, Sendable {
         self.finalAnswer = finalAnswer
         self.transcript = transcript
         self.usage = usage
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.duration = duration
     }
 }
 
@@ -1218,6 +1462,7 @@ public struct CodexResponseStream: AsyncSequence, Sendable {
         private let turn: CodexTurn
         private let transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy
         private var progress: CodexTurnProgressSequence.Iterator
+        private var pendingError: Error?
 
         fileprivate init(
             turn: CodexTurn,
@@ -1230,11 +1475,25 @@ public struct CodexResponseStream: AsyncSequence, Sendable {
         }
 
         public mutating func next() async throws -> Snapshot? {
+            if let error = pendingError {
+                pendingError = nil
+                throw error
+            }
             guard let progress = try await progress.next() else {
                 return nil
             }
             if case .failed(let error) = progress.phase {
                 try await handleFailure()
+                if let response = progress.result {
+                    pendingError = error
+                    return Snapshot(
+                        turnID: turn.id,
+                        content: response.finalAnswer ?? response.transcript.responseText,
+                        transcript: response.transcript,
+                        usage: response.usage,
+                        response: response
+                    )
+                }
                 throw error
             }
             return Snapshot(
@@ -1368,7 +1627,7 @@ public enum CodexThreadEvent: Equatable, Sendable {
     case unknown(CodexRawNotification)
 }
 
-public struct CodexThreadLogEntry: Identifiable, Equatable, Sendable {
+public enum CodexThreadLogEntry: Identifiable, Equatable, Sendable {
     public enum Phase: Equatable, Sendable {
         case started
         case updated
@@ -1376,27 +1635,71 @@ public struct CodexThreadLogEntry: Identifiable, Equatable, Sendable {
         case delta
     }
 
-    public var id: String
-    public var turnID: CodexTurnID?
-    public var phase: Phase
-    public var item: CodexThreadItem?
-    public var messageDelta: CodexMessageDelta?
-    public var reasoningDelta: CodexReasoningDelta?
+    case itemStarted(CodexThreadItem, turnID: CodexTurnID?)
+    case itemUpdated(CodexThreadItem, turnID: CodexTurnID?)
+    case itemCompleted(CodexThreadItem, turnID: CodexTurnID?)
+    case messageDelta(CodexMessageDelta, turnID: CodexTurnID?, id: String)
+    case reasoningPartStarted(CodexReasoningPart, turnID: CodexTurnID?)
+    case reasoningDelta(CodexReasoningDelta, turnID: CodexTurnID?)
 
-    public init(
-        id: String,
-        turnID: CodexTurnID? = nil,
-        phase: Phase,
-        item: CodexThreadItem? = nil,
-        messageDelta: CodexMessageDelta? = nil,
-        reasoningDelta: CodexReasoningDelta? = nil
-    ) {
-        self.id = id
-        self.turnID = turnID
-        self.phase = phase
-        self.item = item
-        self.messageDelta = messageDelta
-        self.reasoningDelta = reasoningDelta
+    public var id: String {
+        switch self {
+        case .itemStarted(let item, _), .itemUpdated(let item, _), .itemCompleted(let item, _):
+            item.id
+        case .messageDelta(_, _, let id):
+            id
+        case .reasoningPartStarted(let part, _):
+            part.id
+        case .reasoningDelta(let delta, _):
+            delta.id
+        }
+    }
+
+    public var turnID: CodexTurnID? {
+        switch self {
+        case .itemStarted(_, let turnID), .itemUpdated(_, let turnID),
+             .itemCompleted(_, let turnID), .messageDelta(_, let turnID, _),
+             .reasoningPartStarted(_, let turnID), .reasoningDelta(_, let turnID):
+            turnID
+        }
+    }
+
+    public var phase: Phase {
+        switch self {
+        case .itemStarted, .reasoningPartStarted:
+            .started
+        case .itemUpdated:
+            .updated
+        case .itemCompleted:
+            .completed
+        case .messageDelta, .reasoningDelta:
+            .delta
+        }
+    }
+
+    public var item: CodexThreadItem? {
+        switch self {
+        case .itemStarted(let item, _), .itemUpdated(let item, _), .itemCompleted(let item, _):
+            item
+        case .reasoningPartStarted(let part, _):
+            .init(id: part.id, kind: .reasoning, content: .reasoning(.empty))
+        case .messageDelta, .reasoningDelta:
+            nil
+        }
+    }
+
+    public var messageDelta: CodexMessageDelta? {
+        if case .messageDelta(let delta, _, _) = self {
+            return delta
+        }
+        return nil
+    }
+
+    public var reasoningDelta: CodexReasoningDelta? {
+        if case .reasoningDelta(let delta, _) = self {
+            return delta
+        }
+        return nil
     }
 }
 
@@ -1706,6 +2009,7 @@ public enum CodexAppServerError: Error, Equatable, LocalizedError, Sendable {
     case retryLimitExceeded
     case malformedNotification(String)
     case turnFailed(String)
+    case turnFailedWithResponse(CodexResponse)
 
     public var errorDescription: String? {
         switch self {
@@ -1721,6 +2025,15 @@ public enum CodexAppServerError: Error, Equatable, LocalizedError, Sendable {
             message
         case .turnFailed(let message):
             message
+        case .turnFailedWithResponse(let response):
+            response.errorMessage ?? response.status?.rawValue ?? "Turn failed."
         }
+    }
+
+    public var response: CodexResponse? {
+        if case .turnFailedWithResponse(let response) = self {
+            return response
+        }
+        return nil
     }
 }

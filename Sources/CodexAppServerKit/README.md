@@ -143,10 +143,30 @@ It also exposes reasoning controls with domain values instead of raw strings:
 ```swift
 let response = try await thread.respond(
     to: "Find the risky part of this change.",
-    options: .init(effort: .high, summary: .detailed)
+    options: .init(
+        effort: .high,
+        summary: .detailed,
+        personality: .pragmatic
+    )
 )
 
 print(response.usage?.reasoningOutputTokens ?? 0)
+```
+
+Structured final answers can be constrained with a JSON schema:
+
+```swift
+let response = try await thread.respond(
+    to: "Summarize the change as JSON.",
+    options: .init(outputSchema: .object([
+        "type": .string("object"),
+        "properties": .object([
+            "summary": .object(["type": .string("string")]),
+            "risk": .object(["type": .string("string")]),
+        ]),
+        "required": .array([.string("summary"), .string("risk")]),
+    ]))
+)
 ```
 
 Threads also expose async sequences for chat, transcript updates, and log-style
@@ -167,22 +187,26 @@ for try await transcript in thread.transcriptUpdates {
 
 ```swift
 for try await entry in thread.logEntries {
-    if let delta = entry.reasoningDelta {
+    switch entry {
+    case .reasoningDelta(let delta, _):
         renderReasoningDelta(delta)
-        continue
-    }
-
-    switch entry.item?.content {
-    case .message(let message):
-        renderMessage(message)
-    case .reasoning(let text):
-        renderReasoning(text)
-    case .command(let command):
-        renderCommand(command.command, output: command.output)
-    case .toolCall(let tool):
-        renderToolCall(tool.name, result: tool.result, error: tool.error)
-    case .fileChange(let fileChange):
-        renderFileChange(fileChange.path, output: fileChange.output)
+    case .itemStarted(let item, _), .itemUpdated(let item, _), .itemCompleted(let item, _):
+        switch item.content {
+        case .message(let message):
+            renderMessage(message)
+        case .reasoning(let reasoning):
+            renderReasoning(summary: reasoning.summary, content: reasoning.content)
+        case .command(let command):
+            renderCommand(command.command, output: command.output)
+        case .toolCall(let tool):
+            renderToolCall(tool.name, result: tool.result, error: tool.error)
+        case .fileChange(let fileChange):
+            renderFileChange(fileChange.path, output: fileChange.output)
+        default:
+            break
+        }
+    case .messageDelta(let delta, _, _):
+        renderMessageDelta(delta.text)
     default:
         break
     }

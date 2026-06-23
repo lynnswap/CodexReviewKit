@@ -41,18 +41,12 @@ public struct CodexThreadMessageSequence: AsyncSequence, Sendable {
                 switch event {
                 case .message(let message, _):
                     return message
-                case .itemStarted(let item, _), .itemUpdated(let item, _),
-                    .itemCompleted(let item, _):
+                case .itemCompleted(let item, _):
                     if let message = item.message {
                         return message
                     }
-                case .messageDelta(let delta, _):
-                    return .init(
-                        id: delta.itemID ?? UUID().uuidString,
-                        role: .assistant,
-                        phase: delta.phase,
-                        text: delta.text
-                    )
+                case .itemStarted, .itemUpdated, .messageDelta:
+                    continue
                 case .turnStarted, .turnCompleted, .turnFailed, .reasoningSummaryPartAdded,
                     .reasoningDelta, .tokenUsageUpdated, .statusChanged, .closed, .unknown:
                     continue
@@ -110,6 +104,7 @@ public struct CodexThreadLogSequence: AsyncSequence, Sendable {
 
     public struct Iterator: AsyncIteratorProtocol {
         private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+        private var logEntryIndex = 0
 
         fileprivate init(events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator) {
             self.events = events
@@ -119,45 +114,37 @@ public struct CodexThreadLogSequence: AsyncSequence, Sendable {
             while let event = try await events.next() {
                 switch event {
                 case .itemStarted(let item, let turnID):
-                    return .init(id: item.id, turnID: turnID, phase: .started, item: item)
+                    return .itemStarted(item, turnID: turnID)
                 case .itemUpdated(let item, let turnID):
-                    return .init(id: item.id, turnID: turnID, phase: .updated, item: item)
+                    return .itemUpdated(item, turnID: turnID)
                 case .itemCompleted(let item, let turnID):
-                    return .init(id: item.id, turnID: turnID, phase: .completed, item: item)
+                    return .itemCompleted(item, turnID: turnID)
                 case .message(let message, let turnID):
                     let item = CodexThreadItem(
                         id: message.id,
                         kind: message.role == .user ? .userMessage : .agentMessage,
                         content: .message(message)
                     )
-                    return .init(id: message.id, turnID: turnID, phase: .completed, item: item)
+                    return .itemCompleted(item, turnID: turnID)
                 case .messageDelta(let delta, let turnID):
-                    return .init(
-                        id: delta.itemID ?? UUID().uuidString,
-                        turnID: turnID,
-                        phase: .delta,
-                        messageDelta: delta
-                    )
+                    return .messageDelta(delta, turnID: turnID, id: nextDeltaLogEntryID(for: delta))
                 case .reasoningSummaryPartAdded(let part, let turnID):
-                    return .init(
-                        id: part.id,
-                        turnID: turnID,
-                        phase: .started,
-                        item: .init(id: part.id, kind: .reasoning, content: .reasoning(""))
-                    )
+                    return .reasoningPartStarted(part, turnID: turnID)
                 case .reasoningDelta(let delta, let turnID):
-                    return .init(
-                        id: delta.id,
-                        turnID: turnID,
-                        phase: .delta,
-                        reasoningDelta: delta
-                    )
+                    return .reasoningDelta(delta, turnID: turnID)
                 case .turnStarted, .turnCompleted, .turnFailed, .tokenUsageUpdated, .statusChanged,
                     .closed, .unknown:
                     continue
                 }
             }
             return nil
+        }
+
+        private mutating func nextDeltaLogEntryID(for delta: CodexMessageDelta) -> String {
+            defer {
+                logEntryIndex += 1
+            }
+            return "\(delta.itemID ?? "agent-message-delta"):\(logEntryIndex)"
         }
     }
 }
@@ -214,16 +201,16 @@ package struct CodexTurnProgressSequence: AsyncSequence, Sendable {
                 return .init(phase: .running, transcript: accumulator.transcript)
             case .completed(var result):
                 result = finalizedResult(result)
-                if let errorMessage = result.errorMessage {
+                if result.errorMessage != nil {
                     return .init(
-                        phase: .failed(.turnFailed(errorMessage)),
+                        phase: .failed(.turnFailedWithResponse(result)),
                         transcript: result.transcript,
                         result: result
                     )
                 }
                 if result.status?.isFailure == true {
                     return .init(
-                        phase: .failed(.turnFailed(result.status?.rawValue ?? "Turn failed.")),
+                        phase: .failed(.turnFailedWithResponse(result)),
                         transcript: result.transcript,
                         result: result
                     )
@@ -276,11 +263,11 @@ package struct CodexResponseCollector {
                 if result.usage == nil {
                     result.usage = usage
                 }
-                if let message = result.errorMessage {
-                    throw CodexAppServerError.turnFailed(message)
+                if result.errorMessage != nil {
+                    throw CodexAppServerError.turnFailedWithResponse(result)
                 }
                 if result.status?.isFailure == true {
-                    throw CodexAppServerError.turnFailed(result.status?.rawValue ?? "Turn failed.")
+                    throw CodexAppServerError.turnFailedWithResponse(result)
                 }
                 return result
             case .failed(let message):
@@ -376,13 +363,24 @@ private struct CodexTranscriptAccumulator {
     }
 
     private mutating func start(_ part: CodexReasoningPart) {
-        upsert(.init(id: part.id, kind: .reasoning, content: .reasoning("")))
+        upsert(.init(
+            id: part.id,
+            kind: .reasoning,
+            content: .reasoning(.empty)
+        ))
     }
 
     private mutating func append(_ delta: CodexReasoningDelta) {
         let text = (reasoningDeltaTextByPartID[delta.id] ?? "") + delta.delta
         reasoningDeltaTextByPartID[delta.id] = text
-        upsert(.init(id: delta.id, kind: .reasoning, content: .reasoning(text)))
+        let reasoning: CodexReasoning
+        switch delta.part.kind {
+        case .summary:
+            reasoning = .init(summary: text)
+        case .text:
+            reasoning = .init(content: text)
+        }
+        upsert(.init(id: delta.id, kind: .reasoning, content: .reasoning(reasoning)))
     }
 
     private mutating func removeReasoningParts(parentItemID: String) {

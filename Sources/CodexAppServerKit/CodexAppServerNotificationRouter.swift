@@ -244,20 +244,17 @@ package actor CodexAppServerNotificationRouter {
             )
         case "item/started":
             if let item = item(from: notification.params) {
-                return item.message.map { .message($0, turnID: context.turnID) }
-                    ?? .itemStarted(item, turnID: context.turnID)
+                return .itemStarted(item, turnID: context.turnID)
             }
             return .unknown(raw)
         case "item/updated":
             if let item = item(from: notification.params) {
-                return item.message.map { .message($0, turnID: context.turnID) }
-                    ?? .itemUpdated(item, turnID: context.turnID)
+                return .itemUpdated(item, turnID: context.turnID)
             }
             return .unknown(raw)
         case "item/completed":
             if let item = item(from: notification.params) {
-                return item.message.map { .message($0, turnID: context.turnID) }
-                    ?? .itemCompleted(item, turnID: context.turnID)
+                return .itemCompleted(item, turnID: context.turnID)
             }
             return .unknown(raw)
         case "item/agentMessage/delta":
@@ -430,7 +427,10 @@ package actor CodexAppServerNotificationRouter {
         return .init(
             turnID: turn.map { .init(rawValue: $0.id) } ?? context.turnID ?? .init(rawValue: ""),
             status: status,
-            errorMessage: turn?.error?.message
+            errorMessage: turn?.error?.message,
+            startedAt: turn?.startedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            completedAt: turn?.completedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+            duration: turn?.durationMS.map { .milliseconds(Int64($0)) }
         )
     }
 
@@ -687,8 +687,12 @@ private struct RawThreadItem: Decodable {
         case .plan:
             return .plan(messageText)
         case .reasoning:
-            return .reasoning(
-                summary?.joined(separator: "\n") ?? content?.joined(separator: "\n") ?? messageText)
+            let summary = summary ?? []
+            let content = content ?? []
+            if summary.isEmpty && content.isEmpty {
+                return .reasoning(.init(summary: messageText))
+            }
+            return .reasoning(.init(summary: summary, content: content))
         case .commandExecution:
             return .command(
                 .init(

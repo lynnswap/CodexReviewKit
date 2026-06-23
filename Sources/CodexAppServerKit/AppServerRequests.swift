@@ -361,10 +361,20 @@ extension AppServerAPI.Thread.Start {
 }
 
 extension AppServerAPI.Thread {
-    package enum Source: String, Codable, Equatable, Sendable {
-        case user
-        case subagent
-        case memoryConsolidation = "memory_consolidation"
+    package struct Source: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
+        package var rawValue: String
+
+        package init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        package init(stringLiteral value: String) {
+            self.rawValue = value
+        }
+
+        package static let user = Self(rawValue: "user")
+        package static let subagent = Self(rawValue: "subagent")
+        package static let memoryConsolidation = Self(rawValue: "memory_consolidation")
     }
 }
 
@@ -574,11 +584,33 @@ extension AppServerAPI.Turn {
         package var id: String
         package var status: String?
         package var error: AppServerAPI.Turn.Error?
+        package var startedAt: Int?
+        package var completedAt: Int?
+        package var durationMS: Int?
 
-        package init(id: String, status: String? = nil, error: AppServerAPI.Turn.Error? = nil) {
+        enum CodingKeys: String, CodingKey {
+            case id
+            case status
+            case error
+            case startedAt
+            case completedAt
+            case durationMS = "durationMs"
+        }
+
+        package init(
+            id: String,
+            status: String? = nil,
+            error: AppServerAPI.Turn.Error? = nil,
+            startedAt: Int? = nil,
+            completedAt: Int? = nil,
+            durationMS: Int? = nil
+        ) {
             self.id = id
             self.status = status
             self.error = error
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMS = durationMS
         }
     }
 }

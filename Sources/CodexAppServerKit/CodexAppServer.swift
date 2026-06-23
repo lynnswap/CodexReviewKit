@@ -274,7 +274,12 @@ public actor CodexAppServer {
                     approvalPolicy: approvalMode.approvalPolicy,
                     approvalsReviewer: approvalMode.approvalsReviewer,
                     sandbox: options.sandbox?.threadSandboxValue,
-                    serviceTier: options.serviceTier
+                    serviceName: options.serviceName,
+                    serviceTier: options.serviceTier,
+                    personality: options.personality?.rawValue,
+                    config: options.config?.mapValues(\.appServerJSONValue),
+                    sessionStartSource: options.sessionStartSource?.appServerSource,
+                    threadSource: options.threadSource?.appServerSource
                 )
             ))
         return CodexThread(
@@ -361,7 +366,12 @@ public actor CodexAppServer {
                     cursor: query.cursor,
                     cwd: query.workspace.map { .path($0.path) },
                     limit: query.limit,
-                    searchTerm: query.searchTerm
+                    modelProviders: query.modelProviders,
+                    searchTerm: query.searchTerm,
+                    sortDirection: query.sortDirection?.rawValue,
+                    sortKey: query.sortKey?.rawValue,
+                    sourceKinds: query.sourceKinds?.map(\.rawValue),
+                    useStateDbOnly: query.useStateDBOnly
                 )))
         return .init(
             threads: response.data.map(Self.threadSnapshot),
@@ -540,7 +550,12 @@ public actor CodexAppServer {
             approvalPolicy: options.approvalMode?.approvalPolicy,
             approvalsReviewer: options.approvalMode?.approvalsReviewer,
             sandbox: options.sandbox?.threadSandboxValue,
-            serviceTier: options.serviceTier
+            serviceName: options.serviceName,
+            serviceTier: options.serviceTier,
+            personality: options.personality?.rawValue,
+            config: options.config?.mapValues(\.appServerJSONValue),
+            sessionStartSource: options.sessionStartSource?.appServerSource,
+            threadSource: options.threadSource?.appServerSource
         )
     }
 

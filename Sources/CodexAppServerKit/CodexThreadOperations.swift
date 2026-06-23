@@ -267,9 +267,12 @@ package func startCodexTurn(
                 input: prompt.appServerInput,
                 approvalPolicy: options.approvalMode?.approvalPolicy,
                 approvalsReviewer: options.approvalMode?.approvalsReviewer,
+                clientUserMessageID: options.clientUserMessageID,
                 cwd: options.cwd?.path,
                 effort: options.effort?.rawValue,
                 model: options.model,
+                outputSchema: options.outputSchema?.appServerJSONValue,
+                personality: options.personality?.rawValue,
                 sandboxPolicy: options.sandbox?.turnSandboxPolicy,
                 serviceTier: options.serviceTier,
                 summary: options.summary?.rawValue
