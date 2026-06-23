@@ -3,18 +3,19 @@ import MCP
 import CodexReview
 import CodexReviewMCPAdapter
 
-func toolResult(tool: CodexReviewMCP.Tool.Name, response: CodexReviewMCP.Tool.Response) throws -> CallTool.Result {
+func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Result {
     let value: Value
     let text: String
     let isError: Bool
     switch response {
+    case .reviewStart(let result, let timeline),
+         .reviewAwait(let result, let timeline):
+        value = result.structuredContentForStartOrAwait(timeline: timeline)
+        text = result.textContentForStartOrAwait()
+        isError = result.core.lifecycle.status == .failed
     case .reviewRead(let result, let timeline, let timelinePage):
-        value = tool == .reviewRead
-            ? result.structuredContentForRead(timeline: timeline, timelinePage: timelinePage)
-            : result.structuredContentForStartOrAwait(timeline: timeline)
-        text = tool == .reviewRead
-            ? result.textContentForRead()
-            : result.textContentForStartOrAwait()
+        value = result.structuredContentForRead(timeline: timeline, timelinePage: timelinePage)
+        text = result.textContentForRead()
         isError = result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()

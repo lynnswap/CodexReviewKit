@@ -76,7 +76,7 @@ package func makeMCPProtocolServer(
                 useBoundedReviewStart: useBoundedReviewStart
             )
             let response = try await adapter.handle(request)
-            return try toolResult(tool: tool, response: response)
+            return try toolResult(response: response)
         } catch {
             return .init(
                 content: [.text(text: error.localizedDescription, annotations: nil, _meta: nil)],
