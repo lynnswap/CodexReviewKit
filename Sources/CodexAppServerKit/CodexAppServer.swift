@@ -6,28 +6,97 @@ import Foundation
 /// JSON-RPC handshake, and routes server notifications to thread, turn, and
 /// login domain objects.
 public actor CodexAppServer {
-    /// Options for launching and identifying a Codex app-server process.
+    /// Options for creating a Codex app-server container.
+    @available(iOS, unavailable, message: "The current local app-server runtime requires macOS.")
+    @available(tvOS, unavailable, message: "The current local app-server runtime requires macOS.")
+    @available(watchOS, unavailable, message: "The current local app-server runtime requires macOS.")
+    @available(visionOS, unavailable, message: "The current local app-server runtime requires macOS.")
     public struct Configuration: Sendable {
-        /// The `codex` executable path or command name.
-        ///
-        /// Set this when the executable is not available through the process
-        /// environment. When `nil`, the default transport command is used.
-        public var executable: String?
+        /// Options for launching a local `codex app-server` process.
+        public struct LocalProcess: Sendable {
+            /// The `codex` executable path or command name.
+            ///
+            /// Set this when the executable is not available through the process
+            /// environment. When `nil`, the default transport command is used.
+            public var executable: String?
 
-        /// Command-line arguments passed to the app-server executable.
-        ///
-        /// When `nil`, the transport uses the default arguments for starting
-        /// `codex app-server`.
-        public var arguments: [String]?
+            /// Command-line arguments passed to the app-server executable.
+            ///
+            /// When `nil`, the transport uses the default arguments for starting
+            /// `codex app-server`.
+            public var arguments: [String]?
 
-        /// Environment variables supplied to the app-server process.
-        public var environment: [String: String]
+            /// Environment variables supplied to the app-server process.
+            public var environment: [String: String]
 
-        /// The Codex home directory used by the app-server process.
-        ///
-        /// When `nil`, the value is derived from `CODEX_HOME` or the user's
-        /// home directory in the supplied environment.
-        public var codexHomeURL: URL?
+            /// The Codex home directory used by the app-server process.
+            public var codexHomeURL: URL
+
+            /// Creates a configuration for launching a local app-server process.
+            ///
+            /// - Parameters:
+            ///   - executable: The `codex` executable path or command name.
+            ///   - arguments: Command-line arguments for the app-server process.
+            ///   - environment: Environment variables for the app-server process.
+            ///   - codexHomeURL: Codex home directory, or `nil` to use the local-process default.
+            public init(
+                executable: String? = nil,
+                arguments: [String]? = nil,
+                environment: [String: String] = ProcessInfo.processInfo.environment,
+                codexHomeURL: URL? = nil
+            ) {
+                self.executable = executable
+                self.arguments = arguments
+                self.environment = environment
+                self.codexHomeURL = codexHomeURL ?? Self.defaultCodexHomeURL(environment: environment)
+            }
+
+            /// A local-process configuration that uses the current process environment.
+            public static var `default`: LocalProcess {
+                LocalProcess()
+            }
+
+            /// Returns the default Codex home for a local app-server process.
+            ///
+            /// The value honors `CODEX_HOME` first. On macOS command-line runs,
+            /// it then matches the Codex CLI convention of `~/.codex`. Other
+            /// Apple platform environments prefer Application Support so the
+            /// default stays inside the app container when this API is compiled
+            /// for a non-command-line host.
+            public static func defaultCodexHomeURL(
+                environment: [String: String] = ProcessInfo.processInfo.environment,
+                homeDirectoryForCurrentUser: URL = FileManager.default.homeDirectoryForCurrentUser,
+                applicationSupportDirectory: URL? = FileManager.default.urls(
+                    for: .applicationSupportDirectory,
+                    in: .userDomainMask
+                ).first
+            ) -> URL {
+                if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ),
+                   codexHome.isEmpty == false {
+                    return URL(fileURLWithPath: codexHome, isDirectory: true)
+                }
+#if os(macOS)
+                if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   home.isEmpty == false {
+                    return URL(fileURLWithPath: home, isDirectory: true)
+                        .appendingPathComponent(".codex", isDirectory: true)
+                }
+#endif
+                if let applicationSupportDirectory {
+                    return applicationSupportDirectory
+                        .appendingPathComponent("Codex", isDirectory: true)
+                }
+                return homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library", isDirectory: true)
+                    .appendingPathComponent("Application Support", isDirectory: true)
+                    .appendingPathComponent("Codex", isDirectory: true)
+            }
+        }
+
+        /// Local process launch settings for the app-server runtime.
+        public var localProcess: LocalProcess
 
         /// The client name sent in the app-server `initialize` request.
         public var clientName: String
@@ -35,33 +104,26 @@ public actor CodexAppServer {
         /// The client version sent in the app-server `initialize` request.
         public var clientVersion: String
 
-        /// Creates a configuration for launching a Codex app-server process.
+        /// Creates a configuration for a Codex app-server container.
         ///
         /// - Parameters:
-        ///   - executable: The `codex` executable path or command name.
-        ///   - arguments: Command-line arguments for the app-server process.
-        ///   - environment: Environment variables for the app-server process.
-        ///   - codexHomeURL: Codex home directory, or `nil` to infer it.
+        ///   - localProcess: Local process launch settings.
         ///   - clientName: Client name sent during app-server initialization.
         ///   - clientVersion: Client version sent during app-server initialization.
         public init(
-            executable: String? = nil,
-            arguments: [String]? = nil,
-            environment: [String: String] = ProcessInfo.processInfo.environment,
-            codexHomeURL: URL? = nil,
+            localProcess: LocalProcess = .default,
             clientName: String = "CodexAppServerKit",
             clientVersion: String = "1"
         ) {
-            self.executable = executable
-            self.arguments = arguments
-            self.environment = environment
-            self.codexHomeURL = codexHomeURL
+            self.localProcess = localProcess
             self.clientName = clientName
             self.clientVersion = clientVersion
         }
 
         /// A configuration that uses the local `codex` executable and current environment.
-        public static let `default` = Configuration()
+        public static var `default`: Configuration {
+            Configuration()
+        }
     }
 
     private let client: AppServerClient
@@ -81,15 +143,18 @@ public actor CodexAppServer {
     /// The initializer completes after the app-server has accepted the
     /// `initialize` request and notification routing is ready.
     ///
-    /// - Parameter configuration: Process and client identity configuration.
+    /// - Parameter configuration: Container and local-process configuration.
     /// - Throws: A transport, JSON-RPC, or app-server initialization error.
+    @available(iOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
+    @available(tvOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
+    @available(watchOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
+    @available(visionOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
     public init(configuration: Configuration = .default) async throws {
         let transportConfiguration = AppServerProcessTransport.Configuration(
-            executable: configuration.executable,
-            arguments: configuration.arguments,
-            environment: configuration.environment,
-            codexHomeURL: configuration.codexHomeURL
-                ?? Self.defaultCodexHomeURL(environment: configuration.environment)
+            executable: configuration.localProcess.executable,
+            arguments: configuration.localProcess.arguments,
+            environment: configuration.localProcess.environment,
+            codexHomeURL: configuration.localProcess.codexHomeURL
         )
         let client = AppServerClient(
             transport: try AppServerProcessTransport(configuration: transportConfiguration))
@@ -583,19 +648,6 @@ public actor CodexAppServer {
         }
     }
 
-    private nonisolated static func defaultCodexHomeURL(environment: [String: String]) -> URL {
-        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-            codexHome.isEmpty == false {
-            return URL(fileURLWithPath: codexHome, isDirectory: true)
-        }
-        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-            home.isEmpty == false {
-            return URL(fileURLWithPath: home, isDirectory: true)
-                .appendingPathComponent(".codex", isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
-    }
 }
 
 private struct AppServerAccountLoginCompletedNotification: Decodable, Equatable, Sendable {

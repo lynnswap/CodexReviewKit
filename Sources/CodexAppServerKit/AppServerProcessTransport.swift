@@ -16,10 +16,8 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
             executable: String? = nil,
             arguments: [String]? = nil,
             environment: [String: String] = ProcessInfo.processInfo.environment,
-            codexHomeURL: URL? = nil
+            codexHomeURL: URL
         ) {
-            let resolvedCodexHomeURL =
-                codexHomeURL ?? AppServerCodexHome.url(environment: environment)
             let resolvedExecutable =
                 executable
                 ?? CodexAppServerExecutable.resolveExecutable(
@@ -42,9 +40,9 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 )
             self.environment = AppServerCodexHome.environment(
                 environment,
-                codexHomeURL: resolvedCodexHomeURL
+                codexHomeURL: codexHomeURL
             )
-            self.codexHomeURL = resolvedCodexHomeURL
+            self.codexHomeURL = codexHomeURL
             self.threadStartPermissionStrategy =
                 supportsSessionSource
                 ? .modernPermissions
@@ -69,7 +67,7 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
     private var stderrLogFilter = AppServerStderrLogFilter()
     private var closed = false
 
-    package init(configuration: Configuration = .init()) throws {
+    package init(configuration: Configuration) throws {
         guard FileManager.default.isExecutableFile(atPath: configuration.executable) else {
             throw AppServerProcessTransportError.executableNotFound(
                 command: configuration.executable,
@@ -836,27 +834,6 @@ private enum AppServerProcessTransportError: LocalizedError {
 }
 
 package enum AppServerCodexHome {
-    package static func url(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectoryForCurrentUser: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) -> URL {
-        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(
-            in: .whitespacesAndNewlines),
-            codexHome.isEmpty == false
-        {
-            return URL(fileURLWithPath: codexHome, isDirectory: true)
-        }
-        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-            home.isEmpty == false
-        {
-            return URL(fileURLWithPath: home, isDirectory: true)
-                .appendingPathComponent(".codex_review", isDirectory: true)
-        }
-        return
-            homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex_review", isDirectory: true)
-    }
-
     package static func environment(
         _ environment: [String: String],
         codexHomeURL: URL

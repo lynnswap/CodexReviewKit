@@ -70,6 +70,8 @@ struct ArchitectureFenceTests {
             forbiddenFragments: [
                 "CodexReviewKit",
                 "ReviewMonitor",
+                ".codex_review",
+                "codex_review",
             ]
         )
 

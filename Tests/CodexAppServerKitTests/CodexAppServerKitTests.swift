@@ -6,6 +6,34 @@ import CodexAppServerKitTesting
 
 @Suite("CodexAppServerKit")
 struct CodexAppServerKitTests {
+    @Test func localProcessConfigurationOwnsDefaultCodexHome() {
+        let fromHome = CodexAppServer.Configuration.LocalProcess(environment: [
+            "HOME": "/tmp/user-home",
+        ])
+        #expect(fromHome.codexHomeURL.path == "/tmp/user-home/.codex")
+
+        let fromCodexHome = CodexAppServer.Configuration.LocalProcess(environment: [
+            "CODEX_HOME": "/tmp/codex-home",
+            "HOME": "/tmp/user-home",
+        ])
+        #expect(fromCodexHome.codexHomeURL.path == "/tmp/codex-home")
+
+        let appSupport = URL(fileURLWithPath: "/tmp/app-support", isDirectory: true)
+        let containerDefault = CodexAppServer.Configuration.LocalProcess.defaultCodexHomeURL(
+            environment: [:],
+            homeDirectoryForCurrentUser: URL(fileURLWithPath: "/tmp/home", isDirectory: true),
+            applicationSupportDirectory: appSupport
+        )
+        #expect(containerDefault.path == "/tmp/app-support/Codex")
+
+        let homeFallback = CodexAppServer.Configuration.LocalProcess.defaultCodexHomeURL(
+            environment: [:],
+            homeDirectoryForCurrentUser: URL(fileURLWithPath: "/tmp/home", isDirectory: true),
+            applicationSupportDirectory: nil
+        )
+        #expect(homeFallback.path == "/tmp/home/Library/Application Support/Codex")
+    }
+
     @Test func testRuntimeStartsAppServerWithoutLaunchingProcess() async throws {
         let runtime = try await CodexAppServerTestRuntime.start(codexHome: "/tmp/codex")
         try await runtime.transport.enqueueThreadStart(threadID: "thread-test", model: "gpt-5")

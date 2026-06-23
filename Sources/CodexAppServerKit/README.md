@@ -29,6 +29,23 @@ await appServer.close()
 notifications, retries app-server overload responses, and preserves schema-new
 notifications as unknown domain events.
 
+## Configuration
+
+`CodexAppServer.Configuration` owns the container identity and local-process
+runtime settings. The default local process resolves Codex home from
+`CODEX_HOME`, then `HOME/.codex` on macOS command-line runs, then Application
+Support for container-style environments. Pass `localProcess.codexHomeURL` when
+an app wants an isolated runtime directory.
+
+```swift
+let configuration = CodexAppServer.Configuration(
+    localProcess: .init(
+        codexHomeURL: appSupportURL.appendingPathComponent("Codex", isDirectory: true)
+    )
+)
+let appServer = try await CodexAppServer(configuration: configuration)
+```
+
 ## Threads
 
 `CodexThread` is the long-lived session handle for a Codex conversation in a

@@ -121,7 +121,8 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
-            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
+            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         )
 
         #expect(configuration.executable == codex.path)
@@ -159,7 +160,8 @@ struct AppServerClientTests {
             environment: [
                 "PATH": "/tmp/not-used",
                 "HOME": "/tmp/review-home",
-            ]
+            ],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         )
 
         #expect(configuration.executable == codex.path)
@@ -184,7 +186,8 @@ struct AppServerClientTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
 
         let configuration = AppServerProcessTransport.Configuration(
-            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
+            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         )
 
         #expect(configuration.executable == codex.path)
@@ -212,7 +215,8 @@ struct AppServerClientTests {
         let configuration = AppServerProcessTransport.Configuration(
             executable: codex.path,
             arguments: ["custom", "argument"],
-            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"]
+            environment: ["PATH": directory.path, "HOME": "/tmp/review-home"],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         )
 
         #expect(configuration.executable == codex.path)
@@ -260,33 +264,37 @@ struct AppServerClientTests {
         ])
     }
 
-    @Test func processTransportConfigurationUsesDedicatedCodexHome() throws {
+    @Test func processTransportConfigurationUsesConfiguredCodexHome() throws {
+        let codexHomeURL = URL(fileURLWithPath: "/tmp/app-server-home", isDirectory: true)
         let configuration = AppServerProcessTransport.Configuration(
             environment: [
                 "PATH": "/usr/bin",
                 "HOME": "/tmp/review-home",
                 "CODEX_SQLITE_HOME": "/tmp/main-codex-sqlite",
-            ]
+            ],
+            codexHomeURL: codexHomeURL
         )
 
-        #expect(configuration.codexHomeURL.path == "/tmp/review-home/.codex_review")
-        #expect(configuration.environment["CODEX_HOME"] == "/tmp/review-home/.codex_review")
-        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/review-home/.codex_review/sqlite")
+        #expect(configuration.codexHomeURL == codexHomeURL)
+        #expect(configuration.environment["CODEX_HOME"] == "/tmp/app-server-home")
+        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/app-server-home/sqlite")
     }
 
-    @Test func processTransportConfigurationUsesExplicitCodexHome() throws {
+    @Test func processTransportConfigurationOverridesCodexHomeEnvironment() throws {
+        let codexHomeURL = URL(fileURLWithPath: "/tmp/configured-codex-home", isDirectory: true)
         let configuration = AppServerProcessTransport.Configuration(
             environment: [
                 "PATH": "/usr/bin",
                 "HOME": "/tmp/review-home",
                 "CODEX_HOME": "/tmp/custom-codex-review",
                 "CODEX_SQLITE_HOME": "/tmp/main-codex-sqlite",
-            ]
+            ],
+            codexHomeURL: codexHomeURL
         )
 
-        #expect(configuration.codexHomeURL.path == "/tmp/custom-codex-review")
-        #expect(configuration.environment["CODEX_HOME"] == "/tmp/custom-codex-review")
-        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/custom-codex-review/sqlite")
+        #expect(configuration.codexHomeURL == codexHomeURL)
+        #expect(configuration.environment["CODEX_HOME"] == "/tmp/configured-codex-home")
+        #expect(configuration.environment["CODEX_SQLITE_HOME"] == "/tmp/configured-codex-home/sqlite")
     }
 
     @Test func processTransportScaffoldsDedicatedSqliteHome() throws {
@@ -336,7 +344,8 @@ struct AppServerClientTests {
             environment: [
                 "HOME": directory.path,
                 "PATH": "/bin:/usr/bin",
-            ]
+            ],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         ))
         let becameReady = await waitUntil(timeout: .seconds(2)) {
             FileManager.default.fileExists(atPath: readyFile.path)
@@ -389,7 +398,8 @@ struct AppServerClientTests {
             environment: [
                 "HOME": directory.path,
                 "PATH": "/bin:/usr/bin",
-            ]
+            ],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         ))
 
         let data = try await transport.send(JSONRPC.Request(
@@ -432,7 +442,8 @@ struct AppServerClientTests {
             environment: [
                 "HOME": directory.path,
                 "PATH": "/bin:/usr/bin",
-            ]
+            ],
+            codexHomeURL: directory.appendingPathComponent("codex-home", isDirectory: true)
         ))
 
         _ = try await transport.send(JSONRPC.Request(

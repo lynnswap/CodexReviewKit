@@ -292,7 +292,28 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         if let codexHomePath = runtimePreferences.codexHomePath {
             return URL(fileURLWithPath: codexHomePath, isDirectory: true)
         }
-        return AppServerCodexHome.url(environment: environment)
+        return defaultCodexReviewHomeURL(environment: environment)
+    }
+
+    private static func defaultCodexReviewHomeURL(
+        environment: [String: String],
+        homeDirectoryForCurrentUser: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+    ) -> URL {
+        if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           home.isEmpty == false {
+            return URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent(".codex_review", isDirectory: true)
+        }
+        if let applicationSupportDirectory {
+            return applicationSupportDirectory
+                .appendingPathComponent("CodexReviewMonitor", isDirectory: true)
+        }
+        return homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex_review", isDirectory: true)
     }
 
     private static func defaultMCPPortOwnerResolver(
@@ -376,8 +397,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let appServer = try await Task.detached(priority: .userInitiated) {
                 // The configuration probe can wait on `codex app-server --help`; keep it off the MainActor.
                 try await CodexAppServer(configuration: .init(
-                    executable: codexExecutablePath,
-                    codexHomeURL: codexHomeURL
+                    localProcess: .init(
+                        executable: codexExecutablePath,
+                        codexHomeURL: codexHomeURL
+                    )
                 ))
             }.value
             return .init(
