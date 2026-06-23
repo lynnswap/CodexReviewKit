@@ -21,6 +21,10 @@ let package = Package(
             targets: ["CodexAppServerKit"]
         ),
         .library(
+            name: "CodexAppServerKitTesting",
+            targets: ["CodexAppServerKitTesting"]
+        ),
+        .library(
             name: "ReviewUI",
             targets: ["ReviewUI"]
         ),
@@ -64,6 +68,15 @@ let package = Package(
         ),
         .target(
             name: "CodexAppServerKit",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "CodexAppServerKitTesting",
+            dependencies: [
+                "CodexAppServerKit",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -167,6 +180,7 @@ let package = Package(
             name: "CodexAppServerKitTests",
             dependencies: [
                 "CodexAppServerKit",
+                "CodexAppServerKitTesting",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

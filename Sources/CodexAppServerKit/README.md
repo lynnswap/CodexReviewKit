@@ -270,6 +270,59 @@ try await appServer.loginAPIKey(apiKey)
 let deviceCode = try await appServer.loginChatGPTDeviceCode()
 ```
 
+## Testing
+
+Use `CodexAppServerKitTesting` to exercise `CodexAppServer` without launching a
+real `codex app-server` process. The test runtime uses an in-memory transport,
+enqueues the startup `initialize` response, records requests, and lets tests
+emit server notifications explicitly.
+
+```swift
+import CodexAppServerKit
+import CodexAppServerKitTesting
+import Testing
+
+@Test func startsThread() async throws {
+    let runtime = try await CodexAppServerTestRuntime.start()
+    try await runtime.transport.enqueueThreadStart(
+        threadID: "thread-test",
+        model: "gpt-5"
+    )
+
+    let thread = try await runtime.server.startThread(
+        in: URL(fileURLWithPath: "/tmp/project", isDirectory: true),
+        options: .init(model: "gpt-5")
+    )
+
+    #expect(thread.id.rawValue == "thread-test")
+    #expect(await runtime.transport.recordedRequests().map(\.method) == [
+        "initialize",
+        "thread/start",
+    ])
+}
+```
+
+For concurrency-sensitive tests, hold a request with
+`CodexAppServerTestGate` and release it explicitly. This avoids depending on
+sleep duration or repeated `Task.yield()` calls.
+
+```swift
+try await runtime.transport.enqueueTurnStart(turnID: "turn-1")
+try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+let stream = try await thread.streamResponse(to: "Run checks.")
+let gate = CodexAppServerTestGate()
+await runtime.transport.holdNext(method: "turn/interrupt", gate: gate)
+
+let interruptTask = Task {
+    try await stream.interrupt()
+}
+
+await runtime.transport.waitForRequest(method: "turn/interrupt")
+await gate.open()
+try await interruptTask.value
+```
+
 ## Boundary
 
 Public users should not need to import or call JSON-RPC or `AppServerAPI`

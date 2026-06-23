@@ -130,6 +130,16 @@ public actor CodexAppServer {
         self.reviewThreadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
+    package static func testing(
+        transport: any JSONRPC.Transport,
+        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+    ) async throws -> CodexAppServer {
+        try await CodexAppServer(
+            transport: transport,
+            threadStartPermissionStrategy: threadStartPermissionStrategy
+        )
+    }
+
     /// Closes the app-server connection and stops notification routing.
     ///
     /// Call this when the container is no longer needed. Closing is idempotent

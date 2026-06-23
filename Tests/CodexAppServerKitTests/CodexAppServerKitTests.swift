@@ -1,12 +1,53 @@
 import Foundation
 import Testing
 
+import CodexAppServerKitTesting
 @testable import CodexAppServerKit
 
 @Suite("CodexAppServerKit")
 struct CodexAppServerKitTests {
+    @Test func testRuntimeStartsAppServerWithoutLaunchingProcess() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start(codexHome: "/tmp/codex")
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-test", model: "gpt-5")
+
+        let thread = try await runtime.server.startThread(
+            in: URL(fileURLWithPath: "/tmp/project", isDirectory: true),
+            options: .init(model: "gpt-5")
+        )
+
+        #expect(thread.id == "thread-test")
+        #expect(await runtime.transport.recordedRequests().map(\.method) == [
+            "initialize",
+            "thread/start",
+        ])
+        #expect(await runtime.transport.recordedNotifications().map(\.method) == [
+            "initialized"
+        ])
+    }
+
+    @Test func testTransportHoldsRequestsAtExplicitGate() async throws {
+        let transport = CodexAppServerTestTransport()
+        let gate = CodexAppServerTestGate()
+        await transport.holdNext(method: "ping", gate: gate)
+        let client = AppServerClient(transport: transport)
+
+        let task = Task {
+            let _: EmptyResponse = try await client.send(
+                method: "ping",
+                params: EmptyResponse(),
+                responseType: EmptyResponse.self
+            )
+        }
+
+        await transport.waitForRequest(method: "ping")
+        #expect(await transport.maxActiveCount(for: "ping") == 1)
+
+        await gate.open()
+        try await task.value
+    }
+
     @Test func initializeSendsHandshakeAndInitializedNotification() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Initialize.Response(codexHome: "/tmp/codex"), for: "initialize")
         let client = AppServerClient(transport: transport)
@@ -23,7 +64,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func appServerStartThreadSerializesDomainOptions() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"),
             for: "thread/start"
@@ -57,7 +98,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func threadStartReviewSerializesTargetAndStreamsReviewThreadLogs() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Review.Start.Response(
                 turnID: "turn-review",
@@ -136,9 +177,8 @@ struct CodexAppServerKitTests {
     }
 
     @Test func clientRetriesOverloadedRequestsThenSucceeds() async throws {
-        let transport = FakeJSONRPCTransport()
-        await transport.enqueueFailure(
-            .responseError(code: -32001, message: "server busy"), for: "ping")
+        let transport = CodexAppServerTestTransport()
+        await transport.enqueueFailure(code: -32001, message: "server busy", for: "ping")
         try await transport.enqueue(EmptyResponse(), for: "ping")
         let client = AppServerClient(
             transport: transport,
@@ -156,7 +196,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func turnResultReplaysEarlyNotificationsAndKeepsUnknownEvents() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         let client = AppServerClient(transport: transport)
         let router = CodexAppServerNotificationRouter(client: client)
         await router.start()
@@ -204,7 +244,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func threadStreamsReplayMessagesTranscriptLogsAndUsage() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         let client = AppServerClient(transport: transport)
         let router = CodexAppServerNotificationRouter(client: client)
         await router.start()
@@ -297,7 +337,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func responseStreamYieldsSnapshotsAndCollectsFinalResponse() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
             for: "turn/start"
@@ -346,7 +386,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func responseStreamInterruptSendsTurnInterrupt() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
             for: "turn/start"
@@ -376,7 +416,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func responseStreamSteerSubmitsInputToCurrentTurn() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
             for: "turn/start"
@@ -410,7 +450,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func responseStreamQueueStartsFollowUpAfterCurrentResponse() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
             for: "turn/start"
@@ -455,7 +495,7 @@ struct CodexAppServerKitTests {
     }
 
     @Test func responseStreamInterruptStartsFollowUpAfterServerTerminalEvent() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-1", status: "running")),
             for: "turn/start"
@@ -517,140 +557,6 @@ private func collect<Sequence: AsyncSequence>(
         elements.append(element)
     }
     return elements
-}
-
-private actor FakeJSONRPCTransport: JSONRPC.Transport {
-    private enum QueuedResponse: Sendable {
-        case success(Data)
-        case failure(JSONRPC.Error)
-    }
-
-    private var responses: [String: [QueuedResponse]] = [:]
-    private var requests: [JSONRPC.Request] = []
-    private var notifications: [JSONRPC.Notification] = []
-    private var notificationContinuations:
-        [AsyncThrowingStream<JSONRPC.Notification, Error>.Continuation] = []
-    private var notificationStreamCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    private var requestCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    private var closed = false
-
-    func enqueue<Response: Encodable & Sendable>(_ response: Response, for method: String) throws {
-        responses[method, default: []].append(.success(try JSONEncoder().encode(response)))
-    }
-
-    func enqueueFailure(_ error: JSONRPC.Error, for method: String) {
-        responses[method, default: []].append(.failure(error))
-    }
-
-    func send(_ request: JSONRPC.Request) async throws -> Data {
-        guard closed == false else {
-            throw JSONRPC.Error.closed
-        }
-        requests.append(request)
-        resumeRequestCountWaiters()
-        let queued =
-            responses[request.method, default: []].isEmpty
-            ? nil
-            : responses[request.method, default: []].removeFirst()
-        switch queued {
-        case .success(let data):
-            return data
-        case .failure(let error):
-            throw error
-        case nil:
-            return try JSONEncoder().encode(EmptyResponse())
-        }
-    }
-
-    func notify(_ notification: JSONRPC.Notification) async throws {
-        notifications.append(notification)
-    }
-
-    func notificationStream() -> AsyncThrowingStream<JSONRPC.Notification, Error> {
-        AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
-            notificationContinuations.append(continuation)
-            resumeNotificationStreamCountWaiters()
-        }
-    }
-
-    func close() async {
-        closed = true
-        for continuation in notificationContinuations {
-            continuation.finish()
-        }
-        notificationContinuations.removeAll()
-    }
-
-    func recordedRequests() -> [JSONRPC.Request] {
-        requests
-    }
-
-    func recordedNotifications() -> [JSONRPC.Notification] {
-        notifications
-    }
-
-    func waitForRequestCount(_ count: Int) async {
-        if requests.count >= count {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if requests.count >= count {
-                continuation.resume()
-            } else {
-                requestCountWaiters.append((count, continuation))
-            }
-        }
-    }
-
-    func waitForNotificationStreamCount(_ count: Int) async {
-        if notificationContinuations.count >= count {
-            return
-        }
-        await withCheckedContinuation { continuation in
-            if notificationContinuations.count >= count {
-                continuation.resume()
-            } else {
-                notificationStreamCountWaiters.append((count, continuation))
-            }
-        }
-    }
-
-    func emitServerNotification<Params: Encodable & Sendable>(
-        method: String,
-        params: Params
-    ) throws {
-        let notification = JSONRPC.Notification(
-            method: method,
-            params: try JSONEncoder().encode(params)
-        )
-        for continuation in notificationContinuations {
-            continuation.yield(notification)
-        }
-    }
-
-    private func resumeNotificationStreamCountWaiters() {
-        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
-        for waiter in notificationStreamCountWaiters {
-            if notificationContinuations.count >= waiter.0 {
-                waiter.1.resume()
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        notificationStreamCountWaiters = remaining
-    }
-
-    private func resumeRequestCountWaiters() {
-        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
-        for waiter in requestCountWaiters {
-            if requests.count >= waiter.0 {
-                waiter.1.resume()
-            } else {
-                remaining.append(waiter)
-            }
-        }
-        requestCountWaiters = remaining
-    }
 }
 
 private struct TurnIDParams: Encodable, Sendable {

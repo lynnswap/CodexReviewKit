@@ -424,8 +424,8 @@ public struct CodexReviewSession: Identifiable, Sendable {
 
     /// Log-oriented review entries.
     ///
-    /// ReviewMonitor-style logs can be built from this sequence without
-    /// depending on raw JSON-RPC notifications.
+    /// Review log views can be built from this sequence without depending on
+    /// raw JSON-RPC notifications.
     public var logEntries: CodexThreadLogSequence {
         eventThread.logEntries
     }
