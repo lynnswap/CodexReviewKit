@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-client")
+private let logger = Logger(subsystem: "CodexAppServerKit", category: "app-server-client")
 
 package actor AppServerClient {
     private static let appServerOverloadedErrorCode = -32001
@@ -35,7 +35,7 @@ package actor AppServerClient {
     }
 
     package func initialize(
-        clientName: String = "CodexReviewKit",
+        clientName: String = "CodexAppServerKit",
         clientVersion: String = "2"
     ) async throws -> AppServerAPI.Initialize.Response {
         if let initializationResponse {

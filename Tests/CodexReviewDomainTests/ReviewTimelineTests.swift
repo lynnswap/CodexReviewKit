@@ -9,7 +9,6 @@ struct ReviewTimelineTests {
         let id: ReviewTimelineItem.ID = "item-1"
         #expect(id.rawValue == "item-1")
         #expect(ReviewItemKind(rawValue: "futureItem").rawValue == "futureItem")
-        #expect(ReviewWireEventKind(rawValue: "future/event").rawValue == "future/event")
 
         let encodedID = try JSONEncoder().encode(id)
         #expect(String(data: encodedID, encoding: .utf8) == #""item-1""#)

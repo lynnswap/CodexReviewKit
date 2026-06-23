@@ -92,7 +92,6 @@ let package = Package(
         .target(
             name: "CodexReviewMCPAdapter",
             dependencies: [
-                "CodexReview",
                 "CodexReviewDomain",
             ],
             swiftSettings: [

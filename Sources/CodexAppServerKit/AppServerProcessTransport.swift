@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: "CodexReviewKit", category: "app-server-transport")
+private let logger = Logger(subsystem: "CodexAppServerKit", category: "app-server-transport")
 
 package actor AppServerProcessTransport: JSONRPC.Transport {
     package struct Configuration: Sendable {
@@ -92,11 +92,11 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         self.stderr = stderr
         let stdoutEvents = AppServerPipeReadEventSource(
             fileHandle: stdout.fileHandleForReading,
-            label: "com.lynnpd.CodexReviewKit.app-server.stdout"
+            label: "com.lynnpd.CodexAppServerKit.app-server.stdout"
         )
         let stderrEvents = AppServerPipeReadEventSource(
             fileHandle: stderr.fileHandleForReading,
-            label: "com.lynnpd.CodexReviewKit.app-server.stderr"
+            label: "com.lynnpd.CodexAppServerKit.app-server.stderr"
         )
         self.stdoutEvents = stdoutEvents
         self.stderrEvents = stderrEvents

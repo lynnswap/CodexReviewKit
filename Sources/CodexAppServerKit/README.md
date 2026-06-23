@@ -171,7 +171,7 @@ for try await event in thread.events {
 }
 ```
 
-This lets CodexReviewKit and similar clients build review logs from
+This lets review clients build logs from
 CodexAppServerKit domain events instead of parsing JSON-RPC notifications or
 string logs directly.
 

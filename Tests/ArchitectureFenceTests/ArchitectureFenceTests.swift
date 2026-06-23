@@ -41,6 +41,41 @@ struct ArchitectureFenceTests {
         Self.expectNoViolations(violations)
     }
 
+    @Test func codexReviewDomainDoesNotOwnAppServerWireVocabulary() throws {
+        let repo = Self.repositoryRoot
+        let domainSources = repo.appending(path: "Sources/CodexReviewDomain")
+        let forbiddenFragments = [
+            "AppServer",
+            "JSONRPC",
+            "WireEvent",
+            "turn/",
+            "item/",
+        ]
+
+        let violations = try Self.sourceFragmentViolations(
+            in: domainSources,
+            relativeRoot: "Sources/CodexReviewDomain",
+            forbiddenFragments: forbiddenFragments
+        )
+
+        Self.expectNoViolations(violations)
+    }
+
+    @Test func codexAppServerKitDoesNotUseReviewMonitorProductNames() throws {
+        let repo = Self.repositoryRoot
+        let kitSources = repo.appending(path: "Sources/CodexAppServerKit")
+        let violations = try Self.sourceFragmentViolations(
+            in: kitSources,
+            relativeRoot: "Sources/CodexAppServerKit",
+            forbiddenFragments: [
+                "CodexReviewKit",
+                "ReviewMonitor",
+            ]
+        )
+
+        Self.expectNoViolations(violations)
+    }
+
     @Test func reviewUIDoesNotMutateStoreOwnedJobStateDirectly() throws {
         let repo = Self.repositoryRoot
         let checkedRoots = [
@@ -273,6 +308,30 @@ struct ArchitectureFenceTests {
                         )
                     }
                 }
+            }
+        }
+        return violations
+    }
+
+    private static func sourceFragmentViolations(
+        in root: URL,
+        relativeRoot: String,
+        forbiddenFragments: [String]
+    ) throws -> [String] {
+        var violations: [String] = []
+        for file in try swiftSourceFiles(in: root) {
+            let url = root.appending(path: file)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            for (offset, line) in text.split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated()
+            {
+                let lineText = String(line)
+                guard let fragment = forbiddenFragments.first(where: { lineText.contains($0) }) else {
+                    continue
+                }
+                violations.append(
+                    "\(relativeRoot)/\(file):\(offset + 1): contains \(fragment)"
+                )
             }
         }
         return violations

@@ -2,13 +2,13 @@ import Foundation
 import CodexReviewDomain
 
 public struct AppServerWireEvent: Equatable, Sendable {
-    public var kind: ReviewWireEventKind
+    public var kind: AppServerReviewEventKind
     public var itemKind: ReviewItemKind?
     public var itemID: ReviewTimelineItem.ID?
     public var timestamp: Date?
 
     public init(
-        kind: ReviewWireEventKind,
+        kind: AppServerReviewEventKind,
         itemKind: ReviewItemKind? = nil,
         itemID: ReviewTimelineItem.ID? = nil,
         timestamp: Date? = nil
@@ -126,7 +126,7 @@ public indirect enum AppServerWireJSONValue: Decodable, Equatable, Sendable {
 }
 
 public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
-    public var method: ReviewWireEventKind
+    public var method: AppServerReviewEventKind
     public var payload: Payload
     public var rawPayload: AppServerWireJSONValue?
 
@@ -135,7 +135,7 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
     }
 
     public init(
-        method: ReviewWireEventKind,
+        method: AppServerReviewEventKind,
         payload: Payload = Payload(),
         rawPayload: AppServerWireJSONValue? = nil
     ) {
@@ -152,7 +152,7 @@ public struct AppServerWireReviewNotification: Decodable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let rawMethod = try container.decode(String.self, forKey: .method)
-        self.method = ReviewWireEventKind(rawValue: rawMethod)
+        self.method = AppServerReviewEventKind(rawValue: rawMethod)
         self.rawPayload = container.contains(.payload)
             ? try container.decode(AppServerWireJSONValue.self, forKey: .payload)
             : nil
@@ -501,7 +501,7 @@ public extension AppServerWireReviewNotification {
             }
         }
 
-        func itemStartedEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func itemStartedEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let item else {
                 return []
             }
@@ -518,7 +518,7 @@ public extension AppServerWireReviewNotification {
             return [.itemStarted(seed(for: item, phase: phase))]
         }
 
-        func itemUpdateEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func itemUpdateEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             if let item {
                 let phase = item.phase(default: .running)
                 if item.family == .reasoning {
@@ -537,7 +537,7 @@ public extension AppServerWireReviewNotification {
             return unknownEvent(method: method)
         }
 
-        func itemCompletionEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func itemCompletionEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let item else {
                 return []
             }
@@ -579,7 +579,7 @@ public extension AppServerWireReviewNotification {
             )]
         }
 
-        func toolProgressEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func toolProgressEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let message = message?.nilIfEmpty else {
                 return unknownEvent(method: method)
             }
@@ -596,7 +596,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func fileChangeUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func fileChangeUpdateEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             let changesOutput = changes.map(\.summaryText).joined(separator: "\n").nilIfEmpty
             let changePath = changes.compactMap { $0.path?.nilIfEmpty }.first
             let updateItemID = item?.path?.nilIfEmpty == nil
@@ -611,7 +611,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func diffUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func diffUpdateEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let diff = diff?.nilIfEmpty else {
                 return unknownEvent(method: method)
             }
@@ -624,7 +624,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func planUpdateEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func planUpdateEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             let markdown = plan.compactMap { step -> String? in
                 switch (step.status.nilIfEmpty, step.step.nilIfEmpty) {
                 case let (status?, step?):
@@ -649,7 +649,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func contextCompactionEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func contextCompactionEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             [.itemCompleted(ReviewTimelineItemSeed(
                 id: .init(rawValue: itemID ?? resolvedTurnID.map { "contextCompaction:\($0)" } ?? syntheticItemID(method: method.rawValue)),
                 kind: .contextCompaction,
@@ -659,7 +659,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func threadStatusEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func threadStatusEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             switch normalizedStatus(status?.type) {
             case "notloaded", "closed":
                 return [.reviewFailed(terminalMessage ?? status?.type ?? "")]
@@ -676,7 +676,7 @@ public extension AppServerWireReviewNotification {
             }
         }
 
-        func errorEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func errorEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let message = diagnosticMessage else {
                 return [.reviewFailed("")]
             }
@@ -687,14 +687,14 @@ public extension AppServerWireReviewNotification {
             return [.itemUpdated(diagnostic), .reviewFailed(message)]
         }
 
-        func diagnosticEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func diagnosticEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let message = diagnosticMessage else {
                 return unknownEvent(method: method)
             }
             return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
         }
 
-        func modelReroutedEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func modelReroutedEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             let route = [fromModel?.nilIfEmpty, toModel?.nilIfEmpty].compactMap(\.self).joined(separator: " -> ")
             let message = [route.nilIfEmpty, reason?.nilIfEmpty].compactMap(\.self).joined(separator: "\n")
             guard message.isEmpty == false else {
@@ -703,7 +703,7 @@ public extension AppServerWireReviewNotification {
             return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
         }
 
-        func modelVerificationEvents(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func modelVerificationEvents(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             let message = diagnosticMessage ?? verifications.joined(separator: "\n").nilIfEmpty
             guard let message else {
                 return unknownEvent(method: method)
@@ -711,7 +711,7 @@ public extension AppServerWireReviewNotification {
             return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
         }
 
-        func messageEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func messageEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             guard let message = message?.nilIfEmpty else {
                 return unknownEvent(method: method)
             }
@@ -724,7 +724,7 @@ public extension AppServerWireReviewNotification {
             ))]
         }
 
-        func unknownEvent(method: ReviewWireEventKind) -> [ReviewDomainEvent] {
+        func unknownEvent(method: AppServerReviewEventKind) -> [ReviewDomainEvent] {
             [.itemUpdated(ReviewTimelineItemSeed(
                 id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
                 kind: ReviewItemKind(rawValue: method.rawValue),
@@ -816,7 +816,7 @@ public extension AppServerWireReviewNotification {
         }
 
         private func diagnosticSeed(
-            method: ReviewWireEventKind,
+            method: AppServerReviewEventKind,
             message: String,
             phase: ReviewItemPhase
         ) -> ReviewTimelineItemSeed {
@@ -1417,7 +1417,7 @@ private enum TerminalDisposition {
     case cancelled
 }
 
-private extension ReviewWireEventKind {
+private extension AppServerReviewEventKind {
     static let turnCompleted: Self = "turn/completed"
     static let turnFailed: Self = "turn/failed"
     static let turnCancelled: Self = "turn/cancelled"
