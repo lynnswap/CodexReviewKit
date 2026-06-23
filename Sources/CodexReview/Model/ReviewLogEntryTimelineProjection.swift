@@ -336,13 +336,14 @@ package extension ReviewLogEntry {
                 style: kind == .rawReasoning ? .raw : .summary
             ))
         case .tool:
+            let errorText = metadata?.errorText
             return .toolCall(.init(
                 namespace: metadata?.namespace,
                 server: metadata?.server,
                 tool: metadata?.tool,
                 arguments: metadata?.detail,
-                result: metadata?.resultText ?? text.nilIfEmpty,
-                error: metadata?.errorText
+                result: metadata?.resultText ?? (errorText == nil ? text.nilIfEmpty : nil),
+                error: errorText
             ))
         case .search:
             return .search(.init(

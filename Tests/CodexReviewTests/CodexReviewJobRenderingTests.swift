@@ -108,6 +108,38 @@ struct CodexReviewJobRenderingTests {
         #expect(command.exitCode == 0)
     }
 
+    @Test func failedToolCallLogDoesNotCopyErrorTextIntoTimelineResult() throws {
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-failed-tool-call",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .toolCall,
+                    groupID: "tool-1",
+                    text: "tool failed",
+                    metadata: .init(
+                        sourceType: "mcpToolCall",
+                        itemID: "tool-1",
+                        server: "codex_review",
+                        tool: "review_start",
+                        errorText: "tool failed"
+                    )
+                ),
+            ]
+        )
+
+        let item = try #require(job.timeline.items.first { $0.family == .tool })
+        guard case .toolCall(let toolCall) = item.content else {
+            Issue.record("Expected tool-call timeline content.")
+            return
+        }
+        #expect(toolCall.error == "tool failed")
+        #expect(toolCall.result == nil)
+    }
+
     @Test func tailAppendPublishesIncrementalLogMutation() {
         let job = CodexReviewJob.makeForTesting(
             id: "job-tail-append-mutation",
