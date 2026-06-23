@@ -295,9 +295,18 @@ public struct CodexThread: Identifiable, Sendable {
 
 /// The target that `codex app-server` should review.
 public enum CodexReviewTarget: Codable, Hashable, Sendable {
+    /// Review the current uncommitted working tree changes.
     case uncommittedChanges
+
+    /// Review changes relative to a base branch.
     case baseBranch(String)
+
+    /// Review a specific commit.
+    ///
+    /// `title` is optional metadata that the app-server may use for display.
     case commit(sha: String, title: String? = nil)
+
+    /// Review using custom app-server instructions.
     case custom(instructions: String)
 
     private enum CodingKeys: String, CodingKey {
@@ -353,19 +362,33 @@ public enum CodexReviewTarget: Codable, Hashable, Sendable {
 
 /// How `review/start` should deliver review work.
 public enum CodexReviewDelivery: String, Codable, Equatable, Sendable {
+    /// Run the review in the current thread.
     case inline
+
+    /// Let the app-server create a detached review thread when supported.
     case detached
 }
 
 /// A review run started by `codex app-server`.
 public struct CodexReviewSession: Identifiable, Sendable {
+    /// The response turn identifier, used as the stable session identity.
     public var id: CodexTurnID {
         turnID
     }
 
+    /// The thread where `startReview(target:delivery:transcriptErrorHandlingPolicy:)` was called.
     public let threadID: CodexThreadID
+
+    /// The app-server turn that is producing the review response.
     public let turnID: CodexTurnID
+
+    /// The thread that emits review events and logs.
+    ///
+    /// This equals `threadID` for inline reviews and may differ for detached
+    /// reviews.
     public let reviewThreadID: CodexThreadID
+
+    /// The live response stream for the review turn.
     public let response: CodexResponseStream
 
     private let eventThread: CodexThread
@@ -384,34 +407,45 @@ public struct CodexReviewSession: Identifiable, Sendable {
         self.eventThread = eventThread
     }
 
+    /// Thread-scoped events for the review thread.
     public var events: CodexThreadEventSequence {
         eventThread.events
     }
 
+    /// Agent messages emitted by the review thread.
     public var messages: CodexThreadMessageSequence {
         eventThread.messages
     }
 
+    /// Incremental transcript snapshots for the review thread.
     public var transcriptUpdates: CodexThreadTranscriptSequence {
         eventThread.transcriptUpdates
     }
 
+    /// Log-oriented review entries.
+    ///
+    /// ReviewMonitor-style logs can be built from this sequence without
+    /// depending on raw JSON-RPC notifications.
     public var logEntries: CodexThreadLogSequence {
         eventThread.logEntries
     }
 
+    /// Collects the review response until the turn finishes.
     public func collect() async throws -> CodexResponse {
         try await response.collect()
     }
 
+    /// Interrupts the running review turn.
     public func interrupt() async throws {
         try await response.interrupt()
     }
 
+    /// Sends additional input to the running review turn.
     public func steer(with prompt: CodexPrompt) async throws {
         try await response.steer(with: prompt)
     }
 
+    /// Sends additional text input to the running review turn.
     public func steer(with prompt: String) async throws {
         try await response.steer(with: prompt)
     }

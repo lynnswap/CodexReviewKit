@@ -1,6 +1,11 @@
 import Foundation
 
 extension CodexThread {
+    /// Thread-scoped events emitted by the app-server.
+    ///
+    /// The sequence replays buffered events for this thread before yielding
+    /// live notifications. It finishes when the app-server reports the thread
+    /// as closed or when the app-server connection closes.
     public var events: CodexThreadEventSequence {
         .init {
             AsyncThrowingStream { continuation in
@@ -19,18 +24,36 @@ extension CodexThread {
         }
     }
 
+    /// Agent messages emitted by this thread.
+    ///
+    /// This sequence is derived from `events` and is useful when callers only
+    /// need the conversational output rather than every item lifecycle event.
     public var messages: CodexThreadMessageSequence {
         .init(events: events)
     }
 
+    /// Incremental transcript snapshots derived from this thread's events.
     public var transcriptUpdates: CodexThreadTranscriptSequence {
         .init(events: events)
     }
 
+    /// Log-oriented item events for this thread.
+    ///
+    /// This includes command, tool, file-change, diagnostic, and unknown
+    /// app-server items that are useful for review logs or progress views.
     public var logEntries: CodexThreadLogSequence {
         .init(events: events)
     }
 
+    /// Sends a prompt to the thread and waits for the final response.
+    ///
+    /// Use `streamResponse(to:options:)` when the caller needs incremental
+    /// progress, transcript updates, steering, or interruption.
+    ///
+    /// - Parameters:
+    ///   - prompt: The structured prompt to send.
+    ///   - options: Per-turn generation options.
+    /// - Returns: The completed response collected from app-server events.
     public func respond(
         to prompt: CodexPrompt,
         options: CodexGenerationOptions = .init()
@@ -38,6 +61,7 @@ extension CodexThread {
         try await streamResponse(to: prompt, options: options).collect()
     }
 
+    /// Sends a text prompt to the thread and waits for the final response.
     public func respond(
         to prompt: String,
         options: CodexGenerationOptions = .init()
@@ -45,6 +69,7 @@ extension CodexThread {
         try await respond(to: CodexPrompt(prompt), options: options)
     }
 
+    /// Builds a structured prompt, sends it to the thread, and waits for the final response.
     public func respond(
         options: CodexGenerationOptions = .init(),
         @CodexPromptBuilder prompt: () throws -> CodexPrompt
@@ -52,6 +77,16 @@ extension CodexThread {
         try await respond(to: try prompt(), options: options)
     }
 
+    /// Sends a prompt and returns a live response stream.
+    ///
+    /// The returned stream exposes events, progress, transcript updates, the
+    /// collected result, and Codex-specific controls such as steer and
+    /// interrupt.
+    ///
+    /// - Parameters:
+    ///   - prompt: The structured prompt to send.
+    ///   - options: Per-turn generation options.
+    /// - Returns: A live response stream for the started turn.
     public func streamResponse(
         to prompt: CodexPrompt,
         options: CodexGenerationOptions = .init()
@@ -63,6 +98,7 @@ extension CodexThread {
         )
     }
 
+    /// Sends a text prompt and returns a live response stream.
     public func streamResponse(
         to prompt: String,
         options: CodexGenerationOptions = .init()
@@ -70,6 +106,7 @@ extension CodexThread {
         try await streamResponse(to: CodexPrompt(prompt), options: options)
     }
 
+    /// Builds a structured prompt, sends it, and returns a live response stream.
     public func streamResponse(
         options: CodexGenerationOptions = .init(),
         @CodexPromptBuilder prompt: () throws -> CodexPrompt
@@ -83,6 +120,12 @@ extension CodexThread {
     /// turn and thread-level event streams, including log entries. When the
     /// app-server uses a detached review thread, those event streams are bound
     /// to that review thread.
+    ///
+    /// - Parameters:
+    ///   - target: The repository changes or custom instructions to review.
+    ///   - delivery: Whether the app-server should run the review inline or in a detached review thread.
+    ///   - transcriptErrorHandlingPolicy: How collection should treat transcript errors.
+    /// - Returns: A live review session.
     public func startReview(
         target: CodexReviewTarget,
         delivery: CodexReviewDelivery = .inline,
@@ -130,6 +173,10 @@ extension CodexThread {
         )
     }
 
+    /// Reads the current thread snapshot.
+    ///
+    /// - Parameter includeTurns: Whether to include turn summaries in the snapshot.
+    /// - Returns: The current app-server snapshot for this thread.
     public func read(includeTurns: Bool = false) async throws -> CodexThreadSnapshot {
         let response = try await client.send(
             AppServerAPI.Thread.Read.Request(
@@ -150,6 +197,9 @@ extension CodexThread {
         )
     }
 
+    /// Renames this thread.
+    ///
+    /// - Parameter name: The new user-visible thread name.
     public func rename(to name: String) async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Name.Set.Request(
@@ -157,6 +207,7 @@ extension CodexThread {
             ))
     }
 
+    /// Starts app-server context compaction for this thread.
     public func compact() async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Compact.Start.Request(
@@ -164,6 +215,7 @@ extension CodexThread {
             ))
     }
 
+    /// Archives this thread.
     public func archive() async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Archive.Request(
@@ -171,6 +223,9 @@ extension CodexThread {
             ))
     }
 
+    /// Restores this thread from the archive.
+    ///
+    /// - Returns: The restored thread snapshot.
     public func unarchive() async throws -> CodexThreadSnapshot {
         let response = try await client.send(
             AppServerAPI.Thread.Unarchive.Request(
@@ -179,6 +234,9 @@ extension CodexThread {
         return CodexAppServer.threadSnapshot(from: response.thread)
     }
 
+    /// Rolls this thread back by the specified number of turns.
+    ///
+    /// - Parameter turnCount: The number of latest turns to remove.
     public func rollback(turnCount: Int = 1) async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Rollback.Request(
@@ -186,6 +244,7 @@ extension CodexThread {
             ))
     }
 
+    /// Permanently deletes this thread.
     public func delete() async throws {
         let _: EmptyResponse = try await client.send(
             AppServerAPI.Thread.Delete.Request(
