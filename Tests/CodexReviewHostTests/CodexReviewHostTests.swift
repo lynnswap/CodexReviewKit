@@ -1003,7 +1003,7 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-first", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-first"), for: "review/start")
+        try await firstTransport.enqueue(AppServerReviewStart.Response(turnID: "turn-first"), for: "review/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
 
         let secondTransport = FakeJSONRPCTransport()
@@ -1083,7 +1083,7 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         try await firstTransport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-active", model: "gpt-5"), for: "thread/start")
-        try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-active"), for: "review/start")
+        try await firstTransport.enqueue(AppServerReviewStart.Response(turnID: "turn-active"), for: "review/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
@@ -1188,7 +1188,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerReviewStart.Response(turnID: "turn-1"), for: "review/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1252,7 +1252,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
+        try await transport.enqueue(AppServerReviewStart.Response(turnID: "turn-1"), for: "review/start")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -1302,7 +1302,7 @@ struct CodexReviewHostTests {
             for: "thread/start"
         )
         try await transport.enqueue(
-            AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
+            AppServerReviewStart.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
             for: "review/start"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")

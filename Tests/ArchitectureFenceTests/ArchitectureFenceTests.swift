@@ -95,6 +95,30 @@ struct ArchitectureFenceTests {
         Self.expectNoViolations(violations)
     }
 
+    @Test func codexAppServerAPINamespaceStaysOwnedByKit() throws {
+        let repo = Self.repositoryRoot
+        let checkedRoots = [
+            "Sources/CodexReviewAppServer",
+            "Sources/CodexReviewHost",
+            "Sources/CodexReviewMCPAdapter",
+            "Sources/CodexReviewMCPServer",
+        ]
+        var violations: [String] = []
+        for checkedRoot in checkedRoots {
+            let root = repo.appending(path: checkedRoot)
+            violations += try Self.sourceFragmentViolations(
+                in: root,
+                relativeRoot: checkedRoot,
+                forbiddenFragments: [
+                    "extension AppServerAPI {",
+                    "AppServerAPI.Review",
+                ]
+            )
+        }
+
+        Self.expectNoViolations(violations)
+    }
+
     @Test func reviewUIDoesNotMutateStoreOwnedJobStateDirectly() throws {
         let repo = Self.repositoryRoot
         let checkedRoots = [

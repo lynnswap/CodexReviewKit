@@ -2,17 +2,15 @@ import CodexAppServerKit
 import CodexReview
 import Foundation
 
-extension AppServerAPI {
-    package enum Review {
-        package enum Start {}
-    }
+package enum AppServerReviewStart {
+    package static let method = "review/start"
 }
 
-extension AppServerAPI.Review.Start {
+extension AppServerReviewStart {
     package struct Params: Codable, Equatable, Sendable {
         package var threadID: String
         package var target: CodexReviewAPI.Target
-        package var delivery: AppServerAPI.Review.Start.Delivery
+        package var delivery: AppServerReviewStart.Delivery
 
         enum CodingKeys: String, CodingKey {
             case threadID = "threadId"
@@ -23,7 +21,7 @@ extension AppServerAPI.Review.Start {
         package init(
             threadID: String,
             target: CodexReviewAPI.Target,
-            delivery: AppServerAPI.Review.Start.Delivery = .inline
+            delivery: AppServerReviewStart.Delivery = .inline
         ) {
             self.threadID = threadID
             self.target = target
@@ -32,14 +30,14 @@ extension AppServerAPI.Review.Start {
     }
 }
 
-extension AppServerAPI.Review.Start {
+extension AppServerReviewStart {
     package enum Delivery: String, Codable, Equatable, Sendable {
         case inline
         case detached
     }
 }
 
-extension AppServerAPI.Review.Start {
+extension AppServerReviewStart {
     package struct Response: Codable, Equatable, Sendable {
         package var turnID: String
         package var reviewThreadID: String?
@@ -69,17 +67,17 @@ extension AppServerAPI.Review.Start {
     }
 }
 
-extension AppServerAPI.Review.Start {
+extension AppServerReviewStart {
     package struct Request: AppServerAPI.Request {
-        package typealias Response = AppServerAPI.Review.Start.Response
+        package typealias Response = AppServerReviewStart.Response
 
-        package static let method = "review/start"
-        package var params: AppServerAPI.Review.Start.Params
+        package static let method = AppServerReviewStart.method
+        package var params: AppServerReviewStart.Params
         package var scope: AppServerAPI.RequestScope? {
             .thread(params.threadID)
         }
 
-        package init(params: AppServerAPI.Review.Start.Params) {
+        package init(params: AppServerReviewStart.Params) {
             self.params = params
         }
     }
