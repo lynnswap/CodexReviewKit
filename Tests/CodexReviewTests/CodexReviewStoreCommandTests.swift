@@ -1185,6 +1185,38 @@ struct CodexReviewStoreCommandTests {
         #expect(allRead.logs.first?.metadata?.command == nil)
     }
 
+    @Test func timelineProjectedReadReviewSuppressesGenericCommandTitle() throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running"
+        )
+        job.timeline.apply(.itemCompleted(.init(
+            id: "process-1",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(command: "Command", output: "Build complete\n"))
+        )))
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [job]
+        )
+
+        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
+
+        #expect(allRead.logs.map(\.kind) == [.commandOutput])
+        #expect(allRead.logs.map(\.text) == ["Build complete\n"])
+        #expect(allRead.logs.first?.metadata?.command == nil)
+    }
+
     @Test func timelineProjectedReadReviewPreservesCommandActions() throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

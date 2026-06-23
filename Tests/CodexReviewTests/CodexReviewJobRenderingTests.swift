@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReview
+import CodexReviewDomain
 
 @Suite("Codex review job rendering")
 @MainActor
@@ -31,6 +32,55 @@ struct CodexReviewJobRenderingTests {
 
         README.md | 1 +
         """)
+    }
+
+    @Test func outputOnlyCommandLogsDoNotSynthesizePlaceholderCommandLine() throws {
+        let outputOnlyJob = CodexReviewJob.makeForTesting(
+            id: "job-output-only-command",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .commandOutput,
+                    groupID: "cmd-output-only",
+                    text: "Build complete\n",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        title: "Command output",
+                        itemID: "cmd-output-only"
+                    )
+                ),
+            ]
+        )
+
+        let outputOnlyItem = try #require(outputOnlyJob.timeline.item(for: "cmd-output-only"))
+        guard case .command(let outputOnlyCommand) = outputOnlyItem.content else {
+            Issue.record("Expected command timeline content.")
+            return
+        }
+        #expect(outputOnlyCommand.command == "")
+        #expect(outputOnlyJob.timelineLogEntries.map(\.kind) == [.commandOutput])
+        #expect(outputOnlyJob.timelineLogEntries.map(\.text) == ["Build complete\n"])
+
+        let mixedJob = CodexReviewJob.makeForTesting(
+            id: "job-generic-command-title",
+            cwd: "/tmp/workspace",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running"
+        )
+        mixedJob.timeline.apply(.itemCompleted(.init(
+            id: "cmd-generic",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(command: "Command", output: "Build complete\n"))
+        )))
+
+        #expect(mixedJob.timelineLogEntries.map(\.kind) == [.commandOutput])
+        #expect(mixedJob.timelineLogEntries.map(\.text) == ["Build complete\n"])
     }
 
     @Test func fileChangeCommandOutputChunksAccumulateInTimelineProjection() throws {

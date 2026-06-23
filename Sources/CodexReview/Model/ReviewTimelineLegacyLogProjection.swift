@@ -16,7 +16,7 @@ private extension ReviewLogEntry {
             return [entry(item: item, kind: .agentMessage, text: message.text)]
         case .command(let command):
             var entries: [ReviewLogEntry] = []
-            let commandLine = command.command.nilIfEmpty
+            let commandLine = commandLineText(for: command)
             if let commandLine {
                 entries.append(entry(
                     item: item,
@@ -114,6 +114,26 @@ private extension ReviewLogEntry {
     }
 
     @MainActor
+    private static func commandLineText(for command: ReviewTimelineItem.Command) -> String? {
+        guard let commandLine = command.command.nilIfEmpty,
+              isGenericCommandTitle(commandLine) == false
+        else {
+            return nil
+        }
+        return commandLine
+    }
+
+    @MainActor
+    private static func isGenericCommandTitle(_ title: String) -> Bool {
+        switch title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "command", "command output":
+            return true
+        default:
+            return false
+        }
+    }
+
+    @MainActor
     private static func entry(
         item: ReviewTimelineItem,
         kind: ReviewLogEntry.Kind,
@@ -206,7 +226,7 @@ private extension ReviewLogEntry {
             sourceType: "commandExecution",
             status: item.phase.rawValue,
             itemID: item.id.rawValue,
-            command: command.command.nilIfEmpty,
+            command: commandLineText(for: command),
             cwd: command.cwd,
             exitCode: command.exitCode,
             startedAt: item.startedAt,

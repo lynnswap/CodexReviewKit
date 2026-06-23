@@ -372,7 +372,7 @@ package extension ReviewLogEntry {
         if kind == .commandOutput {
             commandText = metadata?.command?.nilIfEmpty
                 ?? existingCommand?.command.nilIfEmpty
-                ?? "Command"
+                ?? ""
         } else {
             commandText = metadata?.command?.nilIfEmpty
                 ?? existingCommand?.command.nilIfEmpty
