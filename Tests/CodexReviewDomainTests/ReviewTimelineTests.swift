@@ -167,6 +167,7 @@ struct ReviewTimelineTests {
         ))
         let placeholder = try #require(timeline.item(for: itemID))
         let identity = ObjectIdentifier(placeholder)
+        #expect(timeline.activeItemIDs == [itemID])
 
         timeline.apply(.itemStarted(.init(
             id: itemID,
@@ -192,6 +193,28 @@ struct ReviewTimelineTests {
         } else {
             Issue.record("expected command content")
         }
+    }
+
+    @Test func deltaOnlyRunningItemIsActiveUntilTerminalEvent() throws {
+        let timeline = ReviewTimeline()
+        let itemID: ReviewTimelineItem.ID = "message-1"
+
+        timeline.apply(.textDelta(
+            itemID: itemID,
+            kind: .agentMessage,
+            family: .message,
+            content: .message(.init(text: "")),
+            delta: "partial"
+        ))
+
+        let item = try #require(timeline.item(for: itemID))
+        #expect(item.phase == .running)
+        #expect(timeline.activeItemIDs == [itemID])
+        #expect(timeline.latestActivity == itemID)
+
+        timeline.apply(.reviewCompleted(summary: "done", result: "partial"))
+
+        #expect(timeline.activeItemIDs.isEmpty)
     }
 
     @Test func itemStatusTransitionsDoNotEraseSemanticSnapshot() throws {

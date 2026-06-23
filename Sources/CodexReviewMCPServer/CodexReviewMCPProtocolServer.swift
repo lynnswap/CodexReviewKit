@@ -822,6 +822,11 @@ private extension ReviewMCPProjection.Content {
                     field: "arguments",
                     truncatedFields: &truncatedFields
                 ),
+                "progress": boundedTimelineString(
+                    toolCall.progress,
+                    field: "progress",
+                    truncatedFields: &truncatedFields
+                ),
                 "result": boundedTimelineString(
                     toolCall.result,
                     field: "result",

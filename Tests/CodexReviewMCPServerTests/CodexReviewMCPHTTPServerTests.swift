@@ -4,6 +4,7 @@ import MCP
 @preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReview
+import CodexReviewDomain
 import CodexReviewMCPServer
 import CodexReviewTesting
 
@@ -607,6 +608,73 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(timelineOutput.hasSuffix("..."))
             #expect(timelineOutput.count < longOutput.count)
             #expect(content["truncatedFields"] as? [String] == ["output"])
+        }
+    }
+
+    @Test func streamableHTTPReviewReadIncludesToolProgressInTimelineContent() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let job = CodexReviewJob.makeForTesting(
+                id: "job-tool-progress",
+                sessionID: sessionID,
+                cwd: "/tmp/project",
+                targetSummary: "Included",
+                status: .running,
+                summary: "Running"
+            )
+            job.timeline.apply(.itemUpdated(.init(
+                id: "tool-1:progress",
+                kind: .mcpToolCall,
+                family: .tool,
+                phase: .running,
+                content: .toolCall(.init(
+                    namespace: "mcp",
+                    server: "codex_review",
+                    tool: "review_read",
+                    progress: "Reading review job"
+                ))
+            )))
+            store.loadForTesting(
+                serverState: .running,
+                workspaces: [.init(cwd: "/tmp/project")],
+                jobs: [job]
+            )
+
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-tool-progress",
+                            "logFilter": "all",
+                        ],
+                    ],
+                ]
+            )
+
+            let timeline = try #require(response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            #expect(timeline["activeItemIds"] as? [String] == ["tool-1:progress"])
+            #expect(timeline["activeItemCount"] as? Int == 1)
+            let items = try #require(timeline["items"] as? [[String: Any]])
+            let item = try #require(items.first)
+            #expect(item["id"] as? String == "tool-1:progress")
+            #expect(item["isActive"] as? Bool == true)
+            let content = try #require(item["content"] as? [String: Any])
+            #expect(content["type"] as? String == "toolCall")
+            #expect(content["namespace"] as? String == "mcp")
+            #expect(content["server"] as? String == "codex_review")
+            #expect(content["tool"] as? String == "review_read")
+            #expect(content["progress"] as? String == "Reading review job")
         }
     }
 

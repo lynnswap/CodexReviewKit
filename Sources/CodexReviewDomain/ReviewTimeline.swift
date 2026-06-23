@@ -116,6 +116,9 @@ public final class ReviewTimeline {
                 timestamp: timestamp
             )
             item.appendText(delta, updatedAt: timestamp)
+            if item.phase.isTerminal == false {
+                activeItemIDs.insert(item.id)
+            }
             latestActivity = item.id
             bumpRevision()
         case .reviewCompleted(let summary, let result):
