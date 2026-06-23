@@ -58,54 +58,11 @@ public final class ReviewTimeline {
             terminalResult = nil
             bumpRevision()
         case .itemStarted(let seed):
-            let item = upsert(seed, timestamp: timestamp)
-            item.update(
-                kind: seed.kind,
-                family: seed.family,
-                phase: seed.phase,
-                content: item.content.mergingTimelineUpdate(seed.content),
-                updatedAt: timestamp,
-                startedAt: seed.startedAt,
-                completedAt: seed.completedAt,
-                durationMs: seed.durationMs
-            )
-            activeItemIDs.insert(item.id)
-            latestActivity = item.id
-            bumpRevision()
+            applySeed(seed, timestamp: timestamp, activity: .phaseDriven)
         case .itemUpdated(let seed):
-            let item = upsert(seed, timestamp: timestamp)
-            item.update(
-                kind: seed.kind,
-                family: seed.family,
-                phase: seed.phase,
-                content: item.content.mergingTimelineUpdate(seed.content),
-                updatedAt: timestamp,
-                startedAt: seed.startedAt,
-                completedAt: seed.completedAt,
-                durationMs: seed.durationMs
-            )
-            if seed.phase.isTerminal {
-                activeItemIDs.remove(item.id)
-            } else {
-                activeItemIDs.insert(item.id)
-            }
-            latestActivity = item.id
-            bumpRevision()
+            applySeed(seed, timestamp: timestamp, activity: .phaseDriven)
         case .itemCompleted(let seed):
-            let item = upsert(seed, timestamp: timestamp)
-            item.update(
-                kind: seed.kind,
-                family: seed.family,
-                phase: seed.phase,
-                content: item.content.mergingTimelineUpdate(seed.content),
-                updatedAt: timestamp,
-                startedAt: seed.startedAt,
-                completedAt: seed.completedAt,
-                durationMs: seed.durationMs
-            )
-            activeItemIDs.remove(item.id)
-            latestActivity = item.id
-            bumpRevision()
+            applySeed(seed, timestamp: timestamp, activity: .inactive)
         case .textDelta(let itemID, let kind, let family, let content, let delta):
             let item = item(for: itemID) ?? insert(
                 id: itemID,
@@ -116,9 +73,7 @@ public final class ReviewTimeline {
                 timestamp: timestamp
             )
             item.appendText(delta, updatedAt: timestamp)
-            if item.phase.isTerminal == false {
-                activeItemIDs.insert(item.id)
-            }
+            synchronizeActiveMembership(for: item, activity: .phaseDriven)
             latestActivity = item.id
             bumpRevision()
         case .reviewCompleted(let summary, let result):
@@ -160,6 +115,47 @@ public final class ReviewTimeline {
         item.update(content: content, updatedAt: updatedAt ?? item.updatedAt)
         bumpRevision()
         return true
+    }
+
+    @discardableResult
+    private func applySeed(
+        _ seed: ReviewTimelineItemSeed,
+        timestamp: Date,
+        activity: ItemActivity
+    ) -> ReviewTimelineItem {
+        let item = upsert(seed, timestamp: timestamp)
+        item.update(
+            kind: seed.kind,
+            family: seed.family,
+            phase: seed.phase,
+            content: item.content.mergingTimelineUpdate(seed.content),
+            updatedAt: timestamp,
+            startedAt: seed.startedAt,
+            completedAt: seed.completedAt,
+            durationMs: seed.durationMs
+        )
+        synchronizeActiveMembership(for: item, activity: activity)
+        latestActivity = item.id
+        bumpRevision()
+        return item
+    }
+
+    private enum ItemActivity {
+        case inactive
+        case phaseDriven
+    }
+
+    private func synchronizeActiveMembership(for item: ReviewTimelineItem, activity: ItemActivity) {
+        switch activity {
+        case .inactive:
+            activeItemIDs.remove(item.id)
+        case .phaseDriven:
+            if isTerminal || item.phase.isTerminal {
+                activeItemIDs.remove(item.id)
+            } else {
+                activeItemIDs.insert(item.id)
+            }
+        }
     }
 
     @discardableResult

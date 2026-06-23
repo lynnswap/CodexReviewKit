@@ -217,6 +217,72 @@ struct ReviewTimelineTests {
         #expect(timeline.activeItemIDs.isEmpty)
     }
 
+    @Test func terminalStartedItemsDoNotBecomeActive() throws {
+        let timeline = ReviewTimeline()
+        let terminalPhases: [ReviewItemPhase] = [
+            .cancelled,
+            .completed,
+            .failed,
+            .incomplete,
+            .skipped,
+        ]
+
+        for phase in terminalPhases {
+            let itemID = ReviewTimelineItem.ID(rawValue: "message-\(phase.rawValue)")
+            timeline.apply(.itemStarted(.init(
+                id: itemID,
+                kind: .agentMessage,
+                family: .message,
+                phase: phase,
+                content: .message(.init(text: phase.rawValue))
+            )))
+
+            let item = try #require(timeline.item(for: itemID))
+            #expect(item.phase == phase)
+            #expect(timeline.activeItemIDs.contains(itemID) == false)
+        }
+
+        #expect(timeline.activeItemIDs.isEmpty)
+    }
+
+    @Test func terminalTimelineDoesNotReactivateLateItemEvents() throws {
+        let timeline = ReviewTimeline()
+        let itemID: ReviewTimelineItem.ID = "late-message"
+
+        timeline.apply(.reviewCompleted(summary: "done", result: nil))
+        timeline.apply(.itemStarted(.init(
+            id: itemID,
+            kind: .agentMessage,
+            family: .message,
+            phase: .running,
+            content: .message(.init(text: "late"))
+        )))
+        timeline.apply(.textDelta(
+            itemID: itemID,
+            kind: .agentMessage,
+            family: .message,
+            content: .message(.init(text: "")),
+            delta: " delta"
+        ))
+
+        let lateItem = try #require(timeline.item(for: itemID))
+        #expect(lateItem.phase == .running)
+        #expect(timeline.isTerminal)
+        #expect(timeline.activeItemIDs.isEmpty)
+
+        timeline.apply(.runStarted(turnID: "turn-2", reviewThreadID: "thread-1", model: "gpt"))
+        timeline.apply(.itemUpdated(.init(
+            id: itemID,
+            kind: .agentMessage,
+            family: .message,
+            phase: .running,
+            content: .message(.init(text: "new run"))
+        )))
+
+        #expect(timeline.isTerminal == false)
+        #expect(timeline.activeItemIDs == [itemID])
+    }
+
     @Test func itemStatusTransitionsDoNotEraseSemanticSnapshot() throws {
         let timeline = ReviewTimeline()
         let itemID: ReviewTimelineItem.ID = "tool-2"
