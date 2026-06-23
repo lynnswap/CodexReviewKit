@@ -1142,11 +1142,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard let self, let store else {
                 return
             }
-            let stream = await appServer.notificationStream()
+            let stream = await appServer.accountEvents()
             do {
-                for try await notification in stream {
+                for try await event in stream {
                     await self.handleAuthNotification(
-                        notification,
+                        event,
                         backend: backend,
                         auth: store.auth
                     )
@@ -1190,18 +1190,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleAuthNotification(
-        _ notification: JSONRPC.Notification,
+        _ event: CodexAccountEvent,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
-        switch notification.method {
-        case "account/login/completed":
-            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
-        case "account/updated":
+        switch event {
+        case .loginCompleted(let completion):
+            await handleLoginCompletedNotification(completion, backend: backend, auth: auth)
+        case .accountUpdated:
             await handleAccountUpdatedNotification(backend: backend, auth: auth)
-        case "account/rateLimits/updated":
-            await applyRateLimitsUpdatedNotification(notification, auth: auth)
-        default:
+        case .rateLimitsUpdated(let rateLimits):
+            await applyRateLimitsUpdatedNotification(rateLimits, auth: auth)
+        case .malformed(let method, let message):
+            logger.error("Malformed account notification \(method, privacy: .public): \(message, privacy: .public)")
+        case .unknown:
             return
         }
     }
@@ -1216,13 +1218,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard let self, let auth else {
                 return
             }
-            let stream = await appServer.notificationStream()
+            let stream = await appServer.accountEvents()
             do {
-                for try await notification in stream
-                    where notification.method == "account/login/completed"
-                        || notification.method == "account/updated"
-                {
-                    await self.handleLoginRuntimeNotification(notification, backend: backend, auth: auth)
+                for try await event in stream {
+                    await self.handleLoginRuntimeNotification(event, backend: backend, auth: auth)
                 }
             } catch is CancellationError {
             } catch {
@@ -1232,65 +1231,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func handleLoginRuntimeNotification(
-        _ notification: JSONRPC.Notification,
+        _ event: CodexAccountEvent,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
-        switch notification.method {
-        case "account/login/completed":
-            await handleLoginCompletedNotification(notification, backend: backend, auth: auth)
-        case "account/updated":
+        switch event {
+        case .loginCompleted(let completion):
+            await handleLoginCompletedNotification(completion, backend: backend, auth: auth)
+        case .accountUpdated:
             guard loginBackend != nil, isWaitingForLoginAccountUpdate else {
                 return
             }
             await finishCompletedLoginAfterAccountUpdate(backend: backend, auth: auth)
-        default:
+        case .rateLimitsUpdated,
+             .malformed,
+             .unknown:
             return
         }
     }
 
     private func handleLoginCompletedNotification(
-        _ notification: JSONRPC.Notification,
+        _ completion: CodexLoginCompletion,
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
-        guard notification.method == "account/login/completed" else {
-            await handleAccountUpdatedNotification(backend: backend, auth: auth)
+        guard completion.loginID?.rawValue == nil || completion.loginID?.rawValue == loginChallenge?.id else {
             return
         }
-        do {
-            let payload = try JSONDecoder().decode(AppServerAccountLoginCompletedNotification.self, from: notification.params)
-            guard payload.loginID == nil || payload.loginID == loginChallenge?.id else {
-                return
-            }
-            loginChallenge = nil
-            let loginAppServer = loginAppServer
-            let loginCodexHomeURL = loginCodexHomeURL
-            let activeAuthenticationSession = activeAuthenticationSession
-            self.activeAuthenticationSession = nil
-            authenticationTask?.cancel()
-            authenticationTask = nil
-            await activeAuthenticationSession?.cancel()
-            guard payload.success else {
-                updateAuthenticationFailure(
-                    payload.error ?? "Authentication failed.",
-                    auth: auth,
-                    activation: loginActivation
-                )
-                self.loginBackend = nil
-                isWaitingForLoginAccountUpdate = false
-                self.loginAppServer = nil
-                self.loginCodexHomeURL = nil
-                loginNotificationTask?.cancel()
-                loginNotificationTask = nil
-                await closeIsolatedLoginRuntime(appServer: loginAppServer, codexHomeURL: loginCodexHomeURL)
-                return
-            }
-            isWaitingForLoginAccountUpdate = true
-            logger.info("ChatGPT login completed; waiting for account update notification")
-        } catch {
-            logger.error("Failed to decode account login completion: \(error.localizedDescription, privacy: .public)")
+        loginChallenge = nil
+        let loginAppServer = loginAppServer
+        let loginCodexHomeURL = loginCodexHomeURL
+        let activeAuthenticationSession = activeAuthenticationSession
+        self.activeAuthenticationSession = nil
+        authenticationTask?.cancel()
+        authenticationTask = nil
+        await activeAuthenticationSession?.cancel()
+        guard completion.success else {
+            updateAuthenticationFailure(
+                completion.error ?? "Authentication failed.",
+                auth: auth,
+                activation: loginActivation
+            )
+            self.loginBackend = nil
+            isWaitingForLoginAccountUpdate = false
+            self.loginAppServer = nil
+            self.loginCodexHomeURL = nil
+            loginNotificationTask?.cancel()
+            loginNotificationTask = nil
+            await closeIsolatedLoginRuntime(appServer: loginAppServer, codexHomeURL: loginCodexHomeURL)
+            return
         }
+        isWaitingForLoginAccountUpdate = true
+        logger.info("ChatGPT login completed; waiting for account update notification")
     }
 
     private func handleAccountUpdatedNotification(
@@ -1365,33 +1357,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func applyRateLimitsUpdatedNotification(
-        _ notification: JSONRPC.Notification,
+        _ rateLimits: CodexRateLimits,
         auth: CodexReviewAuthModel
     ) async {
-        do {
-            let payload = try JSONDecoder().decode(AppServerAccountRateLimitsUpdatedPayload.self, from: notification.params)
-            guard let selectedAccount = auth.selectedAccount else {
-                return
-            }
-            guard selectedAccount.capabilities.supportsRateLimitRefresh else {
-                return
-            }
-            guard AppServerAPI.Account.RateLimits.Response.isCodexRateLimit(payload.rateLimits.limitID) else {
-                return
-            }
-            let response = AppServerAPI.Account.RateLimits.Response(rateLimits: payload.rateLimits)
-            applyRateLimits(
-                windows: response.codexRateLimitWindows,
-                planType: response.codexPlanType,
-                to: selectedAccount
-            )
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: selectedAccount,
-                codexHomeURL: codexHomeURL
-            )
-        } catch {
-            logger.error("Failed to decode account rate limit update: \(error.localizedDescription, privacy: .public)")
+        guard let selectedAccount = auth.selectedAccount else {
+            return
         }
+        guard selectedAccount.capabilities.supportsRateLimitRefresh else {
+            return
+        }
+        applyRateLimits(rateLimits, to: selectedAccount)
+        try? CodexReviewAccountRegistry.updateCachedRateLimits(
+            from: selectedAccount,
+            codexHomeURL: codexHomeURL
+        )
     }
 
     private func refreshSelectedAccountRateLimits(auth: CodexReviewAuthModel) async {
@@ -1478,11 +1457,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 )
             }
             let response = try await backend.readRateLimits()
-            applyRateLimits(
-                windows: response.codexRateLimitWindows,
-                planType: response.codexPlanType,
-                to: account
-            )
+            applyRateLimits(response, to: account)
             try? CodexReviewAccountRegistry.updateCachedRateLimits(
                 from: account,
                 codexHomeURL: codexHomeURL
@@ -1569,12 +1544,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func applyRateLimits(
-        windows: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)],
-        planType: String?,
+        _ rateLimits: CodexRateLimits,
         to account: ReviewCodexAccount
     ) {
-        account.updateRateLimits(windows)
-        if let planType {
+        account.updateRateLimits(rateLimits.windows.map {
+            (
+                windowDurationMinutes: $0.windowDurationMinutes,
+                usedPercent: $0.usedPercent,
+                resetsAt: $0.resetsAt
+            )
+        })
+        if let planType = rateLimits.planType {
             account.updatePlanType(planType)
         }
         account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: nil)
@@ -1690,22 +1670,6 @@ private enum LoginActivation: Equatable, Sendable {
 }
 
 private typealias AppServerRuntimeFactory = @MainActor @Sendable (URL) async throws -> AppServerRuntime
-
-private struct AppServerAccountLoginCompletedNotification: Decodable, Equatable, Sendable {
-    var error: String?
-    var loginID: String?
-    var success: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case error
-        case loginID = "loginId"
-        case success
-    }
-}
-
-private struct AppServerAccountRateLimitsUpdatedPayload: Decodable, Equatable, Sendable {
-    var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
-}
 
 @MainActor
 private enum CodexReviewAccountRegistry {

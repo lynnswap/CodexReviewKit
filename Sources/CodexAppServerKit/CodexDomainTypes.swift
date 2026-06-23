@@ -1241,6 +1241,21 @@ public struct CodexRateLimitWindow: Equatable, Sendable {
     }
 }
 
+package extension CodexRateLimits {
+    init(appServer response: AppServerAPI.Account.RateLimits.Response) {
+        self.init(
+            planType: response.codexPlanType,
+            windows: response.codexRateLimitWindows.map {
+                .init(
+                    windowDurationMinutes: $0.windowDurationMinutes,
+                    usedPercent: $0.usedPercent,
+                    resetsAt: $0.resetsAt
+                )
+            }
+        )
+    }
+}
+
 public struct CodexModel: Codable, Identifiable, Equatable, Sendable {
     public struct ReasoningOption: Codable, Equatable, Sendable {
         public var reasoningEffort: String
@@ -1350,6 +1365,42 @@ public struct CodexAccount: Identifiable, Equatable, Sendable {
         self.label = label
         self.planType = planType
     }
+}
+
+/// The result of an app-server account login completion notification.
+public struct CodexLoginCompletion: Equatable, Sendable {
+    /// The app-server login identifier, when the notification is scoped to a login flow.
+    public var loginID: CodexLoginHandle.ID?
+
+    /// Whether the login completed successfully.
+    public var success: Bool
+
+    /// The server-provided failure message when `success` is false.
+    public var error: String?
+
+    public init(loginID: CodexLoginHandle.ID? = nil, success: Bool, error: String? = nil) {
+        self.loginID = loginID
+        self.success = success
+        self.error = error
+    }
+}
+
+/// A typed account-related notification emitted by Codex app-server.
+public enum CodexAccountEvent: Equatable, Sendable {
+    /// A login flow reached a terminal state.
+    case loginCompleted(CodexLoginCompletion)
+
+    /// The active account changed or was refreshed.
+    case accountUpdated
+
+    /// Account rate-limit information changed.
+    case rateLimitsUpdated(CodexRateLimits)
+
+    /// A known account notification arrived with a shape this SDK could not decode.
+    case malformed(method: String, message: String)
+
+    /// A notification outside the current account event surface.
+    case unknown(CodexRawNotification)
 }
 
 public enum CodexLoginHandle: Equatable, Sendable {

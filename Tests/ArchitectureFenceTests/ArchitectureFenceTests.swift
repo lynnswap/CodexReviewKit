@@ -76,6 +76,25 @@ struct ArchitectureFenceTests {
         Self.expectNoViolations(violations)
     }
 
+    @Test func codexReviewHostDoesNotDecodeRawAppServerAccountNotifications() throws {
+        let repo = Self.repositoryRoot
+        let hostSources = repo.appending(path: "Sources/CodexReviewHost")
+        let violations = try Self.sourceFragmentViolations(
+            in: hostSources,
+            relativeRoot: "Sources/CodexReviewHost",
+            forbiddenFragments: [
+                "JSONRPC.Notification",
+                "AppServerAPI.Account",
+                "AppServerAccountLoginCompletedNotification",
+                "AppServerAccountRateLimitsUpdatedPayload",
+                "account/login/completed",
+                "account/rateLimits/updated",
+            ]
+        )
+
+        Self.expectNoViolations(violations)
+    }
+
     @Test func reviewUIDoesNotMutateStoreOwnedJobStateDirectly() throws {
         let repo = Self.repositoryRoot
         let checkedRoots = [

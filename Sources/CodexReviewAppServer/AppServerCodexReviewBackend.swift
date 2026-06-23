@@ -85,9 +85,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return .init(accounts: [account], activeAccountID: account.id)
     }
 
-    package func readRateLimits() async throws -> AppServerAPI.Account.RateLimits.Response {
+    package func readRateLimits() async throws -> CodexRateLimits {
         _ = try await client.initialize()
-        return try await client.send(AppServerAPI.Account.RateLimits.Read.Request())
+        let response = try await client.send(AppServerAPI.Account.RateLimits.Read.Request())
+        return .init(appServer: response)
     }
 
     package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
