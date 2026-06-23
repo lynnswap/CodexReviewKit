@@ -59,6 +59,34 @@ struct ReviewMCPProjectionTests {
         #expect(toolCallContent.arguments == "{\"jobId\":\"job-1\"}")
     }
 
+    @Test func capturesToolCallProgress() throws {
+        let timeline = ReviewTimeline()
+        timeline.apply(.itemUpdated(.init(
+            id: "tool-1:progress",
+            kind: .mcpToolCall,
+            family: .tool,
+            phase: .running,
+            content: .toolCall(.init(
+                namespace: "mcp",
+                server: "codex_review",
+                tool: "review_read",
+                progress: "Reading review job"
+            ))
+        )))
+
+        let projection = ReviewMCPProjection(timeline: timeline)
+        let item = try #require(projection.items.first)
+        guard case .toolCall(let toolCall) = item.content else {
+            Issue.record("Expected tool call content")
+            return
+        }
+
+        #expect(toolCall.namespace == "mcp")
+        #expect(toolCall.server == "codex_review")
+        #expect(toolCall.tool == "review_read")
+        #expect(toolCall.progress == "Reading review job")
+    }
+
     @Test func capturesTerminalStateAndAllTimelineContentCases() throws {
         let timeline = ReviewTimeline()
         let contents: [(String, ReviewItemKind, ReviewItemFamily, ReviewTimelineItem.Content)] = [

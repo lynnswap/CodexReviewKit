@@ -102,6 +102,7 @@ public struct ReviewMCPProjection: Sendable, Equatable {
                     server: toolCall.server,
                     tool: toolCall.tool,
                     arguments: toolCall.arguments,
+                    progress: toolCall.progress,
                     result: toolCall.result,
                     error: toolCall.error
                 ))
@@ -159,6 +160,7 @@ public struct ReviewMCPProjection: Sendable, Equatable {
         public var server: String?
         public var tool: String?
         public var arguments: String?
+        public var progress: String?
         public var result: String?
         public var error: String?
     }

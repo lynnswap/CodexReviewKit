@@ -1102,6 +1102,54 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func timelineProjectedReadReviewLogIDsAreStableAcrossReads() throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running"
+        )
+        job.timeline.apply(.itemUpdated(.init(
+            id: "tool-1:progress",
+            kind: .mcpToolCall,
+            family: .tool,
+            phase: .running,
+            content: .toolCall(.init(
+                server: "codex_review",
+                tool: "review_read",
+                progress: "Reading review job"
+            ))
+        )))
+        job.timeline.apply(.itemCompleted(.init(
+            id: "command-1",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(.init(
+                command: "swift test",
+                output: "Tests passed",
+                exitCode: 0
+            ))
+        )))
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [job]
+        )
+
+        let firstRead = try store.readReview(jobID: "job-1", logFilter: .all)
+        let secondRead = try store.readReview(jobID: "job-1", logFilter: .all)
+
+        #expect(firstRead.logs.map(\.text) == secondRead.logs.map(\.text))
+        #expect(firstRead.logs.map(\.id) == secondRead.logs.map(\.id))
+        #expect(Set(firstRead.logs.map(\.id)).count == firstRead.logs.count)
+    }
+
     @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

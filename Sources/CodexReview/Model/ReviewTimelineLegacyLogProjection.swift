@@ -119,6 +119,7 @@ private extension ReviewLogEntry {
         metadata: ReviewLogEntry.Metadata? = nil
     ) -> ReviewLogEntry {
         ReviewLogEntry(
+            id: stableLogEntryID(item: item, kind: kind),
             kind: kind,
             groupID: legacyGroupID(for: item, kind: kind),
             replacesGroup: false,
@@ -126,6 +127,50 @@ private extension ReviewLogEntry {
             metadata: metadata,
             timestamp: item.updatedAt
         )
+    }
+
+    @MainActor
+    private static func stableLogEntryID(
+        item: ReviewTimelineItem,
+        kind: ReviewLogEntry.Kind
+    ) -> UUID {
+        deterministicUUID(for: "timeline-log:\(item.id.rawValue):\(kind.rawValue)")
+    }
+
+    private static func deterministicUUID(for key: String) -> UUID {
+        var first = UInt64(0xcbf29ce484222325)
+        var second = UInt64(0x84222325cbf29ce4)
+
+        for byte in key.utf8 {
+            first ^= UInt64(byte)
+            first = first &* 0x100000001b3
+
+            second ^= UInt64(byte) &+ 0x9e3779b97f4a7c15
+            second = second &* 0x100000001b3
+            second = (second << 13) | (second >> 51)
+        }
+
+        var uuid: uuid_t = (
+            UInt8((first >> 56) & 0xff),
+            UInt8((first >> 48) & 0xff),
+            UInt8((first >> 40) & 0xff),
+            UInt8((first >> 32) & 0xff),
+            UInt8((first >> 24) & 0xff),
+            UInt8((first >> 16) & 0xff),
+            UInt8((first >> 8) & 0xff),
+            UInt8(first & 0xff),
+            UInt8((second >> 56) & 0xff),
+            UInt8((second >> 48) & 0xff),
+            UInt8((second >> 40) & 0xff),
+            UInt8((second >> 32) & 0xff),
+            UInt8((second >> 24) & 0xff),
+            UInt8((second >> 16) & 0xff),
+            UInt8((second >> 8) & 0xff),
+            UInt8(second & 0xff)
+        )
+        uuid.6 = (uuid.6 & UInt8(0x0f)) | UInt8(0x50)
+        uuid.8 = (uuid.8 & UInt8(0x3f)) | UInt8(0x80)
+        return UUID(uuid: uuid)
     }
 
     @MainActor
