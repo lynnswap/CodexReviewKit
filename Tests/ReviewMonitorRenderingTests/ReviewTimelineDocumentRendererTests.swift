@@ -416,6 +416,64 @@ struct ReviewTimelineDocumentRendererTests {
         #expect(block.rawTranscriptText == "Build complete\n")
         #expect(document.plainText == "Build complete\n")
     }
+
+    @Test func toolCallRawTranscriptIncludesPayloadText() throws {
+        let timeline = ReviewTimeline()
+        complete(
+            timeline,
+            id: "tool-result",
+            kind: .mcpToolCall,
+            family: .tool,
+            content: .toolCall(.init(
+                namespace: "mcp",
+                server: "codex_review",
+                tool: "review_read",
+                result: "Review completed."
+            ))
+        )
+        complete(
+            timeline,
+            id: "tool-error",
+            kind: .mcpToolCall,
+            family: .tool,
+            content: .toolCall(.init(
+                namespace: "mcp",
+                server: "codex_review",
+                tool: "review_start",
+                error: "Review failed."
+            ))
+        )
+        complete(
+            timeline,
+            id: "tool-progress",
+            kind: .mcpToolCall,
+            family: .tool,
+            content: .toolCall(.init(
+                namespace: "mcp",
+                server: "codex_review",
+                tool: "review_await",
+                progress: "Waiting for review."
+            ))
+        )
+
+        let document = ReviewTimelineDocumentRenderer().document(from: timeline)
+
+        #expect(try requireBlock(document, id: "tool-result").rawTranscriptText == """
+        mcp.codex_review.review_read
+        Review completed.
+        """)
+        #expect(try requireBlock(document, id: "tool-error").rawTranscriptText == """
+        mcp.codex_review.review_start
+        Review failed.
+        """)
+        #expect(try requireBlock(document, id: "tool-progress").rawTranscriptText == """
+        mcp.codex_review.review_await
+        Waiting for review.
+        """)
+        #expect(document.plainText.contains("Review completed."))
+        #expect(document.plainText.contains("Review failed."))
+        #expect(document.plainText.contains("Waiting for review."))
+    }
 }
 
 @MainActor

@@ -174,7 +174,7 @@ public struct ReviewTimelineDocumentRenderer: Sendable {
         case .search(let search):
             return search.query
         case .toolCall(let toolCall):
-            return [toolCall.namespace, toolCall.server, toolCall.name].compactMap { $0 }.joined(separator: ".")
+            return toolCallLabel(for: toolCall)
         case .unknown(let unknown):
             return unknown.title
         }
@@ -204,9 +204,33 @@ public struct ReviewTimelineDocumentRenderer: Sendable {
         case .search(let search):
             return [search.query, search.result].compactMap { $0 }.joined(separator: "\n")
         case .toolCall(let toolCall):
-            return [toolCall.namespace, toolCall.server, toolCall.name].compactMap { $0 }.joined(separator: ".")
+            return toolCallTranscriptText(for: toolCall)
         case .unknown(let unknown):
             return [unknown.title, unknown.detail].compactMap { $0 }.joined(separator: "\n")
         }
+    }
+
+    private static func toolCallLabel(for toolCall: ReviewTimelineDocument.ToolCall) -> String {
+        [toolCall.namespace, toolCall.server, toolCall.name]
+            .compactMap { nonEmptyText($0) }
+            .joined(separator: ".")
+    }
+
+    private static func toolCallTranscriptText(for toolCall: ReviewTimelineDocument.ToolCall) -> String {
+        [
+            toolCallLabel(for: toolCall),
+            toolCall.progress,
+            toolCall.result,
+            toolCall.error,
+        ]
+            .compactMap { nonEmptyText($0) }
+            .joined(separator: "\n")
+    }
+
+    private static func nonEmptyText(_ text: String?) -> String? {
+        guard let text, text.isEmpty == false else {
+            return nil
+        }
+        return text
     }
 }
