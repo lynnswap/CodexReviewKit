@@ -170,7 +170,20 @@ struct AppServerWireEventTests {
               "id": "cmd-1",
               "type": "commandExecution",
               "command": "swift test",
-              "cwd": "/tmp/project"
+              "cwd": "/tmp/project",
+              "commandActions": [
+                {
+                  "type": "read",
+                  "command": "cat Package.swift",
+                  "name": "Package.swift",
+                  "path": "Package.swift"
+                },
+                {
+                  "type": "search",
+                  "command": "rg ReviewTimeline",
+                  "query": "ReviewTimeline"
+                }
+              ]
             }
           }
         }
@@ -188,6 +201,19 @@ struct AppServerWireEventTests {
             #expect(command.command.hasPrefix("$") == false)
             #expect(command.cwd == "/tmp/project")
             #expect(command.output.isEmpty)
+            #expect(command.actions == [
+                .init(
+                    kind: .read,
+                    command: "cat Package.swift",
+                    name: "Package.swift",
+                    path: "Package.swift"
+                ),
+                .init(
+                    kind: .search,
+                    command: "rg ReviewTimeline",
+                    query: "ReviewTimeline"
+                )
+            ])
         } else {
             Issue.record("expected command content")
         }

@@ -1184,6 +1184,62 @@ struct CodexReviewStoreCommandTests {
         #expect(allRead.logs.map(\.text) == ["Build complete\n"])
     }
 
+    @Test func timelineProjectedReadReviewPreservesCommandActions() throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+        let action = ReviewLogEntry.Metadata.CommandAction(
+            kind: .read,
+            command: "cat Package.swift",
+            name: "Package.swift",
+            path: "Package.swift"
+        )
+        let timelineAction = ReviewTimelineItem.CommandAction(
+            kind: .read,
+            command: "cat Package.swift",
+            name: "Package.swift",
+            path: "Package.swift"
+        )
+        let job = CodexReviewJob.makeForTesting(
+            id: "job-1",
+            cwd: "/tmp/project",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running",
+            logEntries: [
+                .init(
+                    kind: .command,
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    text: "$ cat Package.swift",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        itemID: "cmd-1",
+                        command: "cat Package.swift",
+                        commandActions: [action]
+                    )
+                )
+            ]
+        )
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [.init(cwd: "/tmp/project")],
+            jobs: [job]
+        )
+
+        let item = try #require(job.timeline.item(for: "cmd-1"))
+        if case .command(let command) = item.content {
+            #expect(command.actions == [timelineAction])
+        } else {
+            Issue.record("expected command timeline content")
+        }
+
+        let read = try store.readReview(jobID: "job-1", logFilter: .all)
+        #expect(read.logs.map(\.text) == ["$ cat Package.swift"])
+        #expect(read.logs.first?.metadata?.commandActions == [action])
+    }
+
     @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(

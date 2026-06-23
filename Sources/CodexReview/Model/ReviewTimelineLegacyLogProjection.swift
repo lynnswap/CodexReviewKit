@@ -200,7 +200,8 @@ private extension ReviewLogEntry {
         item: ReviewTimelineItem,
         command: ReviewTimelineItem.Command
     ) -> ReviewLogEntry.Metadata {
-        .init(
+        let commandActions = command.actions.map(ReviewLogEntry.Metadata.CommandAction.init)
+        return .init(
             sourceType: "commandExecution",
             status: item.phase.rawValue,
             itemID: item.id.rawValue,
@@ -210,7 +211,20 @@ private extension ReviewLogEntry {
             startedAt: item.startedAt,
             completedAt: item.completedAt,
             durationMs: item.durationMs,
+            commandActions: commandActions.isEmpty ? nil : commandActions,
             commandStatus: item.phase.rawValue
+        )
+    }
+}
+
+private extension ReviewLogEntry.Metadata.CommandAction {
+    init(_ action: ReviewTimelineItem.CommandAction) {
+        self.init(
+            kind: .init(rawValue: action.kind.rawValue) ?? .unknown,
+            command: action.command,
+            name: action.name,
+            path: action.path,
+            query: action.query
         )
     }
 }

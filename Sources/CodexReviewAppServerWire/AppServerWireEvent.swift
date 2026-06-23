@@ -965,6 +965,59 @@ public extension AppServerWireReviewNotification {
         }
     }
 
+    struct CommandAction: Decodable, Equatable, Sendable {
+        public var kind: ReviewCommandActionKind
+        public var command: String?
+        public var name: String?
+        public var path: String?
+        public var query: String?
+
+        public init(
+            kind: ReviewCommandActionKind,
+            command: String? = nil,
+            name: String? = nil,
+            path: String? = nil,
+            query: String? = nil
+        ) {
+            self.kind = kind
+            self.command = command
+            self.name = name
+            self.path = path
+            self.query = query
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case kind
+            case command
+            case name
+            case path
+            case query
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let rawKind = try container.decodeStringIfPresent(forKey: .type)
+                ?? container.decodeStringIfPresent(forKey: .kind)
+                ?? ReviewCommandActionKind.unknown.rawValue
+            self.kind = .init(rawValue: rawKind)
+            self.command = try container.decodeStringIfPresent(forKey: .command)
+            self.name = try container.decodeStringIfPresent(forKey: .name)
+            self.path = try container.decodeStringIfPresent(forKey: .path)
+            self.query = try container.decodeStringIfPresent(forKey: .query)
+        }
+
+        var timelineAction: ReviewTimelineItem.CommandAction {
+            .init(
+                kind: kind,
+                command: command,
+                name: name,
+                path: path,
+                query: query
+            )
+        }
+    }
+
     struct Item: Decodable, Equatable, Sendable {
         public var id: String
         public var type: ReviewItemKind
@@ -977,6 +1030,7 @@ public extension AppServerWireReviewNotification {
         public var hasAggregatedOutputField: Bool
         public var exitCode: Int?
         public var durationMs: Int?
+        public var commandActions: [CommandAction]
         public var status: String?
         public var server: String?
         public var tool: String?
@@ -1017,6 +1071,7 @@ public extension AppServerWireReviewNotification {
             hasAggregatedOutputField: Bool = false,
             exitCode: Int? = nil,
             durationMs: Int? = nil,
+            commandActions: [CommandAction] = [],
             status: String? = nil,
             server: String? = nil,
             tool: String? = nil,
@@ -1048,6 +1103,7 @@ public extension AppServerWireReviewNotification {
             self.hasAggregatedOutputField = hasAggregatedOutputField
             self.exitCode = exitCode
             self.durationMs = durationMs
+            self.commandActions = commandActions
             self.status = status
             self.server = server
             self.tool = tool
@@ -1080,6 +1136,7 @@ public extension AppServerWireReviewNotification {
             case aggregatedOutput
             case exitCode
             case durationMs
+            case commandActions
             case status
             case server
             case tool
@@ -1112,6 +1169,7 @@ public extension AppServerWireReviewNotification {
             self.aggregatedOutput = try container.decodeStringIfPresent(forKey: .aggregatedOutput)?.nilIfEmpty
             self.exitCode = try? container.decodeIfPresent(Int.self, forKey: .exitCode)
             self.durationMs = try? container.decodeIfPresent(Int.self, forKey: .durationMs)
+            self.commandActions = (try? container.decodeIfPresent([CommandAction].self, forKey: .commandActions)) ?? []
             self.status = try container.decodeStringIfPresent(forKey: .status)
             self.server = try container.decodeStringIfPresent(forKey: .server)
             self.tool = try container.decodeStringIfPresent(forKey: .tool)
@@ -1214,7 +1272,8 @@ public extension AppServerWireReviewNotification {
                     command: command ?? "",
                     cwd: cwd,
                     output: aggregatedOutput ?? fallbackDelta ?? "",
-                    exitCode: exitCode
+                    exitCode: exitCode,
+                    actions: commandActions.map(\.timelineAction)
                 ))
             case .fileChange:
                 return .fileChange(.init(title: path ?? "", output: aggregatedOutput ?? text ?? fallbackDelta ?? ""))

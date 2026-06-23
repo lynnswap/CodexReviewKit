@@ -1274,13 +1274,26 @@ struct AppServerClientTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         ))
         var iterator = await eventSequence(backend, run, includingDomainEvents: true).makeAsyncIterator()
+        let action = ReviewLogEntry.Metadata.CommandAction(
+            kind: .read,
+            command: "cat Package.swift",
+            name: "Package.swift",
+            path: "Package.swift"
+        )
 
         try await transport.emitServerNotification(
             method: "item/started",
             params: TestItemNotification(
                 threadID: "review-thread",
                 turnID: "turn-1",
-                item: .init(type: "commandExecution", id: "cmd-1", command: "swift test")
+                item: .init(
+                    type: "commandExecution",
+                    id: "cmd-1",
+                    command: "swift test",
+                    commandActions: [
+                        .read(command: "cat Package.swift", name: "Package.swift", path: "Package.swift")
+                    ]
+                )
             )
         )
 
@@ -1300,6 +1313,9 @@ struct AppServerClientTests {
             return
         }
         #expect(command.command == "swift test")
+        #expect(command.actions == [
+            .init(kind: .read, command: "cat Package.swift", name: "Package.swift", path: "Package.swift")
+        ])
 
         guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = try await iterator.next() else {
             Issue.record("expected compatible legacy log entry")
@@ -1310,6 +1326,7 @@ struct AppServerClientTests {
         #expect(groupID == "cmd-1")
         #expect(replacesGroup)
         #expect(metadata?.sourceType == "commandExecution")
+        #expect(metadata?.commandActions == [action])
     }
 
     @Test func backendFlushesPendingStreamedLogsBeforeFollowingDomainEvents() async throws {
