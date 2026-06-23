@@ -533,7 +533,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func replaceLogEntries(_ entries: [ReviewLogEntry], resetDirectTimeline: Bool = false) {
-        let trimmedState = Self.trimmedLogState(entries: entries)
+        let normalizedEntries = entries.map {
+            $0.clampingUnownedRetainedMetadata(maxBytes: Self.logLimitBytes)
+        }
+        let trimmedState = Self.trimmedLogState(entries: normalizedEntries)
         logEntries = trimmedState.entries
         logState = trimmedState.logState
         if resetDirectTimeline {
@@ -556,6 +559,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func appendLogEntry(_ entry: ReviewLogEntry, suppressTimelineProjection: Bool = false) {
+        let entry = entry.clampingUnownedRetainedMetadata(maxBytes: Self.logLimitBytes)
         let supportsIncrementalAppend = logState.supportsIncrementalAppend(entry)
         if supportsIncrementalAppend {
             logState.append(entry)
@@ -815,7 +819,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private nonisolated static func trimmedLogState(entries initialEntries: [ReviewLogEntry]) -> TrimmedLogState {
-        var entries = initialEntries
+        var entries = initialEntries.map {
+            $0.clampingUnownedRetainedMetadata(maxBytes: logLimitBytes)
+        }
         var logState = LogState(entries: entries)
 
         while logState.cappedBytes > logLimitBytes {
@@ -932,7 +938,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             groupID: entry.groupID,
             replacesGroup: entry.replacesGroup,
             text: truncatedText,
-            metadata: entry.metadata,
+            metadata: entry.metadata?.truncatingRetainedText(from: entry.text, to: truncatedText),
             timestamp: entry.timestamp
         )
         return trimmedEntries
@@ -1118,6 +1124,25 @@ public final class CodexReviewJob: Identifiable, Hashable {
 }
 
 private extension ReviewLogEntry {
+    func clampingUnownedRetainedMetadata(maxBytes: Int) -> ReviewLogEntry {
+        guard let metadata else {
+            return self
+        }
+        let clampedMetadata = metadata.clampingUnownedRetainedText(entryText: text, maxBytes: maxBytes)
+        guard clampedMetadata != metadata else {
+            return self
+        }
+        return ReviewLogEntry(
+            id: id,
+            kind: kind,
+            groupID: groupID,
+            replacesGroup: replacesGroup,
+            text: text,
+            metadata: clampedMetadata,
+            timestamp: timestamp
+        )
+    }
+
     var isActiveCommandEntry: Bool {
         guard kind == .command else {
             return false
@@ -1178,6 +1203,70 @@ private extension ReviewLogEntry {
             return trimmed.nilIfEmpty
         }
         return String(trimmed.dropFirst(2)).nilIfEmpty
+    }
+}
+
+private extension ReviewLogEntry.Metadata {
+    func clampingUnownedRetainedText(entryText: String, maxBytes: Int) -> Self {
+        Self(
+            sourceType: sourceType,
+            title: title,
+            status: status,
+            detail: detail,
+            itemID: itemID,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs,
+            commandActions: commandActions,
+            commandStatus: commandStatus,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: Self.clampedUnownedRetainedText(resultText, entryText: entryText, maxBytes: maxBytes),
+            errorText: Self.clampedUnownedRetainedText(errorText, entryText: entryText, maxBytes: maxBytes)
+        )
+    }
+
+    func truncatingRetainedText(from originalText: String, to truncatedText: String) -> Self {
+        Self(
+            sourceType: sourceType,
+            title: title,
+            status: status,
+            detail: detail,
+            itemID: itemID,
+            command: command,
+            cwd: cwd,
+            exitCode: exitCode,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs,
+            commandActions: commandActions,
+            commandStatus: commandStatus,
+            namespace: namespace,
+            server: server,
+            tool: tool,
+            query: query,
+            path: path,
+            resultText: resultText == originalText ? truncatedText : resultText,
+            errorText: errorText == originalText ? truncatedText : errorText
+        )
+    }
+
+    private static func clampedUnownedRetainedText(_ text: String?, entryText: String, maxBytes: Int) -> String? {
+        guard let text else {
+            return nil
+        }
+        guard text != entryText,
+              text.utf8.count > maxBytes
+        else {
+            return text
+        }
+        return nil
     }
 }
 

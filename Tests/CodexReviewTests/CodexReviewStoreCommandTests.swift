@@ -817,6 +817,7 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(search.query == "ReviewTimeline")
             #expect((search.result ?? "").count < longResult.count)
+            #expect((search.result ?? "").isEmpty == false)
             #expect(search.result != "Web search completed: ReviewTimeline.")
         }
     }
@@ -876,6 +877,51 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(search.result == "short result")
+        }
+    }
+
+    @Test func unownedLargeResultMetadataIsDroppedBeforeLegacyTimelineProjection() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let longResult = String(repeating: "Search result\n", count: 30_000)
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: "Web search completed: ReviewTimeline.",
+                groupID: "search-1",
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "webSearch",
+                    title: "Web search",
+                    status: "completed",
+                    query: "ReviewTimeline",
+                    resultText: longResult
+                )
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.count == 1
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            let entry = try #require(job.logEntries.first)
+            #expect(entry.metadata?.resultText == nil)
+            let item = try #require(job.timeline.items.first)
+            guard case .search(let search) = item.content else {
+                Issue.record("expected search timeline content")
+                return
+            }
+            #expect(search.query == "ReviewTimeline")
+            #expect(search.result == nil)
         }
     }
 
@@ -1113,6 +1159,68 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect((toolCall.error ?? "").count < longError.count)
+            #expect((toolCall.error ?? "").isEmpty == false)
+        }
+    }
+
+    @Test func directToolCallResultTextIsTrimmedWhenReviewLogLimitApplies() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
+                waitTimeout: .milliseconds(20)
+            )
+            _ = try await result
+
+            let itemID = ReviewTimelineItem.ID(rawValue: "tool-result-1")
+            let longResult = String(repeating: "result", count: 60_000)
+            await backend.yield(.domainEvents([
+                .itemUpdated(.init(
+                    id: itemID,
+                    kind: .mcpToolCall,
+                    family: .tool,
+                    phase: .completed,
+                    content: .toolCall(.init(
+                        server: "codex_review",
+                        tool: "review_read",
+                        result: longResult
+                    ))
+                )),
+            ], legacyProjectionSuppressionCount: 1))
+            await backend.yield(.logEntry(
+                kind: .toolCall,
+                text: longResult,
+                groupID: itemID.rawValue,
+                replacesGroup: true,
+                metadata: .init(
+                    sourceType: "mcpToolCall",
+                    title: "codex_review.review_read",
+                    status: "completed",
+                    server: "codex_review",
+                    tool: "review_read",
+                    resultText: longResult
+                )
+            ))
+            #expect(await waitUntil {
+                store.job(id: "job-1")?.logEntries.contains {
+                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                } == true
+            })
+
+            let job = try #require(store.job(id: "job-1"))
+            #expect(job.applyReviewLogLimit())
+            let item = try #require(job.timeline.item(for: itemID))
+            guard case .toolCall(let toolCall) = item.content else {
+                Issue.record("expected tool call timeline content")
+                return
+            }
+            #expect((toolCall.result ?? "").count < longResult.count)
+            #expect((toolCall.result ?? "").isEmpty == false)
         }
     }
 
