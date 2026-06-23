@@ -293,6 +293,130 @@ public struct CodexThread: Identifiable, Sendable {
     }
 }
 
+/// The target that `codex app-server` should review.
+public enum CodexReviewTarget: Codable, Hashable, Sendable {
+    case uncommittedChanges
+    case baseBranch(String)
+    case commit(sha: String, title: String? = nil)
+    case custom(instructions: String)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case branch
+        case sha
+        case title
+        case instructions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        switch type {
+        case "uncommittedChanges":
+            self = .uncommittedChanges
+        case "baseBranch":
+            self = .baseBranch(try container.decode(String.self, forKey: .branch))
+        case "commit":
+            self = .commit(
+                sha: try container.decode(String.self, forKey: .sha),
+                title: try container.decodeIfPresent(String.self, forKey: .title)
+            )
+        case "custom":
+            self = .custom(instructions: try container.decode(String.self, forKey: .instructions))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: container,
+                debugDescription: "Unknown review target type: \(type)"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .uncommittedChanges:
+            try container.encode("uncommittedChanges", forKey: .type)
+        case .baseBranch(let branch):
+            try container.encode("baseBranch", forKey: .type)
+            try container.encode(branch, forKey: .branch)
+        case .commit(let sha, let title):
+            try container.encode("commit", forKey: .type)
+            try container.encode(sha, forKey: .sha)
+            try container.encodeIfPresent(title, forKey: .title)
+        case .custom(let instructions):
+            try container.encode("custom", forKey: .type)
+            try container.encode(instructions, forKey: .instructions)
+        }
+    }
+}
+
+/// How `review/start` should deliver review work.
+public enum CodexReviewDelivery: String, Codable, Equatable, Sendable {
+    case inline
+    case detached
+}
+
+/// A review run started by `codex app-server`.
+public struct CodexReviewSession: Identifiable, Sendable {
+    public var id: CodexTurnID {
+        turnID
+    }
+
+    public let threadID: CodexThreadID
+    public let turnID: CodexTurnID
+    public let reviewThreadID: CodexThreadID
+    public let response: CodexResponseStream
+
+    private let eventThread: CodexThread
+
+    package init(
+        threadID: CodexThreadID,
+        turnID: CodexTurnID,
+        reviewThreadID: CodexThreadID,
+        response: CodexResponseStream,
+        eventThread: CodexThread
+    ) {
+        self.threadID = threadID
+        self.turnID = turnID
+        self.reviewThreadID = reviewThreadID
+        self.response = response
+        self.eventThread = eventThread
+    }
+
+    public var events: CodexThreadEventSequence {
+        eventThread.events
+    }
+
+    public var messages: CodexThreadMessageSequence {
+        eventThread.messages
+    }
+
+    public var transcriptUpdates: CodexThreadTranscriptSequence {
+        eventThread.transcriptUpdates
+    }
+
+    public var logEntries: CodexThreadLogSequence {
+        eventThread.logEntries
+    }
+
+    public func collect() async throws -> CodexResponse {
+        try await response.collect()
+    }
+
+    public func interrupt() async throws {
+        try await response.interrupt()
+    }
+
+    public func steer(with prompt: CodexPrompt) async throws {
+        try await response.steer(with: prompt)
+    }
+
+    public func steer(with prompt: String) async throws {
+        try await response.steer(with: prompt)
+    }
+}
+
 public struct CodexTurnID: RawRepresentable, Hashable, Codable, Sendable, ExpressibleByStringLiteral {
     public var rawValue: String
 

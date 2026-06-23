@@ -180,6 +180,33 @@ the original `rawPayload`. Use the raw payload when a product needs
 full-fidelity rendering for app-server fields that the current Kit version does
 not yet model directly.
 
+## Reviews
+
+`review/start` is part of the app-server surface, so CodexAppServerKit exposes
+it as a thread operation. A review session provides the review turn response and
+the review thread event streams. If app-server detaches the review into a
+separate thread, `logEntries`, `events`, and `transcriptUpdates` are bound to
+that review thread automatically.
+
+```swift
+let review = try await thread.startReview(target: .baseBranch("main"))
+
+for try await entry in review.logEntries {
+    renderReviewLog(entry)
+}
+
+let response = try await review.collect()
+print(response.finalAnswer ?? "")
+```
+
+Review targets are Swift domain values:
+
+```swift
+try await thread.startReview(target: .uncommittedChanges)
+try await thread.startReview(target: .commit(sha: sha, title: title))
+try await thread.startReview(target: .custom(instructions: instructions))
+```
+
 ## Responses
 
 `CodexResponse` is the final result from `respond` or `ResponseStream.collect()`.
@@ -254,6 +281,8 @@ The public boundary is:
 - `CodexThreadID`
 - `CodexTurnID`
 - `CodexThread`
+- `CodexReviewTarget`
+- `CodexReviewSession`
 - `CodexResponse`
 - `CodexResponseStream`
 - `CodexGenerationOptions`

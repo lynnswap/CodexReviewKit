@@ -156,11 +156,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         registerReviewEventSession(session, for: provisionalRun)
         control.recordThreadStarted(threadID: thread.threadID)
 
-        let review: AppServerReviewStart.Response
+        let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.send(AppServerReviewStart.Request(
-                params: .init(threadID: thread.threadID, target: request.request.target)
+            review = try await client.send(AppServerAPI.Review.Start.Request(
+                params: .init(
+                    threadID: thread.threadID,
+                    target: request.request.target.appServerReviewTarget
+                )
             ))
         } catch {
             reviewStartRequestsInFlight -= 1
@@ -356,11 +359,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         registerReviewEventSession(session, for: provisionalRun)
 
-        let review: AppServerReviewStart.Response
+        let review: AppServerAPI.Review.Start.Response
         reviewStartRequestsInFlight += 1
         do {
-            review = try await client.send(AppServerReviewStart.Request(
-                params: .init(threadID: interruptedRun.threadID, target: request.request.target)
+            review = try await client.send(AppServerAPI.Review.Start.Request(
+                params: .init(
+                    threadID: interruptedRun.threadID,
+                    target: request.request.target.appServerReviewTarget
+                )
             ))
         } catch {
             reviewStartRequestsInFlight -= 1

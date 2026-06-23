@@ -111,7 +111,7 @@ struct ArchitectureFenceTests {
                 relativeRoot: checkedRoot,
                 forbiddenFragments: [
                     "extension AppServerAPI {",
-                    "AppServerAPI.Review",
+                    "AppServerReviewStart",
                 ]
             )
         }

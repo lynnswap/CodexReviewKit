@@ -56,6 +56,66 @@ struct CodexAppServerKitTests {
         #expect(params.sandbox == "workspace-write")
     }
 
+    @Test func threadStartReviewSerializesTargetAndStreamsReviewThreadLogs() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let review = try await thread.startReview(
+            target: .baseBranch("main"),
+            delivery: .detached
+        )
+
+        #expect(review.threadID == "thread-1")
+        #expect(review.turnID == "turn-review")
+        #expect(review.reviewThreadID == "thread-review")
+
+        let request = try #require(await transport.recordedRequests().first)
+        #expect(request.method == "review/start")
+        let params = try JSONDecoder().decode(
+            AppServerAPI.Review.Start.Params.self,
+            from: request.params
+        )
+        #expect(params.threadID == "thread-1")
+        #expect(params.target == .baseBranch("main"))
+        #expect(params.delivery == .detached)
+
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: ThreadItemParams(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    id: "command-1",
+                    type: "commandExecution",
+                    command: "swift test",
+                    aggregatedOutput: "passed",
+                    status: "completed"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: ThreadIDParams(threadID: "thread-review")
+        )
+
+        let logs = try await collect(review.logEntries)
+        #expect(logs.count == 1)
+        #expect(logs.first?.turnID == "turn-review")
+        #expect(logs.first?.item?.kind == .commandExecution)
+        #expect(logs.first?.item?.text == "passed")
+    }
+
     @Test func promptPartsEncodeToAppServerInputItems() {
         let prompt = CodexPrompt(parts: [
             .text("Describe these files."),

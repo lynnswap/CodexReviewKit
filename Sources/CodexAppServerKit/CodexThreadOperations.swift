@@ -77,6 +77,46 @@ extension CodexThread {
         try await streamResponse(to: try prompt(), options: options)
     }
 
+    /// Starts a Codex code review in this thread.
+    ///
+    /// The returned session exposes both the response stream for the review
+    /// turn and thread-level event streams, including log entries. When the
+    /// app-server uses a detached review thread, those event streams are bound
+    /// to that review thread.
+    public func startReview(
+        target: CodexReviewTarget,
+        delivery: CodexReviewDelivery = .inline,
+        transcriptErrorHandlingPolicy: CodexTranscriptErrorHandlingPolicy = .preserveTranscript
+    ) async throws -> CodexReviewSession {
+        let response = try await client.send(AppServerAPI.Review.Start.Request(
+            params: .init(threadID: id.rawValue, target: target, delivery: delivery)
+        ))
+        let reviewThreadID = response.reviewThreadID.map(CodexThreadID.init(rawValue:)) ?? id
+        let turn = CodexTurn(
+            id: .init(rawValue: response.turnID),
+            threadID: reviewThreadID,
+            client: client,
+            router: router
+        )
+        let eventThread = CodexThread(
+            id: reviewThreadID,
+            workspace: workspace,
+            model: model,
+            client: client,
+            router: router
+        )
+        return .init(
+            threadID: id,
+            turnID: turn.id,
+            reviewThreadID: reviewThreadID,
+            response: .init(
+                turn: turn,
+                transcriptErrorHandlingPolicy: transcriptErrorHandlingPolicy
+            ),
+            eventThread: eventThread
+        )
+    }
+
     package func startTurn(
         _ prompt: CodexPrompt,
         options: CodexGenerationOptions = .init()
