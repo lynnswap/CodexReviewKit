@@ -2893,25 +2893,9 @@ private struct AppServerThreadItem: Decodable, Sendable {
         case "userMessage":
             return []
         case "agentMessage":
-            return text.map {
-                [logEntry(
-                    kind: .agentMessage,
-                    text: $0,
-                    replacesGroup: true,
-                    title: nil,
-                    status: completedStatus
-                )]
-            } ?? []
+            return text.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "exitedReviewMode":
-            return review.map {
-                [logEntry(
-                    kind: .agentMessage,
-                    text: $0,
-                    replacesGroup: true,
-                    title: nil,
-                    status: completedStatus
-                )]
-            } ?? []
+            return review.map { [.logEntry(kind: .agentMessage, text: $0, groupID: id, replacesGroup: true)] } ?? []
         case "commandExecution":
             if let output = aggregatedOutput?.nilIfEmpty ?? lifecycle?.streamedOutputIfAvailable {
                 var events: [CodexReviewBackendModel.Review.Event] = []
