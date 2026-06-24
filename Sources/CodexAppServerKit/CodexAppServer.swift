@@ -346,6 +346,41 @@ public actor CodexAppServer {
             ))
     }
 
+    package nonisolated func threadHandle(
+        id: CodexThreadID,
+        workspace: URL? = nil,
+        model: String? = nil
+    ) -> CodexThread {
+        CodexThread(
+            id: id,
+            workspace: workspace,
+            model: model,
+            client: client,
+            router: router
+        )
+    }
+
+    package func rollbackThread(_ id: CodexThreadID, turnCount: Int = 1) async throws {
+        let _: EmptyResponse = try await client.send(
+            AppServerAPI.Thread.Rollback.Request(
+                params: .init(threadID: id.rawValue, numTurns: turnCount)
+            ))
+    }
+
+    package func cleanBackgroundTerminals(in id: CodexThreadID) async throws {
+        let _: EmptyResponse = try await client.send(
+            AppServerAPI.Thread.BackgroundTerminals.Clean.Request(
+                params: .init(threadID: id.rawValue)
+            ))
+    }
+
+    package func unsubscribeThread(_ id: CodexThreadID) async throws {
+        let _: AppServerAPI.Thread.Unsubscribe.Response = try await client.send(
+            AppServerAPI.Thread.Unsubscribe.Request(
+                params: .init(threadID: id.rawValue)
+            ))
+    }
+
     /// Lists Codex threads visible to the app-server account.
     ///
     /// - Parameter query: Paging and filtering options.
@@ -596,24 +631,34 @@ public actor CodexAppServer {
         case .apiKey:
             return .apiKey
         case .chatgpt(let loginID, let authURL, _):
-            guard let url = URL(string: authURL) else {
-                throw CodexAppServerError.jsonRPC(
-                    code: -32602, message: "Invalid ChatGPT authentication URL.")
-            }
-            return .chatGPT(id: .init(rawValue: loginID), authenticationURL: url)
+            return try .chatGPT(
+                id: .init(rawValue: loginID),
+                authenticationURL: webAuthenticationURL(authURL, field: "authUrl")
+            )
         case .chatgptDeviceCode(let loginID, let verificationURL, let userCode):
-            guard let url = URL(string: verificationURL) else {
-                throw CodexAppServerError.jsonRPC(
-                    code: -32602, message: "Invalid ChatGPT device-code verification URL.")
-            }
             return .chatGPTDeviceCode(
                 id: .init(rawValue: loginID),
-                verificationURL: url,
+                verificationURL: try webAuthenticationURL(verificationURL, field: "verificationUrl"),
                 userCode: userCode
             )
         case .chatgptAuthTokens:
             return .apiKey
         }
+    }
+
+    private nonisolated static func webAuthenticationURL(_ string: String, field: String) throws -> URL {
+        guard let components = URLComponents(string: string),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              components.host?.isEmpty == false,
+              let url = components.url
+        else {
+            throw CodexAppServerError.jsonRPC(
+                code: -32602,
+                message: "Invalid ChatGPT authentication URL in \(field)."
+            )
+        }
+        return url
     }
 
     private nonisolated static func accountEvent(
