@@ -10,13 +10,19 @@ package actor CodexAppServerNotificationRouter {
         var turnID: CodexTurnID?
     }
 
+    private struct CommandOutputKey: Hashable {
+        var threadID: CodexThreadID?
+        var turnID: CodexTurnID?
+        var itemID: String
+    }
+
     private let client: AppServerClient
     private var routerTask: Task<Void, Never>?
     private var threadIDByTurnID: [CodexTurnID: CodexThreadID] = [:]
     private var reviewThreadIDs: Set<CodexThreadID> = []
     private var turnHistoryByTurnID: [CodexTurnID: [CodexTurnEvent]] = [:]
     private var threadHistoryByThreadID: [CodexThreadID: [CodexThreadEvent]] = [:]
-    private var commandOutputByItemID: [String: String] = [:]
+    private var commandOutputByKey: [CommandOutputKey: String] = [:]
     private var turnSubscribersByTurnID: [CodexTurnID: [UUID: Subscriber<CodexTurnEvent>]] = [:]
     private var threadSubscribersByThreadID: [CodexThreadID: [UUID: Subscriber<CodexThreadEvent>]] =
         [:]
@@ -124,7 +130,7 @@ package actor CodexAppServerNotificationRouter {
         }
 
         let reviewLogItem = context.threadID != nil || context.turnID != nil
-            ? reviewLogItem(from: notification)
+            ? reviewLogItem(from: notification, context: context)
             : nil
 
         if let threadID = context.threadID {
@@ -475,7 +481,10 @@ package actor CodexAppServerNotificationRouter {
         return payload.item.threadItem
     }
 
-    private func reviewLogItem(from notification: JSONRPC.Notification) -> CodexThreadItem? {
+    private func reviewLogItem(
+        from notification: JSONRPC.Notification,
+        context: NotificationContext
+    ) -> CodexThreadItem? {
         guard let notification = try? AppServerReviewNotification(
             method: notification.method,
             paramsData: notification.params
@@ -487,22 +496,30 @@ package actor CodexAppServerNotificationRouter {
         }
         switch notification.method {
         case .commandExecutionOutputDelta, .commandExecOutputDelta, .processOutputDelta:
-            item = accumulatingCommandOutput(in: item)
+            item = accumulatingCommandOutput(in: item, context: context)
         default:
             break
         }
         return item
     }
 
-    private func accumulatingCommandOutput(in item: CodexThreadItem) -> CodexThreadItem {
+    private func accumulatingCommandOutput(
+        in item: CodexThreadItem,
+        context: NotificationContext
+    ) -> CodexThreadItem {
         guard case .command(var command) = item.content,
               let delta = command.outputDelta ?? command.output
         else {
             return item
         }
         var item = item
-        let output = (commandOutputByItemID[item.id] ?? "") + delta
-        commandOutputByItemID[item.id] = output
+        let key = CommandOutputKey(
+            threadID: context.threadID,
+            turnID: context.turnID,
+            itemID: item.id
+        )
+        let output = (commandOutputByKey[key] ?? "") + delta
+        commandOutputByKey[key] = output
         command.output = output
         command.outputDelta = delta
         item.content = .command(command)

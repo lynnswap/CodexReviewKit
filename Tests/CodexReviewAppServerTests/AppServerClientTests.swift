@@ -1314,6 +1314,70 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Done"))
     }
 
+    @Test func appServerBackendScopesCommandOutputDeltasByReviewThread() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread-1")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let firstAttempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-2", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-2", reviewThreadID: "review-thread-2")
+        let secondAttempt = try await backend.startReview(.init(
+            jobID: "job-2",
+            sessionID: "session-2",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread-1",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "first"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread-2",
+                turnID: "turn-2",
+                itemID: "cmd-1",
+                delta: "second"
+            )
+        )
+
+        var firstIterator = await eventSequence(backend, firstAttempt, includingDomainEvents: true).makeAsyncIterator()
+        #expect(try await firstIterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
+        guard case .domainEvents(let firstDomainEvents, _) = try await firstIterator.next(),
+              case .itemUpdated(let firstSeed) = try #require(firstDomainEvents.first),
+              case .command(let firstCommand) = firstSeed.content
+        else {
+            Issue.record("expected first command output domain event")
+            return
+        }
+        #expect(firstCommand.output == "first")
+
+        var secondIterator = await eventSequence(backend, secondAttempt, includingDomainEvents: true).makeAsyncIterator()
+        #expect(try await secondIterator.next() == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
+        guard case .domainEvents(let secondDomainEvents, _) = try await secondIterator.next(),
+              case .itemUpdated(let secondSeed) = try #require(secondDomainEvents.first),
+              case .command(let secondCommand) = secondSeed.content
+        else {
+            Issue.record("expected second command output domain event")
+            return
+        }
+        #expect(secondCommand.output == "second")
+    }
+
     @Test func appServerBackendInterruptUsesTypedSession() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
