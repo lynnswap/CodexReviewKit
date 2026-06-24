@@ -8,10 +8,6 @@ private let appServerBackendLogger = Logger(
     category: "app-server-backend"
 )
 
-private func appServerTurnThreadID(for run: CodexReviewBackendModel.Review.Run) -> String {
-    run.reviewThreadID?.nilIfEmpty ?? run.threadID
-}
-
 private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
@@ -49,7 +45,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
-        try await appServer.updateConfiguration(Self.configurationPatch(from: change))
+        guard change.updatesModel == false,
+              change.updatesReasoningEffort == false,
+              change.updatesServiceTier == false
+        else {
+            throw CodexReviewAPI.Error.io(
+                "Updating app-server review settings requires a public CodexKit configuration update API."
+            )
+        }
         return try await readSettings()
     }
 
@@ -65,13 +68,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
-        let handle = try await appServer.loginChatGPT(
-            callbackURLScheme: request.nativeWebAuthenticationCallbackScheme
-        )
-        return try handle.backendChallenge(
-            nativeWebAuthenticationCallbackScheme: request.nativeWebAuthenticationCallbackScheme
-        )
+    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+        let handle = try await appServer.loginChatGPT()
+        return try handle.backendChallenge(nativeWebAuthenticationCallbackScheme: nil)
     }
 
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
@@ -83,9 +82,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             guard let url = URL(string: callbackURL) else {
                 throw CodexReviewAPI.Error.io("Invalid ChatGPT authentication callback URL.")
             }
-            try await appServer.completeLogin(
-                id: .init(rawValue: response.challengeID),
-                callbackURL: url
+            _ = url
+            throw CodexReviewAPI.Error.io(
+                "Completing native ChatGPT authentication callbacks requires a public CodexKit login completion API."
             )
         }
         return try await readAuth()
@@ -111,7 +110,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         let session = AppServerReviewEventSession(run: provisionalRun, control: control)
         registerReviewEventSession(session, for: provisionalRun)
-        control.recordThreadStarted(thread)
+        control.recordThreadStarted()
 
         let review: CodexReviewSession
         do {
@@ -206,10 +205,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
         let interruptedRun = token.interruptedRun
-        try await appServer.rollbackThread(.init(rawValue: token.rollbackThreadID), turnCount: 1)
+        let rollbackThread = try await threadHandle(id: token.rollbackThreadID, model: interruptedRun.model)
+        try await rollbackThread.rollback(turnCount: 1)
 
         let control = reviewControl(for: interruptedRun)
-        let thread = reviewThread(for: interruptedRun)
+        let thread = try await reviewThread(for: interruptedRun)
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
@@ -255,10 +255,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        try? await appServer.cleanBackgroundTerminals(in: .init(rawValue: run.threadID))
-        try? await appServer.unsubscribeThread(.init(rawValue: run.threadID))
         for threadID in cleanupThreadIDs {
-            try? await appServer.deleteThread(.init(rawValue: threadID))
+            guard let thread = try? await threadHandle(id: threadID, model: run.model) else {
+                continue
+            }
+            try? await thread.delete()
         }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
@@ -344,27 +345,26 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         let control = AppServerReviewControl()
         if let turnID = run.turnID {
-            control.recordReviewStarted(thread: turnThread(for: run), turnID: turnID)
+            control.recordReviewStarted(turnID: turnID)
         } else {
-            control.recordThreadStarted(reviewThread(for: run))
+            control.recordThreadStarted()
         }
         controlsByThreadID[run.threadID] = control
         return control
     }
 
-    private func reviewThread(for run: CodexReviewBackendModel.Review.Run) -> CodexThread {
-        threadHandle(id: run.threadID, model: run.model)
+    private func reviewThread(for run: CodexReviewBackendModel.Review.Run) async throws -> CodexThread {
+        try await threadHandle(id: run.threadID, model: run.model)
     }
 
-    private func turnThread(for run: CodexReviewBackendModel.Review.Run) -> CodexThread {
-        threadHandle(id: appServerTurnThreadID(for: run), model: run.model)
-    }
-
-    private func threadHandle(id threadID: String, model: String?) -> CodexThread {
+    private func threadHandle(id threadID: String, model: String?) async throws -> CodexThread {
         if let thread = threadsByThreadID[threadID] {
             return thread
         }
-        let thread = appServer.threadHandle(id: .init(rawValue: threadID), model: model)
+        let thread = try await appServer.resumeThread(
+            .init(rawValue: threadID),
+            options: .init(model: model)
+        )
         threadsByThreadID[threadID] = thread
         return thread
     }
@@ -719,13 +719,13 @@ private enum AppServerTypedReviewEventAdapter {
         _ item: CodexThreadItem,
         phase: AppServerTypedItemPhase
     ) -> [CodexReviewBackendModel.Review.Event] {
-        guard item.startsReviewMode == false else {
+        guard item.kind.rawValue != "enteredReviewMode" else {
             return []
         }
-        if phase == .completed, item.finishesReviewMode {
+        if phase == .completed, item.kind.rawValue == "exitedReviewMode" {
             return [.completed(
                 summary: "Succeeded.",
-                result: item.reviewExitResult
+                result: item.text?.nilIfEmpty
             )]
         }
         guard item.kind != .userMessage,
@@ -969,9 +969,9 @@ private enum AppServerTypedReviewEventAdapter {
                 title: nil
             ))
         }
-        let output = command.outputDelta?.nilIfEmpty ?? command.output?.nilIfEmpty
+        let output = command.output?.nilIfEmpty
         if let output {
-            if command.outputDelta != nil || command.command.isEmpty {
+            if command.command.isEmpty {
                 events.append(item.commandOutputDeltaLogEntry(text: output))
             } else {
                 events.append(item.logEntry(
@@ -1589,7 +1589,7 @@ private actor AppServerReviewEventSession {
     private func recordReviewEvent(_ event: CodexReviewBackendModel.Review.Event, controlThreadID: String? = nil) {
         switch event {
         case .started(let turnID, _, _):
-            control.recordTurnStarted(thread: nil, turnID: turnID)
+            control.recordTurnStarted(turnID: turnID)
         case .completed, .failed, .cancelled:
             control.finish()
             appServerBackendLogger.debug(
@@ -1763,37 +1763,7 @@ private final class ReviewCompletionCoordinator {
     }
 }
 
-private extension AppServerCodexReviewBackend {
-    static func configurationPatch(
-        from change: CodexReviewBackendModel.Settings.Change
-    ) -> CodexConfigurationPatch {
-        .init(
-            reviewModel: change.model,
-            reasoningEffort: change.reasoningEffort.map(CodexReasoningEffort.init(rawValue:)),
-            serviceTier: change.serviceTier,
-            updatesReviewModel: change.updatesModel,
-            updatesReasoningEffort: change.updatesReasoningEffort,
-            updatesServiceTier: change.updatesServiceTier
-        )
-    }
-}
-
 private extension CodexAppServerKit.CodexAccount {
-    var backendAccount: CodexReviewBackendModel.Account.Snapshot {
-        let backendKind: CodexReviewBackendModel.Account.Kind =
-            CodexReviewBackendModel.Account.Kind(rawValue: kind.rawValue) ?? .chatGPT
-        return .init(
-            id: CodexReviewBackendModel.Account.ID(id),
-            kind: backendKind,
-            label: label,
-            isActive: true,
-            planType: planType,
-            capabilities: backendKind.capabilities
-        )
-    }
-}
-
-private extension AppServerAPI.Account.Snapshot {
     var backendAccount: CodexReviewBackendModel.Account.Snapshot {
         let backendKind: CodexReviewBackendModel.Account.Kind =
             CodexReviewBackendModel.Account.Kind(rawValue: kind.rawValue) ?? .chatGPT

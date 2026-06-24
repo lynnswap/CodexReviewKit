@@ -130,7 +130,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transport: any JSONRPC.Transport
+        appServer: CodexAppServer
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
@@ -143,7 +143,7 @@ public extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
-            transportFactory: { _ in transport }
+            appServerFactory: { _ in appServer }
         )
     }
 
@@ -162,7 +162,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
+        appServerFactory: @escaping @MainActor @Sendable (URL) async throws -> CodexAppServer
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
@@ -176,9 +176,7 @@ public extension CodexReviewStore {
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 shutdownCleanupTimeout: shutdownCleanupTimeout,
                 appServerRuntimeFactory: { codexHomeURL in
-                    let appServer = try await CodexAppServer(
-                        transport: try await transportFactory(codexHomeURL)
-                    )
+                    let appServer = try await appServerFactory(codexHomeURL)
                     return .init(
                         appServer: appServer,
                         backend: AppServerCodexReviewBackend(appServer: appServer)
@@ -494,8 +492,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+        let recoveryRunsForCleanup = store.reviewRecoveryWaitingJobIDs
+            .sorted()
+            .compactMap { store.activeRuns[$0] }
+        let didCleanup = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+            for run in recoveryRunsForCleanup {
+                await appServerBackend.cleanupReview(run)
+            }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
@@ -505,7 +509,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if didInterrupt == false || didDrainReviewWorkers == false {
+        if didCleanup == false || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }
@@ -827,14 +831,19 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
-            let usesNativeAuthentication = nativeAuthenticationConfiguration != nil && challenge.verificationURL != nil
+            let usesNativeAuthentication = nativeAuthenticationConfiguration != nil
+                && nativeCallbackScheme != nil
+                && challenge.verificationURL != nil
             auth.updatePhase(.signingIn(.init(
                 title: "Sign in to Codex",
                 detail: challenge.signInDetail(nativeAuthentication: usesNativeAuthentication),
                 browserURL: challenge.verificationURL?.absoluteString,
                 userCode: challenge.userCode
             )))
-            guard let nativeAuthenticationConfiguration, challenge.verificationURL != nil else {
+            guard usesNativeAuthentication,
+                  let nativeAuthenticationConfiguration,
+                  challenge.verificationURL != nil
+            else {
                 if let verificationURL = challenge.verificationURL {
                     externalURLOpener(verificationURL)
                 }

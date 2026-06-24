@@ -15,8 +15,8 @@ package struct AppServerReviewInterruption: Equatable, Sendable {
 package final class AppServerReviewControl: @unchecked Sendable {
     private enum Phase {
         case preparing
-        case threadStarted(CodexThread)
-        case reviewStarted(thread: CodexThread?, turnID: String)
+        case threadStarted
+        case reviewStarted(turnID: String)
         case finished
     }
 
@@ -31,43 +31,40 @@ package final class AppServerReviewControl: @unchecked Sendable {
 
     package init() {}
 
-    package func recordThreadStarted(_ thread: CodexThread) {
+    package func recordThreadStarted() {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         guard case .preparing = phase else {
             return
         }
-        phase = .threadStarted(thread)
+        phase = .threadStarted
         reviewSession = nil
     }
 
-    package func recordReviewStarted(thread: CodexThread, turnID: String) {
+    package func recordReviewStarted(turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(thread: thread, turnID: turnID)
+        phase = .reviewStarted(turnID: turnID)
         reviewSession = nil
     }
 
     package func recordReviewStarted(_ reviewSession: CodexReviewSession) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(
-            thread: nil,
-            turnID: reviewSession.turnID.rawValue
-        )
+        phase = .reviewStarted(turnID: reviewSession.turnID.rawValue)
         self.reviewSession = reviewSession
     }
 
-    package func recordTurnStarted(thread: CodexThread?, turnID: String) {
+    package func recordTurnStarted(turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         switch phase {
         case .preparing, .finished:
             return
-        case .threadStarted(let existingThread):
-            phase = .reviewStarted(thread: thread ?? existingThread, turnID: turnID)
-        case .reviewStarted(let existingThread, _):
-            phase = .reviewStarted(thread: thread ?? existingThread, turnID: turnID)
+        case .threadStarted:
+            phase = .reviewStarted(turnID: turnID)
+        case .reviewStarted:
+            phase = .reviewStarted(turnID: turnID)
         }
     }
 
@@ -79,26 +76,15 @@ package final class AppServerReviewControl: @unchecked Sendable {
         switch snapshot.phase {
         case .preparing, .finished:
             return nil
-        case .threadStarted(let thread):
-            return try await interrupt(
-                thread,
-                expectedTurnID: nil,
-                willInterruptActiveTurn: willInterruptActiveTurn
-            )
-        case .reviewStarted(let thread, let turnID):
-            if let reviewSession = snapshot.reviewSession {
-                return try await interrupt(
-                    reviewSession,
-                    expectedTurnID: turnID,
-                    willInterruptActiveTurn: willInterruptActiveTurn
-                )
-            }
-            guard let thread else {
+        case .threadStarted:
+            return nil
+        case .reviewStarted(let turnID):
+            guard let reviewSession = snapshot.reviewSession else {
                 return nil
             }
             return try await interrupt(
-                thread,
-                expectedTurnID: turnID.nilIfEmpty.map(CodexTurnID.init(rawValue:)),
+                reviewSession,
+                expectedTurnID: turnID,
                 willInterruptActiveTurn: willInterruptActiveTurn
             )
         }
@@ -122,42 +108,14 @@ package final class AppServerReviewControl: @unchecked Sendable {
         expectedTurnID: String,
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
     ) async throws -> AppServerReviewInterruption {
-        let interruption = try await reviewSession.interrupt { interruption in
-            guard let willInterruptActiveTurn else {
-                return
-            }
-            await willInterruptActiveTurn(AppServerReviewInterruption(interruption))
-        }
+        let interruption = try await reviewSession.interrupt()
         let reviewInterruption = AppServerReviewInterruption(interruption)
+        if reviewInterruption.turnID != expectedTurnID,
+           let willInterruptActiveTurn {
+            await willInterruptActiveTurn(reviewInterruption)
+        }
         if reviewInterruption.turnID != expectedTurnID {
-            setPhase(
-                .reviewStarted(
-                    thread: nil,
-                    turnID: reviewInterruption.turnID
-                ),
-                reviewSession: reviewSession
-            )
-        }
-        return reviewInterruption
-    }
-
-    private func interrupt(
-        _ thread: CodexThread,
-        expectedTurnID: CodexTurnID?,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
-    ) async throws -> AppServerReviewInterruption {
-        let interruption = try await thread.interruptActiveTurn(
-            expectedTurnID: expectedTurnID,
-            willInterruptActiveTurn: { interruption in
-                guard let willInterruptActiveTurn else {
-                    return
-                }
-                await willInterruptActiveTurn(AppServerReviewInterruption(interruption))
-            }
-        )
-        let reviewInterruption = AppServerReviewInterruption(interruption)
-        if reviewInterruption.turnID != expectedTurnID?.rawValue {
-            setPhase(.reviewStarted(thread: thread, turnID: reviewInterruption.turnID))
+            setPhase(.reviewStarted(turnID: reviewInterruption.turnID), reviewSession: reviewSession)
         }
         return reviewInterruption
     }
