@@ -127,7 +127,6 @@ let package = Package(
                 "CodexAppServerKit",
                 "CodexAppServerKitTesting",
                 "CodexReviewKit",
-                "CodexReviewAppServer",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

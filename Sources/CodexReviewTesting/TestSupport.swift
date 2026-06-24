@@ -2,7 +2,6 @@ import Foundation
 import CodexAppServerKit
 import CodexAppServerKitTesting
 import CodexReviewKit
-import CodexReviewAppServer
 
 package typealias AsyncGate = CodexAppServerTestGate
 package typealias OneShotGate = AsyncGate
