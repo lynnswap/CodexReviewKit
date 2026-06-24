@@ -1233,6 +1233,18 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
         }
         return nil
     }
+
+    package var startsReviewMode: Bool {
+        kind.rawValue == "enteredReviewMode"
+    }
+
+    package var finishesReviewMode: Bool {
+        kind.rawValue == "exitedReviewMode"
+    }
+
+    package var reviewExitResult: String? {
+        text.flatMap { $0.isEmpty ? nil : $0 }
+    }
 }
 
 public struct CodexReasoning: Equatable, Sendable {

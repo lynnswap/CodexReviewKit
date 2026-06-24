@@ -768,6 +768,15 @@ private enum AppServerTypedReviewEventAdapter {
         _ item: CodexThreadItem,
         phase: AppServerTypedItemPhase
     ) -> [CodexReviewBackendModel.Review.Event] {
+        guard item.startsReviewMode == false else {
+            return []
+        }
+        if phase == .completed, item.finishesReviewMode {
+            return [.completed(
+                summary: "Succeeded.",
+                result: item.reviewExitResult
+            )]
+        }
         guard item.kind != .userMessage,
               let seed = timelineSeed(for: item, phase: phase)
         else {
@@ -1000,24 +1009,26 @@ private enum AppServerTypedReviewEventAdapter {
         command: CodexCommand,
         phase: AppServerTypedItemPhase
     ) -> [CodexReviewBackendModel.Review.Event] {
-        guard command.command.isEmpty == false else {
-            return []
-        }
-        var events: [CodexReviewBackendModel.Review.Event] = [
-            item.logEntry(
+        var events: [CodexReviewBackendModel.Review.Event] = []
+        if command.command.isEmpty == false {
+            events.append(item.logEntry(
                 kind: .command,
                 text: "$ \(command.command)",
                 phase: phase,
                 title: nil
-            ),
-        ]
-        if let output = command.output?.nilIfEmpty {
-            events.append(item.logEntry(
-                kind: .commandOutput,
-                text: output,
-                phase: phase,
-                title: nil
             ))
+        }
+        if let output = command.output?.nilIfEmpty {
+            if command.command.isEmpty {
+                events.append(item.commandOutputDeltaLogEntry(text: output))
+            } else {
+                events.append(item.logEntry(
+                    kind: .commandOutput,
+                    text: output,
+                    phase: phase,
+                    title: nil
+                ))
+            }
         }
         return events
     }
@@ -1197,6 +1208,16 @@ private extension CodexThreadItem {
         )
     }
 
+    func commandOutputDeltaLogEntry(text: String) -> CodexReviewBackendModel.Review.Event {
+        .logEntry(
+            kind: .commandOutput,
+            text: text,
+            groupID: id,
+            replacesGroup: false,
+            metadata: reviewLogMetadata(title: "Command output", phase: .updated)
+        )
+    }
+
     private func reviewLogMetadata(
         title: String?,
         phase: AppServerTypedItemPhase
@@ -1324,13 +1345,18 @@ private actor AppServerReviewEventSession {
         }
         cancelTypedReviewStream()
         let precedingEvents = drainPendingStreamedLogEvents()
-        finished = true
-        completionCoordinator.cancelPendingCompletion()
         cancelPendingStreamedLogFlush()
         await emitPrecedingEvents(precedingEvents)
         if let error {
+            finished = true
+            completionCoordinator.cancelPendingCompletion()
             await mailbox.fail(error)
         } else {
+            if await flushPendingCompletion() {
+                finished = true
+                return
+            }
+            finished = true
             await mailbox.finish()
         }
     }
@@ -1401,6 +1427,10 @@ private actor AppServerReviewEventSession {
         metrics.decoded += 1
         events = eventsWithTypedResultFallback(events)
         for event in events {
+            if event.shouldDeferCompletion {
+                completionCoordinator.deferCompletion(event)
+                continue
+            }
             if await emit(event, controlThreadID: converted.controlThreadID) {
                 return
             }
@@ -1594,6 +1624,10 @@ private actor AppServerReviewEventSession {
         guard let event = completionCoordinator.flushPendingCompletion() else {
             return false
         }
+        let events = eventsWithTypedResultFallback([event])
+        guard let event = events.first else {
+            return false
+        }
         noteEmission(event)
         await mailbox.append(event)
         recordReviewEvent(event, controlThreadID: controlThreadID)
@@ -1685,6 +1719,12 @@ private extension CodexReviewBackendModel.Review.Event {
         }
     }
 
+    var shouldDeferCompletion: Bool {
+        guard case .completed(_, let result) = self else {
+            return false
+        }
+        return result?.nilIfEmpty == nil
+    }
 }
 
 private extension Array where Element == CodexReviewBackendModel.Review.Event {

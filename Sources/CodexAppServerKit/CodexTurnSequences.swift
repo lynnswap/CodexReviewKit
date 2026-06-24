@@ -194,15 +194,18 @@ public struct CodexReviewEventSequence: AsyncSequence, Sendable {
         private func isTerminal(_ event: CodexThreadEvent) -> Bool {
             switch event {
             case .turnCompleted(let response):
-                terminalTurnID.map { response.turnID == $0 } ?? true
+                guard terminalTurnID.map({ response.turnID == $0 }) ?? true else {
+                    return false
+                }
+                return response.shouldFinishReviewSequence
             case .turnFailed(let turnID, _):
-                terminalTurnID.map { turnID == $0 } ?? true
+                return terminalTurnID.map { turnID == $0 } ?? true
             case .closed:
-                true
+                return true
             case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
                 .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
                 .unknown:
-                false
+                return false
             }
         }
     }
@@ -287,15 +290,18 @@ public struct CodexReviewLogSequence: AsyncSequence, Sendable {
         private func isTerminal(_ event: CodexThreadEvent) -> Bool {
             switch event {
             case .turnCompleted(let response):
-                terminalTurnID.map { response.turnID == $0 } ?? true
+                guard terminalTurnID.map({ response.turnID == $0 }) ?? true else {
+                    return false
+                }
+                return response.shouldFinishReviewSequence
             case .turnFailed(let turnID, _):
-                terminalTurnID.map { turnID == $0 } ?? true
+                return terminalTurnID.map { turnID == $0 } ?? true
             case .closed:
-                true
+                return true
             case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
                 .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
                 .unknown:
-                false
+                return false
             }
         }
     }
@@ -405,15 +411,18 @@ public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
         private func isTerminal(_ event: CodexThreadEvent) -> Bool {
             switch event {
             case .turnCompleted(let response):
-                terminalTurnID.map { response.turnID == $0 } ?? true
+                guard terminalTurnID.map({ response.turnID == $0 }) ?? true else {
+                    return false
+                }
+                return response.shouldFinishReviewSequence
             case .turnFailed(let turnID, _):
-                terminalTurnID.map { turnID == $0 } ?? true
+                return terminalTurnID.map { turnID == $0 } ?? true
             case .closed:
-                true
+                return true
             case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
                 .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
                 .unknown:
-                false
+                return false
             }
         }
     }
@@ -664,5 +673,20 @@ private struct CodexTranscriptAccumulator {
         itemIndexesByID = Dictionary(
             uniqueKeysWithValues: items.enumerated().map { index, item in (item.id, index) }
         )
+    }
+}
+
+private extension CodexResponse {
+    var shouldFinishReviewSequence: Bool {
+        if errorMessage != nil || status?.isFailure == true {
+            return true
+        }
+        if finalAnswer?.isEmpty == false
+            || transcript.finalAnswer?.isEmpty == false
+            || transcript.responseText?.isEmpty == false
+        {
+            return true
+        }
+        return false
     }
 }

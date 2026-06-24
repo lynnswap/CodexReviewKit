@@ -1117,6 +1117,169 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
     }
 
+    @Test func appServerBackendDefersTurnCompletionUntilReviewExitItem() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(
+                    type: "agentMessage",
+                    id: "msg-1",
+                    text: "Looks good."
+                )
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(
+                    type: "exitedReviewMode",
+                    id: "review-exit",
+                    review: "Looks good."
+                )
+            )
+        )
+
+        var iterator = await eventSequence(backend, attempt, includingDomainEvents: true).makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        guard case .domainEvents(let messageDomainEvents, _) = try await iterator.next() else {
+            Issue.record("expected final message domain event before completion")
+            return
+        }
+        guard case .itemCompleted(let messageSeed) = try #require(messageDomainEvents.first) else {
+            Issue.record("expected final message item completion")
+            return
+        }
+        #expect(messageSeed.id.rawValue == "msg-1")
+        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, _) = try await iterator.next() else {
+            Issue.record("expected final message legacy log")
+            return
+        }
+        #expect(kind == .agentMessage)
+        #expect(text == "Looks good.")
+        #expect(groupID == "msg-1")
+        #expect(replacesGroup == true)
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
+    }
+
+    @Test func appServerBackendPreservesKnownReviewLogNotificationsFromSessionStream() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+        var iterator = await eventSequence(backend, attempt, includingDomainEvents: true).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "building"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/fileChange/patchUpdated",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "patch-1",
+                delta: "Sources/File.swift\n+ change"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(type: "exitedReviewMode", id: "review-exit", review: "Done")
+            )
+        )
+
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        guard case .domainEvents(let commandDomainEvents, _) = try await iterator.next() else {
+            Issue.record("expected command output domain event")
+            return
+        }
+        guard case .itemUpdated(let commandSeed) = try #require(commandDomainEvents.first) else {
+            Issue.record("expected command item update")
+            return
+        }
+        #expect(commandSeed.id.rawValue == "cmd-1")
+        guard case .command(let command) = commandSeed.content else {
+            Issue.record("expected command content")
+            return
+        }
+        #expect(command.output == "building")
+
+        guard case .logEntry(let commandKind, let commandText, let commandGroupID, let commandReplacesGroup, let commandMetadata) = try await iterator.next() else {
+            Issue.record("expected command output legacy log")
+            return
+        }
+        #expect(commandKind == .commandOutput)
+        #expect(commandText == "building")
+        #expect(commandGroupID == "cmd-1")
+        #expect(commandReplacesGroup == false)
+        #expect(commandMetadata?.sourceType == "commandExecution")
+        #expect(commandMetadata?.title == "Command output")
+
+        guard case .domainEvents(let fileDomainEvents, _) = try await iterator.next() else {
+            Issue.record("expected file change domain event")
+            return
+        }
+        guard case .itemUpdated(let fileSeed) = try #require(fileDomainEvents.first) else {
+            Issue.record("expected file change item update")
+            return
+        }
+        #expect(fileSeed.id.rawValue == "patch-1")
+        guard case .fileChange(let fileChange) = fileSeed.content else {
+            Issue.record("expected file change content")
+            return
+        }
+        #expect(fileChange.output == "Sources/File.swift\n+ change")
+
+        guard case .logEntry(let fileKind, let fileText, let fileGroupID, _, let fileMetadata) = try await iterator.next() else {
+            Issue.record("expected file change legacy log")
+            return
+        }
+        #expect(fileKind == .commandOutput)
+        #expect(fileText == "Sources/File.swift\n+ change")
+        #expect(fileGroupID == "patch-1")
+        #expect(fileMetadata?.sourceType == "fileChange")
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Done"))
+    }
+
     @Test func appServerBackendInterruptUsesTypedSession() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")

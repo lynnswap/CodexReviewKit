@@ -307,6 +307,17 @@ package actor CodexAppServerNotificationRouter {
                 return .tokenUsageUpdated(usage)
             }
             return .unknown(raw)
+        case "item/commandExecution/outputDelta",
+             "command/exec/outputDelta",
+             "process/outputDelta",
+             "item/commandExecution/terminalInteraction",
+             "item/fileChange/outputDelta",
+             "item/fileChange/patchUpdated",
+             "item/mcpToolCall/progress":
+            if let item = reviewLogItem(from: notification) {
+                return .itemUpdated(item)
+            }
+            return .unknown(raw)
         default:
             return .unknown(raw)
         }
@@ -379,6 +390,17 @@ package actor CodexAppServerNotificationRouter {
             return .unknown(raw)
         case "thread/closed":
             return .closed
+        case "item/commandExecution/outputDelta",
+             "command/exec/outputDelta",
+             "process/outputDelta",
+             "item/commandExecution/terminalInteraction",
+             "item/fileChange/outputDelta",
+             "item/fileChange/patchUpdated",
+             "item/mcpToolCall/progress":
+            if let item = reviewLogItem(from: notification) {
+                return .itemUpdated(item, turnID: context.turnID)
+            }
+            return .unknown(raw)
         default:
             return .unknown(raw)
         }
@@ -436,6 +458,16 @@ package actor CodexAppServerNotificationRouter {
             return nil
         }
         return payload.item.threadItem
+    }
+
+    private func reviewLogItem(from notification: JSONRPC.Notification) -> CodexThreadItem? {
+        guard let notification = try? AppServerReviewNotification(
+            method: notification.method,
+            paramsData: notification.params
+        ) else {
+            return nil
+        }
+        return notification.reviewLogItem
     }
 
     private func messageDelta(from data: Data) -> CodexMessageDelta? {
@@ -838,6 +870,120 @@ private struct RawThreadItem: Decodable {
 
     private var rawPayload: Data? {
         rawValue.flatMap { try? JSONEncoder().encode($0) }
+    }
+}
+
+private extension AppServerReviewNotification {
+    var reviewLogItem: CodexThreadItem? {
+        switch method {
+        case .commandExecutionOutputDelta, .commandExecOutputDelta, .processOutputDelta:
+            return commandExecutionItem(output: payload.outputDelta)
+        case .commandExecutionTerminalInteraction:
+            return commandExecutionItem(output: payload.stdin?.nilIfEmpty)
+        case .fileChangeOutputDelta:
+            return fileChangeItem(output: payload.delta?.nilIfEmpty)
+        case .fileChangePatchUpdated:
+            return fileChangeItem(output: payload.fileChangePatchText)
+        case .mcpToolCallProgress:
+            guard let message = payload.message?.nilIfEmpty else {
+                return nil
+            }
+            let itemID = payload.itemID?.nilIfEmpty
+                ?? payload.item?.id.nilIfEmpty
+                ?? "mcpToolCall:\(rawMethod)"
+            return CodexThreadItem(
+                id: itemID,
+                kind: .mcpToolCall,
+                content: .toolCall(.init(
+                    server: payload.item?.server,
+                    name: payload.item?.tool ?? payload.item?.name,
+                    result: message,
+                    status: payload.item?.status.map(CodexTurnStatus.init(rawValue:))
+                )),
+                rawPayload: rawNotification.params
+            )
+        default:
+            return nil
+        }
+    }
+
+    private func commandExecutionItem(output: String?) -> CodexThreadItem? {
+        guard let output else {
+            return nil
+        }
+        let itemID = payload.outputItemID
+            ?? payload.item?.id.nilIfEmpty
+            ?? "commandExecution:\(rawMethod)"
+        return CodexThreadItem(
+            id: itemID,
+            kind: .commandExecution,
+            content: .command(.init(
+                command: payload.item?.command ?? "",
+                cwd: payload.item?.cwd,
+                output: output,
+                exitCode: payload.item?.exitCode,
+                status: payload.item?.status.map(CodexTurnStatus.init(rawValue:))
+            )),
+            rawPayload: rawNotification.params
+        )
+    }
+
+    private func fileChangeItem(output: String?) -> CodexThreadItem? {
+        guard let output else {
+            return nil
+        }
+        let path = payload.item?.path?.nilIfEmpty
+            ?? payload.changes.compactMap { $0.path?.nilIfEmpty }.first
+        let itemID = payload.item?.id.nilIfEmpty
+            ?? payload.itemID?.nilIfEmpty
+            ?? path
+            ?? "fileChange:\(rawMethod)"
+        return CodexThreadItem(
+            id: itemID,
+            kind: .fileChange,
+            content: .fileChange(.init(
+                path: path,
+                output: output,
+                status: payload.item?.status.map(CodexTurnStatus.init(rawValue:))
+            )),
+            rawPayload: rawNotification.params
+        )
+    }
+}
+
+private extension AppServerReviewNotification.Payload {
+    var outputDelta: String? {
+        if let delta = delta?.nilIfEmpty {
+            return delta
+        }
+        guard let deltaBase64 = deltaBase64?.nilIfEmpty,
+              let data = Data(base64Encoded: deltaBase64)
+        else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)?.nilIfEmpty
+    }
+
+    var outputItemID: String? {
+        itemID?.nilIfEmpty
+            ?? processID?.nilIfEmpty
+            ?? processHandle?.nilIfEmpty
+            ?? item?.id.nilIfEmpty
+            ?? item?.processID?.nilIfEmpty
+    }
+
+    var fileChangePatchText: String? {
+        message?.nilIfEmpty
+            ?? delta?.nilIfEmpty
+            ?? diff?.nilIfEmpty
+            ?? changes.map(\.summaryText).joined(separator: "\n").nilIfEmpty
+            ?? "File changes updated."
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 
