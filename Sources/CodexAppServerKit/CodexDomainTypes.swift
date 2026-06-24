@@ -1363,6 +1363,7 @@ public struct CodexCommand: Equatable, Sendable {
     public var command: String
     public var cwd: String?
     public var output: String?
+    package var outputDelta: String?
     public var exitCode: Int?
     public var status: CodexTurnStatus?
 
@@ -1370,12 +1371,14 @@ public struct CodexCommand: Equatable, Sendable {
         command: String,
         cwd: String? = nil,
         output: String? = nil,
+        outputDelta: String? = nil,
         exitCode: Int? = nil,
         status: CodexTurnStatus? = nil
     ) {
         self.command = command
         self.cwd = cwd
         self.output = output
+        self.outputDelta = outputDelta
         self.exitCode = exitCode
         self.status = status
     }

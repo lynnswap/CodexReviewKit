@@ -1018,8 +1018,9 @@ private enum AppServerTypedReviewEventAdapter {
                 title: nil
             ))
         }
-        if let output = command.output?.nilIfEmpty {
-            if command.command.isEmpty {
+        let output = command.outputDelta?.nilIfEmpty ?? command.output?.nilIfEmpty
+        if let output {
+            if command.outputDelta != nil || command.command.isEmpty {
                 events.append(item.commandOutputDeltaLogEntry(text: output))
             } else {
                 events.append(item.logEntry(

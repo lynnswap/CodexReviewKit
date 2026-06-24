@@ -1206,7 +1206,16 @@ struct AppServerClientTests {
                 threadID: "review-thread",
                 turnID: "turn-1",
                 itemID: "cmd-1",
-                delta: "building"
+                delta: "building-"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "done"
             )
         )
         try await runtime.transport.emitServerNotification(
@@ -1241,18 +1250,43 @@ struct AppServerClientTests {
             Issue.record("expected command content")
             return
         }
-        #expect(command.output == "building")
+        #expect(command.output == "building-")
 
         guard case .logEntry(let commandKind, let commandText, let commandGroupID, let commandReplacesGroup, let commandMetadata) = try await iterator.next() else {
             Issue.record("expected command output legacy log")
             return
         }
         #expect(commandKind == .commandOutput)
-        #expect(commandText == "building")
+        #expect(commandText == "building-")
         #expect(commandGroupID == "cmd-1")
         #expect(commandReplacesGroup == false)
         #expect(commandMetadata?.sourceType == "commandExecution")
         #expect(commandMetadata?.title == "Command output")
+
+        guard case .domainEvents(let secondCommandDomainEvents, _) = try await iterator.next() else {
+            Issue.record("expected second command output domain event")
+            return
+        }
+        guard case .itemUpdated(let secondCommandSeed) = try #require(secondCommandDomainEvents.first) else {
+            Issue.record("expected second command item update")
+            return
+        }
+        guard case .command(let secondCommand) = secondCommandSeed.content else {
+            Issue.record("expected second command content")
+            return
+        }
+        #expect(secondCommand.output == "building-done")
+
+        guard case .logEntry(let secondCommandKind, let secondCommandText, let secondCommandGroupID, let secondCommandReplacesGroup, let secondCommandMetadata) = try await iterator.next() else {
+            Issue.record("expected second command output legacy log")
+            return
+        }
+        #expect(secondCommandKind == .commandOutput)
+        #expect(secondCommandText == "done")
+        #expect(secondCommandGroupID == "cmd-1")
+        #expect(secondCommandReplacesGroup == false)
+        #expect(secondCommandMetadata?.sourceType == "commandExecution")
+        #expect(secondCommandMetadata?.title == "Command output")
 
         guard case .domainEvents(let fileDomainEvents, _) = try await iterator.next() else {
             Issue.record("expected file change domain event")

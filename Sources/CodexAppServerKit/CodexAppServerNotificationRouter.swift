@@ -16,6 +16,7 @@ package actor CodexAppServerNotificationRouter {
     private var reviewThreadIDs: Set<CodexThreadID> = []
     private var turnHistoryByTurnID: [CodexTurnID: [CodexTurnEvent]] = [:]
     private var threadHistoryByThreadID: [CodexThreadID: [CodexThreadEvent]] = [:]
+    private var commandOutputByItemID: [String: String] = [:]
     private var turnSubscribersByTurnID: [CodexTurnID: [UUID: Subscriber<CodexTurnEvent>]] = [:]
     private var threadSubscribersByThreadID: [CodexThreadID: [UUID: Subscriber<CodexThreadEvent>]] =
         [:]
@@ -122,13 +123,25 @@ package actor CodexAppServerNotificationRouter {
             context.threadID = threadID
         }
 
+        let reviewLogItem = context.threadID != nil || context.turnID != nil
+            ? reviewLogItem(from: notification)
+            : nil
+
         if let threadID = context.threadID {
-            let event = decodeThreadEvent(notification: notification, context: context)
+            let event = decodeThreadEvent(
+                notification: notification,
+                context: context,
+                reviewLogItem: reviewLogItem
+            )
             appendThreadEvent(event, threadID: threadID)
         }
 
         if let turnID = context.turnID {
-            let event = decodeTurnEvent(notification: notification, context: context)
+            let event = decodeTurnEvent(
+                notification: notification,
+                context: context,
+                reviewLogItem: reviewLogItem
+            )
             turnHistoryByTurnID[turnID, default: []].append(event)
             if let subscribers = turnSubscribersByTurnID[turnID] {
                 for subscriber in subscribers.values {
@@ -252,7 +265,8 @@ package actor CodexAppServerNotificationRouter {
 
     private func decodeTurnEvent(
         notification: JSONRPC.Notification,
-        context: NotificationContext
+        context: NotificationContext,
+        reviewLogItem: CodexThreadItem?
     ) -> CodexTurnEvent {
         let raw = CodexRawNotification(
             method: notification.method,
@@ -314,7 +328,7 @@ package actor CodexAppServerNotificationRouter {
              "item/fileChange/outputDelta",
              "item/fileChange/patchUpdated",
              "item/mcpToolCall/progress":
-            if let item = reviewLogItem(from: notification) {
+            if let item = reviewLogItem {
                 return .itemUpdated(item)
             }
             return .unknown(raw)
@@ -325,7 +339,8 @@ package actor CodexAppServerNotificationRouter {
 
     private func decodeThreadEvent(
         notification: JSONRPC.Notification,
-        context: NotificationContext
+        context: NotificationContext,
+        reviewLogItem: CodexThreadItem?
     ) -> CodexThreadEvent {
         let raw = CodexRawNotification(
             method: notification.method,
@@ -397,7 +412,7 @@ package actor CodexAppServerNotificationRouter {
              "item/fileChange/outputDelta",
              "item/fileChange/patchUpdated",
              "item/mcpToolCall/progress":
-            if let item = reviewLogItem(from: notification) {
+            if let item = reviewLogItem {
                 return .itemUpdated(item, turnID: context.turnID)
             }
             return .unknown(raw)
@@ -467,7 +482,31 @@ package actor CodexAppServerNotificationRouter {
         ) else {
             return nil
         }
-        return notification.reviewLogItem
+        guard var item = notification.reviewLogItem else {
+            return nil
+        }
+        switch notification.method {
+        case .commandExecutionOutputDelta, .commandExecOutputDelta, .processOutputDelta:
+            item = accumulatingCommandOutput(in: item)
+        default:
+            break
+        }
+        return item
+    }
+
+    private func accumulatingCommandOutput(in item: CodexThreadItem) -> CodexThreadItem {
+        guard case .command(var command) = item.content,
+              let delta = command.outputDelta ?? command.output
+        else {
+            return item
+        }
+        var item = item
+        let output = (commandOutputByItemID[item.id] ?? "") + delta
+        commandOutputByItemID[item.id] = output
+        command.output = output
+        command.outputDelta = delta
+        item.content = .command(command)
+        return item
     }
 
     private func messageDelta(from data: Data) -> CodexMessageDelta? {
@@ -921,6 +960,7 @@ private extension AppServerReviewNotification {
                 command: payload.item?.command ?? "",
                 cwd: payload.item?.cwd,
                 output: output,
+                outputDelta: output,
                 exitCode: payload.item?.exitCode,
                 status: payload.item?.status.map(CodexTurnStatus.init(rawValue:))
             )),
