@@ -74,6 +74,14 @@ package actor CodexAppServerNotificationRouter {
         finishAll(throwing: JSONRPC.Error.closed)
     }
 
+    package func turnSubscriberCountForTesting(for turnID: CodexTurnID) -> Int {
+        turnSubscribersByTurnID[turnID]?.count ?? 0
+    }
+
+    package func threadSubscriberCountForTesting(for threadID: CodexThreadID) -> Int {
+        threadSubscribersByThreadID[threadID]?.count ?? 0
+    }
+
     private func route(_ notification: JSONRPC.Notification) {
         var context = Self.context(from: notification.params)
         if let threadID = context.threadID, let turnID = context.turnID {

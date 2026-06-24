@@ -330,6 +330,59 @@ struct CodexAppServerKitTests {
         #expect(result.finalAnswer == "Done")
     }
 
+    @Test func threadEventStreamCancellationRemovesRouterSubscriber() async throws {
+        let transport = CodexAppServerTestTransport()
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let consumer = Task {
+            var iterator = thread.events.makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+
+        #expect(await eventually {
+            await router.threadSubscriberCountForTesting(for: "thread-1") == 1
+        })
+        consumer.cancel()
+        let removed = await eventually {
+            await router.threadSubscriberCountForTesting(for: "thread-1") == 0
+        }
+        #expect(removed)
+        if removed {
+            try await consumer.value
+        }
+    }
+
+    @Test func turnEventStreamCancellationRemovesRouterSubscriber() async throws {
+        let transport = CodexAppServerTestTransport()
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let turn = CodexTurn(
+            id: "turn-1",
+            threadID: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let consumer = Task {
+            var iterator = turn.events.makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+
+        #expect(await eventually {
+            await router.turnSubscriberCountForTesting(for: "turn-1") == 1
+        })
+        consumer.cancel()
+        let removed = await eventually {
+            await router.turnSubscriberCountForTesting(for: "turn-1") == 0
+        }
+        #expect(removed)
+        if removed {
+            try await consumer.value
+        }
+    }
+
     @Test func threadStreamsReplayMessagesTranscriptLogsAndUsage() async throws {
         let transport = CodexAppServerTestTransport()
         let client = AppServerClient(transport: transport)
@@ -1064,4 +1117,17 @@ private struct TokenUsageParams: Encodable, Sendable {
         var reasoningOutputTokens: Int = 0
         var totalTokens: Int
     }
+}
+
+private func eventually(
+    attempts: Int = 50,
+    _ condition: () async -> Bool
+) async -> Bool {
+    for _ in 0..<attempts {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return await condition()
 }

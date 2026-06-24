@@ -9,7 +9,7 @@ extension CodexThread {
     public var events: CodexThreadEventSequence {
         .init {
             AsyncThrowingStream { continuation in
-                Task {
+                let task = Task {
                     let stream = await router.events(for: id)
                     do {
                         for try await event in stream {
@@ -19,6 +19,9 @@ extension CodexThread {
                     } catch {
                         continuation.finish(throwing: error)
                     }
+                }
+                continuation.onTermination = { _ in
+                    task.cancel()
                 }
             }
         }
@@ -290,7 +293,7 @@ extension CodexTurn {
     package var events: CodexTurnEventSequence {
         .init {
             AsyncThrowingStream { continuation in
-                Task {
+                let task = Task {
                     let stream = await router.events(for: id)
                     do {
                         for try await event in stream {
@@ -300,6 +303,9 @@ extension CodexTurn {
                     } catch {
                         continuation.finish(throwing: error)
                     }
+                }
+                continuation.onTermination = { _ in
+                    task.cancel()
                 }
             }
         }
