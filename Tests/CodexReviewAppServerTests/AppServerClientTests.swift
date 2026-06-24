@@ -285,6 +285,36 @@ struct AppServerClientTests {
         #expect(interruptParams["threadId"] as? String == "thread-1")
         #expect(interruptParams["turnId"] as? String == "turn-1")
     }
+
+    @Test func interruptReviewCancelsDetachedReconstructedRunThroughReviewThread() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-1",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        )
+
+        try await backend.interruptReview(run, reason: .init(message: "Stop"))
+
+        let requests = await runtime.transport.recordedRequests()
+        #expect(requests.map(\.method) == ["initialize", "thread/resume", "turn/interrupt"])
+        let resume = try #require(requests.first { $0.method == "thread/resume" })
+        let resumeParams = try jsonObject(from: resume.params)
+        #expect(resumeParams["threadId"] as? String == "review-thread")
+        #expect(resumeParams["model"] as? String == "gpt-5")
+        let interrupt = try #require(requests.first { $0.method == "turn/interrupt" })
+        let interruptParams = try jsonObject(from: interrupt.params)
+        #expect(interruptParams["threadId"] as? String == "review-thread")
+        #expect(interruptParams["turnId"] as? String == "turn-1")
+    }
 }
 
 private func eventSequence(

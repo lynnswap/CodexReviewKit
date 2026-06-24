@@ -493,7 +493,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         guard let expectedTurnID = run.turnID?.nilIfEmpty else {
             throw CodexReviewAPI.Error.io("Review run has no cancellable app-server turn.")
         }
-        let thread = try await reviewThread(for: run)
+        let thread = try await activeReviewTurnThread(for: run)
         let cancellation = try await thread.cancelActiveTurn(
             expectedTurnID: .init(rawValue: expectedTurnID)
         ) { retryCancellation in
@@ -528,6 +528,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             threadIDs.append(run.threadID)
         }
         return threadIDs
+    }
+
+    private func activeReviewTurnThread(for run: CodexReviewBackendModel.Review.Run) async throws -> CodexThread {
+        try await threadHandle(id: activeReviewTurnThreadID(for: run), model: run.model)
+    }
+
+    private func activeReviewTurnThreadID(for run: CodexReviewBackendModel.Review.Run) -> String {
+        run.reviewThreadID?.nilIfEmpty ?? run.threadID
     }
 
     private func mergedCleanupThreadIDs(_ lhs: [String], _ rhs: [String]) -> [String] {
