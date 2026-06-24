@@ -89,11 +89,10 @@ package final class AppServerReviewControl: @unchecked Sendable {
             guard let reviewSession = snapshot.reviewSession else {
                 return nil
             }
-            return try await cancel(
-                reviewSession,
-                expectedTurnID: turnID,
-                willCancelActiveTurn: willCancelActiveTurn
-            )
+            guard willCancelActiveTurn == nil else {
+                return nil
+            }
+            return try await cancel(reviewSession, expectedTurnID: turnID)
         }
     }
 
@@ -112,15 +111,10 @@ package final class AppServerReviewControl: @unchecked Sendable {
 
     private func cancel(
         _ reviewSession: CodexReviewSession,
-        expectedTurnID: String,
-        willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)?
+        expectedTurnID: String
     ) async throws -> AppServerReviewCancellation {
         let cancellation = try await reviewSession.cancel()
         let reviewCancellation = AppServerReviewCancellation(cancellation)
-        if reviewCancellation.turnID != expectedTurnID,
-           let willCancelActiveTurn {
-            await willCancelActiveTurn(reviewCancellation)
-        }
         if reviewCancellation.turnID != expectedTurnID {
             setPhase(.reviewStarted(turnID: reviewCancellation.turnID), reviewSession: reviewSession)
         }

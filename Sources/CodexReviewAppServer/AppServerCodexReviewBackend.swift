@@ -1407,7 +1407,28 @@ private actor AppServerReviewEventSession {
         }
         metrics.decoded += 1
         events = eventsWithTypedResultFallback(events)
-        for event in events {
+        for index in events.indices {
+            let event = events[index]
+            if case .domainEvents = event {
+                let followingEvents = events[events.index(after: index)...]
+                if shouldFlushPendingStreamedLogBeforeDomainEvent(
+                    followingEvents: followingEvents,
+                    suppressTimelineProjection: false
+                ),
+                   await flushPendingStreamedLog(controlThreadID: converted.controlThreadID) {
+                    return
+                }
+                if await emit(event, controlThreadID: converted.controlThreadID) {
+                    return
+                }
+                continue
+            }
+            if bufferStreamedLog(event) {
+                continue
+            }
+            if await flushPendingStreamedLog(controlThreadID: converted.controlThreadID) {
+                return
+            }
             if event.shouldDeferCompletion {
                 completionCoordinator.deferCompletion(event)
                 continue

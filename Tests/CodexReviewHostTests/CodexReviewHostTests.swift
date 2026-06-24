@@ -1428,6 +1428,10 @@ struct CodexReviewHostTests {
             AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
             for: "review/start"
         )
+        try await transport.enqueueJSON(
+            #"{"thread":{"id":"review-thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],

@@ -235,6 +235,59 @@ struct AppServerClientTests {
         #expect(secondCommand.output == "second")
     }
 
+    @Test func backendCoalescesTypedCommandOutputDeltas() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart())
+        #expect(try await nextEvent(from: attempt.events) == .started(
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        ))
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "first"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/commandExecution/outputDelta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "cmd-1",
+                delta: "second"
+            )
+        )
+
+        guard case .domainEvents = try await nextEvent(from: attempt.events),
+              case .domainEvents = try await nextEvent(from: attempt.events)
+        else {
+            Issue.record("expected direct timeline updates before coalesced legacy log")
+            return
+        }
+        guard case .logEntry(.commandOutput, let text, let groupID, let replacesGroup, let metadata) =
+            try await nextEvent(from: attempt.events)
+        else {
+            Issue.record("expected coalesced command output log")
+            return
+        }
+        #expect(text == "firstsecond")
+        #expect(groupID == "cmd-1")
+        #expect(replacesGroup == false)
+        #expect(metadata?.sourceType == "commandExecution")
+        #expect(metadata?.title == "Command output")
+        #expect(metadata?.itemID == "cmd-1")
+    }
+
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
@@ -314,6 +367,70 @@ struct AppServerClientTests {
         let interruptParams = try jsonObject(from: interrupt.params)
         #expect(interruptParams["threadId"] as? String == "review-thread")
         #expect(interruptParams["turnId"] as? String == "turn-1")
+    }
+
+    @Test func beginReviewRecoveryCancelsLiveSessionThroughReviewThreadWhenHookIsNeeded() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        await runtime.transport.enqueueFailure(
+            code: -32602,
+            message: "expected active turn id turn-old but found turn-new",
+            for: "turn/interrupt"
+        )
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+        let token = try await backend.beginReviewRecovery(
+            attempt.run,
+            reason: .init(message: "Recover after network outage")
+        )
+
+        #expect(token.rollbackThreadID == "review-thread")
+        let requests = await runtime.transport.recordedRequests()
+        #expect(requests.map(\.method) == [
+            "initialize",
+            "thread/start",
+            "review/start",
+            "thread/resume",
+            "turn/interrupt",
+            "turn/interrupt",
+        ])
+        let resume = try #require(requests.first { $0.method == "thread/resume" })
+        let resumeParams = try jsonObject(from: resume.params)
+        #expect(resumeParams["threadId"] as? String == "review-thread")
+        let interruptTurnIDs = try requests.filter { $0.method == "turn/interrupt" }.map {
+            try jsonObject(from: $0.params)["turnId"] as? String
+        }
+        #expect(interruptTurnIDs == ["turn-old", "turn-new"])
+    }
+}
+
+private enum AppServerClientTestTimeout: Error {
+    case timedOut
+}
+
+private func nextEvent(
+    from mailbox: BackendReviewEventMailbox,
+    timeout: Duration = .seconds(1)
+) async throws -> CodexReviewBackendModel.Review.Event? {
+    try await withThrowingTaskGroup(of: CodexReviewBackendModel.Review.Event?.self) { group in
+        group.addTask {
+            try await mailbox.next()
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw AppServerClientTestTimeout.timedOut
+        }
+        let event = try await group.next()
+        group.cancelAll()
+        return event ?? nil
     }
 }
 
