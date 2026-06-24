@@ -472,6 +472,87 @@ struct CodexAppServerKitTests {
         }
     }
 
+    @Test func reviewEventsRouteThreadlessBroadcastsToSeededReviewThread() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let review = try await thread.startReview(
+            target: .baseBranch("main"),
+            delivery: .detached
+        )
+        try await transport.emitServerNotification(
+            method: "warning",
+            params: ReviewWarningParams(message: "model warning")
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: ThreadIDParams(threadID: "thread-review")
+        )
+
+        let events = try await collect(review.events)
+        #expect(
+            events.contains {
+                if case .unknown(let raw) = $0 {
+                    let text = String(data: raw.params, encoding: .utf8) ?? ""
+                    return raw.method == "warning"
+                        && raw.threadID == "thread-review"
+                        && text.contains("model warning")
+                }
+                return false
+            })
+    }
+
+    @Test func reviewEventsRouteIdentifiedBroadcastMethodsThroughTurnSeed() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let review = try await thread.startReview(
+            target: .baseBranch("main"),
+            delivery: .detached
+        )
+        try await transport.emitServerNotification(
+            method: "error",
+            params: ReviewErrorParams(turnID: "turn-review", message: "recoverable")
+        )
+        try await transport.emitServerNotification(
+            method: "thread/closed",
+            params: ThreadIDParams(threadID: "thread-review")
+        )
+
+        let events = try await collect(review.events)
+        #expect(
+            events.contains {
+                if case .unknown(let raw) = $0 {
+                    return raw.method == "error"
+                        && raw.threadID == "thread-review"
+                        && raw.turnID == "turn-review"
+                }
+                return false
+            })
+    }
+
     @Test func promptPartsEncodeToAppServerInputItems() {
         let prompt = CodexPrompt(parts: [
             .text("Describe these files."),
@@ -1211,6 +1292,20 @@ private struct ThreadIDParams: Encodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
+    }
+}
+
+private struct ReviewWarningParams: Encodable, Sendable {
+    var message: String
+}
+
+private struct ReviewErrorParams: Encodable, Sendable {
+    var turnID: String
+    var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case turnID = "turnId"
+        case message
     }
 }
 

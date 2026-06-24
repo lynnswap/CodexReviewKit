@@ -13,6 +13,7 @@ package actor CodexAppServerNotificationRouter {
     private let client: AppServerClient
     private var routerTask: Task<Void, Never>?
     private var threadIDByTurnID: [CodexTurnID: CodexThreadID] = [:]
+    private var reviewThreadIDs: Set<CodexThreadID> = []
     private var turnHistoryByTurnID: [CodexTurnID: [CodexTurnEvent]] = [:]
     private var threadHistoryByThreadID: [CodexThreadID: [CodexThreadEvent]] = [:]
     private var turnSubscribersByTurnID: [CodexTurnID: [UUID: Subscriber<CodexTurnEvent>]] = [:]
@@ -70,6 +71,7 @@ package actor CodexAppServerNotificationRouter {
 
     package func seedReviewTurn(_ turnID: CodexTurnID, reviewThreadID: CodexThreadID) {
         threadIDByTurnID[turnID] = reviewThreadID
+        reviewThreadIDs.insert(reviewThreadID)
         guard let turnHistory = turnHistoryByTurnID[turnID] else {
             return
         }
@@ -101,7 +103,19 @@ package actor CodexAppServerNotificationRouter {
     }
 
     private func route(_ notification: JSONRPC.Notification) {
-        var context = Self.context(from: notification.params)
+        let reviewNotification = try? AppServerReviewNotification(
+            method: notification.method,
+            paramsData: notification.params
+        )
+        if let reviewNotification,
+           reviewNotification.method.isThreadlessReviewBroadcast,
+           reviewNotification.payload.threadID == nil,
+           reviewNotification.payload.resolvedTurnID == nil,
+           routeReviewBroadcast(reviewNotification) {
+            return
+        }
+
+        var context = Self.context(from: notification.params, reviewNotification: reviewNotification)
         if let threadID = context.threadID, let turnID = context.turnID {
             threadIDByTurnID[turnID] = threadID
         } else if let turnID = context.turnID, let threadID = threadIDByTurnID[turnID] {
@@ -125,6 +139,18 @@ package actor CodexAppServerNotificationRouter {
                 finishTurnSubscribers(turnID: turnID)
             }
         }
+    }
+
+    private func routeReviewBroadcast(_ notification: AppServerReviewNotification) -> Bool {
+        guard reviewThreadIDs.isEmpty == false else {
+            return false
+        }
+        for threadID in reviewThreadIDs {
+            var raw = notification.rawNotification
+            raw.threadID = threadID
+            appendThreadEvent(.unknown(raw), threadID: threadID)
+        }
+        return true
     }
 
     private func appendThreadEvent(_ event: CodexThreadEvent, threadID: CodexThreadID) {
@@ -508,7 +534,19 @@ package actor CodexAppServerNotificationRouter {
         return nil
     }
 
-    private static func context(from data: Data) -> NotificationContext {
+    private static func context(
+        from data: Data,
+        reviewNotification: AppServerReviewNotification? = nil
+    ) -> NotificationContext {
+        if let reviewNotification {
+            let payload = reviewNotification.payload
+            if payload.threadID != nil || payload.resolvedTurnID != nil {
+                return .init(
+                    threadID: payload.threadID.map(CodexThreadID.init(rawValue:)),
+                    turnID: payload.resolvedTurnID.map(CodexTurnID.init(rawValue:))
+                )
+            }
+        }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .init()
         }
