@@ -31,10 +31,9 @@ This table describes intended ownership.
 | `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and legacy log compatibility projections. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level `CodexReviewSession` review streams into `CodexReviewKit` backend events |
 | `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
-| `CodexUI` | Concrete AppKit UI and existing hosted SwiftUI views. SwiftUI views remain concrete UI here; there is no requirement to delete or rewrite them just to satisfy target ownership |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
 | `ReviewMonitorRendering` | Domain timeline rendering helpers that do not know AppKit/SwiftUI or app-server wire |
-| `ReviewUI` | Current concrete native monitor UI target while UI ownership names are still migrating |
+| `ReviewUI` | Concrete ReviewMonitor UI: AppKit views/controllers, existing hosted SwiftUI views, and monitor presentation state such as selection and sidebar filters |
 | `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
 | `TextTransitions` | UI text transition view support |
 
