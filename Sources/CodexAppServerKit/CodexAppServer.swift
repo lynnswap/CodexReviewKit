@@ -278,6 +278,7 @@ public actor CodexAppServer {
                     serviceTier: options.serviceTier,
                     personality: options.personality?.rawValue,
                     config: options.config?.mapValues(\.appServerJSONValue),
+                    permissions: options.permissions?.appServerPermissions,
                     sessionStartSource: options.sessionStartSource?.appServerSource,
                     threadSource: options.threadSource?.appServerSource
                 )
@@ -554,6 +555,7 @@ public actor CodexAppServer {
             serviceTier: options.serviceTier,
             personality: options.personality?.rawValue,
             config: options.config?.mapValues(\.appServerJSONValue),
+            permissions: options.permissions?.appServerPermissions,
             sessionStartSource: options.sessionStartSource?.appServerSource,
             threadSource: options.threadSource?.appServerSource
         )

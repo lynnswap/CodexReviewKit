@@ -175,7 +175,13 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexReviewAppServerTests",
-            dependencies: ["CodexAppServerKit", "CodexReviewAppServer", "CodexReviewKit", "CodexReviewTesting"],
+            dependencies: [
+                "CodexAppServerKit",
+                "CodexAppServerKitTesting",
+                "CodexReviewAppServer",
+                "CodexReviewKit",
+                "CodexReviewTesting",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
