@@ -1,7 +1,6 @@
 import Foundation
 import CodexAppServerKit
 import CodexReviewKit
-import CodexReviewAppServerWire
 import OSLog
 
 private let appServerBackendLogger = Logger(
@@ -895,14 +894,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             notificationRouterMetrics.ignored += 1
             return
         }
-        guard let wireNotification = try? AppServerWireReviewNotification(
+        guard let reviewNotification = try? AppServerReviewNotification(
             method: notification.method,
             paramsData: notification.params
         ) else {
             notificationRouterMetrics.ignored += 1
             return
         }
-        let payload = wireNotification.payload
+        let payload = reviewNotification.payload
         notificationRouterMetrics.decoded += 1
         if let turnID = payload.resolvedTurnID,
            abandonedTurnIDs.contains(turnID) {
@@ -913,7 +912,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reviewNotificationSequence += 1
         let routed = AppServerRoutedReviewNotification(
             sequence: reviewNotificationSequence,
-            wireNotification: wireNotification
+            reviewNotification: reviewNotification
         )
         if let threadID = payload.threadID {
             guard let session = reviewEventSession(forThreadID: threadID) else {
@@ -986,14 +985,14 @@ package struct AppServerReviewEventSessionMetrics: Equatable, Sendable {
 
 private struct AppServerRoutedReviewNotification: Sendable {
     var sequence: Int
-    var wireNotification: AppServerWireReviewNotification
+    var reviewNotification: AppServerReviewNotification
 
     var method: String {
-        wireNotification.rawMethod
+        reviewNotification.rawMethod
     }
 
     var payload: TurnNotificationPayload {
-        wireNotification.payload
+        reviewNotification.payload
     }
 }
 
@@ -2175,7 +2174,7 @@ private actor AppServerReviewEventSession {
             return false
         }
         let startsNewCommand = notification.method == "item/started"
-            && notification.payload.item?.type == .commandExecution
+            && notification.payload.item?.rawType == "commandExecution"
         let reachesModelProgress = decoded.events.contains(where: Self.isCommandProgressBoundary(_:))
         guard startsNewCommand || reachesModelProgress else {
             return false
@@ -2187,7 +2186,7 @@ private actor AppServerReviewEventSession {
             "process/outputDelta",
             "item/commandExecution/terminalInteraction":
             return false
-        case "item/completed" where notification.payload.item?.type == .commandExecution:
+        case "item/completed" where notification.payload.item?.rawType == "commandExecution":
             return false
         case "turn/completed", "turn/failed", "turn/cancelled", "thread/closed":
             return false
@@ -2784,9 +2783,9 @@ private extension AppServerAPI.Account.Login.Response {
     }
 }
 
-private typealias TurnNotificationPayload = AppServerWireReviewNotification.Payload
-private typealias AppServerCommandAction = AppServerWireReviewNotification.CommandAction
-private typealias AppServerThreadItem = AppServerWireReviewNotification.Item
+private typealias TurnNotificationPayload = AppServerReviewNotification.Payload
+private typealias AppServerCommandAction = AppServerReviewNotification.Payload.Item.CommandAction
+private typealias AppServerThreadItem = AppServerReviewNotification.Payload.Item
 
 private let appServerContextCompactionStartedText = "Automatically compacting context"
 private let appServerContextCompactionCompletedText = "Context automatically compacted"
@@ -2809,7 +2808,7 @@ private func decodeReviewNotification(
         )]
     case "item/started":
         if let item = payload.item,
-           item.type == .commandExecution {
+           item.rawType == "commandExecution" {
             let lifecycle = AppServerCommandLifecycle(
                 item: item,
                 startedAt: payload.startedAt,
@@ -2824,7 +2823,7 @@ private func decodeReviewNotification(
         events = payload.item?.updatedEvents() ?? []
     case "item/completed":
         if let item = payload.item,
-           item.type == .commandExecution {
+           item.rawType == "commandExecution" {
             let previous = commandLifecycleByItemID[item.id]
             let lifecycle = AppServerCommandLifecycle(
                 item: item,
@@ -3020,8 +3019,8 @@ private func decodeReviewNotification(
     return .init(
         events: orderedEvents,
         turnID: payload.resolvedTurnID,
-        startsReviewMode: notification.wireNotification.startsReviewMode,
-        finishesReviewMode: notification.wireNotification.finishesReviewMode,
+        startsReviewMode: notification.reviewNotification.startsReviewMode,
+        finishesReviewMode: notification.reviewNotification.finishesReviewMode,
         hasDirectTimelineEvents: directEvents.isEmpty == false
     )
 }
@@ -3030,13 +3029,493 @@ private func directTimelineDomainEvents(
     for notification: AppServerRoutedReviewNotification,
     fallbackReviewThreadID: String
 ) -> [ReviewDomainEvent] {
-    let wireNotification = notification.wireNotification
-    return wireNotification
+    let reviewNotification = notification.reviewNotification
+    return reviewNotification
         .domainEvents(fallbackReviewThreadID: .init(rawValue: fallbackReviewThreadID))
-        .filter { wireNotification.allowsDirectTimelineEvent($0) }
+        .filter { reviewNotification.allowsDirectTimelineEvent($0) }
 }
 
-private extension AppServerWireReviewNotification {
+private extension AppServerReviewNotification {
+    func domainEvents(fallbackReviewThreadID: ReviewThread.ID? = nil) -> [ReviewDomainEvent] {
+        switch method {
+        case .turnStarted:
+            return [.runStarted(
+                turnID: ReviewTurn.ID(rawValue: payload.resolvedTurnID ?? ""),
+                reviewThreadID: (payload.reviewThreadID ?? payload.threadID).map(ReviewThread.ID.init(rawValue:))
+                    ?? fallbackReviewThreadID,
+                model: payload.model
+            )]
+        case .turnCompleted:
+            return payload.turnCompletedEvents()
+        case .turnFailed:
+            return [.reviewFailed(payload.terminalMessage ?? "")]
+        case .turnCancelled, .turnAborted:
+            return [.reviewCancelled(payload.terminalMessage ?? "")]
+        case .itemStarted:
+            return payload.itemStartedEvents(method: method)
+        case .itemUpdated:
+            return payload.itemUpdateEvents(method: method)
+        case .itemCompleted:
+            return payload.itemCompletionEvents(method: method)
+        case .agentMessageDelta:
+            return payload.deltaDomainEvent(
+                kind: .agentMessage,
+                family: .message,
+                content: .message(.init(text: ""))
+            )
+        case .planDelta:
+            return payload.deltaDomainEvent(
+                kind: .plan,
+                family: .plan,
+                content: .plan(.init(markdown: ""))
+            )
+        case .reasoningSummaryTextDelta:
+            return payload.deltaDomainEvent(
+                kind: .reasoning,
+                family: .reasoning,
+                content: .reasoning(.init(text: "", style: .summary)),
+                itemID: payload.reasoningSummaryItemID
+            )
+        case .reasoningTextDelta:
+            return payload.deltaDomainEvent(
+                kind: .reasoning,
+                family: .reasoning,
+                content: .reasoning(.init(text: "", style: .raw)),
+                itemID: payload.rawReasoningItemID
+            )
+        case .reasoningSummaryPartAdded:
+            return []
+        case .autoApprovalReviewStarted, .autoApprovalReviewCompleted:
+            return []
+        case .commandExecutionOutputDelta, .commandExecOutputDelta, .processOutputDelta:
+            return payload.deltaDomainEvent(
+                kind: .commandExecution,
+                family: .command,
+                content: .command(.init(command: payload.item?.command ?? "", cwd: payload.item?.cwd)),
+                delta: payload.outputDelta,
+                itemID: payload.outputItemID
+            )
+        case .commandExecutionTerminalInteraction:
+            return payload.deltaDomainEvent(
+                kind: .commandExecution,
+                family: .command,
+                content: .command(.init(command: payload.item?.command ?? "", cwd: payload.item?.cwd)),
+                delta: payload.stdin
+            )
+        case .fileChangeOutputDelta:
+            return payload.deltaDomainEvent(
+                kind: .fileChange,
+                family: .fileChange,
+                content: .fileChange(.init(title: payload.item?.path ?? "")),
+                delta: payload.delta
+            )
+        case .mcpToolCallProgress:
+            return payload.toolProgressEvent(method: method)
+        case .fileChangePatchUpdated:
+            return payload.fileChangeUpdateEvent(method: method)
+        case .turnDiffUpdated:
+            return payload.diffUpdateEvent(method: method)
+        case .turnPlanUpdated:
+            return payload.planUpdateEvent(method: method)
+        case .threadCompacted:
+            return payload.contextCompactionEvent(method: method)
+        case .threadClosed:
+            return [.reviewFailed(payload.terminalMessage ?? payload.status?.type ?? "")]
+        case .threadStatusChanged:
+            return payload.threadStatusEvents(method: method)
+        case .error:
+            return payload.errorEvents(method: method)
+        case .warning, .guardianWarning, .deprecationNotice, .configWarning, .diagnostic:
+            return payload.diagnosticEvents(method: method)
+        case .modelRerouted:
+            return payload.modelReroutedEvents(method: method)
+        case .modelVerification:
+            return payload.modelVerificationEvents(method: method)
+        case .agentMessage:
+            return payload.messageEvent(method: method)
+        case .log:
+            return payload.diagnosticEvents(method: method)
+        default:
+            return payload.unknownEvent(method: method)
+        }
+    }
+}
+
+private extension TurnNotificationPayload {
+    var terminalMessage: String? {
+        turn?.error?.message?.nilIfEmpty
+            ?? error?.message?.nilIfEmpty
+            ?? message?.nilIfEmpty
+            ?? summary?.nilIfEmpty
+    }
+
+    var outputDelta: String? {
+        if let delta, delta.isEmpty == false {
+            return delta
+        }
+        if let decodedBase64Output, decodedBase64Output.isEmpty == false {
+            return decodedBase64Output
+        }
+        return nil
+    }
+
+    var outputItemID: String? {
+        itemID ?? processID ?? processHandle ?? item?.id.nilIfEmpty ?? item?.processID
+    }
+
+    var reasoningSummaryItemID: String? {
+        itemID.map { Self.reasoningSummaryItemID(itemID: $0, summaryIndex: summaryIndex ?? 0) }
+    }
+
+    var rawReasoningItemID: String? {
+        itemID.map { Self.rawReasoningItemID(itemID: $0, contentIndex: contentIndex ?? 0) }
+    }
+
+    func turnCompletedEvents() -> [ReviewDomainEvent] {
+        switch terminalDisposition {
+        case .failed:
+            return [.reviewFailed(terminalMessage ?? "")]
+        case .cancelled:
+            return [.reviewCancelled(terminalMessage ?? "")]
+        case .completed:
+            return [.reviewCompleted(summary: message ?? summary ?? "", result: result?.nonNullText)]
+        }
+    }
+
+    func itemStartedEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let item else {
+            return []
+        }
+        let phase = item.phase(default: .running)
+        if item.family == .reasoning {
+            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+            if reasoningSeeds.isEmpty == false {
+                return reasoningSeeds.map(ReviewDomainEvent.itemStarted)
+            }
+            guard item.hasReasoningParentContent(fallbackDelta: delta) else {
+                return []
+            }
+        }
+        return [.itemStarted(seed(for: item, phase: phase))]
+    }
+
+    func itemUpdateEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        if let item {
+            let phase = item.phase(default: .running)
+            if item.family == .reasoning {
+                let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+                if reasoningSeeds.isEmpty == false {
+                    return reasoningSeeds.map(ReviewDomainEvent.itemUpdated)
+                }
+                guard item.hasReasoningParentContent(fallbackDelta: delta)
+                    || item.hasReasoningLifecycleUpdate(phase: phase)
+                else {
+                    return []
+                }
+            }
+            return [.itemUpdated(seed(for: item, phase: phase))]
+        }
+        return unknownEvent(method: method)
+    }
+
+    func itemCompletionEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let item else {
+            return []
+        }
+        let phase = item.phase(default: .completed)
+        if item.family == .reasoning {
+            let reasoningSeeds = reasoningPartSeeds(for: item, phase: phase)
+            if reasoningSeeds.isEmpty == false {
+                return reasoningSeeds.map(ReviewDomainEvent.itemCompleted)
+            }
+        }
+        if item.wouldEraseStreamedCommandOutput(
+            fallbackDelta: delta,
+            phase: phase,
+            hasCompletionMetadata: completedAt != nil
+        ) {
+            return []
+        }
+        return [.itemCompleted(seed(for: item, phase: phase))]
+    }
+
+    func deltaDomainEvent(
+        kind: ReviewItemKind,
+        family: ReviewItemFamily,
+        content: ReviewTimelineItem.Content,
+        delta explicitDelta: String? = nil,
+        itemID explicitItemID: String? = nil
+    ) -> [ReviewDomainEvent] {
+        guard let delta = explicitDelta ?? delta,
+              delta.isEmpty == false
+        else {
+            return []
+        }
+        return [.textDelta(
+            itemID: .init(rawValue: explicitItemID ?? itemID ?? syntheticItemID(method: kind.rawValue)),
+            kind: kind,
+            family: family,
+            content: content,
+            delta: delta
+        )]
+    }
+
+    func toolProgressEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let message = message?.nilIfEmpty else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID.map { "\($0):progress" } ?? syntheticItemID(method: method.rawValue)),
+            kind: .mcpToolCall,
+            family: .tool,
+            phase: .running,
+            content: .toolCall(.init(
+                server: item?.server,
+                tool: item?.tool,
+                progress: message
+            ))
+        ))]
+    }
+
+    func fileChangeUpdateEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        let changesOutput = changes.map(\.summaryText).joined(separator: "\n").nilIfEmpty
+        let changePath = changes.compactMap { $0.path?.nilIfEmpty }.first
+        let updateItemID = item?.path?.nilIfEmpty == nil
+            ? itemID.map { "\($0):patch" }
+            : item?.id.nilIfEmpty ?? itemID
+        return [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: updateItemID ?? syntheticItemID(method: method.rawValue)),
+            kind: ReviewItemKind(rawValue: method.rawValue),
+            family: .fileChange,
+            phase: item?.phase(default: .running) ?? .running,
+            content: .fileChange(.init(title: item?.path ?? changePath ?? "", output: message ?? delta ?? diff ?? changesOutput ?? ""))
+        ))]
+    }
+
+    func diffUpdateEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let diff = diff?.nilIfEmpty else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+            kind: ReviewItemKind(rawValue: method.rawValue),
+            family: .fileChange,
+            phase: .running,
+            content: .fileChange(.init(title: "", output: diff))
+        ))]
+    }
+
+    func planUpdateEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        let markdown = plan.compactMap { step -> String? in
+            switch (step.status.nilIfEmpty, step.step.nilIfEmpty) {
+            case let (status?, step?):
+                return "[\(status)] \(step)"
+            case let (status?, nil):
+                return "[\(status)]"
+            case let (nil, step?):
+                return step
+            case (nil, nil):
+                return nil
+            }
+        }.joined(separator: "\n")
+        guard markdown.isEmpty == false else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+            kind: .plan,
+            family: .plan,
+            phase: .running,
+            content: .plan(.init(markdown: markdown))
+        ))]
+    }
+
+    func contextCompactionEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        [.itemCompleted(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? resolvedTurnID.map { "contextCompaction:\($0)" } ?? syntheticItemID(method: method.rawValue)),
+            kind: .contextCompaction,
+            family: .contextCompaction,
+            phase: .completed,
+            content: .contextCompaction(.init(title: status?.type ?? ""))
+        ))]
+    }
+
+    func threadStatusEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        switch normalizedStatus(status?.type) {
+        case "notloaded", "closed":
+            return [.reviewFailed(terminalMessage ?? status?.type ?? "")]
+        case "cancelled", "canceled", "interrupted", "aborted":
+            return [.reviewCancelled(terminalMessage ?? status?.type ?? "")]
+        case "systemerror":
+            return [.itemUpdated(diagnosticSeed(
+                method: method,
+                message: terminalMessage ?? status?.type ?? "",
+                phase: .running
+            ))]
+        default:
+            return unknownEvent(method: method)
+        }
+    }
+
+    func errorEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let message = diagnosticMessage else {
+            return [.reviewFailed("")]
+        }
+        let diagnostic = diagnosticSeed(method: method, message: message, phase: willRetry == true ? .running : .failed)
+        if willRetry == true {
+            return [.itemUpdated(diagnostic)]
+        }
+        return [.itemUpdated(diagnostic), .reviewFailed(message)]
+    }
+
+    func diagnosticEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let message = diagnosticMessage else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
+    }
+
+    func modelReroutedEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        let route = [fromModel?.nilIfEmpty, toModel?.nilIfEmpty].compactMap(\.self).joined(separator: " -> ")
+        let message = [route.nilIfEmpty, reason?.nilIfEmpty].compactMap(\.self).joined(separator: "\n")
+        guard message.isEmpty == false else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
+    }
+
+    func modelVerificationEvents(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        let message = diagnosticMessage ?? verifications.joined(separator: "\n").nilIfEmpty
+        guard let message else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(diagnosticSeed(method: method, message: message, phase: .running))]
+    }
+
+    func messageEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        guard let message = message?.nilIfEmpty else {
+            return unknownEvent(method: method)
+        }
+        return [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+            kind: .agentMessage,
+            family: .message,
+            phase: .completed,
+            content: .message(.init(text: message))
+        ))]
+    }
+
+    func unknownEvent(method: AppServerReviewNotification.Method) -> [ReviewDomainEvent] {
+        [.itemUpdated(ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+            kind: ReviewItemKind(rawValue: method.rawValue),
+            family: .unknown,
+            phase: .running,
+            content: .unknown(.init(title: method.rawValue, detail: rawValue?.jsonString))
+        ))]
+    }
+
+    func seed(
+        for item: AppServerThreadItem,
+        phase: ReviewItemPhase,
+        content explicitContent: ReviewTimelineItem.Content? = nil
+    ) -> ReviewTimelineItemSeed {
+        ReviewTimelineItemSeed(
+            id: .init(rawValue: item.id.nilIfEmpty ?? itemID ?? syntheticItemID(method: item.rawType)),
+            kind: item.reviewItemKind,
+            family: item.family,
+            phase: phase,
+            content: explicitContent ?? item.content(fallbackDelta: delta),
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: item.durationMs
+        )
+    }
+
+    private func reasoningPartSeeds(for item: AppServerThreadItem, phase: ReviewItemPhase) -> [ReviewTimelineItemSeed] {
+        guard item.family == .reasoning else {
+            return []
+        }
+        let parentItemID = item.id.nilIfEmpty ?? itemID ?? syntheticItemID(method: item.rawType)
+        let summarySeeds = item.indexedSummaryTexts.map { index, text in
+            reasoningSeed(
+                id: Self.reasoningSummaryItemID(itemID: parentItemID, summaryIndex: index),
+                text: text,
+                style: .summary,
+                item: item,
+                phase: phase
+            )
+        }
+        let rawSeeds = item.indexedContentTexts.map { index, text in
+            reasoningSeed(
+                id: Self.rawReasoningItemID(itemID: parentItemID, contentIndex: index),
+                text: text,
+                style: .raw,
+                item: item,
+                phase: phase
+            )
+        }
+        return summarySeeds + rawSeeds
+    }
+
+    private func reasoningSeed(
+        id: String,
+        text: String,
+        style: ReviewTimelineItem.Reasoning.Style,
+        item: AppServerThreadItem,
+        phase: ReviewItemPhase
+    ) -> ReviewTimelineItemSeed {
+        ReviewTimelineItemSeed(
+            id: .init(rawValue: id),
+            kind: item.reviewItemKind,
+            family: .reasoning,
+            phase: phase,
+            content: .reasoning(.init(text: text, style: style)),
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: item.durationMs
+        )
+    }
+
+    private var terminalDisposition: AppServerTerminalDisposition {
+        switch normalizedStatus(turn?.status ?? status?.type) {
+        case "failed", "failure", "error", "errored":
+            return .failed
+        case "cancelled", "canceled", "interrupted", "aborted":
+            return .cancelled
+        default:
+            return .completed
+        }
+    }
+
+    private func diagnosticSeed(
+        method: AppServerReviewNotification.Method,
+        message: String,
+        phase: ReviewItemPhase
+    ) -> ReviewTimelineItemSeed {
+        ReviewTimelineItemSeed(
+            id: .init(rawValue: itemID ?? syntheticItemID(method: method.rawValue)),
+            kind: ReviewItemKind(rawValue: method.rawValue),
+            family: .diagnostic,
+            phase: phase,
+            content: .diagnostic(.init(message: message))
+        )
+    }
+
+    private func syntheticItemID(method: String) -> String {
+        [resolvedTurnID, method].compactMap(\.self).joined(separator: ":").nilIfEmpty ?? method
+    }
+
+    private static func reasoningSummaryItemID(itemID: String, summaryIndex: Int) -> String {
+        "\(itemID):summary:\(summaryIndex)"
+    }
+
+    private static func rawReasoningItemID(itemID: String, contentIndex: Int) -> String {
+        "\(itemID):content:\(contentIndex)"
+    }
+}
+
+private extension AppServerReviewNotification {
     func allowsDirectTimelineEvent(_ event: ReviewDomainEvent) -> Bool {
         guard event.isDirectTimelineEvent else {
             return false
@@ -3061,7 +3540,7 @@ private extension AppServerWireReviewNotification {
     }
 
     private func allowsDirectTimelineSeed(_ seed: ReviewTimelineItemSeed) -> Bool {
-        if payload.item?.type.rawValue == "userMessage" || seed.kind.rawValue == "userMessage" {
+        if payload.item?.rawType == "userMessage" || seed.kind.rawValue == "userMessage" {
             return false
         }
         if seed.family == .message,
@@ -3071,7 +3550,7 @@ private extension AppServerWireReviewNotification {
         }
         if seed.family == .message,
            isItemLifecycleMethod,
-           payload.item?.type == .agentMessage,
+           payload.item?.rawType == "agentMessage",
            payload.item?.id.nilIfEmpty == nil,
            payload.itemID?.nilIfEmpty == nil {
             return false
@@ -3157,6 +3636,14 @@ private func rawReasoningGroupID(itemID: String, contentIndex: Int) -> String {
 }
 
 private extension TurnNotificationPayload {
+    var startedAt: Date? {
+        startedAtMs.map(Self.date(millisecondsSince1970:))
+    }
+
+    var completedAt: Date? {
+        completedAtMs.map(Self.date(millisecondsSince1970:))
+    }
+
     var commandOutputID: String? {
         itemID?.nilIfEmpty ?? processID?.nilIfEmpty ?? processHandle?.nilIfEmpty
     }
@@ -3274,6 +3761,21 @@ private extension TurnNotificationPayload {
         return summary?.nilIfEmpty ?? details?.nilIfEmpty
     }
 
+    var diagnosticMessage: String? {
+        if let message = message?.nilIfEmpty {
+            return message
+        }
+        if let error = error?.message?.nilIfEmpty {
+            return error
+        }
+        if let summary = summary?.nilIfEmpty,
+           let details = details?.nilIfEmpty
+        {
+            return "\(summary)\n\(details)"
+        }
+        return summary?.nilIfEmpty ?? details?.nilIfEmpty
+    }
+
     var modelReroutedText: String {
         let route = [fromModel, toModel].compactMap { $0?.nilIfEmpty }.joined(separator: " -> ")
         let suffix = reason?.nilIfEmpty.map { " (\($0))" } ?? ""
@@ -3285,6 +3787,10 @@ private extension TurnNotificationPayload {
             return "Model verification required."
         }
         return "Model verification required: \(verifications.joined(separator: ", "))."
+    }
+
+    private static func date(millisecondsSince1970 milliseconds: Int64) -> Date {
+        Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
     }
 }
 
@@ -3300,7 +3806,7 @@ private extension AppServerCommandAction {
     }
 
     private var metadataKind: ReviewLogEntry.Metadata.CommandAction.Kind {
-        switch kind.rawValue {
+        switch kind {
         case "read":
             .read
         case "listFiles":
@@ -3310,6 +3816,16 @@ private extension AppServerCommandAction {
         default:
             .unknown
         }
+    }
+
+    var timelineAction: ReviewTimelineItem.CommandAction {
+        .init(
+            kind: .init(rawValue: kind),
+            command: command,
+            name: name,
+            path: path,
+            query: query
+        )
     }
 }
 
@@ -3446,11 +3962,212 @@ private extension Dictionary where Key == String, Value == AppServerCommandLifec
 }
 
 private extension AppServerThreadItem {
+    var reviewItemKind: ReviewItemKind {
+        .init(rawValue: rawType)
+    }
+
+    var family: ReviewItemFamily {
+        switch rawType {
+        case ReviewItemKind.agentMessage.rawValue,
+            "userMessage",
+            "exitedReviewMode":
+            return .message
+        case ReviewItemKind.commandExecution.rawValue:
+            return .command
+        case ReviewItemKind.fileChange.rawValue:
+            return .fileChange
+        case ReviewItemKind.plan.rawValue:
+            return .plan
+        case ReviewItemKind.reasoning.rawValue:
+            return .reasoning
+        case ReviewItemKind.contextCompaction.rawValue:
+            return .contextCompaction
+        case ReviewItemKind.webSearch.rawValue:
+            return .search
+        case ReviewItemKind.mcpToolCall.rawValue,
+            ReviewItemKind.dynamicToolCall.rawValue,
+            "collabAgentToolCall",
+            ReviewItemKind.imageGeneration.rawValue,
+            ReviewItemKind.imageView.rawValue:
+            return .tool
+        case "hookPrompt", "autoApprovalReview":
+            return .approval
+        case "enteredReviewMode":
+            return .lifecycle
+        case "diagnostic", "warning":
+            return .diagnostic
+        default:
+            return .unknown
+        }
+    }
+
+    func phase(default defaultPhase: ReviewItemPhase) -> ReviewItemPhase {
+        if let status = normalizedStatus(status) {
+            switch status {
+            case "approved", "completed", "succeeded", "success":
+                return .completed
+            case "cancelled", "canceled", "interrupted", "aborted":
+                return .cancelled
+            case "failed", "failure", "error", "errored":
+                return .failed
+            case "incomplete":
+                return .incomplete
+            case "skipped":
+                return .skipped
+            case "approval", "awaitingapproval", "pendingapproval":
+                return .awaitingApproval
+            case "queued", "pending":
+                return .queued
+            case "waiting", "waitingforinput", "inputrequired":
+                return .waitingForInput
+            case "inprogress", "running", "started":
+                return .running
+            default:
+                break
+            }
+        }
+        if error?.nonNullText?.nilIfEmpty != nil || success == false {
+            return .failed
+        }
+        if success == true {
+            return .completed
+        }
+        if let exitCode {
+            return exitCode == 0 ? .completed : .failed
+        }
+        return defaultPhase
+    }
+
+    func content(fallbackDelta rawFallbackDelta: String?) -> ReviewTimelineItem.Content {
+        let fallbackDelta = rawFallbackDelta?.nilIfEmpty
+        switch family {
+        case .message:
+            return .message(.init(text: text ?? review ?? joinedContentText ?? fallbackDelta ?? ""))
+        case .command:
+            return .command(.init(
+                command: command ?? "",
+                cwd: cwd,
+                output: aggregatedOutput ?? fallbackDelta ?? "",
+                exitCode: exitCode,
+                status: status.map(ReviewCommandStatus.init(rawValue:)),
+                source: source.map(ReviewCommandSource.init(rawValue:)),
+                processID: processID,
+                actions: commandActions.map(\.timelineAction),
+                durationMs: durationMs
+            ))
+        case .fileChange:
+            return .fileChange(.init(title: path ?? "", output: aggregatedOutput ?? text ?? fallbackDelta ?? ""))
+        case .plan:
+            return .plan(.init(markdown: text ?? fallbackDelta ?? ""))
+        case .reasoning:
+            let summaryText = summary.joined(separator: "\n").nilIfEmpty
+            let contentText = content.joined(separator: "\n").nilIfEmpty
+            let style: ReviewTimelineItem.Reasoning.Style = summaryText == nil ? .raw : .summary
+            return .reasoning(.init(text: text ?? summaryText ?? contentText ?? fallbackDelta ?? "", style: style))
+        case .contextCompaction:
+            return .contextCompaction(.init(title: status ?? text ?? ""))
+        case .search:
+            return .search(.init(query: query ?? text ?? "", result: result?.nonNullText))
+        case .tool:
+            return .toolCall(.init(
+                namespace: namespace,
+                server: server,
+                tool: tool,
+                arguments: arguments?.nonNullText ?? input?.nonNullText,
+                result: result?.nonNullText,
+                error: error?.nonNullText
+            ))
+        case .approval:
+            return .approval(.init(title: prompt ?? text ?? joinedFragmentText ?? "", detail: review))
+        case .diagnostic:
+            return .diagnostic(.init(message: text ?? error?.nonNullText ?? fallbackDelta ?? ""))
+        case .lifecycle, .unknown:
+            return .unknown(.init(title: rawType, detail: rawValue?.jsonString))
+        }
+    }
+
+    func wouldEraseStreamedCommandOutput(
+        fallbackDelta: String?,
+        phase: ReviewItemPhase,
+        hasCompletionMetadata: Bool
+    ) -> Bool {
+        family == .command
+            && aggregatedOutput == nil
+            && hasAggregatedOutputField == false
+            && fallbackDelta?.nilIfEmpty == nil
+            && phase == .completed
+            && hasCompletionMetadata == false
+            && hasCommandCompletionSnapshot == false
+    }
+
+    func hasReasoningParentContent(fallbackDelta: String?) -> Bool {
+        family == .reasoning
+            && (text?.nilIfEmpty != nil || fallbackDelta?.nilIfEmpty != nil)
+    }
+
+    func hasReasoningLifecycleUpdate(phase: ReviewItemPhase) -> Bool {
+        family == .reasoning
+            && phase.isTerminal
+            && (
+                status?.nilIfEmpty != nil
+                    || success != nil
+                    || error?.nonNullText?.nilIfEmpty != nil
+            )
+    }
+
+    var hasCommandCompletionSnapshot: Bool {
+        exitCode != nil
+            || durationMs != nil
+            || status?.nilIfEmpty != nil
+            || success != nil
+            || command?.nilIfEmpty != nil
+            || cwd?.nilIfEmpty != nil
+            || processID?.nilIfEmpty != nil
+            || source?.nilIfEmpty != nil
+    }
+
+    private var joinedContentText: String? {
+        indexedContentTexts
+            .map { $0.1 }
+            .joined(separator: "\n")
+            .nilIfEmpty
+    }
+
+    var indexedSummaryTexts: [(Int, String)] {
+        let strings = summary.enumerated().compactMap { index, text in
+            text.nilIfEmpty.map { (index, $0) }
+        }
+        if strings.isEmpty == false {
+            return strings
+        }
+        return summaryFragments.enumerated().compactMap { index, fragment in
+            fragment.text?.nilIfEmpty.map { (index, $0) }
+        }
+    }
+
+    var indexedContentTexts: [(Int, String)] {
+        let strings = content.enumerated().compactMap { index, text in
+            text.nilIfEmpty.map { (index, $0) }
+        }
+        if strings.isEmpty == false {
+            return strings
+        }
+        return contentFragments.enumerated().compactMap { index, fragment in
+            fragment.text?.nilIfEmpty.map { (index, $0) }
+        }
+    }
+
+    private var joinedFragmentText: String? {
+        fragments.compactMap { $0.text?.nilIfEmpty }
+            .joined(separator: "\n")
+            .nilIfEmpty
+    }
+
     func startedEvents(
         startedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
     ) -> [CodexReviewBackendModel.Review.Event] {
-        switch type.rawValue {
+        switch rawType {
         case "userMessage":
             return []
         case "enteredReviewMode":
@@ -3500,12 +4217,12 @@ private extension AppServerThreadItem {
         case "agentMessage":
             return []
         default:
-            return [.logEntry(kind: .event, text: "App-server item started: \(type).", groupID: id, replacesGroup: true)]
+            return [.logEntry(kind: .event, text: "App-server item started: \(rawType).", groupID: id, replacesGroup: true)]
         }
     }
 
     func updatedEvents() -> [CodexReviewBackendModel.Review.Event] {
-        switch type.rawValue {
+        switch rawType {
         case "agentMessage":
             return text.map {
                 [logEntry(
@@ -3577,7 +4294,7 @@ private extension AppServerThreadItem {
         completedAt: Date?,
         lifecycle: AppServerCommandLifecycle?
     ) -> [CodexReviewBackendModel.Review.Event] {
-        switch type.rawValue {
+        switch rawType {
         case "userMessage":
             return []
         case "agentMessage":
@@ -3678,7 +4395,7 @@ private extension AppServerThreadItem {
         case "enteredReviewMode":
             return []
         default:
-            return [.logEntry(kind: .event, text: "App-server item completed: \(type).", groupID: id, replacesGroup: true)]
+            return [.logEntry(kind: .event, text: "App-server item completed: \(rawType).", groupID: id, replacesGroup: true)]
         }
     }
 
@@ -3733,10 +4450,10 @@ private extension AppServerThreadItem {
         let itemStatus = self.status?.nilIfEmpty
         let resolvedStatus: String? = explicitStatusValue ?? itemStatus
         let resolvedCommandStatus: String? = itemStatus ?? explicitStatusValue ?? lifecycle?.commandStatus
-        let isCommandExecution = type == .commandExecution
-        let isLifecycleItem = isCommandExecution || type == .contextCompaction
+        let isCommandExecution = rawType == "commandExecution"
+        let isLifecycleItem = isCommandExecution || rawType == "contextCompaction"
         return .init(
-            sourceType: type.rawValue,
+            sourceType: rawType,
             title: title?.nilIfEmpty,
             status: resolvedStatus,
             detail: detail?.nilIfEmpty,
@@ -3829,7 +4546,7 @@ private extension AppServerThreadItem {
         [namespace, server, tool]
             .compactMap { $0?.nilIfEmpty }
             .joined(separator: ".")
-            .nilIfEmpty ?? type.rawValue
+            .nilIfEmpty ?? rawType
     }
 
     private var resultSuffix: String {
@@ -3873,8 +4590,65 @@ private extension AppServerThreadItem {
     }
 }
 
-private extension AppServerWireJSONValue {
+private enum AppServerTerminalDisposition {
+    case completed
+    case failed
+    case cancelled
+}
+
+private func normalizedStatus(_ value: String?) -> String? {
+    value?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .replacingOccurrences(of: "_", with: "")
+        .replacingOccurrences(of: "-", with: "")
+        .nilIfEmpty
+}
+
+private extension AppServerJSONValue {
     var nonNullDebugText: String? {
         nonNullText
+    }
+
+    var nonNullText: String? {
+        switch self {
+        case .null:
+            return nil
+        case .string(let value):
+            return value
+        case .int(let value):
+            return String(value)
+        case .double(let value):
+            return String(value)
+        case .bool(let value):
+            return String(value)
+        case .array, .object:
+            return jsonString
+        }
+    }
+
+    var jsonString: String {
+        let fallback: String
+        switch self {
+        case .object:
+            fallback = "{}"
+        case .array:
+            fallback = "[]"
+        case .string(let value):
+            fallback = value
+        case .int(let value):
+            fallback = String(value)
+        case .double(let value):
+            fallback = String(value)
+        case .bool(let value):
+            fallback = String(value)
+        case .null:
+            fallback = "null"
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return (try? encoder.encode(self))
+            .flatMap { String(data: $0, encoding: .utf8) }
+            ?? fallback
     }
 }

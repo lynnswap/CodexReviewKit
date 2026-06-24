@@ -90,7 +90,6 @@ let package = Package(
             dependencies: [
                 "CodexAppServerKit",
                 "CodexReviewKit",
-                "CodexReviewAppServerWire",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
