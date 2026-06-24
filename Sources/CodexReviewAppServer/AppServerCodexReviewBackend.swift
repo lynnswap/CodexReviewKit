@@ -45,14 +45,17 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
-        guard change.updatesModel == false,
-              change.updatesReasoningEffort == false,
-              change.updatesServiceTier == false
-        else {
-            throw CodexReviewAPI.Error.io(
-                "Updating app-server review settings requires a public CodexKit configuration update API."
-            )
+        var patch = CodexConfigurationPatch()
+        if change.updatesModel {
+            patch.setReviewModel(change.model?.nilIfEmpty)
         }
+        if change.updatesReasoningEffort {
+            patch.setReasoningEffort(change.reasoningEffort?.nilIfEmpty.map(CodexReasoningEffort.init(rawValue:)))
+        }
+        if change.updatesServiceTier {
+            patch.setServiceTier(change.serviceTier?.nilIfEmpty)
+        }
+        try await appServer.updateConfiguration(patch)
         return try await readSettings()
     }
 
@@ -68,9 +71,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
-        let handle = try await appServer.loginChatGPT()
-        return try handle.backendChallenge(nativeWebAuthenticationCallbackScheme: nil)
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+        let handle = try await appServer.loginChatGPT(
+            callbackURLScheme: request.nativeWebAuthenticationCallbackScheme
+        )
+        return try handle.backendChallenge(
+            nativeWebAuthenticationCallbackScheme: request.nativeWebAuthenticationCallbackScheme
+        )
     }
 
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
@@ -82,9 +89,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             guard let url = URL(string: callbackURL) else {
                 throw CodexReviewAPI.Error.io("Invalid ChatGPT authentication callback URL.")
             }
-            _ = url
-            throw CodexReviewAPI.Error.io(
-                "Completing native ChatGPT authentication callbacks requires a public CodexKit login completion API."
+            try await appServer.completeLogin(
+                id: .init(rawValue: response.challengeID),
+                callbackURL: url
             )
         }
         return try await readAuth()
