@@ -1,5 +1,5 @@
 import Observation
-import CodexReview
+import CodexReviewKit
 import Foundation
 import SwiftUI
 

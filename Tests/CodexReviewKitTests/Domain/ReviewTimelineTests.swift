@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import CodexReviewDomain
+@testable import CodexReviewKit
 
 @MainActor
 @Suite("review timeline")

@@ -1,5 +1,5 @@
 import AppKit
-import CodexReview
+import CodexReviewKit
 
 @MainActor
 enum ReviewMonitorAddAccountAction {

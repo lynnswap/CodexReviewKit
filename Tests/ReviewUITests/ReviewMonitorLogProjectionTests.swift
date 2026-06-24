@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 
 @Suite("ReviewMonitor log projection")

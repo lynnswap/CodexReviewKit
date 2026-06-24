@@ -1,6 +1,6 @@
 import AppKit
 import ObjectiveC.runtime
-import CodexReview
+import CodexReviewKit
 
 @MainActor
 final class ReviewMonitorLogScrollView: NSScrollView {

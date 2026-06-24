@@ -1,7 +1,6 @@
 import Foundation
 import Testing
-@testable import CodexReviewApplication
-import CodexReviewDomain
+@testable import CodexReviewKit
 
 @MainActor
 @Suite("review observation awaiter")

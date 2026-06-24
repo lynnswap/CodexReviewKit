@@ -1,6 +1,6 @@
 import AppKit
 import ObservationBridge
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 @MainActor

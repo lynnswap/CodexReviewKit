@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 @testable import CodexReviewMCPAdapter
-import CodexReviewDomain
+import CodexReviewKit
 
 @MainActor
 @Suite("review MCP projection")

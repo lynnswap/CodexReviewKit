@@ -3,7 +3,7 @@ import AppKit
 import AuthenticationServices
 import Testing
 import CodexAppServerKit
-import CodexReview
+import CodexReviewKit
 import CodexReviewAppServer
 import CodexReviewHost
 import CodexReviewMCPServer
@@ -1042,7 +1042,7 @@ struct CodexReviewHostTests {
         )
         await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
 
-        try await store.switchAccount(CodexReview.CodexAccount(email: "second@example.com"))
+        try await store.switchAccount(CodexReviewKit.CodexAccount(email: "second@example.com"))
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
         await firstTransport.waitForRequestCount(8)
@@ -1166,7 +1166,7 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await #expect(throws: (any Error).self) {
-            try await store.switchAccount(CodexReview.CodexAccount(email: "second@example.com"))
+            try await store.switchAccount(CodexReviewKit.CodexAccount(email: "second@example.com"))
         }
 
         #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
@@ -1679,7 +1679,7 @@ struct CodexReviewHostTests {
     @Test func liveStoreRemovesOnlyEncodedSavedAccountDirectory() async throws {
         let homeURL = try temporaryHome()
         let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-        let account = CodexReview.CodexAccount(email: "../outside@example.com")
+        let account = CodexReviewKit.CodexAccount(email: "../outside@example.com")
         let rawFallbackDirectoryURL = codexHomeURL.appendingPathComponent("outside@example.com", isDirectory: true)
         try FileManager.default.createDirectory(at: rawFallbackDirectoryURL, withIntermediateDirectories: true)
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1702,8 +1702,8 @@ struct CodexReviewHostTests {
         let sentinelURL = codexHomeURL.appendingPathComponent("sentinel.txt")
         try Data("keep".utf8).write(to: sentinelURL)
 
-        let dotAccount = CodexReview.CodexAccount(email: ".")
-        let dotDotAccount = CodexReview.CodexAccount(email: "..")
+        let dotAccount = CodexReviewKit.CodexAccount(email: ".")
+        let dotDotAccount = CodexReviewKit.CodexAccount(email: "..")
         let dotDirectoryURL = accountsURL.appendingPathComponent("%2E", isDirectory: true)
         let dotDotDirectoryURL = accountsURL.appendingPathComponent("%2E%2E", isDirectory: true)
         try FileManager.default.createDirectory(at: dotDirectoryURL, withIntermediateDirectories: true)

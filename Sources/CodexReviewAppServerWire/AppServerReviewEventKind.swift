@@ -1,5 +1,5 @@
 import Foundation
-import CodexReviewDomain
+import CodexReviewKit
 
 public struct AppServerReviewEventKind: ReviewStringIdentifier, CustomStringConvertible {
     public var rawValue: String

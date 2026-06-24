@@ -1,5 +1,5 @@
 import Foundation
-import CodexReviewDomain
+import CodexReviewKit
 
 public extension AppServerWireReviewNotification {
     struct Payload: Decodable, Equatable, Sendable {

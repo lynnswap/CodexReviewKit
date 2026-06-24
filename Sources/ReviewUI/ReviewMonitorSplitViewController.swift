@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import ObservationBridge
-import CodexReview
+import CodexReviewKit
 
 @MainActor
 final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDelegate {

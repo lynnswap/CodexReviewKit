@@ -1,6 +1,6 @@
 #if DEBUG
 import AppKit
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 #Preview("Normal") {

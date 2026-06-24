@@ -1,6 +1,6 @@
 import Foundation
 import CodexAppServerKit
-import CodexReview
+import CodexReviewKit
 
 package struct AppServerReviewInterruption: Equatable, Sendable {
     package var threadID: String

@@ -1,7 +1,6 @@
 import Foundation
 import Testing
-@_spi(Testing) @testable import CodexReview
-import CodexReviewDomain
+@_spi(Testing) @testable import CodexReviewKit
 
 @Suite("Codex review job rendering")
 @MainActor

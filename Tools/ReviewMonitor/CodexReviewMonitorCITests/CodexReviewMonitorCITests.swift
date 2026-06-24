@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import CodexReview
+import CodexReviewKit
 import CodexReviewHost
 import Testing
 @testable import CodexReviewMonitor

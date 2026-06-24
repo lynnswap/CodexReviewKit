@@ -1,5 +1,5 @@
 import Foundation
-import CodexReviewDomain
+import CodexReviewKit
 
 public struct ReviewMCPProjection: Sendable, Equatable {
     public struct Item: Sendable, Equatable {

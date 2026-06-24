@@ -1,4 +1,4 @@
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 struct ReviewMonitorAccountRowView: View {

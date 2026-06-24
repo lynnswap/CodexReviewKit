@@ -1,5 +1,4 @@
 import Foundation
-import CodexReviewDomain
 
 @MainActor
 extension CodexReviewJob {

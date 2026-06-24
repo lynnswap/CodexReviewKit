@@ -1,6 +1,4 @@
 import Foundation
-import CodexReviewApplication
-import CodexReviewDomain
 
 private let networkRecoveryUnavailableMessage = "Network unavailable; waiting to reconnect."
 private let networkRecoveryRestoredMessage = "Network restored; restarting review."

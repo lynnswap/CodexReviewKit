@@ -3,8 +3,8 @@ import Foundation
 import MCP
 @preconcurrency import NIOCore
 import Testing
-@_spi(Testing) @testable import CodexReview
-import CodexReviewDomain
+@_spi(Testing) @testable import CodexReviewKit
+import CodexReviewKit
 import CodexReviewMCPServer
 import CodexReviewTesting
 

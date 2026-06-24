@@ -1,8 +1,8 @@
 import Foundation
 import CodexAppServerKit
-import CodexReview
+import CodexReviewKit
 import CodexReviewAppServerWire
-import CodexReviewDomain
+import CodexReviewKit
 import OSLog
 
 private let appServerBackendLogger = Logger(

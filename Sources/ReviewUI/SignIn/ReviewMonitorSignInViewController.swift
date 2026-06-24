@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 @MainActor

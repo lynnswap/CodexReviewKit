@@ -1,6 +1,6 @@
 import Foundation
 import MCP
-import CodexReview
+import CodexReviewKit
 
 func toolRequest(
     tool: CodexReviewMCP.Tool.Name,

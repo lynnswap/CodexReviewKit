@@ -1,6 +1,6 @@
 import Foundation
 import MCP
-import CodexReview
+import CodexReviewKit
 import CodexReviewMCPAdapter
 
 func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Result {

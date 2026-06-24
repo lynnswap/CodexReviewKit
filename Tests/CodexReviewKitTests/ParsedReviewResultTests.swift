@@ -1,5 +1,5 @@
 import Testing
-@testable import CodexReview
+@testable import CodexReviewKit
 
 @Suite("Parsed review results")
 struct ParsedReviewResultTests {

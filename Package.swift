@@ -9,8 +9,8 @@ let package = Package(
     ],
     products: [
         .library(
-            name: "CodexReview",
-            targets: ["CodexReview"]
+            name: "CodexReviewKit",
+            targets: ["CodexReviewKit"]
         ),
         .library(
             name: "CodexReviewHost",
@@ -40,26 +40,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "CodexReviewDomain",
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
-            name: "CodexReviewApplication",
+            name: "CodexReviewKit",
             dependencies: [
-                "CodexReviewDomain",
-                .product(name: "ObservationBridge", package: "ObservationBridge"),
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
-            name: "CodexReview",
-            dependencies: [
-                "CodexReviewApplication",
-                "CodexReviewDomain",
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
             swiftSettings: [
@@ -84,7 +66,7 @@ let package = Package(
         .target(
             name: "CodexReviewAppServerWire",
             dependencies: [
-                "CodexReviewDomain",
+                "CodexReviewKit",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -94,9 +76,8 @@ let package = Package(
             name: "CodexReviewAppServer",
             dependencies: [
                 "CodexAppServerKit",
-                "CodexReview",
+                "CodexReviewKit",
                 "CodexReviewAppServerWire",
-                "CodexReviewDomain",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -105,7 +86,7 @@ let package = Package(
         .target(
             name: "CodexReviewMCPAdapter",
             dependencies: [
-                "CodexReviewDomain",
+                "CodexReviewKit",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -114,7 +95,7 @@ let package = Package(
         .target(
             name: "CodexReviewMCPServer",
             dependencies: [
-                "CodexReview",
+                "CodexReviewKit",
                 "CodexReviewMCPAdapter",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -129,7 +110,7 @@ let package = Package(
             name: "CodexReviewHost",
             dependencies: [
                 "CodexAppServerKit",
-                "CodexReview",
+                "CodexReviewKit",
                 "CodexReviewAppServer",
                 "CodexReviewMCPServer",
             ],
@@ -142,7 +123,7 @@ let package = Package(
             dependencies: [
                 "CodexAppServerKit",
                 "CodexAppServerKitTesting",
-                "CodexReview",
+                "CodexReviewKit",
                 "CodexReviewAppServer",
             ],
             swiftSettings: [
@@ -152,8 +133,7 @@ let package = Package(
         .target(
             name: "ReviewUI",
             dependencies: [
-                "CodexReview",
-                "CodexReviewDomain",
+                "CodexReviewKit",
                 "ReviewMonitorRendering",
                 "TextTransitions",
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
@@ -165,7 +145,7 @@ let package = Package(
         .target(
             name: "ReviewMonitorRendering",
             dependencies: [
-                "CodexReviewDomain",
+                "CodexReviewKit",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -182,24 +162,6 @@ let package = Package(
             dependencies: [
                 "CodexAppServerKit",
                 "CodexAppServerKitTesting",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "CodexReviewDomainTests",
-            dependencies: [
-                "CodexReviewDomain",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "CodexReviewApplicationTests",
-            dependencies: [
-                "CodexReviewApplication",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -224,15 +186,15 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "CodexReviewTests",
-            dependencies: ["CodexReview", "CodexReviewDomain", "CodexReviewTesting"],
+            name: "CodexReviewKitTests",
+            dependencies: ["CodexReviewKit", "CodexReviewTesting"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
         ),
         .testTarget(
             name: "CodexReviewAppServerTests",
-            dependencies: ["CodexAppServerKit", "CodexReviewAppServer", "CodexReviewDomain", "CodexReviewTesting"],
+            dependencies: ["CodexAppServerKit", "CodexReviewAppServer", "CodexReviewKit", "CodexReviewTesting"],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -258,7 +220,7 @@ let package = Package(
         .testTarget(
             name: "ReviewUITests",
             dependencies: [
-                "CodexReview",
+                "CodexReviewKit",
                 "CodexReviewTesting",
                 "ReviewUI",
             ],
@@ -269,7 +231,7 @@ let package = Package(
         .testTarget(
             name: "ReviewMonitorRenderingTests",
             dependencies: [
-                "CodexReviewDomain",
+                "CodexReviewKit",
                 "ReviewMonitorRendering",
             ],
             swiftSettings: [
@@ -281,12 +243,6 @@ let package = Package(
             dependencies: [
                 "TextTransitions",
             ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "ArchitectureFenceTests",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]

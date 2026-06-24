@@ -1,5 +1,5 @@
 import Foundation
-@_spi(Testing) import CodexReview
+@_spi(Testing) import CodexReviewKit
 
 @_spi(PreviewSupport)
 @MainActor
@@ -401,7 +401,7 @@ public enum ReviewMonitorPreviewContent {
             text: """
             import AppKit
             import ObjectiveC.runtime
-            import CodexReview
+            import CodexReviewKit
 
             @MainActor
             final class ReviewMonitorLogScrollView: NSScrollView {

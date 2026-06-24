@@ -1,7 +1,7 @@
 import AppKit
 import ObservationBridge
-import CodexReview
-import CodexReviewDomain
+import CodexReviewKit
+import CodexReviewKit
 import ReviewMonitorRendering
 
 @MainActor

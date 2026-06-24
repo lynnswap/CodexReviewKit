@@ -1,5 +1,4 @@
 import Foundation
-import CodexReviewDomain
 
 package enum CodexReviewBackendModel {
     package enum Settings {}
