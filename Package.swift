@@ -1,6 +1,30 @@
 // swift-tools-version: 6.3
 
+import Foundation
 import PackageDescription
+
+private let packageDirectory = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+private let codexKitDevelopmentPath = "dependencies/CodexKit"
+private let codexKitDevelopmentManifestPath = packageDirectory
+    .appendingPathComponent(codexKitDevelopmentPath)
+    .appendingPathComponent("Package.swift")
+    .path
+private let codexKitDependency: Package.Dependency = {
+    if FileManager.default.fileExists(atPath: codexKitDevelopmentManifestPath) {
+        // Development-only CodexKit integration checkout. Keep the local CodexKit
+        // worktree at dependencies/CodexKit while this branch tracks in-flight APIs.
+        return .package(path: codexKitDevelopmentPath)
+    }
+
+    // Fresh checkouts and CI must not depend on an ignored local checkout. Until
+    // CodexKit is released, fall back to the pinned integration revision; replace
+    // this with the final pinned remote CodexKit release dependency before release.
+    return .package(
+        url: "https://github.com/lynnswap/CodexKit.git",
+        revision: "09ad955e2d638a0287cbb4a2165214f8f8fa3dfb"
+    )
+}()
 
 let package = Package(
     name: "CodexReviewKit",
@@ -29,11 +53,7 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        // Development-only CodexKit integration checkout. Keep the local CodexKit
-        // worktree at dependencies/CodexKit while this branch tracks in-flight
-        // APIs; replace this with a pinned remote CodexKit dependency before
-        // merging or releasing.
-        .package(path: "dependencies/CodexKit"),
+        codexKitDependency,
     ],
     targets: [
         .target(
