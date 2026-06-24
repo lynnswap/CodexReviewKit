@@ -21,42 +21,58 @@ have been converted into domain events.
 
 ## Targets
 
+This table describes intended ownership. Some names in this table are target
+ownership names that may still be pending migration in `Package.swift`; do not
+read them as a claim that every symbol has already moved.
+
 | Target | Responsibility |
 | --- | --- |
-| `CodexReviewKit` | Review identifiers, kinds, runs, jobs, semantic timeline, application store/use-case primitives, `CodexReviewStore`, auth/settings/runtime product state, and legacy log compatibility projections |
-| `CodexAppServerKit` | Generic `codex app-server` process transport, JSON-RPC client, typed request DTOs, and Swift domain API for threads, turns, prompts, models, accounts, and login |
+| `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, and high-level Swift domain API for threads, turns, prompts, review sessions, models, accounts, and login. It has no Review, UI, or MCP dependencies |
+| `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and legacy log compatibility projections. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServerWire` | Raw `codex app-server` review notification DTO decode and conversion into domain events |
-| `CodexReviewAppServer` | Review-specific `review/start` orchestration, ReviewMonitor notification routing, and runtime conversion |
-| `CodexReviewMCPServer` | MCP-facing projections from observable review/domain state, internal MCP protocol request/response conversion, and Streamable HTTP endpoint |
+| `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level review sessions into `CodexReviewKit` backend events |
+| `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
+| `CodexUIKit` | Future generic UI-facing model/API layer over Codex and app-server concepts. It provides UI-construction models and APIs, uses `LocalizedStringResource` for display values where appropriate, and avoids mirror snapshot state |
+| `CodexUI` | Concrete AppKit UI and existing hosted SwiftUI views. SwiftUI views remain concrete UI here; there is no requirement to delete or rewrite them just to satisfy target ownership |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
 | `ReviewMonitorRendering` | Domain timeline rendering helpers that do not know AppKit/SwiftUI or app-server wire |
-| `ReviewUI` | Native monitor UI rendering and user-intent forwarding |
+| `ReviewUI` | Current concrete native monitor UI target while UI ownership names are still migrating |
 | `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
 | `TextTransitions` | UI text transition view support |
 
 ReviewMonitor is the product entry point. The host target wires the concrete
 runtime together; lower targets do not import the host.
 
+`CodexUIKit` must not own `CodexReviewStore`, `ReviewTimeline`,
+`ReviewMonitorUIState`, sidebar/detail concepts, or concrete `NSView`,
+`ViewController`, or SwiftUI `View` types. Those belong to review core/store or
+concrete UI targets. `CodexUIKit` may describe reusable UI construction models
+over generic Codex/app-server concepts, but it must not become a mirror cache of
+ReviewMonitor state.
+
 ## Source Of Truth
 
 `CodexReviewKit` owns the semantic timeline vocabulary. It defines the
 review item kinds, timeline item content, and `ReviewDomainEvent` values that
 describe review progress independently of any transport, UI, or MCP protocol.
+Review parsing, store commands, backend contracts, and timeline mutation stay
+in this target.
 
 `CodexAppServerKit` owns the generic app-server connection boundary. It starts
 the local `codex app-server` process, performs JSON-RPC framing, sends
 `initialize`/`initialized`, retries overload responses, preserves unknown
 notifications, and exposes `CodexAppServer` as the Swift-facing container for
 threads, turns, prompts, messages, transcripts, log entries, models, accounts,
-and login flows. It must not import ReviewMonitor targets.
+and login flows. It must not import Review, UI, or MCP targets.
 
 `CodexReviewAppServerWire` owns raw app-server notification shapes. Its job is
 to decode review-specific wire payloads and expose domain events. It may depend on
 `CodexReviewKit`, but it must not import UI, rendering, or MCP targets.
 
-`CodexReviewAppServer` owns ReviewMonitor's `review/start` runtime behavior. It
-uses the generic app-server boundary for transport and common DTOs, converts
-review notifications through `CodexReviewAppServerWire`, and hands
+`CodexReviewAppServer` owns the adapter from high-level app-server review
+sessions into `CodexReviewKit` backend events. It uses the generic
+app-server boundary for transport and common DTOs, converts review
+notifications through `CodexReviewAppServerWire`, and hands
 application-facing review events to the store. Review wire details stop at this
 boundary.
 
@@ -200,9 +216,9 @@ the store.
 - Cancellation is represented by typed control/cleanup requests, not by closing
   the transport.
 
-`CodexReviewAppServer` adds ReviewMonitor-specific `review/start`, review
-notification conversion, cleanup, recovery, and UI-facing orchestration on top
-of that generic boundary.
+`CodexReviewAppServer` adds ReviewMonitor-specific review session adaptation,
+review notification conversion, cleanup, and recovery on top of that generic
+boundary.
 
 The intended ownership for review logs is that `CodexAppServerKit` supplies
 generic app-server thread events and log entries, while ReviewMonitor-specific
@@ -216,8 +232,9 @@ Fake and live tests use the same transport protocol.
 `CodexReviewMCPServer` knows MCP tool names, request arguments, response shape,
 session headers, Streamable HTTP behavior, and MCP-facing value snapshots from
 domain/product state. It calls store commands and projects the review timeline
-into MCP tool response shape. It does not know Codex JSON-RPC details and must
-not import ReviewUI, the app-server runtime, or app-server wire DTOs.
+into MCP tool response shape. It does not know Codex JSON-RPC details, does not
+depend on the UI or app-server backend, and must not import ReviewUI, the
+app-server runtime, or app-server wire DTOs.
 
 ReviewMonitor owns the default Streamable HTTP endpoint at
 `http://localhost:9417/mcp`. The HTTP boundary follows current MCP session
@@ -234,6 +251,16 @@ The public tool surface is:
 - `review_cancel`
 
 ## Monitor UI Boundary
+
+The intended UI ownership has two layers:
+
+- `CodexUIKit` is a future generic UI-facing model/API layer over Codex and
+  app-server concepts. It supplies reusable UI-construction values and APIs,
+  can use `LocalizedStringResource` for display values where appropriate, and
+  derives values from the owning model instead of keeping mirror snapshot state.
+- `CodexUI` owns concrete AppKit objects and existing hosted SwiftUI views.
+  SwiftUI views remain here as concrete UI; target ownership does not force a
+  deletion or rewrite of those views.
 
 `ReviewUI` observes product/domain state and forwards user intent.
 
@@ -267,6 +294,9 @@ Default tests are deterministic and do not start a live `codex app-server`.
 Forbidden test patterns:
 
 - Sleeping to wait for lifecycle progress when an explicit signal can be used.
+- Enforcing architecture with string-scan or `ArchitectureFence`-style tests.
+  Target ownership should be covered by contract and behavior tests at the
+  relevant boundary.
 - Inspecting fake-only storage as product behavior.
 - Starting a live `codex app-server` in default CI tests.
 - Testing behavior only because another implementation happened to behave
