@@ -22,6 +22,7 @@ skip_tests=0
 allow_dirty=0
 app_name="CodexReviewMonitor"
 tag_needs_push=1
+expected_team_id_variable="EXPECTED_DEVELOPER_ID_TEAM_ID"
 
 remote_tag_commit() {
   local remote_name="$1"
@@ -118,6 +119,11 @@ if [[ "$signing_identity" != Developer\ ID\ Application:* ]]; then
   echo "Apple Development identities are for local development and are intentionally not accepted here." >&2
   exit 1
 fi
+if [[ ! "$signing_identity" =~ \(([A-Z0-9]{10})\)$ ]]; then
+  echo "--signing-identity must end with an Apple Team ID, for example: Developer ID Application: Name (TEAMID)" >&2
+  exit 1
+fi
+signing_team_id="${BASH_REMATCH[1]}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -184,6 +190,19 @@ if [[ "$allow_dirty" -eq 0 ]]; then
 
   if ! gh auth status >/dev/null 2>&1; then
     echo "gh CLI is not authenticated." >&2
+    exit 1
+  fi
+
+  configured_team_id="$(gh variable get "$expected_team_id_variable" 2>/dev/null || true)"
+  if [[ -z "$configured_team_id" ]]; then
+    echo "Repository variable $expected_team_id_variable must be set before publishing." >&2
+    echo "Set it to the Apple Team ID from the Developer ID Application certificate: $signing_team_id" >&2
+    exit 1
+  fi
+  if [[ "$configured_team_id" != "$signing_team_id" ]]; then
+    echo "Repository variable $expected_team_id_variable does not match the signing certificate Team ID." >&2
+    echo "Repository variable: $configured_team_id" >&2
+    echo "Signing identity:    $signing_team_id" >&2
     exit 1
   fi
 fi
