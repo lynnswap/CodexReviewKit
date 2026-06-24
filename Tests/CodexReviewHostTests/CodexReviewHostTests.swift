@@ -3,11 +3,90 @@ import AppKit
 import AuthenticationServices
 import Testing
 import CodexAppServerKit
+import CodexAppServerKitTesting
 import CodexReviewKit
 import CodexReviewAppServer
 import CodexReviewHost
 import CodexReviewMCPServer
 import CodexReviewTesting
+
+private let testAuthenticationURL = URL(string: "https://example.com/auth")!
+
+private extension CodexReviewStore {
+    @MainActor
+    static func makeLiveStoreForTesting(
+        environment: [String: String],
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = { _ in },
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        transport: FakeCodexAppServerTransport
+    ) -> CodexReviewStore {
+        makeLiveStoreForTesting(
+            environment: environment,
+            runtimePreferences: runtimePreferences,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            appServerFactory: { codexHomeURL in
+                try await CodexAppServerTestRuntime.start(
+                    transport: transport,
+                    codexHome: codexHomeURL.path
+                ).server
+            }
+        )
+    }
+
+    @MainActor
+    static func makeLiveStoreForTesting(
+        environment: [String: String],
+        runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
+        nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory,
+        externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = { _ in },
+        mcpHTTPServerFactory: (@MainActor @Sendable (
+            CodexReviewStore,
+            CodexReviewMCPHTTPServer.Configuration
+        ) -> any CodexReviewMCPHTTPServing)? = nil,
+        mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
+        mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
+        shutdownCleanupTimeout: Duration = .seconds(2),
+        networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
+        networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> FakeCodexAppServerTransport
+    ) -> CodexReviewStore {
+        makeLiveStoreForTesting(
+            environment: environment,
+            runtimePreferences: runtimePreferences,
+            nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            externalURLOpener: externalURLOpener,
+            mcpHTTPServerFactory: mcpHTTPServerFactory,
+            mcpPortOwnerResolver: mcpPortOwnerResolver,
+            mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
+            shutdownCleanupTimeout: shutdownCleanupTimeout,
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: networkRecoveryPolicy,
+            appServerFactory: { codexHomeURL in
+                let transport = try await transportFactory(codexHomeURL)
+                return try await CodexAppServerTestRuntime.start(
+                    transport: transport,
+                    codexHome: codexHomeURL.path
+                ).server
+            }
+        )
+    }
+}
 
 @Suite("host composition")
 @MainActor
@@ -170,7 +249,7 @@ struct CodexReviewHostTests {
     @Test func liveStoreUsesRuntimePreferenceCodexHome() async throws {
         let homeURL = try temporaryHome()
         let configuredCodexHomeURL = homeURL.appendingPathComponent("custom-codex-home", isDirectory: true)
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -196,7 +275,7 @@ struct CodexReviewHostTests {
 
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -263,7 +342,7 @@ struct CodexReviewHostTests {
             },
             transportFactory: { _ in
                 didLaunchAppServer = true
-                return FakeJSONRPCTransport()
+                return FakeCodexAppServerTransport()
             }
         )
 
@@ -300,7 +379,7 @@ struct CodexReviewHostTests {
             },
             transportFactory: { _ in
                 didLaunchAppServer = true
-                return FakeJSONRPCTransport()
+                return FakeCodexAppServerTransport()
             }
         )
 
@@ -338,7 +417,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: FakeJSONRPCTransport()
+            transport: FakeCodexAppServerTransport()
         )
 
         let reviewAccount = try #require(store.auth.persistedAccounts.first {
@@ -380,7 +459,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: FakeJSONRPCTransport()
+            transport: FakeCodexAppServerTransport()
         )
 
         let reviewAccount = try #require(store.auth.persistedAccounts.first {
@@ -402,7 +481,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
             TestAccountReadResponse(account: .init(type: "apiKey")),
@@ -433,8 +512,8 @@ struct CodexReviewHostTests {
         ])
     }
 
-    @Test func liveStoreCancelsLoginWhenAuthenticationSessionIsClosed() async throws {
-        let transport = FakeJSONRPCTransport()
+    @Test func liveStoreUsesNativeLoginCompletionWhenCallbackIsAvailable() async throws {
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -450,8 +529,23 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
         let sessions = FakeWebAuthenticationSessions()
+        let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             nativeAuthenticationConfiguration: .init(
@@ -460,6 +554,7 @@ struct CodexReviewHostTests {
                 presentationAnchorProvider: { NSWindow() }
             ),
             webAuthenticationSessionFactory: sessions.makeSession,
+            externalURLOpener: externalURLOpener.open,
             transport: transport
         )
 
@@ -468,13 +563,22 @@ struct CodexReviewHostTests {
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
         #expect(store.auth.isAuthenticating)
-
-        await session.closeFromAuthenticationWindow()
-        await transport.waitForRequestCount(6)
-        await waitUntil { store.auth.isAuthenticating == false }
-
-        #expect(store.auth.isAuthenticating == false)
-        #expect(store.auth.selectedAccount == nil)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        await transport.waitForRequestCount(7)
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
+        await waitUntil { store.auth.selectedAccount?.accountKey == "new@example.com" }
+        let loginRequest = try #require(await transport.recordedRequests().first {
+            $0.method == "account/login/start"
+        })
+        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
+        #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
+        let completeRequest = try #require(await transport.recordedRequests().first {
+            $0.method == "account/login/complete"
+        })
+        let completeParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Complete.Params.self, from: completeRequest.params)
+        #expect(completeParams.loginID == "login-1")
+        #expect(completeParams.callbackURL == "lynnpd.CodexReviewMonitor.auth://callback?code=abc")
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods == [
             "initialize",
@@ -482,12 +586,15 @@ struct CodexReviewHostTests {
             "config/read",
             "model/list",
             "account/login/start",
-            "account/login/cancel",
+            "account/login/complete",
+            "account/read",
+            "account/rateLimits/read",
         ])
+        await store.stop()
     }
 
-    @Test func liveStoreCancelsLoginWhenAuthenticationSessionSetupFails() async throws {
-        let transport = FakeJSONRPCTransport()
+    @Test func liveStoreReportsNativeAuthenticationSessionCreationFailure() async throws {
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -503,7 +610,12 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        try await transport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(),
+            for: "account/login/cancel"
+        )
+        var didCreateNativeSession = false
+        let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             nativeAuthenticationConfiguration: .init(
@@ -512,8 +624,10 @@ struct CodexReviewHostTests {
                 presentationAnchorProvider: { NSWindow() }
             ),
             webAuthenticationSessionFactory: { _, _, _, _ in
+                didCreateNativeSession = true
                 throw CodexReviewAPI.Error.io("Authentication presentation failed.")
             },
+            externalURLOpener: externalURLOpener.open,
             transport: transport
         )
 
@@ -521,7 +635,10 @@ struct CodexReviewHostTests {
         await store.addAccount()
         await transport.waitForRequestCount(6)
 
+        #expect(didCreateNativeSession)
+        #expect(store.auth.isAuthenticating == false)
         #expect(failedMessage(from: store.auth.phase) == "Authentication presentation failed.")
+        #expect(externalURLOpener.openedURLs == [])
         #expect(await transport.recordedRequests().map(\.method) == [
             "initialize",
             "account/read",
@@ -530,12 +647,13 @@ struct CodexReviewHostTests {
             "account/login/start",
             "account/login/cancel",
         ])
+        await store.stop()
     }
 
     @Test func liveStoreAddsAccountWithoutSwitchingExistingActiveAccount() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(
@@ -556,7 +674,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
 
-        let authTransport = FakeJSONRPCTransport()
+        let authTransport = FakeCodexAppServerTransport()
         try await authTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await authTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
@@ -565,6 +683,10 @@ struct CodexReviewHostTests {
                 nativeWebAuthentication: nil
             ),
             for: "account/login/start"
+        )
+        try await authTransport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
         )
         try await authTransport.enqueue(
             AppServerAPI.Account.Read.Response(
@@ -579,7 +701,7 @@ struct CodexReviewHostTests {
             )),
             for: "account/rateLimits/read"
         )
-        let refreshTransport = FakeJSONRPCTransport()
+        let refreshTransport = FakeCodexAppServerTransport()
         let refreshGate = AsyncGate()
         await refreshTransport.hold(method: "account/rateLimits/read", gate: refreshGate)
         try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -631,9 +753,10 @@ struct CodexReviewHostTests {
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
 
         await store.addAccount()
+        await authTransport.waitForNotificationStreamCount(1)
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        await authTransport.waitForNotificationStreamCount(1)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
         #expect(sessions.createdSessionCount == 1)
         #expect(externalURLOpener.openedURLs == [])
         let loginRequest = try #require(await authTransport.recordedRequests().first {
@@ -641,19 +764,7 @@ struct CodexReviewHostTests {
         })
         let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
         #expect(loginParams.nativeWebAuthentication?.callbackURLScheme == "lynnpd.CodexReviewMonitor.auth")
-        try await authTransport.emitServerNotification(
-            method: "account/updated",
-            params: EmptyResponse()
-        )
-        try await authTransport.emitServerNotification(
-            method: "account/login/completed",
-            params: TestLoginCompletedNotification(loginID: "login-2", success: true)
-        )
-        try await authTransport.emitServerNotification(
-            method: "account/updated",
-            params: EmptyResponse()
-        )
-        await authTransport.waitForRequestCount(4)
+        await authTransport.waitForRequestCount(5)
         await waitUntil {
             store.auth.persistedAccounts.contains { $0.accountKey == "new@example.com" }
                 && store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 25
@@ -668,6 +779,7 @@ struct CodexReviewHostTests {
         #expect(await authTransport.recordedRequests().map(\.method) == [
             "initialize",
             "account/login/start",
+            "account/login/complete",
             "account/read",
             "account/rateLimits/read",
         ])
@@ -703,7 +815,7 @@ struct CodexReviewHostTests {
         )
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "new@example.com")
 
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -722,7 +834,7 @@ struct CodexReviewHostTests {
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
 
-        let refreshTransport = FakeJSONRPCTransport()
+        let refreshTransport = FakeCodexAppServerTransport()
         try await refreshTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await refreshTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -768,7 +880,7 @@ struct CodexReviewHostTests {
             activeAccountKey: nil,
             accounts: ["existing@example.com"]
         )
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -784,7 +896,10 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        try await transport.enqueue(AppServerAPI.Account.Login.Complete.Response(), for: "account/login/complete")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
+        )
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
             for: "account/read"
@@ -796,6 +911,7 @@ struct CodexReviewHostTests {
             )),
             for: "account/rateLimits/read"
         )
+        let externalURLOpener = FakeExternalURLOpener()
         let sessions = FakeWebAuthenticationSessions()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -805,6 +921,7 @@ struct CodexReviewHostTests {
                 presentationAnchorProvider: { NSWindow() }
             ),
             webAuthenticationSessionFactory: sessions.makeSession,
+            externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 #expect(codexHomeURL == mainCodexHomeURL)
                 return transport
@@ -818,7 +935,15 @@ struct CodexReviewHostTests {
         await store.addAccount()
         let session = await sessions.waitForSession()
         await session.waitUntilWaitingForCallback()
-        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=1")!)
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-new", success: true)
+        )
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
         await waitUntil {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
@@ -840,9 +965,10 @@ struct CodexReviewHostTests {
             "account/read",
             "account/rateLimits/read",
         ])
+        #expect(externalURLOpener.openedURLs == [])
     }
 
-    @Test func liveStoreAddAccountSetupFailureRecordsAuthenticationFailure() async throws {
+    @Test func liveStoreAddAccountReportsNativeSessionSetupFailure() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         try writeRegistry(
@@ -850,7 +976,7 @@ struct CodexReviewHostTests {
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
         )
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -868,7 +994,7 @@ struct CodexReviewHostTests {
             for: "config/read"
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        let loginTransport = FakeJSONRPCTransport()
+        let loginTransport = FakeCodexAppServerTransport()
         try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
@@ -878,8 +1004,12 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        try await loginTransport.enqueue(AppServerAPI.Account.Login.Cancel.Response(), for: "account/login/cancel")
+        try await loginTransport.enqueue(
+            AppServerAPI.Account.Login.Cancel.Response(),
+            for: "account/login/cancel"
+        )
         var isolatedCodexHomeURL: URL?
+        let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             nativeAuthenticationConfiguration: .init(
@@ -890,6 +1020,7 @@ struct CodexReviewHostTests {
             webAuthenticationSessionFactory: { _, _, _, _ in
                 throw CodexReviewAPI.Error.io("Authentication presentation failed.")
             },
+            externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
@@ -903,15 +1034,15 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         let previousFailureCount = store.auth.authenticationFailureCount
         await store.addAccount()
-        await loginTransport.waitForRequestCount(3)
+        await loginTransport.waitForRequestCount(2)
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(store.auth.authenticationFailureCount == previousFailureCount + 1)
+        #expect(store.auth.isAuthenticating == false)
         #expect(failedMessage(from: store.auth.phase) == "Authentication presentation failed.")
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
-        await waitUntil {
-            FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
-        }
+        #expect(externalURLOpener.openedURLs == [])
+        await store.stop()
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
         #expect(await loginTransport.recordedRequests().map(\.method) == [
             "initialize",
@@ -921,7 +1052,7 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreIgnoresNonCodexRateLimitNotifications() async throws {
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -984,7 +1115,7 @@ struct CodexReviewHostTests {
         )
         try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
 
-        let firstTransport = FakeJSONRPCTransport()
+        let firstTransport = FakeCodexAppServerTransport()
         try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
@@ -1006,7 +1137,7 @@ struct CodexReviewHostTests {
         try await firstTransport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-first"), for: "review/start")
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
 
-        let secondTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeCodexAppServerTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await secondTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "second@example.com", planType: "plus")),
@@ -1063,7 +1194,7 @@ struct CodexReviewHostTests {
             accounts: ["active@example.com"]
         )
 
-        let firstTransport = FakeJSONRPCTransport()
+        let firstTransport = FakeCodexAppServerTransport()
         try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -1087,7 +1218,7 @@ struct CodexReviewHostTests {
         try await firstTransport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
-        let secondTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeCodexAppServerTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await secondTransport.enqueue(
@@ -1140,7 +1271,7 @@ struct CodexReviewHostTests {
         try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
         try originalAuth.write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "first@example.com", planType: "pro")),
@@ -1178,7 +1309,7 @@ struct CodexReviewHostTests {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let interruptGate = AsyncGate()
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -1228,21 +1359,18 @@ struct CodexReviewHostTests {
 
         #expect(interruptStarted)
         #expect(methodsBeforeInterruptCompletes.contains("turn/interrupt"))
-        #expect(methodsBeforeInterruptCompletes.contains("thread/backgroundTerminals/clean") == false)
         #expect(methodsBeforeInterruptCompletes.contains("thread/delete") == false)
         #expect(result.core.lifecycle.status == .cancelled)
         let methods = await transport.recordedRequests().map(\.method)
         let interruptIndex = try #require(methods.firstIndex(of: "turn/interrupt"))
-        let cleanupIndex = try #require(methods.firstIndex(of: "thread/backgroundTerminals/clean"))
         let deleteIndex = try #require(methods.firstIndex(of: "thread/delete"))
-        #expect(interruptIndex < cleanupIndex)
         #expect(interruptIndex < deleteIndex)
     }
 
     @Test func liveStoreStopBoundsStuckReviewCancellationCleanup() async throws {
         let homeURL = try temporaryHome()
         let interruptGate = AsyncGate()
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         await transport.holdNext(method: "turn/interrupt", gate: interruptGate)
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -1281,15 +1409,10 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
 
-    @Test func liveStoreStopDrainsRecoveryWaitingWorkerCleanupBeforeDroppingBackend() async throws {
+    @Test func liveStoreStopCleansRecoveryWaitingReviewWithoutLegacyCleanup() async throws {
         let homeURL = try temporaryHome()
-        let cleanupGate = AsyncGate()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
-        let transport = FakeJSONRPCTransport()
-        await transport.holdNextIgnoringCancellation(
-            method: "thread/backgroundTerminals/clean",
-            gate: cleanupGate
-        )
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -1304,6 +1427,10 @@ struct CodexReviewHostTests {
         try await transport.enqueue(
             AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
             for: "review/start"
+        )
+        try await transport.enqueueJSON(
+            #"{"thread":{"id":"review-thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -1334,26 +1461,19 @@ struct CodexReviewHostTests {
             await store.stop()
             await stopFinished.complete()
         }
-        let cleanupStarted = await waitUntil(timeout: .seconds(2)) {
-            await transport.recordedRequests().map(\.method).contains("thread/backgroundTerminals/clean")
-        }
-        let stoppedBeforeCleanupUnblocked = await waitUntil(timeout: .milliseconds(100)) {
-            await stopFinished.isCompleted()
-        }
-        await cleanupGate.open()
         await stopTask.value
         let result = try await reviewRead.value
-
-        #expect(cleanupStarted)
-        #expect(stoppedBeforeCleanupUnblocked == false)
-        #expect(result.core.lifecycle.status == .cancelled)
         let methods = await transport.recordedRequests().map(\.method)
+
+        #expect(await stopFinished.isCompleted())
+        #expect(result.core.lifecycle.status == .cancelled)
+        #expect(methods.contains("turn/interrupt"))
         #expect(methods.contains("thread/delete"))
     }
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
         let homeURL = try temporaryHome()
-        let transport = FakeJSONRPCTransport()
+        let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await transport.enqueue(
@@ -1369,7 +1489,7 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForNotificationStreamCount(1)
-        await transport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
+        await transport.finishNotificationStreams(throwing: TestTransportClosedError())
         await waitUntil {
             if case .failed = store.serverState {
                 return true
@@ -1393,7 +1513,7 @@ struct CodexReviewHostTests {
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
         )
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -1404,7 +1524,7 @@ struct CodexReviewHostTests {
             for: "config/read"
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        let loginTransport = FakeJSONRPCTransport()
+        let loginTransport = FakeCodexAppServerTransport()
         try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
@@ -1414,7 +1534,7 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        let sessions = FakeWebAuthenticationSessions()
+        let externalURLOpener = FakeExternalURLOpener()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1423,7 +1543,8 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: sessions.makeSession,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
@@ -1437,12 +1558,11 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         await mainTransport.waitForNotificationStreamCount(1)
         await store.addAccount()
-        let session = await sessions.waitForSession()
-        await session.waitUntilWaitingForCallback()
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
+        #expect(externalURLOpener.openedURLs == [])
 
-        await mainTransport.finishNotificationStreams(throwing: JSONRPC.Error.closed)
+        await mainTransport.finishNotificationStreams(throwing: TestTransportClosedError())
         await waitUntil {
             if case .failed = store.serverState {
                 return true
@@ -1450,17 +1570,9 @@ struct CodexReviewHostTests {
             return false
         }
         await waitUntil {
-            await loginTransport.isClosedForTesting()
-        }
-
-        #expect(await loginTransport.isClosedForTesting())
-        await waitUntil {
             FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
         }
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
-        await #expect(throws: JSONRPC.Error.closed) {
-            _ = try await loginTransport.send(JSONRPC.Request(id: 99, method: "ping", params: Data()))
-        }
     }
 
     @Test func liveStoreRemovingActiveAccountClearsSharedAuthAndRestartsSignedOutRuntime() async throws {
@@ -1474,7 +1586,7 @@ struct CodexReviewHostTests {
         try Data("{\"tokens\":{\"id_token\":\"test\"}}".utf8)
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
-        let firstTransport = FakeJSONRPCTransport()
+        let firstTransport = FakeCodexAppServerTransport()
         try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await firstTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -1494,7 +1606,7 @@ struct CodexReviewHostTests {
         )
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
 
-        let secondTransport = FakeJSONRPCTransport()
+        let secondTransport = FakeCodexAppServerTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
         try await secondTransport.enqueue(
@@ -1543,7 +1655,7 @@ struct CodexReviewHostTests {
             transportFactory: { codexHomeURL in
                 isolatedCodexHomeURL = codexHomeURL
                 try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
-                return FakeJSONRPCTransport()
+                return FakeCodexAppServerTransport()
             }
         )
 
@@ -1562,7 +1674,7 @@ struct CodexReviewHostTests {
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
         )
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -1573,10 +1685,11 @@ struct CodexReviewHostTests {
             for: "config/read"
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        let loginTransport = FakeJSONRPCTransport()
+        let loginTransport = FakeCodexAppServerTransport()
         try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         await loginTransport.enqueueFailure(
-            .responseError(code: -32603, message: "login unavailable"),
+            code: -32603,
+            message: "login unavailable",
             for: "account/login/start"
         )
         var isolatedCodexHomeURL: URL?
@@ -1606,7 +1719,7 @@ struct CodexReviewHostTests {
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
     }
 
-    @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionFails() async throws {
+    @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginCompletionNotificationFails() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         try writeRegistry(
@@ -1614,7 +1727,7 @@ struct CodexReviewHostTests {
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
         )
-        let mainTransport = FakeJSONRPCTransport()
+        let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
@@ -1625,7 +1738,7 @@ struct CodexReviewHostTests {
             for: "config/read"
         )
         try await mainTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
-        let loginTransport = FakeJSONRPCTransport()
+        let loginTransport = FakeCodexAppServerTransport()
         try await loginTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await loginTransport.enqueue(
             AppServerAPI.Account.Login.Response.chatgpt(
@@ -1635,11 +1748,7 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
-        await loginTransport.enqueueFailure(
-            .responseError(code: -32603, message: "login completion failed"),
-            for: "account/login/complete"
-        )
-        let sessions = FakeWebAuthenticationSessions()
+        let externalURLOpener = FakeExternalURLOpener()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1648,7 +1757,8 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: sessions.makeSession,
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
                     return mainTransport
@@ -1661,18 +1771,26 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await store.addAccount()
-        let session = await sessions.waitForSession()
-        await session.waitUntilWaitingForCallback()
-        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=1")!)
-        await loginTransport.waitForRequestCount(3)
+        await loginTransport.waitForNotificationStreamCount(1)
+        #expect(externalURLOpener.openedURLs == [])
+        try await loginTransport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(
+                loginID: "login-2",
+                success: false,
+                error: "login completion failed"
+            )
+        )
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         await waitUntil { failedMessage(from: store.auth.phase) == "login completion failed" }
+        await waitUntil {
+            FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
+        }
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
         #expect(await loginTransport.recordedRequests().map(\.method) == [
             "initialize",
             "account/login/start",
-            "account/login/complete",
         ])
     }
 
@@ -1685,7 +1803,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: FakeJSONRPCTransport()
+            transport: FakeCodexAppServerTransport()
         )
         store.auth.applyPersistedAccountStates([savedAccountPayload(from: account)])
 
@@ -1711,7 +1829,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: FakeJSONRPCTransport()
+            transport: FakeCodexAppServerTransport()
         )
         store.auth.applyPersistedAccountStates([
             savedAccountPayload(from: dotAccount),
@@ -1763,6 +1881,357 @@ private struct TestAccount: Encodable, Sendable {
 
 private struct TestRateLimitsUpdatedNotification: Encodable, Sendable {
     var rateLimits: AppServerAPI.Account.RateLimits.Snapshot
+}
+
+private struct TestTransportClosedError: LocalizedError, Equatable, Sendable {
+    var errorDescription: String? {
+        "JSON-RPC transport is closed."
+    }
+}
+
+private struct EmptyResponse: Codable, Equatable, Sendable {
+    init() {}
+}
+
+private enum AppServerAPI {
+    enum Initialize {
+        struct Response: Codable, Equatable, Sendable {
+            var codexHome: String?
+            var userAgent: String?
+
+            init(codexHome: String? = nil, userAgent: String? = nil) {
+                self.codexHome = codexHome
+                self.userAgent = userAgent
+            }
+        }
+    }
+
+    enum Config {
+        enum Read {
+            struct Response: Codable, Equatable, Sendable {
+                var config: Snapshot
+            }
+        }
+
+        struct Snapshot: Codable, Equatable, Sendable {
+            var model: String?
+            var reviewModel: String?
+            var modelReasoningEffort: String?
+            var serviceTier: String?
+
+            enum CodingKeys: String, CodingKey {
+                case model
+                case reviewModel = "review_model"
+                case modelReasoningEffort = "model_reasoning_effort"
+                case serviceTier = "service_tier"
+            }
+
+            init(
+                model: String? = nil,
+                reviewModel: String? = nil,
+                modelReasoningEffort: String? = nil,
+                serviceTier: String? = nil
+            ) {
+                self.model = model
+                self.reviewModel = reviewModel
+                self.modelReasoningEffort = modelReasoningEffort
+                self.serviceTier = serviceTier
+            }
+        }
+    }
+
+    enum Model {
+        enum List {
+            struct Response: Codable, Equatable, Sendable {
+                var data: [CodexModel]
+                var nextCursor: String?
+
+                init(data: [CodexModel], nextCursor: String? = nil) {
+                    self.data = data
+                    self.nextCursor = nextCursor
+                }
+            }
+        }
+    }
+
+    enum Thread {
+        enum Start {
+            struct Response: Codable, Equatable, Sendable {
+                var threadID: String
+                var model: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case thread
+                    case model
+                }
+
+                private struct Thread: Codable, Equatable, Sendable {
+                    var id: String
+                }
+
+                init(threadID: String, model: String? = nil) {
+                    self.threadID = threadID
+                    self.model = model
+                }
+
+                init(from decoder: Decoder) throws {
+                    let container = try decoder.container(keyedBy: CodingKeys.self)
+                    threadID = try container.decode(Thread.self, forKey: .thread).id
+                    model = try container.decodeIfPresent(String.self, forKey: .model)
+                }
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(Thread(id: threadID), forKey: .thread)
+                    try container.encodeIfPresent(model, forKey: .model)
+                }
+            }
+        }
+    }
+
+    enum Review {
+        enum Start {
+            struct Response: Codable, Equatable, Sendable {
+                var turnID: String
+                var reviewThreadID: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case turn
+                    case reviewThreadID = "reviewThreadId"
+                }
+
+                private struct Turn: Codable, Equatable, Sendable {
+                    var id: String
+                }
+
+                init(turnID: String, reviewThreadID: String? = nil) {
+                    self.turnID = turnID
+                    self.reviewThreadID = reviewThreadID
+                }
+
+                init(from decoder: Decoder) throws {
+                    let container = try decoder.container(keyedBy: CodingKeys.self)
+                    turnID = try container.decode(Turn.self, forKey: .turn).id
+                    reviewThreadID = try container.decodeIfPresent(String.self, forKey: .reviewThreadID)
+                }
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(Turn(id: turnID), forKey: .turn)
+                    try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
+                }
+            }
+        }
+    }
+
+    enum Account {
+        enum Read {
+            struct Response: Codable, Equatable, Sendable {
+                var account: Snapshot?
+                var requiresOpenAIAuth: Bool
+
+                enum CodingKeys: String, CodingKey {
+                    case account
+                    case requiresOpenAIAuth = "requiresOpenaiAuth"
+                }
+
+                init(account: Snapshot? = nil, requiresOpenAIAuth: Bool = false) {
+                    self.account = account
+                    self.requiresOpenAIAuth = requiresOpenAIAuth
+                }
+            }
+        }
+
+        struct Snapshot: Codable, Equatable, Sendable {
+            var type: String
+            var email: String?
+            var planType: String?
+
+            init(type: String = "chatgpt", email: String? = nil, planType: String? = nil) {
+                self.type = type
+                self.email = email
+                self.planType = planType
+            }
+        }
+
+        enum RateLimits {
+            struct Response: Codable, Equatable, Sendable {
+                var rateLimits: Snapshot
+                var rateLimitsByLimitID: [String: Snapshot]?
+
+                enum CodingKeys: String, CodingKey {
+                    case rateLimits
+                    case rateLimitsByLimitID = "rateLimitsByLimitId"
+                }
+
+                init(rateLimits: Snapshot, rateLimitsByLimitID: [String: Snapshot]? = nil) {
+                    self.rateLimits = rateLimits
+                    self.rateLimitsByLimitID = rateLimitsByLimitID
+                }
+            }
+
+            struct Snapshot: Codable, Equatable, Sendable {
+                var limitID: String?
+                var primary: Window?
+                var secondary: Window?
+                var planType: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case limitID = "limitId"
+                    case primary
+                    case secondary
+                    case planType
+                }
+
+                init(
+                    limitID: String? = nil,
+                    primary: Window? = nil,
+                    secondary: Window? = nil,
+                    planType: String? = nil
+                ) {
+                    self.limitID = limitID
+                    self.primary = primary
+                    self.secondary = secondary
+                    self.planType = planType
+                }
+            }
+
+            struct Window: Codable, Equatable, Sendable {
+                var usedPercent: Int
+                var windowDurationMins: Int?
+                var resetsAt: Int64?
+
+                init(usedPercent: Int, windowDurationMins: Int? = nil, resetsAt: Int64? = nil) {
+                    self.usedPercent = usedPercent
+                    self.windowDurationMins = windowDurationMins
+                    self.resetsAt = resetsAt
+                }
+            }
+        }
+
+        enum Login {
+            struct Params: Codable, Equatable, Sendable {
+                var type: String
+                var apiKey: String?
+                var codexStreamlinedLogin: Bool
+                var nativeWebAuthentication: NativeWebAuthentication?
+
+                init(
+                    type: String = "chatgpt",
+                    apiKey: String? = nil,
+                    codexStreamlinedLogin: Bool = true,
+                    nativeWebAuthentication: NativeWebAuthentication? = nil
+                ) {
+                    self.type = type
+                    self.apiKey = apiKey
+                    self.codexStreamlinedLogin = codexStreamlinedLogin
+                    self.nativeWebAuthentication = nativeWebAuthentication
+                }
+            }
+
+            struct NativeWebAuthentication: Codable, Equatable, Sendable {
+                var callbackURLScheme: String
+
+                enum CodingKeys: String, CodingKey {
+                    case callbackURLScheme = "callbackUrlScheme"
+                }
+            }
+
+            enum Complete {
+                struct Params: Codable, Equatable, Sendable {
+                    var loginID: String
+                    var callbackURL: String
+
+                    enum CodingKeys: String, CodingKey {
+                        case loginID = "loginId"
+                        case callbackURL = "callbackUrl"
+                    }
+                }
+
+                struct Response: Codable, Equatable, Sendable {
+                    init() {}
+                }
+            }
+
+            enum Response: Codable, Equatable, Sendable {
+                case apiKey
+                case chatgpt(
+                    loginID: String,
+                    authURL: String,
+                    nativeWebAuthentication: NativeWebAuthentication?
+                )
+                case chatgptDeviceCode(loginID: String, verificationURL: String, userCode: String)
+                case chatgptAuthTokens
+
+                private enum CodingKeys: String, CodingKey {
+                    case type
+                    case loginID = "loginId"
+                    case authURL = "authUrl"
+                    case nativeWebAuthentication
+                    case verificationURL = "verificationUrl"
+                    case userCode
+                }
+
+                init(from decoder: Decoder) throws {
+                    let container = try decoder.container(keyedBy: CodingKeys.self)
+                    switch try container.decode(String.self, forKey: .type) {
+                    case "apiKey":
+                        self = .apiKey
+                    case "chatgpt":
+                        self = .chatgpt(
+                            loginID: try container.decode(String.self, forKey: .loginID),
+                            authURL: try container.decode(String.self, forKey: .authURL),
+                            nativeWebAuthentication: try container.decodeIfPresent(
+                                NativeWebAuthentication.self,
+                                forKey: .nativeWebAuthentication
+                            )
+                        )
+                    case "chatgptDeviceCode":
+                        self = .chatgptDeviceCode(
+                            loginID: try container.decode(String.self, forKey: .loginID),
+                            verificationURL: try container.decode(String.self, forKey: .verificationURL),
+                            userCode: try container.decode(String.self, forKey: .userCode)
+                        )
+                    case "chatgptAuthTokens":
+                        self = .chatgptAuthTokens
+                    case let type:
+                        throw DecodingError.dataCorruptedError(
+                            forKey: .type,
+                            in: container,
+                            debugDescription: "Unsupported login response type: \(type)"
+                        )
+                    }
+                }
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    switch self {
+                    case .apiKey:
+                        try container.encode("apiKey", forKey: .type)
+                    case .chatgpt(let loginID, let authURL, let nativeWebAuthentication):
+                        try container.encode("chatgpt", forKey: .type)
+                        try container.encode(loginID, forKey: .loginID)
+                        try container.encode(authURL, forKey: .authURL)
+                        try container.encodeIfPresent(nativeWebAuthentication, forKey: .nativeWebAuthentication)
+                    case .chatgptDeviceCode(let loginID, let verificationURL, let userCode):
+                        try container.encode("chatgptDeviceCode", forKey: .type)
+                        try container.encode(loginID, forKey: .loginID)
+                        try container.encode(verificationURL, forKey: .verificationURL)
+                        try container.encode(userCode, forKey: .userCode)
+                    case .chatgptAuthTokens:
+                        try container.encode("chatgptAuthTokens", forKey: .type)
+                    }
+                }
+            }
+
+            enum Cancel {
+                struct Response: Codable, Equatable, Sendable {
+                    init() {}
+                }
+            }
+
+        }
+    }
 }
 
 @MainActor

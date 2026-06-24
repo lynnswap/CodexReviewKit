@@ -130,7 +130,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transport: any JSONRPC.Transport
+        appServer: CodexAppServer
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
@@ -143,7 +143,7 @@ public extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
-            transportFactory: { _ in transport }
+            appServerFactory: { _ in appServer }
         )
     }
 
@@ -162,7 +162,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        transportFactory: @escaping @MainActor @Sendable (URL) async throws -> any JSONRPC.Transport
+        appServerFactory: @escaping @MainActor @Sendable (URL) async throws -> CodexAppServer
     ) -> CodexReviewStore {
         CodexReviewStore(
             backend: LiveCodexReviewStoreBackend(
@@ -176,9 +176,7 @@ public extension CodexReviewStore {
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 shutdownCleanupTimeout: shutdownCleanupTimeout,
                 appServerRuntimeFactory: { codexHomeURL in
-                    let appServer = try await CodexAppServer(
-                        transport: try await transportFactory(codexHomeURL)
-                    )
+                    let appServer = try await appServerFactory(codexHomeURL)
                     return .init(
                         appServer: appServer,
                         backend: AppServerCodexReviewBackend(appServer: appServer)
@@ -213,6 +211,11 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private var authenticationTask: Task<Void, Never>?
     private var authNotificationTask: Task<Void, Never>?
     private var loginNotificationTask: Task<Void, Never>?
+    // Native completeLogin returns the account before app-server notification echoes settle.
+    private var nativeLoginCompletionInFlightID: String?
+    private var nativeCompletedLoginIDAwaitingNotificationDrain: String?
+    private var didDrainNativeLoginAccountUpdateDuringCompletion = false
+    private var ignoresNextNativeLoginAccountUpdate = false
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
@@ -494,8 +497,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let didInterrupt = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.interruptActiveReviewsForShutdown(reason: .init(message: reason.message))
+        let recoveryRunsForCleanup = store.reviewRecoveryWaitingJobIDs
+            .sorted()
+            .compactMap { store.activeRuns[$0] }
+        let didCleanup = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
+            for run in recoveryRunsForCleanup {
+                await appServerBackend.cleanupReview(run)
+            }
         }
         let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
@@ -505,7 +514,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
             timeout: shutdownCleanupTimeout
         )
-        if didInterrupt == false || didDrainReviewWorkers == false {
+        if didCleanup == false || didDrainReviewWorkers == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }
@@ -795,6 +804,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func startLogin(auth: CodexReviewAuthModel, activation: LoginActivation) async {
         var isolatedLoginAppServer: CodexAppServer?
         var isolatedLoginCodexHomeURL: URL?
+        resetNativeLoginNotificationDrain()
         do {
             let runtime = try await loginRuntime(for: activation)
             let appServerBackend = runtime.backend
@@ -822,19 +832,25 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.loginCodexHomeURL = loginCodexHomeURL
             loginActivation = activation
             isWaitingForLoginAccountUpdate = false
+            resetNativeLoginNotificationDrain()
             if let loginAppServer {
                 observeLoginNotifications(appServer: loginAppServer, backend: appServerBackend, auth: auth)
             }
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
-            let usesNativeAuthentication = nativeAuthenticationConfiguration != nil && challenge.verificationURL != nil
+            let usesNativeAuthentication = nativeAuthenticationConfiguration != nil
+                && nativeCallbackScheme != nil
+                && challenge.verificationURL != nil
             auth.updatePhase(.signingIn(.init(
                 title: "Sign in to Codex",
                 detail: challenge.signInDetail(nativeAuthentication: usesNativeAuthentication),
                 browserURL: challenge.verificationURL?.absoluteString,
                 userCode: challenge.userCode
             )))
-            guard let nativeAuthenticationConfiguration, challenge.verificationURL != nil else {
+            guard usesNativeAuthentication,
+                  let nativeAuthenticationConfiguration,
+                  challenge.verificationURL != nil
+            else {
                 if let verificationURL = challenge.verificationURL {
                     externalURLOpener(verificationURL)
                 }
@@ -846,6 +862,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 try? await appServerBackend.cancelLogin(challenge)
                 loginChallenge = nil
                 loginBackend = nil
+                resetNativeLoginNotificationDrain()
                 self.loginAppServer = nil
                 self.loginCodexHomeURL = nil
                 updateAuthenticationFailure(
@@ -881,6 +898,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             loginChallenge = nil
             loginBackend = nil
             isWaitingForLoginAccountUpdate = false
+            resetNativeLoginNotificationDrain()
             let loginAppServer = loginAppServer ?? isolatedLoginAppServer
             self.loginAppServer = nil
             let loginCodexHomeURL = loginCodexHomeURL ?? isolatedLoginCodexHomeURL
@@ -920,6 +938,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             guard let loginBackend else {
                 return
             }
+            resetNativeLoginNotificationDrain()
+            nativeLoginCompletionInFlightID = challenge.id
             let snapshot = try await loginBackend.completeLogin(.init(
                 challengeID: challenge.id,
                 callbackURL: callbackURL.absoluteString
@@ -930,6 +950,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             loginChallenge = nil
             self.loginBackend = nil
             isWaitingForLoginAccountUpdate = false
+            nativeLoginCompletionInFlightID = nil
+            nativeCompletedLoginIDAwaitingNotificationDrain = didDrainNativeLoginAccountUpdateDuringCompletion
+                ? nil
+                : challenge.id
+            if didDrainNativeLoginAccountUpdateDuringCompletion {
+                ignoresNextNativeLoginAccountUpdate = false
+            }
+            didDrainNativeLoginAccountUpdateDuringCompletion = false
             self.loginAppServer = nil
             self.loginCodexHomeURL = nil
             activeAuthenticationSession = nil
@@ -958,7 +986,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } catch CodexReviewNativeAuthenticationError.cancelled {
             await handleAuthenticationSessionCancelled(challenge: challenge, auth: auth)
         } catch {
-            guard loginChallenge?.id == challenge.id else {
+            guard loginChallenge?.id == challenge.id || nativeLoginCompletionInFlightID == challenge.id else {
                 return
             }
             logger.error("ChatGPT login failed to complete: \(error.localizedDescription, privacy: .public)")
@@ -967,6 +995,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             loginChallenge = nil
             self.loginBackend = nil
             isWaitingForLoginAccountUpdate = false
+            resetNativeLoginNotificationDrain()
             self.loginAppServer = nil
             self.loginCodexHomeURL = nil
             activeAuthenticationSession = nil
@@ -993,6 +1022,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         case .preserveActiveAccount:
             auth.recordAuthenticationFailure(message: message)
         }
+    }
+
+    private func resetNativeLoginNotificationDrain() {
+        nativeLoginCompletionInFlightID = nil
+        nativeCompletedLoginIDAwaitingNotificationDrain = nil
+        didDrainNativeLoginAccountUpdateDuringCompletion = false
+        ignoresNextNativeLoginAccountUpdate = false
     }
 
     private func loginRuntime(for activation: LoginActivation) async throws -> LoginRuntime {
@@ -1041,6 +1077,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         loginChallenge = nil
         self.loginBackend = nil
         isWaitingForLoginAccountUpdate = false
+        resetNativeLoginNotificationDrain()
         self.loginAppServer = nil
         self.loginCodexHomeURL = nil
         activeAuthenticationSession = nil
@@ -1278,6 +1315,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
+        if let completingLoginID = nativeLoginCompletionInFlightID,
+           completion.loginID?.rawValue == nil || completion.loginID?.rawValue == completingLoginID {
+            if didDrainNativeLoginAccountUpdateDuringCompletion == false {
+                ignoresNextNativeLoginAccountUpdate = true
+            }
+            return
+        }
+        if let completedLoginID = nativeCompletedLoginIDAwaitingNotificationDrain,
+           completion.loginID?.rawValue == nil || completion.loginID?.rawValue == completedLoginID {
+            ignoresNextNativeLoginAccountUpdate = true
+            return
+        }
         guard completion.loginID?.rawValue == nil || completion.loginID?.rawValue == loginChallenge?.id else {
             return
         }
@@ -1297,6 +1346,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
             self.loginBackend = nil
             isWaitingForLoginAccountUpdate = false
+            resetNativeLoginNotificationDrain()
             self.loginAppServer = nil
             self.loginCodexHomeURL = nil
             loginNotificationTask?.cancel()
@@ -1312,6 +1362,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         backend: AppServerCodexReviewBackend,
         auth: CodexReviewAuthModel
     ) async {
+        if nativeLoginCompletionInFlightID != nil {
+            didDrainNativeLoginAccountUpdateDuringCompletion = true
+            ignoresNextNativeLoginAccountUpdate = false
+            return
+        }
+        if ignoresNextNativeLoginAccountUpdate {
+            nativeCompletedLoginIDAwaitingNotificationDrain = nil
+            ignoresNextNativeLoginAccountUpdate = false
+            return
+        }
+        nativeCompletedLoginIDAwaitingNotificationDrain = nil
         guard isWaitingForLoginAccountUpdate else {
             await refreshAuthAfterAccountNotification(backend: backend, auth: auth)
             return
@@ -1362,6 +1423,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.loginAppServer = nil
         self.loginCodexHomeURL = nil
         isWaitingForLoginAccountUpdate = false
+        resetNativeLoginNotificationDrain()
         loginNotificationTask?.cancel()
         loginNotificationTask = nil
         await closeIsolatedLoginRuntime(appServer: loginAppServer, codexHomeURL: loginCodexHomeURL)

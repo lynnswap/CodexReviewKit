@@ -830,4 +830,4 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 }
 
-package typealias FakeJSONRPCTransport = CodexAppServerTestTransport
+package typealias FakeCodexAppServerTransport = CodexAppServerTestTransport

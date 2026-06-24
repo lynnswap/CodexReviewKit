@@ -1,6 +1,33 @@
 // swift-tools-version: 6.3
 
+import Foundation
 import PackageDescription
+
+private let packageDirectory = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+private let codexKitDevelopmentPath = "dependencies/CodexKit"
+private let usesLocalCodexKit = ProcessInfo.processInfo.environment["CODEX_REVIEWKIT_USE_LOCAL_CODEXKIT"] == "1"
+private let codexKitDevelopmentManifestPath = packageDirectory
+    .appendingPathComponent(codexKitDevelopmentPath)
+    .appendingPathComponent("Package.swift")
+    .path
+private let codexKitDependency: Package.Dependency = {
+    if usesLocalCodexKit,
+       FileManager.default.fileExists(atPath: codexKitDevelopmentManifestPath) {
+        // Development-only CodexKit integration checkout. Set
+        // CODEX_REVIEWKIT_USE_LOCAL_CODEXKIT=1 to use dependencies/CodexKit while
+        // this branch tracks in-flight APIs. The default stays on the pinned
+        // remote dependency so fresh checkouts and locked resolution remain stable.
+        return .package(path: codexKitDevelopmentPath)
+    }
+
+    // Until CodexKit is released, use the pinned integration revision; replace
+    // this with the final pinned remote CodexKit release dependency before release.
+    return .package(
+        url: "https://github.com/lynnswap/CodexKit.git",
+        revision: "717dddc6cb778dfd72435da550b35b1690998ff8"
+    )
+}()
 
 let package = Package(
     name: "CodexReviewKit",
@@ -17,14 +44,6 @@ let package = Package(
             targets: ["CodexReviewHost"]
         ),
         .library(
-            name: "CodexAppServerKit",
-            targets: ["CodexAppServerKit"]
-        ),
-        .library(
-            name: "CodexAppServerKitTesting",
-            targets: ["CodexAppServerKitTesting"]
-        ),
-        .library(
             name: "ReviewUI",
             targets: ["ReviewUI"]
         ),
@@ -37,6 +56,7 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
+        codexKitDependency,
     ],
     targets: [
         .target(
@@ -49,24 +69,9 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CodexAppServerKit",
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
-            name: "CodexAppServerKitTesting",
-            dependencies: [
-                "CodexAppServerKit",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
             name: "CodexReviewAppServer",
             dependencies: [
-                "CodexAppServerKit",
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
                 "CodexReviewKit",
             ],
             swiftSettings: [
@@ -89,7 +94,7 @@ let package = Package(
         .target(
             name: "CodexReviewHost",
             dependencies: [
-                "CodexAppServerKit",
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewAppServer",
                 "CodexReviewMCPServer",
@@ -101,8 +106,8 @@ let package = Package(
         .target(
             name: "CodexReviewTesting",
             dependencies: [
-                "CodexAppServerKit",
-                "CodexAppServerKitTesting",
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewKit",
             ],
             swiftSettings: [
@@ -137,16 +142,6 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "CodexAppServerKitTests",
-            dependencies: [
-                "CodexAppServerKit",
-                "CodexAppServerKitTesting",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
             name: "CodexReviewKitTests",
             dependencies: ["CodexReviewKit", "CodexReviewTesting"],
             swiftSettings: [
@@ -156,8 +151,8 @@ let package = Package(
         .testTarget(
             name: "CodexReviewAppServerTests",
             dependencies: [
-                "CodexAppServerKit",
-                "CodexAppServerKitTesting",
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewAppServer",
                 "CodexReviewKit",
                 "CodexReviewTesting",
@@ -179,7 +174,13 @@ let package = Package(
         ),
         .testTarget(
             name: "CodexReviewHostTests",
-            dependencies: ["CodexAppServerKit", "CodexReviewAppServer", "CodexReviewHost", "CodexReviewTesting"],
+            dependencies: [
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
+                "CodexReviewAppServer",
+                "CodexReviewHost",
+                "CodexReviewTesting",
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
