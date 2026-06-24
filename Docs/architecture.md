@@ -10,6 +10,7 @@ direction:
 
 ```text
 raw app-server wire
+  -> high-level app-server review stream
   -> domain review event
   -> observable review timeline
   -> UI / MCP / rendering / legacy log projections
@@ -17,7 +18,8 @@ raw app-server wire
 
 Raw JSON-RPC notifications are an input boundary only. They must not become the
 source of truth for ReviewMonitor UI, MCP responses, or legacy logs after they
-have been converted into domain events.
+have been normalized into high-level app-server review streams and converted
+into domain events.
 
 ## Targets
 
@@ -27,10 +29,9 @@ read them as a claim that every symbol has already moved.
 
 | Target | Responsibility |
 | --- | --- |
-| `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, and high-level Swift domain API for threads, turns, prompts, review sessions, models, accounts, and login. It has no Review, UI, or MCP dependencies |
+| `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, app-server review notification schema, high-level review stream/session API, and Swift domain API for threads, turns, prompts, review sessions, models, accounts, and login. Raw review DTOs are not its public boundary. It has no Review, UI, or MCP dependencies |
 | `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and legacy log compatibility projections. It has no app-server wire, UI, or MCP dependencies |
-| `CodexReviewAppServerWire` | Raw `codex app-server` review notification DTO decode and conversion into domain events |
-| `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level review sessions into `CodexReviewKit` backend events |
+| `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level `CodexReviewSession` review streams into `CodexReviewKit` backend events |
 | `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
 | `CodexUIKit` | Future generic UI-facing model/API layer over Codex and app-server concepts. It provides UI-construction models and APIs, uses `LocalizedStringResource` for display values where appropriate, and avoids mirror snapshot state |
 | `CodexUI` | Concrete AppKit UI and existing hosted SwiftUI views. SwiftUI views remain concrete UI here; there is no requirement to delete or rewrite them just to satisfy target ownership |
@@ -42,6 +43,12 @@ read them as a claim that every symbol has already moved.
 
 ReviewMonitor is the product entry point. The host target wires the concrete
 runtime together; lower targets do not import the host.
+
+`CodexReviewAppServerWire` exists today as a transitional raw decoder target.
+It is not an intended ownership boundary. The intended owner for app-server
+review notification schema and high-level review streams is
+`CodexAppServerKit`; raw review DTOs should remain implementation details
+behind that SDK boundary rather than becoming public ReviewMonitor API.
 
 `CodexUIKit` must not own `CodexReviewStore`, `ReviewTimeline`,
 `ReviewMonitorUIState`, sidebar/detail concepts, or concrete `NSView`,
@@ -58,23 +65,28 @@ describe review progress independently of any transport, UI, or MCP protocol.
 Review parsing, store commands, backend contracts, and timeline mutation stay
 in this target.
 
-`CodexAppServerKit` owns the generic app-server connection boundary. It starts
-the local `codex app-server` process, performs JSON-RPC framing, sends
+`CodexAppServerKit` owns the app-server connection and schema boundary. It
+starts the local `codex app-server` process, performs JSON-RPC framing, sends
 `initialize`/`initialized`, retries overload responses, preserves unknown
-notifications, and exposes `CodexAppServer` as the Swift-facing container for
-threads, turns, prompts, messages, transcripts, log entries, models, accounts,
-and login flows. It must not import Review, UI, or MCP targets.
+notifications, owns app-server review notification schema, and exposes
+`CodexAppServer` plus high-level review session streams as the Swift-facing
+API for threads, turns, prompts, review sessions, messages, transcripts, log
+entries, models, accounts, and login flows. Raw review DTOs may exist as
+internal implementation detail, but they are not the public API boundary. It
+must not import Review, UI, or MCP targets.
 
-`CodexReviewAppServerWire` owns raw app-server notification shapes. Its job is
-to decode review-specific wire payloads and expose domain events. It may depend on
-`CodexReviewKit`, but it must not import UI, rendering, or MCP targets.
+`CodexReviewAppServerWire` is a current transitional decoder for raw app-server
+review notification shapes. While it exists during migration, it must not be
+treated as the intended owner of review wire schema or public API. The intended
+direction is for `CodexAppServerKit` to provide the high-level review stream
+boundary and keep raw DTOs out of ReviewMonitor-facing contracts.
 
 `CodexReviewAppServer` owns the adapter from high-level app-server review
-sessions into `CodexReviewKit` backend events. It uses the generic
-app-server boundary for transport and common DTOs, converts review
-notifications through `CodexReviewAppServerWire`, and hands
-application-facing review events to the store. Review wire details stop at this
-boundary.
+sessions into `CodexReviewKit` backend events. It consumes `CodexReviewSession`
+values from `CodexAppServerKit` and hands application-facing review events to
+the store backend. If current code still passes through
+`CodexReviewAppServerWire`, that is a migration detail, not the ownership
+model.
 
 `ReviewTimeline` and application/store state are the observable source of truth
 after conversion. UI views, rendering helpers, MCP server projections, and
@@ -110,12 +122,9 @@ flowchart TB
         LegacyProjection["Legacy log projections"]
     end
 
-    subgraph Wire["CodexReviewAppServerWire"]
-        WireDTO["Raw app-server DTOs"]
-    end
-
     subgraph Kit["CodexAppServerKit"]
         DomainAPI["CodexAppServer"]
+        ReviewSession["CodexReviewSession"]
         Client["JSON-RPC client"]
         Process["codex app-server"]
     end
@@ -137,7 +146,8 @@ flowchart TB
         Composition["Composition root"]
     end
 
-    WireDTO --> DomainEvents
+    ReviewSession --> Runtime
+    Runtime --> DomainEvents
     DomainEvents --> Timeline
     Timeline --> AppStore
     Timeline --> PublicStore
@@ -147,9 +157,8 @@ flowchart TB
     PublicStore --> UI
     Renderer --> UI
     DomainAPI --> Client
+    ReviewSession --> Client
     Client --> Process
-    Runtime --> DomainAPI
-    Runtime --> WireDTO
     Runtime --> PublicStore
     Composition --> Runtime
     Composition --> MCPServer
@@ -159,6 +168,8 @@ flowchart TB
 The diagram describes ownership direction, not every SwiftPM dependency. New
 code should not move domain, application, rendering, UI, or MCP projection
 responsibilities back into runtime owners.
+`CodexReviewAppServerWire` is intentionally omitted from the intended ownership
+graph because it is a current transitional decoder, not a target owner.
 
 ## Observation Ownership
 
@@ -205,7 +216,11 @@ the store.
   `CodexTurnID`, `CodexThread`, `CodexPrompt`, Foundation Models-style
   `respond` / `streamResponse` / `CodexResponseStream.collect()` calls,
   Codex-specific response stream controls, thread event streams, messages,
-  transcript/log values, model values, account values, and login handles.
+  transcript/log values, high-level review sessions such as
+  `CodexReviewSession`, model values, account values, and login handles.
+- App-server review notification schemas belong inside the Kit boundary. The
+  public review surface should be a high-level review stream/session API, not
+  raw notification DTOs.
 - Same-thread mutating requests are serialized. `turn/interrupt` is the
   intentional control-path exception so an in-flight response can be stopped
   without waiting behind queued same-thread work.
@@ -216,14 +231,14 @@ the store.
 - Cancellation is represented by typed control/cleanup requests, not by closing
   the transport.
 
-`CodexReviewAppServer` adds ReviewMonitor-specific review session adaptation,
-review notification conversion, cleanup, and recovery on top of that generic
-boundary.
+`CodexReviewAppServer` adapts high-level `CodexReviewSession` output into
+ReviewMonitor backend events and adds ReviewMonitor-specific cleanup and
+recovery on top of that generic boundary.
 
 The intended ownership for review logs is that `CodexAppServerKit` supplies
-generic app-server thread events and log entries, while ReviewMonitor-specific
-targets adapt those values into `ReviewDomainEvent`, `ReviewTimeline`, and
-legacy review log projections.
+generic app-server thread events, log entries, and high-level review session
+events, while ReviewMonitor-specific targets adapt those values into
+`ReviewDomainEvent`, `ReviewTimeline`, and legacy review log projections.
 
 Fake and live tests use the same transport protocol.
 
@@ -283,10 +298,10 @@ Default tests are deterministic and do not start a live `codex app-server`.
 
 | Test area | Uses | Verifies |
 | --- | --- | --- |
-| `CodexAppServerKitTests` | Fake JSON-RPC transport | Generic app-server handshake, request serialization, retry, notification routing, and domain result aggregation |
-| `CodexReviewAppServerWireTests` | Raw notification JSON | Wire decode and domain event conversion |
+| `CodexAppServerKitTests` | Fake JSON-RPC transport | Generic app-server handshake, request serialization, retry, notification routing, domain result aggregation, and high-level review stream behavior |
+| `CodexReviewAppServerWireTests` | Raw notification JSON while the transitional decoder exists | Migration compatibility for decode/conversion behavior, not intended target ownership |
 | `CodexReviewKitTests` | Domain timelines, ObservationBridge awaiters, and fake `CodexReviewStoreBackend` | Semantic timeline mutation, use-case observation behavior, review/auth/settings state machines, cancellation, result retention |
-| `CodexReviewAppServerTests` | Fake JSON-RPC transport | Review-specific request serialization, notification buffering, interrupt/cleanup, and recovery |
+| `CodexReviewAppServerTests` | Fake app-server review sessions or transport as needed | Adapter behavior from high-level review sessions into backend events, cleanup, and recovery |
 | `CodexReviewMCPServerTests` | Fake review store and domain timeline projections | MCP protocol conversion, response shape, and timeline projection snapshots |
 | `CodexReviewHostTests` | Fake runtime dependencies | Composition, startup, shutdown |
 | `ReviewUITests` | Preview/test monitor backend | Native UI behavior and user-intent forwarding |
