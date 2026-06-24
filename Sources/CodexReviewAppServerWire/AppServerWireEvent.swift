@@ -1,5 +1,5 @@
 import Foundation
-import CodexReviewDomain
+import CodexReviewKit
 
 public struct AppServerWireEvent: Equatable, Sendable {
     public var kind: AppServerReviewEventKind

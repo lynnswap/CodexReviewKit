@@ -1,6 +1,6 @@
 import Foundation
-import CodexReview
-import CodexReviewDomain
+import CodexReviewKit
+import CodexReviewKit
 import ReviewMonitorRendering
 
 struct ReviewMonitorTimelineLogProjection: Sendable {

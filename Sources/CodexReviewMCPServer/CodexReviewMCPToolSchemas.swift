@@ -1,5 +1,5 @@
 import MCP
-import CodexReview
+import CodexReviewKit
 
 func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
     switch tool {

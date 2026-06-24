@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-import CodexReview
+import CodexReviewKit
 
 struct ReviewMonitorJobRowView: View {
     var job: CodexReviewJob

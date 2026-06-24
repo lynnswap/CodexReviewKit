@@ -1,5 +1,5 @@
 import SwiftUI
-import CodexReview
+import CodexReviewKit
 
 struct SignInView: View {
     let store: CodexReviewStore

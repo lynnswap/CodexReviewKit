@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 import ObservationBridge
-import CodexReview
+import CodexReviewKit
 
 typealias ReviewMonitorContentTransitionAnimator = @MainActor (
     NSView,

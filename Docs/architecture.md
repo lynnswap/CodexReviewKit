@@ -23,9 +23,7 @@ have been converted into domain events.
 
 | Target | Responsibility |
 | --- | --- |
-| `CodexReviewDomain` | Semantic review identifiers, kinds, runs, jobs, `ReviewDomainEvent`, `ReviewTimeline`, and `ReviewTimelineItem` |
-| `CodexReviewApplication` | Observation-oriented application store/use-case primitives, including `ReviewStore` and `ReviewObservationAwaiter` |
-| `CodexReview` | Public ReviewMonitor API, `CodexReviewStore`, auth/settings/runtime product state, and legacy log compatibility projections |
+| `CodexReviewKit` | Review identifiers, kinds, runs, jobs, semantic timeline, application store/use-case primitives, `CodexReviewStore`, auth/settings/runtime product state, and legacy log compatibility projections |
 | `CodexAppServerKit` | Generic `codex app-server` process transport, JSON-RPC client, typed request DTOs, and Swift domain API for threads, turns, prompts, models, accounts, and login |
 | `CodexReviewAppServerWire` | Raw `codex app-server` review notification DTO decode and conversion into domain events |
 | `CodexReviewAppServer` | Review-specific `review/start` orchestration, ReviewMonitor notification routing, and runtime conversion |
@@ -42,7 +40,7 @@ runtime together; lower targets do not import the host.
 
 ## Source Of Truth
 
-`CodexReviewDomain` owns the semantic timeline vocabulary. It defines the
+`CodexReviewKit` owns the semantic timeline vocabulary. It defines the
 review item kinds, timeline item content, and `ReviewDomainEvent` values that
 describe review progress independently of any transport, UI, or MCP protocol.
 
@@ -55,8 +53,7 @@ and login flows. It must not import ReviewMonitor targets.
 
 `CodexReviewAppServerWire` owns raw app-server notification shapes. Its job is
 to decode review-specific wire payloads and expose domain events. It may depend on
-`CodexReviewDomain`, but it must not import `CodexReviewApplication`, UI,
-rendering, or MCP targets.
+`CodexReviewKit`, but it must not import UI, rendering, or MCP targets.
 
 `CodexReviewAppServer` owns ReviewMonitor's `review/start` runtime behavior. It
 uses the generic app-server boundary for transport and common DTOs, converts
@@ -83,17 +80,17 @@ events and timeline state as the owner.
 
 ```mermaid
 flowchart TB
-    subgraph Domain["CodexReviewDomain"]
+    subgraph Domain["CodexReviewKit domain layer"]
         DomainEvents["ReviewDomainEvent"]
         Timeline["ReviewTimeline"]
     end
 
-    subgraph Application["CodexReviewApplication"]
+    subgraph Application["CodexReviewKit application layer"]
         AppStore["ReviewStore"]
         Awaiter["ReviewObservationAwaiter"]
     end
 
-    subgraph Product["CodexReview"]
+    subgraph Product["CodexReviewKit product API"]
         PublicStore["CodexReviewStore"]
         LegacyProjection["Legacy log projections"]
     end
@@ -147,8 +144,8 @@ flowchart TB
 ```
 
 The diagram describes ownership direction, not every SwiftPM dependency. New
-code should not create reverse imports from Domain, Wire, Application,
-Rendering, UI, or MCP adapter targets back into runtime/protocol owners.
+code should not move domain, application, rendering, UI, or MCP adapter
+responsibilities back into runtime/protocol owners.
 
 ## Observation Ownership
 
@@ -160,7 +157,7 @@ source of truth.
 - Subscription tokens live with the subscriber that created them. A view
   controller, awaiter, or driver that starts observation is responsible for
   cancelling its token when that owner ends.
-- `ReviewObservationAwaiter` belongs in `CodexReviewApplication` because it is a
+- `ReviewObservationAwaiter` belongs in `CodexReviewKit` because it is a
   use-case-level awaiter over observable domain state.
 - UI observation tokens are view/controller lifetime details. Any UI projection
   derived from observed state is transient and can be rebuilt from the timeline.
@@ -168,9 +165,9 @@ source of truth.
   must not retain ObservationBridge tokens or persist their projection as model
   state.
 
-## CodexReview
+## CodexReviewKit
 
-`CodexReview` is the public product surface used by existing ReviewMonitor code.
+`CodexReviewKit` is the public product surface used by existing ReviewMonitor code.
 It owns review commands, auth/settings/runtime state, network recovery policy,
 diagnostics, and legacy store APIs through `CodexReviewStore`.
 
@@ -264,17 +261,14 @@ Default tests are deterministic and do not start a live `codex app-server`.
 
 | Test area | Uses | Verifies |
 | --- | --- | --- |
-| `CodexReviewDomainTests` | Domain timelines and events | Semantic timeline mutation and terminal state |
-| `CodexReviewApplicationTests` | Domain timelines and ObservationBridge awaiters | Use-case observation behavior |
 | `CodexAppServerKitTests` | Fake JSON-RPC transport | Generic app-server handshake, request serialization, retry, notification routing, and domain result aggregation |
 | `CodexReviewAppServerWireTests` | Raw notification JSON | Wire decode and domain event conversion |
-| `CodexReviewTests` | Fake `CodexReviewStoreBackend` | Review/auth/settings state machines, cancellation, result retention |
+| `CodexReviewKitTests` | Domain timelines, ObservationBridge awaiters, and fake `CodexReviewStoreBackend` | Semantic timeline mutation, use-case observation behavior, review/auth/settings state machines, cancellation, result retention |
 | `CodexReviewAppServerTests` | Fake JSON-RPC transport | Review-specific request serialization, notification buffering, interrupt/cleanup, and recovery |
 | `CodexReviewMCPAdapterTests` | Domain timeline projections | MCP adapter snapshots |
 | `CodexReviewMCPServerTests` | Fake review store | MCP protocol conversion and response shape |
 | `CodexReviewHostTests` | Fake runtime dependencies | Composition, startup, shutdown |
 | `ReviewUITests` | Preview/test monitor backend | Native UI behavior and user-intent forwarding |
-| `ArchitectureFenceTests` | Source scan | Target ownership and forbidden implementation imports |
 
 Forbidden test patterns:
 

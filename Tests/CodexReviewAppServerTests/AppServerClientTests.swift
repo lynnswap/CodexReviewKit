@@ -3,8 +3,8 @@ import Foundation
 import Testing
 import CodexAppServerKit
 @testable import CodexReviewAppServer
-import CodexReview
-import CodexReviewDomain
+import CodexReviewKit
+import CodexReviewKit
 import CodexReviewTesting
 
 private extension AppServerCodexReviewBackend {
@@ -4556,7 +4556,7 @@ struct AppServerClientTests {
                 item: .init(
                     type: "commandExecution",
                     id: "cmd-failed",
-                    command: "git diff -- Sources/CodexReview"
+                    command: "git diff -- Sources/CodexReviewKit"
                 ),
                 startedAtMs: startedAtMs
             )
@@ -4569,7 +4569,7 @@ struct AppServerClientTests {
                 item: .init(
                     type: "commandExecution",
                     id: "cmd-failed",
-                    command: "git diff -- Sources/CodexReview",
+                    command: "git diff -- Sources/CodexReviewKit",
                     aggregatedOutput: "execution error: No such process",
                     exitCode: -1,
                     durationMs: 0,
@@ -4585,28 +4585,28 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: nil))
         #expect(try await iterator.next() == .logEntry(
             kind: .command,
-            text: "$ git diff -- Sources/CodexReview",
+            text: "$ git diff -- Sources/CodexReviewKit",
             groupID: "cmd-failed",
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
                 status: "inProgress",
                 itemID: "cmd-failed",
-                command: "git diff -- Sources/CodexReview",
+                command: "git diff -- Sources/CodexReviewKit",
                 startedAt: startedAt,
                 commandStatus: "inProgress"
             )
         ))
         #expect(try await iterator.next() == .logEntry(
             kind: .command,
-            text: "$ git diff -- Sources/CodexReview",
+            text: "$ git diff -- Sources/CodexReviewKit",
             groupID: "cmd-failed",
             replacesGroup: true,
             metadata: .init(
                 sourceType: "commandExecution",
                 status: "failed",
                 itemID: "cmd-failed",
-                command: "git diff -- Sources/CodexReview",
+                command: "git diff -- Sources/CodexReviewKit",
                 exitCode: -1,
                 startedAt: startedAt,
                 completedAt: completedAt,
@@ -4623,7 +4623,7 @@ struct AppServerClientTests {
                 sourceType: "commandExecution",
                 status: "failed",
                 itemID: "cmd-failed",
-                command: "git diff -- Sources/CodexReview",
+                command: "git diff -- Sources/CodexReviewKit",
                 exitCode: -1,
                 startedAt: startedAt,
                 completedAt: completedAt,

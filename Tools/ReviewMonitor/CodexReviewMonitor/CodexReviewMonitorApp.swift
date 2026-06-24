@@ -6,7 +6,7 @@
 //
 
 import AppKit
-import CodexReview
+import CodexReviewKit
 import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
 

@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 @testable import CodexReviewAppServerWire
-import CodexReviewDomain
+import CodexReviewKit
 
 @Suite("app-server wire events")
 struct AppServerWireEventTests {

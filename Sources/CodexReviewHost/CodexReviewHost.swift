@@ -1,8 +1,8 @@
 import Foundation
-import CodexReview
+import CodexReviewKit
 import CodexReviewMCPServer
 
-private typealias ReviewCodexAccount = CodexReview.CodexAccount
+private typealias ReviewCodexAccount = CodexReviewKit.CodexAccount
 
 @MainActor
 package final class CodexReviewHost {

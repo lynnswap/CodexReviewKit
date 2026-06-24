@@ -1,4 +1,4 @@
-import CodexReview
+import CodexReviewKit
 import ReviewMonitorRendering
 
 struct ReviewMonitorRenderedLogDocument: Equatable, Sendable {

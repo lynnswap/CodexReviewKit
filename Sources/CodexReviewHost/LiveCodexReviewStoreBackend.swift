@@ -2,11 +2,11 @@ import AppKit
 import Foundation
 import OSLog
 import CodexAppServerKit
-import CodexReview
+import CodexReviewKit
 import CodexReviewAppServer
 import CodexReviewMCPServer
 
-private typealias ReviewCodexAccount = CodexReview.CodexAccount
+private typealias ReviewCodexAccount = CodexReviewKit.CodexAccount
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
 private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void

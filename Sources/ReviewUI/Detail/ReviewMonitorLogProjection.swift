@@ -1,5 +1,5 @@
 import Foundation
-import CodexReview
+import CodexReviewKit
 
 enum ReviewMonitorLog {}
 

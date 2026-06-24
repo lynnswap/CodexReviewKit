@@ -1,5 +1,5 @@
 import CodexAppServerKit
-import CodexReview
+import CodexReviewKit
 import Foundation
 
 extension CodexReviewAPI.Target {

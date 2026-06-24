@@ -1,11 +1,11 @@
 import AppKit
 import Foundation
 import ObservationBridge
-import CodexReviewDomain
+import CodexReviewKit
 import ReviewMonitorRendering
 import SwiftUI
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 import CodexReviewTesting
 

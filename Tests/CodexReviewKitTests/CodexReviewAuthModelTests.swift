@@ -1,5 +1,5 @@
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @testable import CodexReviewKit
 
 @Suite("Codex review auth model")
 @MainActor

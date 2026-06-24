@@ -1,5 +1,5 @@
 import Foundation
-import CodexReviewDomain
+import CodexReviewKit
 
 public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
     public struct Block: Identifiable, Codable, Equatable, Sendable {

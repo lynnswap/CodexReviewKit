@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@_spi(Testing) @testable import CodexReview
+@_spi(Testing) @testable import CodexReviewKit
 import CodexReviewTesting
 
 @Suite("Store rate limit auto refresh")

@@ -1,5 +1,4 @@
 import Foundation
-import CodexReviewDomain
 
 private actor RuntimeStopDetachedReviewWorkerDrainRace {
     private var result: Bool?

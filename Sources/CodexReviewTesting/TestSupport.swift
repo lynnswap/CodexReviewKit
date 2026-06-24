@@ -1,7 +1,7 @@
 import Foundation
 import CodexAppServerKit
 import CodexAppServerKitTesting
-import CodexReview
+import CodexReviewKit
 import CodexReviewAppServer
 
 package typealias AsyncGate = CodexAppServerTestGate
@@ -666,12 +666,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func refreshAuth(auth: CodexReviewAuthModel) async {
         do {
             let snapshot = try await reviewBackend.readAuth()
-            let accounts = snapshot.accounts.compactMap { account -> CodexReview.CodexAccount? in
+            let accounts = snapshot.accounts.compactMap { account -> CodexReviewKit.CodexAccount? in
                 let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard label.isEmpty == false else {
                     return nil
                 }
-                return CodexReview.CodexAccount(email: label)
+                return CodexReviewKit.CodexAccount(email: label)
             }
             auth.applyPersistedAccountStates(
                 accounts.map(savedAccountPayload(from:)),

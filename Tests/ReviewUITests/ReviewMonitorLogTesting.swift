@@ -1,4 +1,4 @@
-import CodexReview
+import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 
 @MainActor

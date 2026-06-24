@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import CodexReviewDomain
+import CodexReviewKit
 @testable import ReviewMonitorRendering
 
 @MainActor

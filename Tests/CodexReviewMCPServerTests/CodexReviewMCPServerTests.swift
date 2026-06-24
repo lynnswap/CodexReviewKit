@@ -1,5 +1,5 @@
 import Testing
-@testable import CodexReview
+@testable import CodexReviewKit
 import CodexReviewMCPServer
 import CodexReviewTesting
 
