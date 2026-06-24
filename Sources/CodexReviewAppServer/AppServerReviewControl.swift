@@ -20,9 +20,15 @@ package final class AppServerReviewControl: @unchecked Sendable {
         case finished
     }
 
+    private struct Snapshot {
+        var phase: Phase
+        var reviewSession: CodexReviewSession?
+    }
+
     private let client: AppServerClient
     private let phaseLock = NSLock()
     private var phase: Phase = .preparing
+    private var reviewSession: CodexReviewSession?
 
     package init(client: AppServerClient) {
         self.client = client
@@ -35,26 +41,39 @@ package final class AppServerReviewControl: @unchecked Sendable {
             return
         }
         phase = .threadStarted(threadID: threadID)
+        reviewSession = nil
     }
 
     package func recordReviewStarted(turnThreadID: String, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
+        reviewSession = nil
+    }
+
+    package func recordReviewStarted(_ reviewSession: CodexReviewSession) {
+        phaseLock.lock()
+        defer { phaseLock.unlock() }
+        phase = .reviewStarted(
+            turnThreadID: reviewSession.reviewThreadID.rawValue,
+            turnID: reviewSession.turnID.rawValue
+        )
+        self.reviewSession = reviewSession
     }
 
     package func recordTurnStarted(turnThreadID: String, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
+        reviewSession = nil
     }
 
     @discardableResult
     package func interrupt(
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
     ) async throws -> AppServerReviewInterruption? {
-        let currentPhase = phaseSnapshot()
-        switch currentPhase {
+        let snapshot = stateSnapshot()
+        switch snapshot.phase {
         case .preparing, .finished:
             return nil
         case .threadStarted(let threadID):
@@ -64,6 +83,13 @@ package final class AppServerReviewControl: @unchecked Sendable {
                 willInterruptActiveTurn: willInterruptActiveTurn
             )
         case .reviewStarted(let turnThreadID, let turnID):
+            if let reviewSession = snapshot.reviewSession {
+                return try await interrupt(
+                    reviewSession,
+                    expectedTurnID: turnID,
+                    willInterruptActiveTurn: willInterruptActiveTurn
+                )
+            }
             return try await sendInterrupt(
                 threadID: turnThreadID,
                 turnID: turnID,
@@ -76,12 +102,36 @@ package final class AppServerReviewControl: @unchecked Sendable {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         phase = .finished
+        reviewSession = nil
     }
 
-    private func phaseSnapshot() -> Phase {
+    private func stateSnapshot() -> Snapshot {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        return phase
+        return Snapshot(phase: phase, reviewSession: reviewSession)
+    }
+
+    private func interrupt(
+        _ reviewSession: CodexReviewSession,
+        expectedTurnID: String,
+        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
+    ) async throws -> AppServerReviewInterruption {
+        let interruption = try await reviewSession.interrupt { interruption in
+            guard let willInterruptActiveTurn else {
+                return
+            }
+            await willInterruptActiveTurn(AppServerReviewInterruption(interruption))
+        }
+        let reviewInterruption = AppServerReviewInterruption(interruption)
+        if reviewInterruption.turnID != expectedTurnID {
+            setPhase(
+                .reviewStarted(
+                    turnThreadID: reviewInterruption.threadID,
+                    turnID: reviewInterruption.turnID
+                )
+            )
+        }
+        return reviewInterruption
     }
 
     private func sendInterrupt(
@@ -97,25 +147,29 @@ package final class AppServerReviewControl: @unchecked Sendable {
                 guard let willInterruptActiveTurn else {
                     return
                 }
-                await willInterruptActiveTurn(AppServerReviewInterruption(
-                    threadID: interruption.threadID.rawValue,
-                    turnID: interruption.turnID?.rawValue ?? ""
-                ))
+                await willInterruptActiveTurn(AppServerReviewInterruption(interruption))
             }
         )
-        let reviewInterruption = AppServerReviewInterruption(
-            threadID: interruption.threadID.rawValue,
-            turnID: interruption.turnID?.rawValue ?? ""
-        )
+        let reviewInterruption = AppServerReviewInterruption(interruption)
         if reviewInterruption.turnID != turnID {
             setPhase(.reviewStarted(turnThreadID: threadID, turnID: reviewInterruption.turnID))
         }
         return reviewInterruption
     }
 
-    private func setPhase(_ phase: Phase) {
+    private func setPhase(_ phase: Phase, reviewSession: CodexReviewSession? = nil) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         self.phase = phase
+        self.reviewSession = reviewSession
+    }
+}
+
+private extension AppServerReviewInterruption {
+    init(_ interruption: CodexTurnInterruption) {
+        self.init(
+            threadID: interruption.threadID.rawValue,
+            turnID: interruption.turnID?.rawValue ?? ""
+        )
     }
 }

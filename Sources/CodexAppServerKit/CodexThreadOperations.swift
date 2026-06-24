@@ -340,6 +340,18 @@ extension CodexTurn {
     package func interrupt() async throws -> CodexTurnInterruption {
         try await interruptCodexTurn(threadID: threadID, turnID: id, client: client)
     }
+
+    @discardableResult
+    package func interrupt(
+        willInterruptActiveTurn: (@Sendable (CodexTurnInterruption) async -> Void)?
+    ) async throws -> CodexTurnInterruption {
+        try await interruptCodexTurn(
+            threadID: threadID,
+            turnID: id,
+            client: client,
+            willInterruptActiveTurn: willInterruptActiveTurn
+        )
+    }
 }
 
 @discardableResult

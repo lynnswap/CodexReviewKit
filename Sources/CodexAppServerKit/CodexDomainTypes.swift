@@ -863,6 +863,13 @@ public struct CodexReviewSession: Identifiable, Sendable {
         try await response.interrupt()
     }
 
+    @discardableResult
+    package func interrupt(
+        willInterruptActiveTurn: (@Sendable (CodexTurnInterruption) async -> Void)?
+    ) async throws -> CodexTurnInterruption {
+        try await response.interrupt(willInterruptActiveTurn: willInterruptActiveTurn)
+    }
+
     /// Sends additional input to the running review turn.
     public func steer(with prompt: CodexPrompt) async throws {
         try await response.steer(with: prompt)
@@ -1596,6 +1603,13 @@ public struct CodexResponseStream: AsyncSequence, Sendable {
     @discardableResult
     public func interrupt() async throws -> CodexTurnInterruption {
         try await turn.interrupt()
+    }
+
+    @discardableResult
+    package func interrupt(
+        willInterruptActiveTurn: (@Sendable (CodexTurnInterruption) async -> Void)?
+    ) async throws -> CodexTurnInterruption {
+        try await turn.interrupt(willInterruptActiveTurn: willInterruptActiveTurn)
     }
 
     public func steer(with prompt: CodexPrompt) async throws {

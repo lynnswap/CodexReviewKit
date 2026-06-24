@@ -282,10 +282,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
-        control.recordReviewStarted(
-            turnThreadID: appServerTurnThreadID(for: run),
-            turnID: review.turnID.rawValue
-        )
+        control.recordReviewStarted(review)
         await session.finalizeRun()
         await session.startConsuming(review)
 
