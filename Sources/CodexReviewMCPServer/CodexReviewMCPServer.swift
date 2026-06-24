@@ -38,11 +38,11 @@ package extension CodexReviewMCP.Tool {
 }
 
 package extension CodexReviewMCP.Tool {
-    struct ReviewSnapshot: Equatable, Sendable {
-        package var result: CodexReviewAPI.Read.Result
-        package var timeline: ReviewMCPProjection
+    internal struct ReviewSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Read.Result
+        var timeline: ReviewMCPProjection
 
-        package init(result: CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection) {
+        init(result: CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection) {
             self.result = result
             self.timeline = timeline
         }
@@ -50,7 +50,7 @@ package extension CodexReviewMCP.Tool {
 }
 
 package extension CodexReviewMCP.Tool {
-    enum Response: Equatable, Sendable {
+    internal enum Response: Equatable, Sendable {
         case reviewStart(ReviewSnapshot)
         case reviewAwait(ReviewSnapshot)
         case reviewRead(ReviewSnapshot, timelinePage: CodexReviewAPI.Log.PageRequest)
@@ -77,7 +77,7 @@ package final class CodexReviewMCPServer {
         ]
     }
 
-    package func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
+    func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
         switch request {
         case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
             let result: CodexReviewAPI.Read.Result
