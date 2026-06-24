@@ -33,7 +33,6 @@ read them as a claim that every symbol has already moved.
 | `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and legacy log compatibility projections. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level `CodexReviewSession` review streams into `CodexReviewKit` backend events |
 | `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
-| `CodexUIKit` | Future generic UI-facing model/API layer over Codex and app-server concepts. It provides UI-construction models and APIs, uses `LocalizedStringResource` for display values where appropriate, and avoids mirror snapshot state |
 | `CodexUI` | Concrete AppKit UI and existing hosted SwiftUI views. SwiftUI views remain concrete UI here; there is no requirement to delete or rewrite them just to satisfy target ownership |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
 | `ReviewMonitorRendering` | Domain timeline rendering helpers that do not know AppKit/SwiftUI or app-server wire |
@@ -49,13 +48,6 @@ It is not an intended ownership boundary. The intended owner for app-server
 review notification schema and high-level review streams is
 `CodexAppServerKit`; raw review DTOs should remain implementation details
 behind that SDK boundary rather than becoming public ReviewMonitor API.
-
-`CodexUIKit` must not own `CodexReviewStore`, `ReviewTimeline`,
-`ReviewMonitorUIState`, sidebar/detail concepts, or concrete `NSView`,
-`ViewController`, or SwiftUI `View` types. Those belong to review core/store or
-concrete UI targets. `CodexUIKit` may describe reusable UI construction models
-over generic Codex/app-server concepts, but it must not become a mirror cache of
-ReviewMonitor state.
 
 ## Source Of Truth
 
@@ -266,16 +258,6 @@ The public tool surface is:
 - `review_cancel`
 
 ## Monitor UI Boundary
-
-The intended UI ownership has two layers:
-
-- `CodexUIKit` is a future generic UI-facing model/API layer over Codex and
-  app-server concepts. It supplies reusable UI-construction values and APIs,
-  can use `LocalizedStringResource` for display values where appropriate, and
-  derives values from the owning model instead of keeping mirror snapshot state.
-- `CodexUI` owns concrete AppKit objects and existing hosted SwiftUI views.
-  SwiftUI views remain here as concrete UI; target ownership does not force a
-  deletion or rewrite of those views.
 
 `ReviewUI` observes product/domain state and forwards user intent.
 

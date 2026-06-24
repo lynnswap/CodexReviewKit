@@ -21,10 +21,6 @@ let package = Package(
             targets: ["CodexAppServerKit"]
         ),
         .library(
-            name: "CodexUIKit",
-            targets: ["CodexUIKit"]
-        ),
-        .library(
             name: "CodexAppServerKitTesting",
             targets: ["CodexAppServerKitTesting"]
         ),
@@ -54,15 +50,6 @@ let package = Package(
         ),
         .target(
             name: "CodexAppServerKit",
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
-            name: "CodexUIKit",
-            dependencies: [
-                "CodexAppServerKit",
-            ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
             ]
@@ -163,15 +150,6 @@ let package = Package(
             dependencies: [
                 "CodexAppServerKit",
                 "CodexAppServerKitTesting",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "CodexUIKitTests",
-            dependencies: [
-                "CodexUIKit",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
