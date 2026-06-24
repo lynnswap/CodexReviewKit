@@ -890,7 +890,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func routeReviewNotification(_ notification: JSONRPC.Notification) async {
         notificationRouterMetrics.received += 1
-        let method = AppServerReviewEventKind(rawValue: notification.method)
+        let method = AppServerReviewNotification.Method(rawValue: notification.method)
         guard method.isReviewNotificationMethod else {
             notificationRouterMetrics.ignored += 1
             return
@@ -925,7 +925,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
             notificationRouterMetrics.routed += 1
             await session.receive(routed)
-        } else if wireNotification.method.isThreadlessReviewBroadcast {
+        } else if method.isThreadlessReviewBroadcast {
             let sessions = Array(reviewEventSessionsByAttemptID.values)
             guard sessions.isEmpty == false else {
                 notificationRouterMetrics.ignored += 1
