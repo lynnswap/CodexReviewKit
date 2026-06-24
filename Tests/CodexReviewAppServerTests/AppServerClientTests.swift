@@ -994,6 +994,11 @@ struct AppServerClientTests {
         #expect(attempt.turnID == "turn-1")
         #expect(attempt.reviewThreadID == "review-thread")
         #expect(await backend.notificationRouterIsRunningForTesting() == false)
+        let storedAttempt = await backend.reviewAttemptForTesting(attempt.run)
+        #expect(storedAttempt.threadID == "thread-1")
+        #expect(storedAttempt.turnID == "turn-1")
+        #expect(storedAttempt.reviewThreadID == "review-thread")
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
 
         let requests = await runtime.transport.recordedRequests()
         #expect(requests.map(\.method) == ["initialize", "thread/start", "review/start"])
@@ -1101,6 +1106,32 @@ struct AppServerClientTests {
         #expect(delta == "Looks good.")
         #expect(try await iterator.next() == .messageDelta("Looks good.", itemID: "msg-1"))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
+    }
+
+    @Test func appServerBackendInterruptUsesTypedSessionWithoutStartingRawRouter() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        try await backend.interruptReview(attempt, reason: .init(message: "Stop"))
+
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+        let interrupt = try #require(await runtime.transport.recordedRequests().last)
+        #expect(interrupt.method == "turn/interrupt")
+        let params = try interrupt.decodeParams(AppServerAPI.Turn.Interrupt.Params.self)
+        #expect(params.threadID == "review-thread")
+        #expect(params.turnID == "turn-1")
     }
 
     @Test func backendUsesLegacySandboxWhenProcessDoesNotSupportModernSessionSource() async throws {

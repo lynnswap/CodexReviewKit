@@ -660,7 +660,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func reviewEventSession(for run: CodexReviewBackendModel.Review.Run) async -> AppServerReviewEventSession {
-        await ensureNotificationRouterStarted()
+        if appServer == nil {
+            await ensureNotificationRouterStarted()
+        }
         if let session = reviewEventSessionsByAttemptID[run.attemptID] {
             await session.updateRun(run)
             registerReviewEventSession(session, for: run)
