@@ -336,11 +336,63 @@ extension CodexTurn {
         try await steer(with: CodexPrompt(prompt))
     }
 
-    package func interrupt() async throws {
-        let _: EmptyResponse = try await client.send(
-            AppServerAPI.Turn.Interrupt.Request(
-                params: .init(threadID: threadID.rawValue, turnID: id.rawValue)
-            ))
+    @discardableResult
+    package func interrupt() async throws -> CodexTurnInterruption {
+        try await interruptCodexTurn(threadID: threadID, turnID: id, client: client)
+    }
+}
+
+@discardableResult
+package func interruptCodexTurn(
+    threadID: CodexThreadID,
+    turnID: CodexTurnID?,
+    client: AppServerClient,
+    willInterruptActiveTurn: (@Sendable (CodexTurnInterruption) async -> Void)? = nil
+) async throws -> CodexTurnInterruption {
+    do {
+        try await sendInterrupt(threadID: threadID, turnID: turnID, client: client)
+        return .init(threadID: threadID, turnID: turnID)
+    } catch {
+        guard let activeTurnID = activeTurnID(from: error),
+              activeTurnID != turnID?.rawValue
+        else {
+            throw error
+        }
+        let activeTurn = CodexTurnID(rawValue: activeTurnID)
+        let interruption = CodexTurnInterruption(threadID: threadID, turnID: activeTurn)
+        if let willInterruptActiveTurn {
+            await willInterruptActiveTurn(interruption)
+        }
+        try await sendInterrupt(threadID: threadID, turnID: activeTurn, client: client)
+        return interruption
+    }
+}
+
+private func sendInterrupt(
+    threadID: CodexThreadID,
+    turnID: CodexTurnID?,
+    client: AppServerClient
+) async throws {
+    let _: EmptyResponse = try await client.send(
+        AppServerAPI.Turn.Interrupt.Request(
+            params: .init(threadID: threadID.rawValue, turnID: turnID?.rawValue ?? "")
+        ))
+}
+
+private func activeTurnID(from error: Error) -> String? {
+    guard case JSONRPC.Error.responseError(_, let message) = error,
+          let range = message.range(of: " but found ")
+    else {
+        return nil
+    }
+    return String(message[range.upperBound...])
+        .trimmingCharacters(in: CharacterSet(charactersIn: "` ").union(.whitespacesAndNewlines))
+        .nonEmpty
+}
+
+private extension String {
+    var nonEmpty: String? {
+        isEmpty ? nil : self
     }
 }
 

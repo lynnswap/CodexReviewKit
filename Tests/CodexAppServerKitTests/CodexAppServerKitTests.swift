@@ -1135,6 +1135,40 @@ struct CodexAppServerKitTests {
         #expect(params.turnID == "turn-1")
     }
 
+    @Test func responseStreamInterruptRetriesWithCurrentActiveTurnID() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Turn.Start.Response(turn: .init(id: "turn-old", status: "running")),
+            for: "turn/start"
+        )
+        await transport.enqueueFailure(
+            code: -32602,
+            message: "expected active turn id turn-old but found turn-new",
+            for: "turn/interrupt"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: router
+        )
+
+        let stream = try await thread.streamResponse(to: "Run the slow checks.")
+        let interruption = try await stream.interrupt()
+
+        #expect(interruption.threadID == "thread-1")
+        #expect(interruption.turnID == "turn-new")
+        let interruptRequests = await transport.recordedRequests().filter {
+            $0.method == "turn/interrupt"
+        }
+        let turnIDs = try interruptRequests.map { request in
+            try request.decodeParams(AppServerAPI.Turn.Interrupt.Params.self).turnID
+        }
+        #expect(turnIDs == ["turn-old", "turn-new"])
+    }
+
     @Test func responseStreamSteerSubmitsInputToCurrentTurn() async throws {
         let transport = CodexAppServerTestTransport()
         try await transport.enqueue(

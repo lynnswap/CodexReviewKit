@@ -855,7 +855,11 @@ public struct CodexReviewSession: Identifiable, Sendable {
     }
 
     /// Interrupts the running review turn.
-    public func interrupt() async throws {
+    ///
+    /// - Returns: The turn that the app-server actually interrupted. This can
+    ///   differ from `turnID` when the app-server reports a newer active turn.
+    @discardableResult
+    public func interrupt() async throws -> CodexTurnInterruption {
         try await response.interrupt()
     }
 
@@ -1500,6 +1504,27 @@ public struct CodexResponse: Identifiable, Equatable, Sendable {
     }
 }
 
+/// The turn interrupted by an app-server control request.
+public struct CodexTurnInterruption: Equatable, Sendable {
+    /// The thread that owns the interrupted turn.
+    public var threadID: CodexThreadID
+
+    /// The interrupted turn, when the app-server reported one.
+    public var turnID: CodexTurnID?
+
+    public init(threadID: CodexThreadID, turnID: CodexTurnID?) {
+        self.threadID = threadID
+        self.turnID = turnID
+    }
+
+    package init(threadID: String, turnID: String?) {
+        self.threadID = .init(rawValue: threadID)
+        self.turnID = turnID.flatMap { value in
+            value.isEmpty ? nil : CodexTurnID(rawValue: value)
+        }
+    }
+}
+
 public struct CodexResponseStream: AsyncSequence, Sendable {
     public enum SubmissionMode: Equatable, Sendable {
         case queueAfterCurrentResponse
@@ -1563,7 +1588,13 @@ public struct CodexResponseStream: AsyncSequence, Sendable {
         }
     }
 
-    public func interrupt() async throws {
+    /// Interrupts the running response.
+    ///
+    /// - Returns: The turn that the app-server actually interrupted. This can
+    ///   differ from the stream's original turn when the app-server reports a
+    ///   newer active turn.
+    @discardableResult
+    public func interrupt() async throws -> CodexTurnInterruption {
         try await turn.interrupt()
     }
 
