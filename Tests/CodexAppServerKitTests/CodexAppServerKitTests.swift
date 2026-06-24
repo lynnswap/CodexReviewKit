@@ -184,7 +184,7 @@ struct CodexAppServerKitTests {
         #expect(params.useStateDbOnly == true)
     }
 
-    @Test func threadStartReviewSerializesTargetAndStreamsReviewThreadLogs() async throws {
+    @Test func threadStartReviewSerializesTargetAndStreamsTypedReviewLogs() async throws {
         let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
             AppServerAPI.Review.Start.Response(
@@ -233,15 +233,155 @@ struct CodexAppServerKitTests {
             )
         )
         try await transport.emitServerNotification(
+            method: "item/completed",
+            params: ThreadItemParams(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    id: "reasoning-1",
+                    type: "reasoning",
+                    summary: ["Checked the diff"],
+                    content: ["trace"]
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: ThreadItemParams(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    id: "tool-1",
+                    type: "mcpToolCall",
+                    text: "ok",
+                    status: "completed",
+                    tool: "review_read"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
+            method: "item/completed",
+            params: ThreadItemParams(
+                threadID: "thread-review",
+                turnID: "turn-review",
+                item: .init(
+                    id: "file-1",
+                    type: "fileChange",
+                    text: "updated",
+                    status: "completed",
+                    path: "Sources/File.swift"
+                )
+            )
+        )
+        try await transport.emitServerNotification(
             method: "thread/closed",
             params: ThreadIDParams(threadID: "thread-review")
         )
 
         let logs = try await collect(review.logEntries)
-        #expect(logs.count == 1)
+        #expect(logs.count == 4)
         #expect(logs.first?.turnID == "turn-review")
         #expect(logs.first?.item?.kind == .commandExecution)
         #expect(logs.first?.item?.text == "passed")
+        #expect(logs.contains {
+            if case .reasoning(let reasoning) = $0.item?.content {
+                reasoning.summary == ["Checked the diff"]
+            } else {
+                false
+            }
+        })
+        #expect(logs.contains {
+            if case .toolCall(let toolCall) = $0.item?.content {
+                toolCall.name == "review_read"
+            } else {
+                false
+            }
+        })
+        #expect(logs.contains {
+            if case .fileChange(let fileChange) = $0.item?.content {
+                fileChange.path == "Sources/File.swift"
+            } else {
+                false
+            }
+        })
+    }
+
+    @Test func reviewStartSeedsDetachedTurnRoutingForTurnOnlyTerminalNotifications() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let review = try await thread.startReview(
+            target: .baseBranch("main"),
+            delivery: .detached
+        )
+        try await transport.emitServerNotification(
+            method: "turn/completed",
+            params: TurnCompletedParams(turn: .init(id: "turn-review", status: "completed"))
+        )
+
+        var eventIterator = review.events.makeAsyncIterator()
+        let event = try await eventIterator.next()
+        if case .turnCompleted(let response) = event {
+            #expect(response.turnID == "turn-review")
+        } else {
+            Issue.record("Expected review.events to receive turn-only completion.")
+        }
+        #expect(try await eventIterator.next() == nil)
+
+        var logIterator = review.logEntries.makeAsyncIterator()
+        #expect(try await logIterator.next() == nil)
+
+        var progressIterator = review.progress.makeAsyncIterator()
+        let progress = try #require(try await progressIterator.next())
+        #expect(progress.phase == .completed)
+        #expect(progress.result?.turnID == "turn-review")
+        #expect(try await progressIterator.next() == nil)
+    }
+
+    @Test func reviewEventsPreserveUnknownNotificationsAsRawDomainEvents() async throws {
+        let transport = CodexAppServerTestTransport()
+        try await transport.enqueue(
+            AppServerAPI.Review.Start.Response(
+                turnID: "turn-review",
+                reviewThreadID: "thread-review"
+            ),
+            for: "review/start"
+        )
+        let client = AppServerClient(transport: transport)
+        let router = CodexAppServerNotificationRouter(client: client)
+        await router.start()
+        await transport.waitForNotificationStreamCount(1)
+        let thread = CodexThread(id: "thread-1", client: client, router: router)
+
+        let review = try await thread.startReview(
+            target: .baseBranch("main"),
+            delivery: .detached
+        )
+        try await transport.emitServerNotification(
+            method: "review/futureEvent",
+            params: TurnIDParams(turnID: "turn-review")
+        )
+
+        var iterator = review.events.makeAsyncIterator()
+        let event = try await iterator.next()
+        if case .unknown(let raw) = event {
+            #expect(raw.method == "review/futureEvent")
+            #expect(raw.threadID == "thread-review")
+            #expect(raw.turnID == "turn-review")
+        } else {
+            Issue.record("Expected unknown review notification to be preserved.")
+        }
     }
 
     @Test func promptPartsEncodeToAppServerInputItems() {
@@ -1021,6 +1161,8 @@ private struct ThreadItemParams: Encodable, Sendable {
         var command: String?
         var aggregatedOutput: String?
         var status: String?
+        var path: String?
+        var tool: String?
         var summary: [String]?
         var content: [String]?
 
@@ -1032,6 +1174,8 @@ private struct ThreadItemParams: Encodable, Sendable {
             command: String? = nil,
             aggregatedOutput: String? = nil,
             status: String? = nil,
+            path: String? = nil,
+            tool: String? = nil,
             summary: [String]? = nil,
             content: [String]? = nil
         ) {
@@ -1042,6 +1186,8 @@ private struct ThreadItemParams: Encodable, Sendable {
             self.command = command
             self.aggregatedOutput = aggregatedOutput
             self.status = status
+            self.path = path
+            self.tool = tool
             self.summary = summary
             self.content = content
         }

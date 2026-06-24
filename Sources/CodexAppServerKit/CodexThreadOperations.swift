@@ -138,8 +138,10 @@ extension CodexThread {
             params: .init(threadID: id.rawValue, target: target, delivery: delivery)
         ))
         let reviewThreadID = response.reviewThreadID.map(CodexThreadID.init(rawValue:)) ?? id
+        let turnID = CodexTurnID(rawValue: response.turnID)
+        await router.seedReviewTurn(turnID, reviewThreadID: reviewThreadID)
         let turn = CodexTurn(
-            id: .init(rawValue: response.turnID),
+            id: turnID,
             threadID: reviewThreadID,
             client: client,
             router: router

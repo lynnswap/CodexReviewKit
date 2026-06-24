@@ -68,6 +68,24 @@ package actor CodexAppServerNotificationRouter {
         }
     }
 
+    package func seedReviewTurn(_ turnID: CodexTurnID, reviewThreadID: CodexThreadID) {
+        threadIDByTurnID[turnID] = reviewThreadID
+        guard let turnHistory = turnHistoryByTurnID[turnID] else {
+            return
+        }
+        for turnEvent in turnHistory {
+            let threadEvent = Self.threadEvent(
+                from: turnEvent,
+                turnID: turnID,
+                threadID: reviewThreadID
+            )
+            if (threadHistoryByThreadID[reviewThreadID] ?? []).contains(threadEvent) {
+                continue
+            }
+            appendThreadEvent(threadEvent, threadID: reviewThreadID)
+        }
+    }
+
     package func stop() {
         routerTask?.cancel()
         routerTask = nil
@@ -92,15 +110,7 @@ package actor CodexAppServerNotificationRouter {
 
         if let threadID = context.threadID {
             let event = decodeThreadEvent(notification: notification, context: context)
-            threadHistoryByThreadID[threadID, default: []].append(event)
-            if let subscribers = threadSubscribersByThreadID[threadID] {
-                for subscriber in subscribers.values {
-                    subscriber.continuation.yield(event)
-                }
-            }
-            if case .closed = event {
-                finishThreadSubscribers(threadID: threadID)
-            }
+            appendThreadEvent(event, threadID: threadID)
         }
 
         if let turnID = context.turnID {
@@ -114,6 +124,18 @@ package actor CodexAppServerNotificationRouter {
             if Self.isTerminalTurnEvent(event) {
                 finishTurnSubscribers(turnID: turnID)
             }
+        }
+    }
+
+    private func appendThreadEvent(_ event: CodexThreadEvent, threadID: CodexThreadID) {
+        threadHistoryByThreadID[threadID, default: []].append(event)
+        if let subscribers = threadSubscribersByThreadID[threadID] {
+            for subscriber in subscribers.values {
+                subscriber.continuation.yield(event)
+            }
+        }
+        if case .closed = event {
+            finishThreadSubscribers(threadID: threadID)
         }
     }
 
@@ -166,6 +188,40 @@ package actor CodexAppServerNotificationRouter {
             return true
         }
         return false
+    }
+
+    private nonisolated static func threadEvent(
+        from event: CodexTurnEvent,
+        turnID: CodexTurnID,
+        threadID: CodexThreadID
+    ) -> CodexThreadEvent {
+        switch event {
+        case .started(let turnID):
+            return .turnStarted(turnID)
+        case .itemStarted(let item):
+            return .itemStarted(item, turnID: turnID)
+        case .itemUpdated(let item):
+            return .itemUpdated(item, turnID: turnID)
+        case .itemCompleted(let item):
+            return .itemCompleted(item, turnID: turnID)
+        case .messageDelta(let delta):
+            return .messageDelta(delta, turnID: turnID)
+        case .reasoningSummaryPartAdded(let part):
+            return .reasoningSummaryPartAdded(part, turnID: turnID)
+        case .reasoningDelta(let delta):
+            return .reasoningDelta(delta, turnID: turnID)
+        case .tokenUsageUpdated(let usage):
+            return .tokenUsageUpdated(usage, turnID: turnID)
+        case .completed(let response):
+            return .turnCompleted(response)
+        case .failed(let message):
+            return .turnFailed(turnID: turnID, message: message)
+        case .unknown(let raw):
+            var raw = raw
+            raw.threadID = threadID
+            raw.turnID = turnID
+            return .unknown(raw)
+        }
     }
 
     private func decodeTurnEvent(
