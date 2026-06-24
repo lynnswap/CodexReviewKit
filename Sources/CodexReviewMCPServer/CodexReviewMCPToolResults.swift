@@ -1,7 +1,6 @@
 import Foundation
 import MCP
 import CodexReviewKit
-import CodexReviewMCPAdapter
 
 func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Result {
     let value: Value

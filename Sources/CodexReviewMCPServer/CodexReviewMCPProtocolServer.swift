@@ -1,7 +1,6 @@
 import Foundation
 import MCP
 import CodexReviewKit
-import CodexReviewMCPAdapter
 
 package actor MCPClientSessionState {
     private var clientInfo: Client.Info?

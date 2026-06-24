@@ -1,22 +1,22 @@
 import Foundation
 import CodexReviewKit
 
-public struct ReviewMCPProjection: Sendable, Equatable {
-    public struct Item: Sendable, Equatable {
-        public var id: ReviewTimelineItem.ID
-        public var kind: ReviewItemKind
-        public var family: ReviewItemFamily
-        public var phase: ReviewItemPhase
-        public var isActive: Bool
-        public var content: Content
-        public var createdAt: Date
-        public var updatedAt: Date
-        public var startedAt: Date?
-        public var completedAt: Date?
-        public var durationMs: Int?
+struct ReviewMCPProjection: Sendable, Equatable {
+    struct Item: Sendable, Equatable {
+        var id: ReviewTimelineItem.ID
+        var kind: ReviewItemKind
+        var family: ReviewItemFamily
+        var phase: ReviewItemPhase
+        var isActive: Bool
+        var content: Content
+        var createdAt: Date
+        var updatedAt: Date
+        var startedAt: Date?
+        var completedAt: Date?
+        var durationMs: Int?
 
         @MainActor
-        public init(item: ReviewTimelineItem, isActive: Bool) {
+        init(item: ReviewTimelineItem, isActive: Bool) {
             self.id = item.id
             self.kind = item.kind
             self.family = item.family
@@ -31,7 +31,7 @@ public struct ReviewMCPProjection: Sendable, Equatable {
         }
     }
 
-    public enum Content: Sendable, Equatable {
+    enum Content: Sendable, Equatable {
         case approval(Approval)
         case command(Command)
         case contextCompaction(ContextCompaction)
@@ -44,7 +44,7 @@ public struct ReviewMCPProjection: Sendable, Equatable {
         case toolCall(ToolCall)
         case unknown(Unknown)
 
-        public var type: String {
+        var type: String {
             switch self {
             case .approval:
                 "approval"
@@ -71,7 +71,7 @@ public struct ReviewMCPProjection: Sendable, Equatable {
             }
         }
 
-        public init(_ content: ReviewTimelineItem.Content) {
+        init(_ content: ReviewTimelineItem.Content) {
             switch content {
             case .approval(let approval):
                 self = .approval(.init(title: approval.title, detail: approval.detail))
@@ -112,75 +112,75 @@ public struct ReviewMCPProjection: Sendable, Equatable {
         }
     }
 
-    public struct Approval: Sendable, Equatable {
-        public var title: String
-        public var detail: String?
+    struct Approval: Sendable, Equatable {
+        var title: String
+        var detail: String?
     }
 
-    public struct Command: Sendable, Equatable {
-        public var command: String
-        public var cwd: String?
-        public var output: String
-        public var exitCode: Int?
+    struct Command: Sendable, Equatable {
+        var command: String
+        var cwd: String?
+        var output: String
+        var exitCode: Int?
     }
 
-    public struct ContextCompaction: Sendable, Equatable {
-        public var title: String
+    struct ContextCompaction: Sendable, Equatable {
+        var title: String
     }
 
-    public struct Diagnostic: Sendable, Equatable {
-        public var message: String
+    struct Diagnostic: Sendable, Equatable {
+        var message: String
     }
 
-    public struct FileChange: Sendable, Equatable {
-        public var title: String
-        public var output: String
+    struct FileChange: Sendable, Equatable {
+        var title: String
+        var output: String
     }
 
-    public struct Message: Sendable, Equatable {
-        public var text: String
+    struct Message: Sendable, Equatable {
+        var text: String
     }
 
-    public struct Plan: Sendable, Equatable {
-        public var markdown: String
+    struct Plan: Sendable, Equatable {
+        var markdown: String
     }
 
-    public struct Reasoning: Sendable, Equatable {
-        public var text: String
-        public var style: ReviewTimelineItem.Reasoning.Style
+    struct Reasoning: Sendable, Equatable {
+        var text: String
+        var style: ReviewTimelineItem.Reasoning.Style
     }
 
-    public struct Search: Sendable, Equatable {
-        public var query: String
-        public var result: String?
+    struct Search: Sendable, Equatable {
+        var query: String
+        var result: String?
     }
 
-    public struct ToolCall: Sendable, Equatable {
-        public var namespace: String?
-        public var server: String?
-        public var tool: String?
-        public var arguments: String?
-        public var progress: String?
-        public var result: String?
-        public var error: String?
+    struct ToolCall: Sendable, Equatable {
+        var namespace: String?
+        var server: String?
+        var tool: String?
+        var arguments: String?
+        var progress: String?
+        var result: String?
+        var error: String?
     }
 
-    public struct Unknown: Sendable, Equatable {
-        public var title: String
-        public var detail: String?
+    struct Unknown: Sendable, Equatable {
+        var title: String
+        var detail: String?
     }
 
-    public var timelineRevision: ReviewTimeline.Revision
-    public var orderedItemIDs: [ReviewTimelineItem.ID]
-    public var activeItemIDs: [ReviewTimelineItem.ID]
-    public var activeItemCount: Int
-    public var latestActivityID: ReviewTimelineItem.ID?
-    public var terminalSummary: String?
-    public var terminalResult: String?
-    public var items: [Item]
+    var timelineRevision: ReviewTimeline.Revision
+    var orderedItemIDs: [ReviewTimelineItem.ID]
+    var activeItemIDs: [ReviewTimelineItem.ID]
+    var activeItemCount: Int
+    var latestActivityID: ReviewTimelineItem.ID?
+    var terminalSummary: String?
+    var terminalResult: String?
+    var items: [Item]
 
     @MainActor
-    public init(timeline: ReviewTimeline) {
+    init(timeline: ReviewTimeline) {
         let activeItemIDs = timeline.orderedItemIDs.filter { timeline.activeItemIDs.contains($0) }
         self.timelineRevision = timeline.revision
         self.orderedItemIDs = timeline.orderedItemIDs

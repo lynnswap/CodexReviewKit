@@ -27,8 +27,7 @@ have been converted into domain events.
 | `CodexAppServerKit` | Generic `codex app-server` process transport, JSON-RPC client, typed request DTOs, and Swift domain API for threads, turns, prompts, models, accounts, and login |
 | `CodexReviewAppServerWire` | Raw `codex app-server` review notification DTO decode and conversion into domain events |
 | `CodexReviewAppServer` | Review-specific `review/start` orchestration, ReviewMonitor notification routing, and runtime conversion |
-| `CodexReviewMCPAdapter` | MCP-facing projections from observable review/domain state |
-| `CodexReviewMCPServer` | Internal MCP protocol request/response conversion and Streamable HTTP endpoint |
+| `CodexReviewMCPServer` | MCP-facing projections from observable review/domain state, internal MCP protocol request/response conversion, and Streamable HTTP endpoint |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
 | `ReviewMonitorRendering` | Domain timeline rendering helpers that do not know AppKit/SwiftUI or app-server wire |
 | `ReviewUI` | Native monitor UI rendering and user-intent forwarding |
@@ -62,9 +61,9 @@ application-facing review events to the store. Review wire details stop at this
 boundary.
 
 `ReviewTimeline` and application/store state are the observable source of truth
-after conversion. UI views, rendering helpers, MCP adapters, and legacy log
-support project from the timeline; they do not parse raw app-server events and
-do not make string logs authoritative again.
+after conversion. UI views, rendering helpers, MCP server projections, and
+legacy log support project from the timeline; they do not parse raw app-server
+events and do not make string logs authoritative again.
 
 Legacy log support exists for compatibility with older ReviewMonitor surfaces:
 
@@ -110,7 +109,6 @@ flowchart TB
     end
 
     subgraph MCP["MCP"]
-        MCPAdapter["CodexReviewMCPAdapter"]
         MCPServer["CodexReviewMCPServer"]
     end
 
@@ -128,11 +126,10 @@ flowchart TB
     Timeline --> AppStore
     Timeline --> PublicStore
     Timeline --> LegacyProjection
-    Timeline --> MCPAdapter
+    Timeline --> MCPServer
     Timeline --> Renderer
     PublicStore --> UI
     Renderer --> UI
-    MCPAdapter --> MCPServer
     DomainAPI --> Client
     Client --> Process
     Runtime --> DomainAPI
@@ -144,8 +141,8 @@ flowchart TB
 ```
 
 The diagram describes ownership direction, not every SwiftPM dependency. New
-code should not move domain, application, rendering, UI, or MCP adapter
-responsibilities back into runtime/protocol owners.
+code should not move domain, application, rendering, UI, or MCP projection
+responsibilities back into runtime owners.
 
 ## Observation Ownership
 
@@ -217,12 +214,10 @@ Fake and live tests use the same transport protocol.
 ## MCP Boundary
 
 `CodexReviewMCPServer` knows MCP tool names, request arguments, response shape,
-session headers, and Streamable HTTP behavior. It calls store commands and
-adapter projections. It does not know Codex JSON-RPC details.
-
-`CodexReviewMCPAdapter` may depend on domain/product state to build MCP-facing
-value snapshots. It must not import ReviewUI, the app-server runtime, or
-app-server wire DTOs.
+session headers, Streamable HTTP behavior, and MCP-facing value snapshots from
+domain/product state. It calls store commands and projects the review timeline
+into MCP tool response shape. It does not know Codex JSON-RPC details and must
+not import ReviewUI, the app-server runtime, or app-server wire DTOs.
 
 ReviewMonitor owns the default Streamable HTTP endpoint at
 `http://localhost:9417/mcp`. The HTTP boundary follows current MCP session
@@ -245,7 +240,7 @@ The public tool surface is:
 - Views and view controllers render observable state.
 - User actions call store methods.
 - UI rendering may use `ReviewMonitorRendering` helpers over `ReviewTimeline`.
-- UI code must not import app-server runtime, app-server wire, MCP adapter, or
+- UI code must not import app-server runtime, app-server wire, or
   MCP server targets.
 - UI tests cover layout, selection, rendering, accessibility-facing text, and
   user-intent forwarding.
@@ -265,8 +260,7 @@ Default tests are deterministic and do not start a live `codex app-server`.
 | `CodexReviewAppServerWireTests` | Raw notification JSON | Wire decode and domain event conversion |
 | `CodexReviewKitTests` | Domain timelines, ObservationBridge awaiters, and fake `CodexReviewStoreBackend` | Semantic timeline mutation, use-case observation behavior, review/auth/settings state machines, cancellation, result retention |
 | `CodexReviewAppServerTests` | Fake JSON-RPC transport | Review-specific request serialization, notification buffering, interrupt/cleanup, and recovery |
-| `CodexReviewMCPAdapterTests` | Domain timeline projections | MCP adapter snapshots |
-| `CodexReviewMCPServerTests` | Fake review store | MCP protocol conversion and response shape |
+| `CodexReviewMCPServerTests` | Fake review store and domain timeline projections | MCP protocol conversion, response shape, and timeline projection snapshots |
 | `CodexReviewHostTests` | Fake runtime dependencies | Composition, startup, shutdown |
 | `ReviewUITests` | Preview/test monitor backend | Native UI behavior and user-intent forwarding |
 

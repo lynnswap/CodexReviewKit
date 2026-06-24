@@ -1,6 +1,6 @@
 import Testing
 @testable import CodexReviewKit
-import CodexReviewMCPServer
+@testable import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP server adapter")
