@@ -184,6 +184,94 @@ struct CodexAppServerKitTests {
         #expect(params.useStateDbOnly == true)
     }
 
+    @Test func reviewNotificationMethodsClassifyReviewEvents() {
+        #expect(AppServerReviewNotification.Method(rawValue: "turn/started").isReviewNotificationMethod)
+        #expect(AppServerReviewNotification.Method(rawValue: "item/started").isReviewNotificationMethod)
+        #expect(
+            AppServerReviewNotification.Method(rawValue: "item/commandExecution/outputDelta")
+                .isReviewNotificationMethod
+        )
+        #expect(AppServerReviewNotification.Method(rawValue: "thread/status/changed").isReviewNotificationMethod)
+        #expect(AppServerReviewNotification.Method(rawValue: "model/verification").isReviewNotificationMethod)
+        #expect(AppServerReviewNotification.Method(rawValue: "review/futureEvent").isReviewNotificationMethod == false)
+    }
+
+    @Test func reviewNotificationMethodsClassifyThreadlessBroadcasts() {
+        #expect(AppServerReviewNotification.Method(rawValue: "warning").isThreadlessReviewBroadcast)
+        #expect(AppServerReviewNotification.Method(rawValue: "deprecationNotice").isThreadlessReviewBroadcast)
+        #expect(AppServerReviewNotification.Method(rawValue: "configWarning").isThreadlessReviewBroadcast)
+        #expect(AppServerReviewNotification.Method(rawValue: "error").isThreadlessReviewBroadcast)
+        #expect(AppServerReviewNotification.Method(rawValue: "diagnostic").isThreadlessReviewBroadcast == false)
+        #expect(AppServerReviewNotification.Method(rawValue: "turn/started").isThreadlessReviewBroadcast == false)
+    }
+
+    @Test func reviewNotificationDecodePreservesUnknownRawPayloads() throws {
+        let objectData = Data("""
+            {
+              "threadId": "thread-review",
+              "turnId": "turn-review",
+              "future": { "enabled": true },
+              "count": 2
+            }
+            """.utf8)
+        let objectNotification = try AppServerReviewNotification(
+            method: "review/futureEvent",
+            paramsData: objectData
+        )
+
+        #expect(objectNotification.method.rawValue == "review/futureEvent")
+        #expect(objectNotification.payload.threadID == "thread-review")
+        #expect(objectNotification.payload.turnID == "turn-review")
+        #expect(objectNotification.rawNotification.threadID == "thread-review")
+        #expect(objectNotification.rawNotification.turnID == "turn-review")
+        #expect(objectNotification.rawNotification.params == objectData)
+        #expect(objectNotification.rawPayload == .object([
+            "threadId": .string("thread-review"),
+            "turnId": .string("turn-review"),
+            "future": .object(["enabled": .bool(true)]),
+            "count": .int(2),
+        ]))
+
+        let nonObjectData = Data(#""future schema""#.utf8)
+        let nonObjectNotification = try AppServerReviewNotification(
+            method: "review/futureEvent",
+            paramsData: nonObjectData
+        )
+
+        #expect(nonObjectNotification.payload.threadID == nil)
+        #expect(nonObjectNotification.payload.turnID == nil)
+        #expect(nonObjectNotification.rawPayload == .string("future schema"))
+        #expect(nonObjectNotification.rawNotification.params == nonObjectData)
+    }
+
+    @Test func reviewNotificationDecodeReadsOfficialItemPayload() throws {
+        let notification = try AppServerReviewNotification(
+            method: "item/completed",
+            paramsData: Data("""
+                {
+                  "threadId": "thread-review",
+                  "turnId": "turn-review",
+                  "item": {
+                    "id": "command-1",
+                    "type": "commandExecution",
+                    "command": "swift test",
+                    "aggregatedOutput": "passed",
+                    "status": "completed"
+                  }
+                }
+                """.utf8)
+        )
+
+        #expect(notification.method.isReviewNotificationMethod)
+        #expect(notification.payload.threadID == "thread-review")
+        #expect(notification.payload.resolvedTurnID == "turn-review")
+        #expect(notification.payload.item?.id == "command-1")
+        #expect(notification.payload.item?.resolvedType == "commandExecution")
+        #expect(notification.payload.item?.command == "swift test")
+        #expect(notification.payload.item?.aggregatedOutput == "passed")
+        #expect(notification.payload.item?.status == "completed")
+    }
+
     @Test func threadStartReviewSerializesTargetAndStreamsTypedReviewLogs() async throws {
         let transport = CodexAppServerTestTransport()
         try await transport.enqueue(
