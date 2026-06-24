@@ -7,10 +7,6 @@ import Foundation
 /// login domain objects.
 public actor CodexAppServer {
     /// Options for creating a Codex app-server container.
-    @available(iOS, unavailable, message: "The current local app-server runtime requires macOS.")
-    @available(tvOS, unavailable, message: "The current local app-server runtime requires macOS.")
-    @available(watchOS, unavailable, message: "The current local app-server runtime requires macOS.")
-    @available(visionOS, unavailable, message: "The current local app-server runtime requires macOS.")
     public struct Configuration: Sendable {
         /// Options for launching a local `codex app-server` process.
         public struct LocalProcess: Sendable {
@@ -145,10 +141,6 @@ public actor CodexAppServer {
     ///
     /// - Parameter configuration: Container and local-process configuration.
     /// - Throws: A transport, JSON-RPC, or app-server initialization error.
-    @available(iOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
-    @available(tvOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
-    @available(watchOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
-    @available(visionOS, unavailable, message: "Launching a local Codex app-server process requires macOS.")
     public init(configuration: Configuration = .default) async throws {
         let transportConfiguration = AppServerProcessTransport.Configuration(
             executable: configuration.localProcess.executable,
