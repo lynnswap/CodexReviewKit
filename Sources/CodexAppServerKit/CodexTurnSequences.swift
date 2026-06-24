@@ -154,27 +154,56 @@ public struct CodexReviewEventSequence: AsyncSequence, Sendable {
     public typealias Element = CodexReviewEvent
 
     private let events: CodexThreadEventSequence
+    private let terminalTurnID: CodexTurnID?
 
-    package init(events: CodexThreadEventSequence) {
+    package init(events: CodexThreadEventSequence, terminalTurnID: CodexTurnID? = nil) {
         self.events = events
+        self.terminalTurnID = terminalTurnID
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(events: events.makeAsyncIterator())
+        Iterator(events: events.makeAsyncIterator(), terminalTurnID: terminalTurnID)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
         private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+        private let terminalTurnID: CodexTurnID?
+        private var finished = false
 
-        fileprivate init(events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator) {
+        fileprivate init(
+            events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator,
+            terminalTurnID: CodexTurnID?
+        ) {
             self.events = events
+            self.terminalTurnID = terminalTurnID
         }
 
         public mutating func next() async throws -> CodexReviewEvent? {
+            guard finished == false else {
+                return nil
+            }
             guard let event = try await events.next() else {
                 return nil
             }
+            if isTerminal(event) {
+                finished = true
+            }
             return CodexReviewEvent(event)
+        }
+
+        private func isTerminal(_ event: CodexThreadEvent) -> Bool {
+            switch event {
+            case .turnCompleted(let response):
+                terminalTurnID.map { response.turnID == $0 } ?? true
+            case .turnFailed(let turnID, _):
+                terminalTurnID.map { turnID == $0 } ?? true
+            case .closed:
+                true
+            case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
+                .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
+                .unknown:
+                false
+            }
         }
     }
 }
@@ -183,28 +212,91 @@ public struct CodexReviewEventSequence: AsyncSequence, Sendable {
 public struct CodexReviewLogSequence: AsyncSequence, Sendable {
     public typealias Element = CodexReviewLogEntry
 
-    private let logs: CodexThreadLogSequence
+    private let events: CodexThreadEventSequence
+    private let terminalTurnID: CodexTurnID?
 
-    package init(logs: CodexThreadLogSequence) {
-        self.logs = logs
+    package init(events: CodexThreadEventSequence, terminalTurnID: CodexTurnID? = nil) {
+        self.events = events
+        self.terminalTurnID = terminalTurnID
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(logs: logs.makeAsyncIterator())
+        Iterator(events: events.makeAsyncIterator(), terminalTurnID: terminalTurnID)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
-        private var logs: CodexThreadLogSequence.Iterator
+        private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+        private let terminalTurnID: CodexTurnID?
+        private var logEntryIndex = 0
+        private var finished = false
 
-        fileprivate init(logs: CodexThreadLogSequence.Iterator) {
-            self.logs = logs
+        fileprivate init(
+            events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator,
+            terminalTurnID: CodexTurnID?
+        ) {
+            self.events = events
+            self.terminalTurnID = terminalTurnID
         }
 
         public mutating func next() async throws -> CodexReviewLogEntry? {
-            guard let entry = try await logs.next() else {
+            guard finished == false else {
                 return nil
             }
-            return CodexReviewLogEntry(entry)
+            while let event = try await events.next() {
+                switch event {
+                case .itemStarted(let item, let turnID):
+                    return .itemStarted(item, turnID: turnID)
+                case .itemUpdated(let item, let turnID):
+                    return .itemUpdated(item, turnID: turnID)
+                case .itemCompleted(let item, let turnID):
+                    return .itemCompleted(item, turnID: turnID)
+                case .message(let message, let turnID):
+                    let item = CodexThreadItem(
+                        id: message.id,
+                        kind: message.role == .user ? .userMessage : .agentMessage,
+                        content: .message(message)
+                    )
+                    return .itemCompleted(item, turnID: turnID)
+                case .messageDelta(let delta, let turnID):
+                    return .messageDelta(delta, turnID: turnID, id: nextDeltaLogEntryID(for: delta))
+                case .reasoningSummaryPartAdded(let part, let turnID):
+                    return .reasoningPartStarted(part, turnID: turnID)
+                case .reasoningDelta(let delta, let turnID):
+                    return .reasoningDelta(delta, turnID: turnID)
+                case .turnCompleted, .turnFailed, .closed:
+                    if isTerminal(event) {
+                        finished = true
+                        return nil
+                    }
+                    continue
+                case .turnStarted, .tokenUsageUpdated, .statusChanged, .unknown:
+                    continue
+                }
+            }
+            finished = true
+            return nil
+        }
+
+        private mutating func nextDeltaLogEntryID(for delta: CodexMessageDelta) -> String {
+            defer {
+                logEntryIndex += 1
+            }
+            return "\(delta.itemID ?? "agent-message-delta"):\(logEntryIndex)"
+        }
+
+        private func isTerminal(_ event: CodexThreadEvent) -> Bool {
+            switch event {
+            case .turnCompleted(let response):
+                terminalTurnID.map { response.turnID == $0 } ?? true
+            case .turnFailed(let turnID, _):
+                terminalTurnID.map { turnID == $0 } ?? true
+            case .closed:
+                true
+            case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
+                .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
+                .unknown:
+                false
+            }
         }
     }
 }
@@ -214,23 +306,30 @@ public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
     public typealias Element = CodexReviewProgress
 
     private let events: CodexThreadEventSequence
+    private let terminalTurnID: CodexTurnID?
 
-    package init(events: CodexThreadEventSequence) {
+    package init(events: CodexThreadEventSequence, terminalTurnID: CodexTurnID? = nil) {
         self.events = events
+        self.terminalTurnID = terminalTurnID
     }
 
     public func makeAsyncIterator() -> Iterator {
-        Iterator(events: events.makeAsyncIterator())
+        Iterator(events: events.makeAsyncIterator(), terminalTurnID: terminalTurnID)
     }
 
     public struct Iterator: AsyncIteratorProtocol {
         private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+        private let terminalTurnID: CodexTurnID?
         private var accumulator = CodexTranscriptAccumulator()
         private var usage: CodexTokenUsage?
         private var finished = false
 
-        fileprivate init(events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator) {
+        fileprivate init(
+            events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator,
+            terminalTurnID: CodexTurnID?
+        ) {
             self.events = events
+            self.terminalTurnID = terminalTurnID
         }
 
         public mutating func next() async throws -> CodexReviewProgress? {
@@ -249,6 +348,9 @@ public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
                     usage = newUsage
                     return .init(phase: .running, transcript: accumulator.transcript, usage: usage)
                 case .turnCompleted(var result):
+                    guard isTerminal(event) else {
+                        continue
+                    }
                     finished = true
                     result = finalizedResult(result)
                     if result.errorMessage != nil || result.status?.isFailure == true {
@@ -266,6 +368,9 @@ public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
                         result: result
                     )
                 case .turnFailed(_, let message):
+                    guard isTerminal(event) else {
+                        continue
+                    }
                     finished = true
                     return .init(
                         phase: .failed(.turnFailed(message)),
@@ -295,6 +400,21 @@ public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
                 result.usage = usage
             }
             return result
+        }
+
+        private func isTerminal(_ event: CodexThreadEvent) -> Bool {
+            switch event {
+            case .turnCompleted(let response):
+                terminalTurnID.map { response.turnID == $0 } ?? true
+            case .turnFailed(let turnID, _):
+                terminalTurnID.map { turnID == $0 } ?? true
+            case .closed:
+                true
+            case .turnStarted, .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
+                .reasoningSummaryPartAdded, .reasoningDelta, .tokenUsageUpdated, .statusChanged,
+                .unknown:
+                false
+            }
         }
     }
 }

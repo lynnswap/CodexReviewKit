@@ -789,7 +789,7 @@ public struct CodexReviewSession: Identifiable, Sendable {
 
     /// Review-scoped events emitted by the review thread.
     public var events: CodexReviewEventSequence {
-        .init(events: eventThread.events)
+        .init(events: eventThread.events, terminalTurnID: turnID)
     }
 
     /// Agent messages emitted by the review thread.
@@ -807,12 +807,12 @@ public struct CodexReviewSession: Identifiable, Sendable {
     /// Review log views can be built from this sequence without depending on
     /// raw JSON-RPC notifications.
     public var logEntries: CodexReviewLogSequence {
-        .init(logs: eventThread.logEntries)
+        .init(events: eventThread.events, terminalTurnID: turnID)
     }
 
     /// Incremental progress snapshots for the review thread.
     public var progress: CodexReviewProgressSequence {
-        .init(events: eventThread.events)
+        .init(events: eventThread.events, terminalTurnID: turnID)
     }
 
     /// Collects the review response until the turn finishes.

@@ -337,6 +337,10 @@ struct CodexAppServerKitTests {
         } else {
             Issue.record("Expected review.events to receive turn-only completion.")
         }
+        #expect(try await eventIterator.next() == nil)
+
+        var logIterator = review.logEntries.makeAsyncIterator()
+        #expect(try await logIterator.next() == nil)
 
         var progressIterator = review.progress.makeAsyncIterator()
         let progress = try #require(try await progressIterator.next())
