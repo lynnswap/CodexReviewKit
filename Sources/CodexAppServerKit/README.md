@@ -245,15 +245,31 @@ not yet model directly.
 
 `review/start` is part of the app-server surface, so CodexAppServerKit exposes
 it as a thread operation. A review session provides the review turn response and
-the review thread event streams. If app-server detaches the review into a
-separate thread, `logEntries`, `events`, and `transcriptUpdates` are bound to
-that review thread automatically.
+review-domain streams. If app-server detaches the review into a separate
+thread, `events`, `logEntries`, `progress`, and `transcriptUpdates` are bound to
+that review thread automatically. Detached review notification routing is owned
+by CodexAppServerKit, so callers do not need to parse JSON-RPC notifications or
+track app-server thread event details.
 
 ```swift
 let review = try await thread.startReview(target: .baseBranch("main"))
 
 for try await entry in review.logEntries {
-    renderReviewLog(entry)
+    switch entry {
+    case .itemCompleted(let item, _):
+        renderReviewLog(item)
+    case .reasoningDelta(let delta, _):
+        renderReasoningDelta(delta)
+    default:
+        break
+    }
+}
+
+for try await progress in review.progress {
+    renderReviewTranscript(progress.transcript)
+    if progress.phase == .completed {
+        break
+    }
 }
 
 let response = try await review.collect()
@@ -267,6 +283,14 @@ try await thread.startReview(target: .uncommittedChanges)
 try await thread.startReview(target: .commit(sha: sha, title: title))
 try await thread.startReview(target: .custom(instructions: instructions))
 ```
+
+`CodexReviewSession.events` yields `CodexReviewEvent`, preserving unknown
+schema-new notifications as `CodexRawNotification`. `logEntries` yields
+`CodexReviewLogEntry` values for command, reasoning, tool, file-change, message,
+and delta output. `progress` yields `CodexReviewProgress` snapshots until the
+review turn completes or fails. `transcriptUpdates` remains the transcript
+sequence for the review thread itself, which is useful when a UI wants
+thread-bound transcript snapshots rather than review progress phases.
 
 ## Responses
 
@@ -397,6 +421,12 @@ The public boundary is:
 - `CodexThread`
 - `CodexReviewTarget`
 - `CodexReviewSession`
+- `CodexReviewEvent`
+- `CodexReviewLogEntry`
+- `CodexReviewProgress`
+- `CodexReviewEventSequence`
+- `CodexReviewLogSequence`
+- `CodexReviewProgressSequence`
 - `CodexResponse`
 - `CodexResponseStream`
 - `CodexGenerationOptions`

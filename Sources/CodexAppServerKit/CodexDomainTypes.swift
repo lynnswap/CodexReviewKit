@@ -583,6 +583,172 @@ public enum CodexReviewDelivery: String, Codable, Equatable, Sendable {
     case detached
 }
 
+/// Review-scoped events emitted for a `CodexReviewSession`.
+public enum CodexReviewEvent: Equatable, Sendable {
+    case turnStarted(CodexTurnID)
+    case turnCompleted(CodexResponse)
+    case turnFailed(turnID: CodexTurnID?, message: String)
+    case itemStarted(CodexThreadItem, turnID: CodexTurnID?)
+    case itemUpdated(CodexThreadItem, turnID: CodexTurnID?)
+    case itemCompleted(CodexThreadItem, turnID: CodexTurnID?)
+    case message(CodexMessage, turnID: CodexTurnID?)
+    case messageDelta(CodexMessageDelta, turnID: CodexTurnID?)
+    case reasoningSummaryPartAdded(CodexReasoningPart, turnID: CodexTurnID?)
+    case reasoningDelta(CodexReasoningDelta, turnID: CodexTurnID?)
+    case tokenUsageUpdated(CodexTokenUsage, turnID: CodexTurnID?)
+    case statusChanged(CodexThreadStatus)
+    case closed
+    case unknown(CodexRawNotification)
+
+    package init(_ event: CodexThreadEvent) {
+        switch event {
+        case .turnStarted(let turnID):
+            self = .turnStarted(turnID)
+        case .turnCompleted(let response):
+            self = .turnCompleted(response)
+        case .turnFailed(let turnID, let message):
+            self = .turnFailed(turnID: turnID, message: message)
+        case .itemStarted(let item, let turnID):
+            self = .itemStarted(item, turnID: turnID)
+        case .itemUpdated(let item, let turnID):
+            self = .itemUpdated(item, turnID: turnID)
+        case .itemCompleted(let item, let turnID):
+            self = .itemCompleted(item, turnID: turnID)
+        case .message(let message, let turnID):
+            self = .message(message, turnID: turnID)
+        case .messageDelta(let delta, let turnID):
+            self = .messageDelta(delta, turnID: turnID)
+        case .reasoningSummaryPartAdded(let part, let turnID):
+            self = .reasoningSummaryPartAdded(part, turnID: turnID)
+        case .reasoningDelta(let delta, let turnID):
+            self = .reasoningDelta(delta, turnID: turnID)
+        case .tokenUsageUpdated(let usage, let turnID):
+            self = .tokenUsageUpdated(usage, turnID: turnID)
+        case .statusChanged(let status):
+            self = .statusChanged(status)
+        case .closed:
+            self = .closed
+        case .unknown(let raw):
+            self = .unknown(raw)
+        }
+    }
+}
+
+/// A log-oriented review event suitable for review output views.
+public enum CodexReviewLogEntry: Identifiable, Equatable, Sendable {
+    public typealias Phase = CodexThreadLogEntry.Phase
+
+    case itemStarted(CodexThreadItem, turnID: CodexTurnID?)
+    case itemUpdated(CodexThreadItem, turnID: CodexTurnID?)
+    case itemCompleted(CodexThreadItem, turnID: CodexTurnID?)
+    case messageDelta(CodexMessageDelta, turnID: CodexTurnID?, id: String)
+    case reasoningPartStarted(CodexReasoningPart, turnID: CodexTurnID?)
+    case reasoningDelta(CodexReasoningDelta, turnID: CodexTurnID?)
+
+    package init(_ entry: CodexThreadLogEntry) {
+        switch entry {
+        case .itemStarted(let item, let turnID):
+            self = .itemStarted(item, turnID: turnID)
+        case .itemUpdated(let item, let turnID):
+            self = .itemUpdated(item, turnID: turnID)
+        case .itemCompleted(let item, let turnID):
+            self = .itemCompleted(item, turnID: turnID)
+        case .messageDelta(let delta, let turnID, let id):
+            self = .messageDelta(delta, turnID: turnID, id: id)
+        case .reasoningPartStarted(let part, let turnID):
+            self = .reasoningPartStarted(part, turnID: turnID)
+        case .reasoningDelta(let delta, let turnID):
+            self = .reasoningDelta(delta, turnID: turnID)
+        }
+    }
+
+    public var id: String {
+        switch self {
+        case .itemStarted(let item, _), .itemUpdated(let item, _), .itemCompleted(let item, _):
+            item.id
+        case .messageDelta(_, _, let id):
+            id
+        case .reasoningPartStarted(let part, _):
+            part.id
+        case .reasoningDelta(let delta, _):
+            delta.id
+        }
+    }
+
+    public var turnID: CodexTurnID? {
+        switch self {
+        case .itemStarted(_, let turnID), .itemUpdated(_, let turnID),
+             .itemCompleted(_, let turnID), .messageDelta(_, let turnID, _),
+             .reasoningPartStarted(_, let turnID), .reasoningDelta(_, let turnID):
+            turnID
+        }
+    }
+
+    public var phase: Phase {
+        switch self {
+        case .itemStarted, .reasoningPartStarted:
+            .started
+        case .itemUpdated:
+            .updated
+        case .itemCompleted:
+            .completed
+        case .messageDelta, .reasoningDelta:
+            .delta
+        }
+    }
+
+    public var item: CodexThreadItem? {
+        switch self {
+        case .itemStarted(let item, _), .itemUpdated(let item, _), .itemCompleted(let item, _):
+            item
+        case .reasoningPartStarted(let part, _):
+            .init(id: part.id, kind: .reasoning, content: .reasoning(.empty))
+        case .messageDelta, .reasoningDelta:
+            nil
+        }
+    }
+
+    public var messageDelta: CodexMessageDelta? {
+        if case .messageDelta(let delta, _, _) = self {
+            return delta
+        }
+        return nil
+    }
+
+    public var reasoningDelta: CodexReasoningDelta? {
+        if case .reasoningDelta(let delta, _) = self {
+            return delta
+        }
+        return nil
+    }
+}
+
+/// Incremental review progress derived from review-domain events.
+public struct CodexReviewProgress: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable {
+        case running
+        case completed
+        case failed(CodexAppServerError)
+    }
+
+    public var phase: Phase
+    public var transcript: CodexTranscript
+    public var usage: CodexTokenUsage?
+    public var result: CodexResponse?
+
+    public init(
+        phase: Phase,
+        transcript: CodexTranscript = .init(),
+        usage: CodexTokenUsage? = nil,
+        result: CodexResponse? = nil
+    ) {
+        self.phase = phase
+        self.transcript = transcript
+        self.usage = usage
+        self.result = result
+    }
+}
+
 /// A review run started by `codex app-server`.
 public struct CodexReviewSession: Identifiable, Sendable {
     /// The response turn identifier, used as the stable session identity.
@@ -621,9 +787,9 @@ public struct CodexReviewSession: Identifiable, Sendable {
         self.eventThread = eventThread
     }
 
-    /// Thread-scoped events for the review thread.
-    public var events: CodexThreadEventSequence {
-        eventThread.events
+    /// Review-scoped events emitted by the review thread.
+    public var events: CodexReviewEventSequence {
+        .init(events: eventThread.events)
     }
 
     /// Agent messages emitted by the review thread.
@@ -640,8 +806,13 @@ public struct CodexReviewSession: Identifiable, Sendable {
     ///
     /// Review log views can be built from this sequence without depending on
     /// raw JSON-RPC notifications.
-    public var logEntries: CodexThreadLogSequence {
-        eventThread.logEntries
+    public var logEntries: CodexReviewLogSequence {
+        .init(logs: eventThread.logEntries)
+    }
+
+    /// Incremental progress snapshots for the review thread.
+    public var progress: CodexReviewProgressSequence {
+        .init(events: eventThread.events)
     }
 
     /// Collects the review response until the turn finishes.

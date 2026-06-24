@@ -149,6 +149,156 @@ public struct CodexThreadLogSequence: AsyncSequence, Sendable {
     }
 }
 
+/// Review-scoped event stream for a `CodexReviewSession`.
+public struct CodexReviewEventSequence: AsyncSequence, Sendable {
+    public typealias Element = CodexReviewEvent
+
+    private let events: CodexThreadEventSequence
+
+    package init(events: CodexThreadEventSequence) {
+        self.events = events
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(events: events.makeAsyncIterator())
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+
+        fileprivate init(events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator) {
+            self.events = events
+        }
+
+        public mutating func next() async throws -> CodexReviewEvent? {
+            guard let event = try await events.next() else {
+                return nil
+            }
+            return CodexReviewEvent(event)
+        }
+    }
+}
+
+/// Review-scoped log stream for a `CodexReviewSession`.
+public struct CodexReviewLogSequence: AsyncSequence, Sendable {
+    public typealias Element = CodexReviewLogEntry
+
+    private let logs: CodexThreadLogSequence
+
+    package init(logs: CodexThreadLogSequence) {
+        self.logs = logs
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(logs: logs.makeAsyncIterator())
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private var logs: CodexThreadLogSequence.Iterator
+
+        fileprivate init(logs: CodexThreadLogSequence.Iterator) {
+            self.logs = logs
+        }
+
+        public mutating func next() async throws -> CodexReviewLogEntry? {
+            guard let entry = try await logs.next() else {
+                return nil
+            }
+            return CodexReviewLogEntry(entry)
+        }
+    }
+}
+
+/// Incremental progress stream for a `CodexReviewSession`.
+public struct CodexReviewProgressSequence: AsyncSequence, Sendable {
+    public typealias Element = CodexReviewProgress
+
+    private let events: CodexThreadEventSequence
+
+    package init(events: CodexThreadEventSequence) {
+        self.events = events
+    }
+
+    public func makeAsyncIterator() -> Iterator {
+        Iterator(events: events.makeAsyncIterator())
+    }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        private var events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator
+        private var accumulator = CodexTranscriptAccumulator()
+        private var usage: CodexTokenUsage?
+        private var finished = false
+
+        fileprivate init(events: AsyncThrowingStream<CodexThreadEvent, Error>.Iterator) {
+            self.events = events
+        }
+
+        public mutating func next() async throws -> CodexReviewProgress? {
+            guard finished == false else {
+                return nil
+            }
+            while let event = try await events.next() {
+                switch event {
+                case .turnStarted, .unknown:
+                    return .init(phase: .running, transcript: accumulator.transcript, usage: usage)
+                case .itemStarted, .itemUpdated, .itemCompleted, .message, .messageDelta,
+                    .reasoningSummaryPartAdded, .reasoningDelta:
+                    _ = accumulator.apply(event)
+                    return .init(phase: .running, transcript: accumulator.transcript, usage: usage)
+                case .tokenUsageUpdated(let newUsage, _):
+                    usage = newUsage
+                    return .init(phase: .running, transcript: accumulator.transcript, usage: usage)
+                case .turnCompleted(var result):
+                    finished = true
+                    result = finalizedResult(result)
+                    if result.errorMessage != nil || result.status?.isFailure == true {
+                        return .init(
+                            phase: .failed(.turnFailedWithResponse(result)),
+                            transcript: result.transcript,
+                            usage: result.usage,
+                            result: result
+                        )
+                    }
+                    return .init(
+                        phase: .completed,
+                        transcript: result.transcript,
+                        usage: result.usage,
+                        result: result
+                    )
+                case .turnFailed(_, let message):
+                    finished = true
+                    return .init(
+                        phase: .failed(.turnFailed(message)),
+                        transcript: accumulator.transcript,
+                        usage: usage
+                    )
+                case .statusChanged:
+                    return .init(phase: .running, transcript: accumulator.transcript, usage: usage)
+                case .closed:
+                    finished = true
+                    return nil
+                }
+            }
+            finished = true
+            return nil
+        }
+
+        private func finalizedResult(_ result: CodexResponse) -> CodexResponse {
+            var result = result
+            if result.finalAnswer == nil {
+                result.finalAnswer = accumulator.transcript.finalAnswer
+            }
+            if result.transcript.items.isEmpty {
+                result.transcript = accumulator.transcript
+            }
+            if result.usage == nil {
+                result.usage = usage
+            }
+            return result
+        }
+    }
+}
+
 package struct CodexTurnEventSequence: AsyncSequence, Sendable {
     package typealias Element = CodexTurnEvent
 
