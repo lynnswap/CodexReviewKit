@@ -84,19 +84,9 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CodexReviewMCPAdapter",
-            dependencies: [
-                "CodexReviewKit",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
             name: "CodexReviewMCPServer",
             dependencies: [
                 "CodexReviewKit",
-                "CodexReviewMCPAdapter",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -171,15 +161,6 @@ let package = Package(
             name: "CodexReviewAppServerWireTests",
             dependencies: [
                 "CodexReviewAppServerWire",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "CodexReviewMCPAdapterTests",
-            dependencies: [
-                "CodexReviewMCPAdapter",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import CodexReviewMCPAdapter
+@testable import CodexReviewMCPServer
 import CodexReviewKit
 
 @MainActor

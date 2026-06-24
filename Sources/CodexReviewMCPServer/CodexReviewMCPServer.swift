@@ -1,6 +1,5 @@
 import Foundation
 import CodexReviewKit
-import CodexReviewMCPAdapter
 
 package enum CodexReviewMCP {
     package enum Tool {}
