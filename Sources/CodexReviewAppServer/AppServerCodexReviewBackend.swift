@@ -173,7 +173,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = await reviewEventSession(for: run)
         await session.requestCancellation(message: reason.message)
         do {
-            _ = try await sendTurnInterrupt(for: run)
+            _ = try await sendTurnCancellation(for: run)
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
@@ -190,10 +190,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         reason _: CodexReviewBackendModel.CancellationReason
     ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
         markTurnAbandoned(run.turnID)
-        let interruption = try await sendTurnInterrupt(for: run) { retryInterruption in
-            await self.markInterruptionTurnAbandoned(retryInterruption, canonicalThreadID: run.threadID)
+        let cancellation = try await sendTurnCancellation(for: run) { retryCancellation in
+            await self.markCancellationTurnAbandoned(retryCancellation, canonicalThreadID: run.threadID)
         }
-        markAttemptAbandoned(run, interruption: interruption)
+        markAttemptAbandoned(run, cancellation: cancellation)
         if let session = unregisterReviewEventSession(for: run) {
             await session.abandon()
             let metrics = await session.metricsSnapshot()
@@ -203,7 +203,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         return CodexReviewBackendModel.Review.RecoveryToken(
             interruptedRun: run,
-            rollbackThreadID: interruption.threadID
+            rollbackThreadID: cancellation.threadID
         )
     }
 
@@ -434,20 +434,20 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func markAttemptAbandoned(
         _ run: CodexReviewBackendModel.Review.Run,
-        interruption: AppServerReviewInterruption
+        cancellation: AppServerReviewCancellation
     ) {
         abandonedReviewAttemptIDs.insert(run.attemptID)
         markTurnAbandoned(run.turnID)
-        markTurnAbandoned(interruption.turnID)
-        noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: run.threadID)
+        markTurnAbandoned(cancellation.turnID)
+        noteReviewThreadIDForCleanup(cancellation.threadID, canonicalThreadID: run.threadID)
     }
 
-    private func markInterruptionTurnAbandoned(
-        _ interruption: AppServerReviewInterruption,
+    private func markCancellationTurnAbandoned(
+        _ cancellation: AppServerReviewCancellation,
         canonicalThreadID: String
     ) {
-        markTurnAbandoned(interruption.turnID)
-        noteReviewThreadIDForCleanup(interruption.threadID, canonicalThreadID: canonicalThreadID)
+        markTurnAbandoned(cancellation.turnID)
+        noteReviewThreadIDForCleanup(cancellation.threadID, canonicalThreadID: canonicalThreadID)
     }
 
     private func markTurnAbandoned(_ turnID: String?) {
@@ -481,19 +481,33 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    private func sendTurnInterrupt(
+    private func sendTurnCancellation(
         for run: CodexReviewBackendModel.Review.Run,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
-    ) async throws -> AppServerReviewInterruption {
-        if let control = controlsByThreadID[run.threadID],
-           let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) {
-            return interruption
-        }
+        willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)? = nil
+    ) async throws -> AppServerReviewCancellation {
         let control = reviewControl(for: run)
-        guard let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) else {
-            throw CodexReviewAPI.Error.io("Review run has no interruptible app-server session.")
+        if let cancellation = try await control.cancel(willCancelActiveTurn: willCancelActiveTurn) {
+            return cancellation
         }
-        return interruption
+
+        guard let expectedTurnID = run.turnID?.nilIfEmpty else {
+            throw CodexReviewAPI.Error.io("Review run has no cancellable app-server turn.")
+        }
+        let thread = try await reviewThread(for: run)
+        let cancellation = try await thread.cancelActiveTurn(
+            expectedTurnID: .init(rawValue: expectedTurnID)
+        ) { retryCancellation in
+            let reviewCancellation = AppServerReviewCancellation(retryCancellation)
+            if reviewCancellation.turnID != expectedTurnID,
+               let willCancelActiveTurn {
+                await willCancelActiveTurn(reviewCancellation)
+            }
+        }
+        let reviewCancellation = AppServerReviewCancellation(cancellation)
+        if reviewCancellation.turnID != expectedTurnID {
+            control.recordReviewStarted(turnID: reviewCancellation.turnID)
+        }
+        return reviewCancellation
     }
 
     private func cleanupThreadIDs(for run: CodexReviewBackendModel.Review.Run) -> [String] {

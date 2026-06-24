@@ -2,13 +2,20 @@ import Foundation
 import CodexAppServerKit
 import CodexReviewKit
 
-package struct AppServerReviewInterruption: Equatable, Sendable {
+package struct AppServerReviewCancellation: Equatable, Sendable {
     package var threadID: String
     package var turnID: String
 
     package init(threadID: String, turnID: String) {
         self.threadID = threadID
         self.turnID = turnID
+    }
+
+    package init(_ cancellation: CodexTurnCancellation) {
+        self.init(
+            threadID: cancellation.threadID.rawValue,
+            turnID: cancellation.turnID?.rawValue ?? ""
+        )
     }
 }
 
@@ -69,9 +76,9 @@ package final class AppServerReviewControl: @unchecked Sendable {
     }
 
     @discardableResult
-    package func interrupt(
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)? = nil
-    ) async throws -> AppServerReviewInterruption? {
+    package func cancel(
+        willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)? = nil
+    ) async throws -> AppServerReviewCancellation? {
         let snapshot = stateSnapshot()
         switch snapshot.phase {
         case .preparing, .finished:
@@ -82,10 +89,10 @@ package final class AppServerReviewControl: @unchecked Sendable {
             guard let reviewSession = snapshot.reviewSession else {
                 return nil
             }
-            return try await interrupt(
+            return try await cancel(
                 reviewSession,
                 expectedTurnID: turnID,
-                willInterruptActiveTurn: willInterruptActiveTurn
+                willCancelActiveTurn: willCancelActiveTurn
             )
         }
     }
@@ -103,21 +110,21 @@ package final class AppServerReviewControl: @unchecked Sendable {
         return Snapshot(phase: phase, reviewSession: reviewSession)
     }
 
-    private func interrupt(
+    private func cancel(
         _ reviewSession: CodexReviewSession,
         expectedTurnID: String,
-        willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
-    ) async throws -> AppServerReviewInterruption {
-        let interruption = try await reviewSession.interrupt()
-        let reviewInterruption = AppServerReviewInterruption(interruption)
-        if reviewInterruption.turnID != expectedTurnID,
-           let willInterruptActiveTurn {
-            await willInterruptActiveTurn(reviewInterruption)
+        willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)?
+    ) async throws -> AppServerReviewCancellation {
+        let cancellation = try await reviewSession.cancel()
+        let reviewCancellation = AppServerReviewCancellation(cancellation)
+        if reviewCancellation.turnID != expectedTurnID,
+           let willCancelActiveTurn {
+            await willCancelActiveTurn(reviewCancellation)
         }
-        if reviewInterruption.turnID != expectedTurnID {
-            setPhase(.reviewStarted(turnID: reviewInterruption.turnID), reviewSession: reviewSession)
+        if reviewCancellation.turnID != expectedTurnID {
+            setPhase(.reviewStarted(turnID: reviewCancellation.turnID), reviewSession: reviewSession)
         }
-        return reviewInterruption
+        return reviewCancellation
     }
 
     private func setPhase(_ phase: Phase, reviewSession: CodexReviewSession? = nil) {
@@ -125,14 +132,5 @@ package final class AppServerReviewControl: @unchecked Sendable {
         defer { phaseLock.unlock() }
         self.phase = phase
         self.reviewSession = reviewSession
-    }
-}
-
-private extension AppServerReviewInterruption {
-    init(_ interruption: CodexTurnInterruption) {
-        self.init(
-            threadID: interruption.threadID.rawValue,
-            turnID: interruption.turnID?.rawValue ?? ""
-        )
     }
 }
