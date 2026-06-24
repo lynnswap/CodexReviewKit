@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 import Testing
 import CodexAppServerKit
+import CodexAppServerKitTesting
 @testable import CodexReviewAppServer
-import CodexReviewKit
 import CodexReviewKit
 import CodexReviewTesting
 
@@ -974,6 +974,164 @@ struct AppServerClientTests {
         #expect(object["sessionStartSource"] as? String == "startup")
         #expect(object["threadSource"] as? String == "user")
         #expect(object["sandbox"] == nil)
+    }
+
+    @Test func appServerBackendConsumesTypedReviewSessionStream() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+
+        #expect(attempt.threadID == "thread-1")
+        #expect(attempt.turnID == "turn-1")
+        #expect(attempt.reviewThreadID == "review-thread")
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+        let storedAttempt = await backend.reviewAttemptForTesting(attempt.run)
+        #expect(storedAttempt.threadID == "thread-1")
+        #expect(storedAttempt.turnID == "turn-1")
+        #expect(storedAttempt.reviewThreadID == "review-thread")
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        let requests = await runtime.transport.recordedRequests()
+        #expect(requests.map(\.method) == ["initialize", "thread/start", "review/start"])
+        let threadStart = try #require(requests.first { $0.method == "thread/start" })
+        let threadParams = try threadStart.decodeParams(AppServerAPI.Thread.Start.Params.self)
+        #expect(threadParams.cwd == "/tmp/project")
+        #expect(threadParams.model == "gpt-5")
+        #expect(threadParams.approvalPolicy == "never")
+        #expect(threadParams.permissions == .profileID(":danger-full-access"))
+        #expect(threadParams.sessionStartSource == .startup)
+        #expect(threadParams.threadSource == .user)
+
+        let reviewStart = try #require(requests.first { $0.method == "review/start" })
+        let reviewParams = try reviewStart.decodeParams(AppServerAPI.Review.Start.Params.self)
+        #expect(reviewParams.threadID == "thread-1")
+        #expect(reviewParams.target == .baseBranch("main"))
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/completed",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(
+                    type: "commandExecution",
+                    id: "cmd-1",
+                    command: "swift test",
+                    aggregatedOutput: "passed",
+                    status: "completed"
+                )
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "msg-1",
+                delta: "Looks good."
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
+
+        var iterator = await eventSequence(backend, attempt, includingDomainEvents: true).makeAsyncIterator()
+        #expect(try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        guard case .domainEvents(let commandDomainEvents, let commandSuppressionCount) = try await iterator.next() else {
+            Issue.record("expected typed command domain event")
+            return
+        }
+        #expect(commandSuppressionCount == 2)
+        guard case .itemCompleted(let commandSeed) = try #require(commandDomainEvents.first) else {
+            Issue.record("expected completed command seed")
+            return
+        }
+        #expect(commandSeed.id.rawValue == "cmd-1")
+        guard case .command(let command) = commandSeed.content else {
+            Issue.record("expected command content")
+            return
+        }
+        #expect(command.command == "swift test")
+        #expect(command.output == "passed")
+
+        #expect(try await iterator.next() == .logEntry(
+            kind: .command,
+            text: "$ swift test",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                commandStatus: "completed"
+            )
+        ))
+        #expect(try await iterator.next() == .logEntry(
+            kind: .commandOutput,
+            text: "passed",
+            groupID: "cmd-1",
+            replacesGroup: true,
+            metadata: .init(
+                sourceType: "commandExecution",
+                status: "completed",
+                itemID: "cmd-1",
+                command: "swift test",
+                commandStatus: "completed"
+            )
+        ))
+        guard case .domainEvents(let messageDomainEvents, let messageSuppressionCount) = try await iterator.next() else {
+            Issue.record("expected typed message delta domain event")
+            return
+        }
+        #expect(messageSuppressionCount == 1)
+        guard case .textDelta(let itemID, _, let family, _, let delta) = try #require(messageDomainEvents.first) else {
+            Issue.record("expected message text delta")
+            return
+        }
+        #expect(itemID.rawValue == "msg-1")
+        #expect(family == .message)
+        #expect(delta == "Looks good.")
+        #expect(try await iterator.next() == .messageDelta("Looks good.", itemID: "msg-1"))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
+    }
+
+    @Test func appServerBackendInterruptUsesTypedSessionWithoutStartingRawRouter() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(.init(
+            jobID: "job-1",
+            sessionID: "session-1",
+            request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+            model: "gpt-5"
+        ))
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+
+        try await backend.interruptReview(attempt, reason: .init(message: "Stop"))
+
+        #expect(await backend.notificationRouterIsRunningForTesting() == false)
+        let interrupt = try #require(await runtime.transport.recordedRequests().last)
+        #expect(interrupt.method == "turn/interrupt")
+        let params = try interrupt.decodeParams(AppServerAPI.Turn.Interrupt.Params.self)
+        #expect(params.threadID == "review-thread")
+        #expect(params.turnID == "turn-1")
     }
 
     @Test func backendUsesLegacySandboxWhenProcessDoesNotSupportModernSessionSource() async throws {

@@ -232,6 +232,37 @@ public enum CodexSandbox: String, Codable, Equatable, Sendable {
     }
 }
 
+/// Permission profile selection for a newly created Codex thread.
+public struct CodexThreadPermissions: Equatable, Sendable {
+    package enum Kind: Equatable, Sendable {
+        case profileID(String)
+        case profileSelection(String)
+    }
+
+    package var kind: Kind
+
+    package init(kind: Kind) {
+        self.kind = kind
+    }
+
+    public static func profile(id: String) -> Self {
+        .init(kind: .profileID(id))
+    }
+
+    package static func profileSelection(id: String) -> Self {
+        .init(kind: .profileSelection(id))
+    }
+
+    package var appServerPermissions: AppServerAPI.Thread.Start.Permissions {
+        switch kind {
+        case .profileID(let id):
+            .profileID(id)
+        case .profileSelection(let id):
+            .profileSelection(.init(id: id))
+        }
+    }
+}
+
 public enum CodexApprovalMode: String, Codable, Equatable, Sendable {
     case autoReview
     case denyAll
@@ -448,6 +479,7 @@ public struct CodexThread: Identifiable, Sendable {
         public var modelProvider: String?
         public var approvalMode: CodexApprovalMode?
         public var sandbox: CodexSandbox?
+        public var permissions: CodexThreadPermissions?
         public var serviceTier: String?
         public var ephemeral: Bool?
         public var config: [String: CodexJSONValue]?
@@ -461,6 +493,7 @@ public struct CodexThread: Identifiable, Sendable {
             modelProvider: String? = nil,
             approvalMode: CodexApprovalMode? = nil,
             sandbox: CodexSandbox? = nil,
+            permissions: CodexThreadPermissions? = nil,
             serviceTier: String? = nil,
             ephemeral: Bool? = nil,
             config: [String: CodexJSONValue]? = nil,
@@ -473,6 +506,7 @@ public struct CodexThread: Identifiable, Sendable {
             self.modelProvider = modelProvider
             self.approvalMode = approvalMode
             self.sandbox = sandbox
+            self.permissions = permissions
             self.serviceTier = serviceTier
             self.ephemeral = ephemeral
             self.config = config

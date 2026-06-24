@@ -2,7 +2,6 @@ import Foundation
 import CodexAppServerKit
 import CodexReviewKit
 import CodexReviewAppServerWire
-import CodexReviewKit
 import OSLog
 
 private let appServerBackendLogger = Logger(
@@ -186,6 +185,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
+        if let appServer {
+            return try await startReview(appServer: appServer, request: request)
+        }
         _ = try await client.initialize()
         await ensureNotificationRouterStarted()
         let control = AppServerReviewControl(client: client)
@@ -239,6 +241,119 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         discardUnmatchedReviewNotificationsIfIdle()
 
         return await session.attempt()
+    }
+
+    private func startReview(
+        appServer: CodexAppServer,
+        request: CodexReviewBackendModel.Review.Start
+    ) async throws -> BackendReviewAttempt {
+        let control = AppServerReviewControl(client: client)
+        let thread = try await startReviewThread(appServer: appServer, request: request)
+        controlsByThreadID[thread.id.rawValue] = control
+
+        let attemptID = makeAppServerReviewAttemptID()
+        let provisionalRun = CodexReviewBackendModel.Review.Run(
+            attemptID: attemptID,
+            threadID: thread.id.rawValue,
+            reviewThreadID: thread.id.rawValue,
+            model: thread.model ?? request.model
+        )
+        let session = AppServerReviewEventSession(
+            run: provisionalRun,
+            control: control,
+            isRunFinalized: false
+        )
+        registerReviewEventSession(session, for: provisionalRun)
+        control.recordThreadStarted(threadID: thread.id.rawValue)
+
+        let review: CodexReviewSession
+        do {
+            review = try await thread.startReview(target: request.request.target.appServerReviewTarget)
+        } catch {
+            await cleanupReview(provisionalRun)
+            throw error
+        }
+
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: attemptID,
+            threadID: thread.id.rawValue,
+            turnID: review.turnID.rawValue,
+            reviewThreadID: review.reviewThreadID.rawValue,
+            model: thread.model ?? request.model
+        )
+        await session.updateRun(run)
+        registerReviewEventSession(session, for: run)
+        control.recordReviewStarted(
+            turnThreadID: appServerTurnThreadID(for: run),
+            turnID: review.turnID.rawValue
+        )
+        await session.finalizeRun()
+        await session.startConsuming(review)
+
+        return await session.attempt()
+    }
+
+    private func startReviewThread(
+        appServer: CodexAppServer,
+        request: CodexReviewBackendModel.Review.Start
+    ) async throws -> CodexThread {
+        let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
+        if threadStartPermissionStrategy == .legacySandbox {
+            // Deprecated compatibility: installed Codex builds without the app-server v2
+            // session-source flag can ignore permissions without failing the request.
+            return try await appServer.startThread(
+                in: workspace,
+                options: reviewThreadOptions(request, sandbox: .fullAccess)
+            )
+        }
+        do {
+            return try await appServer.startThread(
+                in: workspace,
+                options: reviewThreadOptions(request, permissions: .profile(id: Self.reviewPermissionProfileID))
+            )
+        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
+            // Deprecated compatibility: installed Codex builds can require object-shaped
+            // permissions while the latest local app-server source accepts a profile ID string.
+            do {
+                return try await appServer.startThread(
+                    in: workspace,
+                    options: reviewThreadOptions(
+                        request,
+                        permissions: .profileSelection(id: Self.reviewPermissionProfileID)
+                    )
+                )
+            } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
+                // Deprecated compatibility: installed Codex builds can know the permissions
+                // object shape without registering the danger-full-access built-in profile.
+                return try await appServer.startThread(
+                    in: workspace,
+                    options: reviewThreadOptions(request, sandbox: .fullAccess)
+                )
+            }
+        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
+            // Deprecated compatibility: some builds accept the permissions field shape
+            // without registering the danger-full-access built-in profile.
+            return try await appServer.startThread(
+                in: workspace,
+                options: reviewThreadOptions(request, sandbox: .fullAccess)
+            )
+        }
+    }
+
+    private func reviewThreadOptions(
+        _ request: CodexReviewBackendModel.Review.Start,
+        permissions: CodexThreadPermissions? = nil,
+        sandbox: CodexSandbox? = nil
+    ) -> CodexThread.Options {
+        .init(
+            model: request.model,
+            approvalMode: .denyAll,
+            sandbox: sandbox,
+            permissions: permissions,
+            ephemeral: false,
+            sessionStartSource: .startup,
+            threadSource: .user
+        )
     }
 
     private func startReviewThread(_ request: CodexReviewBackendModel.Review.Start) async throws -> AppServerAPI.Thread.Start.Response {
@@ -545,7 +660,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func reviewEventSession(for run: CodexReviewBackendModel.Review.Run) async -> AppServerReviewEventSession {
-        await ensureNotificationRouterStarted()
+        if appServer == nil {
+            await ensureNotificationRouterStarted()
+        }
         if let session = reviewEventSessionsByAttemptID[run.attemptID] {
             await session.updateRun(run)
             registerReviewEventSession(session, for: run)
@@ -977,6 +1094,594 @@ private struct PendingStreamedLogEntry: Sendable {
     }
 }
 
+private struct AppServerTypedReviewEvent: Sendable {
+    var events: [CodexReviewBackendModel.Review.Event]
+    var controlThreadID: String?
+
+    init(
+        events: [CodexReviewBackendModel.Review.Event],
+        controlThreadID: String? = nil
+    ) {
+        self.events = events
+        self.controlThreadID = controlThreadID
+    }
+}
+
+private enum AppServerTypedItemPhase {
+    case started
+    case updated
+    case completed
+}
+
+private enum AppServerTypedReviewEventAdapter {
+    static func started(
+        review: CodexReviewSession,
+        run: CodexReviewBackendModel.Review.Run
+    ) -> AppServerTypedReviewEvent {
+        .init(
+            events: [.started(
+                turnID: review.turnID.rawValue,
+                reviewThreadID: review.reviewThreadID.rawValue,
+                model: run.model
+            )],
+            controlThreadID: review.reviewThreadID.rawValue
+        )
+    }
+
+    static func convert(
+        _ event: CodexReviewEvent,
+        review: CodexReviewSession
+    ) -> AppServerTypedReviewEvent {
+        let controlThreadID = review.reviewThreadID.rawValue
+        return switch event {
+        case .turnStarted:
+            .init(events: [], controlThreadID: controlThreadID)
+        case .turnCompleted(let response):
+            .init(events: terminalEvents(for: response), controlThreadID: controlThreadID)
+        case .turnFailed(_, let message):
+            .init(events: [.failed(message.nilIfEmpty ?? "Failed.")], controlThreadID: controlThreadID)
+        case .itemStarted(let item, _):
+            .init(events: itemEvents(item, phase: .started), controlThreadID: controlThreadID)
+        case .itemUpdated(let item, _):
+            .init(events: itemEvents(item, phase: .updated), controlThreadID: controlThreadID)
+        case .itemCompleted(let item, _):
+            .init(events: itemEvents(item, phase: .completed), controlThreadID: controlThreadID)
+        case .message(let message, _):
+            .init(events: messageEvents(message), controlThreadID: controlThreadID)
+        case .messageDelta(let delta, _):
+            .init(events: messageDeltaEvents(delta), controlThreadID: controlThreadID)
+        case .reasoningSummaryPartAdded(let part, _):
+            .init(events: reasoningPartEvents(part), controlThreadID: controlThreadID)
+        case .reasoningDelta(let delta, _):
+            .init(events: reasoningDeltaEvents(delta), controlThreadID: controlThreadID)
+        case .tokenUsageUpdated, .statusChanged(.running):
+            .init(events: [], controlThreadID: controlThreadID)
+        case .statusChanged(.closed):
+            .init(events: [.failed("Review thread is no longer loaded.")], controlThreadID: controlThreadID)
+        case .statusChanged(.unknown(let status)):
+            .init(events: [.logEntry(
+                kind: .diagnostic,
+                text: "Review thread status changed: \(status).",
+                groupID: review.turnID.rawValue,
+                replacesGroup: false
+            )], controlThreadID: controlThreadID)
+        case .closed:
+            .init(events: [.failed("Review thread closed.")], controlThreadID: controlThreadID)
+        case .unknown(let raw):
+            .init(events: unknownEvents(raw), controlThreadID: controlThreadID)
+        }
+    }
+
+    private static func terminalEvents(
+        for response: CodexResponse
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        if let message = response.errorMessage?.nilIfEmpty {
+            return terminalFailureEvents(status: response.status, message: message)
+        }
+        if response.status?.isFailure == true {
+            return terminalFailureEvents(
+                status: response.status,
+                message: response.status?.rawValue ?? "Failed."
+            )
+        }
+        return [.completed(
+            summary: "Succeeded.",
+            result: response.finalAnswer?.nilIfEmpty
+                ?? response.transcript.finalAnswer?.nilIfEmpty
+                ?? response.transcript.responseText?.nilIfEmpty
+        )]
+    }
+
+    private static func terminalFailureEvents(
+        status: CodexTurnStatus?,
+        message: String
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        switch status {
+        case .interrupted, .cancelled:
+            [.cancelled(message)]
+        case .failed, .running, .completed, .unknown, nil:
+            [.failed(message)]
+        }
+    }
+
+    private static func itemEvents(
+        _ item: CodexThreadItem,
+        phase: AppServerTypedItemPhase
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard item.kind != .userMessage,
+              let seed = timelineSeed(for: item, phase: phase)
+        else {
+            return []
+        }
+        let domainEvent: ReviewDomainEvent = switch phase {
+        case .started:
+            .itemStarted(seed)
+        case .updated:
+            .itemUpdated(seed)
+        case .completed:
+            .itemCompleted(seed)
+        }
+        let legacyEvents = legacyLogEvents(for: item, phase: phase)
+        return [.domainEvents(
+            [domainEvent],
+            legacyProjectionSuppressionCount: legacyEvents.legacyTimelineProjectionCount
+        )] + legacyEvents.addingTerminalFailureLogProjectionSuppressionIfNeeded
+    }
+
+    private static func messageEvents(
+        _ message: CodexMessage
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard message.role != .user,
+              message.text.isEmpty == false
+        else {
+            return []
+        }
+        let item = CodexThreadItem(
+            id: message.id,
+            kind: .agentMessage,
+            content: .message(message)
+        )
+        return itemEvents(item, phase: .completed)
+    }
+
+    private static func messageDeltaEvents(
+        _ delta: CodexMessageDelta
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard delta.text.isEmpty == false else {
+            return []
+        }
+        let itemID = delta.itemID?.nilIfEmpty ?? "agent-message-delta"
+        let domainEvent = ReviewDomainEvent.textDelta(
+            itemID: .init(rawValue: itemID),
+            kind: .agentMessage,
+            family: .message,
+            content: .message(.init(text: "")),
+            delta: delta.text
+        )
+        return [
+            .domainEvents([domainEvent], legacyProjectionSuppressionCount: 1),
+            .messageDelta(delta.text, itemID: itemID),
+        ]
+    }
+
+    private static func reasoningPartEvents(
+        _ part: CodexReasoningPart
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        let style: ReviewTimelineItem.Reasoning.Style = switch part.kind {
+        case .summary:
+            .summary
+        case .text:
+            .raw
+        }
+        let seed = ReviewTimelineItemSeed(
+            id: .init(rawValue: part.id),
+            kind: .reasoning,
+            family: .reasoning,
+            phase: .running,
+            content: .reasoning(.init(text: "", style: style))
+        )
+        return [.domainEvents([.itemStarted(seed)], legacyProjectionSuppressionCount: 0)]
+    }
+
+    private static func reasoningDeltaEvents(
+        _ delta: CodexReasoningDelta
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard delta.delta.isEmpty == false else {
+            return []
+        }
+        let style: ReviewTimelineItem.Reasoning.Style
+        let kind: ReviewLogEntry.Kind
+        switch delta.part.kind {
+        case .summary:
+            style = .summary
+            kind = .reasoningSummary
+        case .text:
+            style = .raw
+            kind = .rawReasoning
+        }
+        let domainEvent = ReviewDomainEvent.textDelta(
+            itemID: .init(rawValue: delta.id),
+            kind: .reasoning,
+            family: .reasoning,
+            content: .reasoning(.init(text: "", style: style)),
+            delta: delta.delta
+        )
+        return [
+            .domainEvents([domainEvent], legacyProjectionSuppressionCount: 1),
+            .logEntry(kind: kind, text: delta.delta, groupID: delta.id, replacesGroup: false),
+        ]
+    }
+
+    private static func unknownEvents(
+        _ raw: CodexRawNotification
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        let itemID = raw.turnID?.rawValue
+            ?? raw.threadID?.rawValue
+            ?? raw.method
+        let detail = String(data: raw.params, encoding: .utf8)
+        let seed = ReviewTimelineItemSeed(
+            id: .init(rawValue: "\(itemID):\(raw.method)"),
+            kind: .init(rawValue: raw.method),
+            family: .unknown,
+            phase: .running,
+            content: .unknown(.init(
+                title: raw.method,
+                detail: detail,
+                rawKind: .init(rawValue: raw.method)
+            ))
+        )
+        return [.domainEvents([.itemUpdated(seed)], legacyProjectionSuppressionCount: 0)]
+    }
+
+    private static func timelineSeed(
+        for item: CodexThreadItem,
+        phase: AppServerTypedItemPhase
+    ) -> ReviewTimelineItemSeed? {
+        ReviewTimelineItemSeed(
+            id: .init(rawValue: item.id),
+            kind: .init(rawValue: item.kind.rawValue),
+            family: item.reviewItemFamily,
+            phase: item.reviewItemPhase(defaultingTo: phase),
+            content: item.reviewTimelineContent
+        )
+    }
+
+    private static func legacyLogEvents(
+        for item: CodexThreadItem,
+        phase: AppServerTypedItemPhase
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        switch item.content {
+        case .message(let message):
+            guard message.role != .user,
+                  message.text.isEmpty == false
+            else {
+                return []
+            }
+            return [item.logEntry(
+                kind: .agentMessage,
+                text: message.text,
+                phase: phase,
+                title: nil
+            )]
+        case .plan(let text):
+            return text.nilIfEmpty.map {
+                [item.logEntry(kind: .plan, text: $0, phase: phase, title: nil)]
+            } ?? []
+        case .reasoning(let reasoning):
+            let summaryEvents = reasoning.summary.enumerated().compactMap { index, text in
+                text.nilIfEmpty.map {
+                    CodexReviewBackendModel.Review.Event.logEntry(
+                        kind: .reasoningSummary,
+                        text: $0,
+                        groupID: reasoningSummaryGroupID(itemID: item.id, summaryIndex: index),
+                        replacesGroup: phase != .started
+                    )
+                }
+            }
+            let rawEvents = reasoning.content.enumerated().compactMap { index, text in
+                text.nilIfEmpty.map {
+                    CodexReviewBackendModel.Review.Event.logEntry(
+                        kind: .rawReasoning,
+                        text: $0,
+                        groupID: rawReasoningGroupID(itemID: item.id, contentIndex: index),
+                        replacesGroup: phase != .started
+                    )
+                }
+            }
+            return summaryEvents + rawEvents
+        case .command(let command):
+            return commandLogEvents(item: item, command: command, phase: phase)
+        case .fileChange(let fileChange):
+            let text = fileChange.output?.nilIfEmpty
+                ?? fileChange.path?.nilIfEmpty
+                ?? "File changes \(item.legacyStatus(phase: phase) ?? "updated")."
+            let kind: ReviewLogEntry.Kind = fileChange.output?.nilIfEmpty == nil ? .toolCall : .commandOutput
+            return [item.logEntry(
+                kind: kind,
+                text: text,
+                phase: phase,
+                title: "File changes"
+            )]
+        case .toolCall(let toolCall):
+            let label = item.toolLabel
+            let text = toolCall.error?.nilIfEmpty
+                ?? toolCall.result?.nilIfEmpty
+                ?? "\(label) \(item.legacyStatus(phase: phase) ?? "updated")."
+            return [item.logEntry(
+                kind: .toolCall,
+                text: text,
+                phase: phase,
+                title: label
+            )]
+        case .contextCompaction(let text):
+            return [item.logEntry(
+                kind: .contextCompaction,
+                text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.legacyStatus(phase: phase)),
+                phase: phase,
+                title: nil
+            )]
+        case .diagnostic(let text):
+            return text.nilIfEmpty.map {
+                [item.logEntry(kind: .diagnostic, text: $0, phase: phase, title: nil)]
+            } ?? []
+        case .log(let text):
+            return text.nilIfEmpty.map {
+                [item.logEntry(kind: .event, text: $0, phase: phase, title: item.kind.rawValue)]
+            } ?? []
+        case .unknown(let raw):
+            return raw.text?.nilIfEmpty.map {
+                [item.logEntry(kind: .event, text: $0, phase: phase, title: raw.rawType)]
+            } ?? []
+        }
+    }
+
+    private static func commandLogEvents(
+        item: CodexThreadItem,
+        command: CodexCommand,
+        phase: AppServerTypedItemPhase
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        guard command.command.isEmpty == false else {
+            return []
+        }
+        var events: [CodexReviewBackendModel.Review.Event] = [
+            item.logEntry(
+                kind: .command,
+                text: "$ \(command.command)",
+                phase: phase,
+                title: nil
+            ),
+        ]
+        if let output = command.output?.nilIfEmpty {
+            events.append(item.logEntry(
+                kind: .commandOutput,
+                text: output,
+                phase: phase,
+                title: nil
+            ))
+        }
+        return events
+    }
+
+    private static func contextCompactionText(
+        phase: AppServerTypedItemPhase,
+        status: String?
+    ) -> String {
+        switch phase {
+        case .started, .updated:
+            return appServerContextCompactionStartedText
+        case .completed:
+            let normalized = status?
+                .lowercased()
+                .replacingOccurrences(of: "_", with: "")
+                .replacingOccurrences(of: "-", with: "")
+            switch normalized {
+            case "failed", "failure", "errored", "error":
+                return appServerContextCompactionFailedText
+            case "cancelled", "canceled":
+                return appServerContextCompactionCancelledText
+            default:
+                return appServerContextCompactionCompletedText
+            }
+        }
+    }
+}
+
+private extension CodexThreadItem {
+    var reviewItemFamily: ReviewItemFamily {
+        switch kind {
+        case .agentMessage:
+            .message
+        case .plan:
+            .plan
+        case .reasoning:
+            .reasoning
+        case .commandExecution:
+            .command
+        case .fileChange:
+            .fileChange
+        case .mcpToolCall, .dynamicToolCall, .collabAgentToolCall, .imageView, .imageGeneration, .sleep:
+            .tool
+        case .webSearch:
+            .search
+        case .contextCompaction:
+            .contextCompaction
+        case .diagnostic, .error:
+            .diagnostic
+        case .userMessage, .subAgentActivity, .unknown:
+            .unknown
+        }
+    }
+
+    var reviewTimelineContent: ReviewTimelineItem.Content {
+        switch content {
+        case .message(let message):
+            .message(.init(text: message.text))
+        case .plan(let text):
+            .plan(.init(markdown: text))
+        case .reasoning(let reasoning):
+            .reasoning(.init(
+                text: reasoning.text,
+                style: reasoning.summary.isEmpty ? .raw : .summary
+            ))
+        case .command(let command):
+            .command(.init(
+                command: command.command,
+                cwd: command.cwd,
+                output: command.output ?? "",
+                exitCode: command.exitCode,
+                status: command.status.map { .init(rawValue: $0.rawValue) }
+            ))
+        case .fileChange(let fileChange):
+            .fileChange(.init(
+                title: "File changes",
+                output: fileChange.output ?? "",
+                paths: fileChange.path.map { [$0] } ?? [],
+                status: fileChange.status.map { .init(rawValue: $0.rawValue) }
+            ))
+        case .toolCall(let toolCall):
+            .toolCall(.init(
+                namespace: toolCall.namespace,
+                server: toolCall.server,
+                tool: toolCall.name,
+                arguments: toolCall.arguments,
+                result: toolCall.result,
+                error: toolCall.error,
+                status: toolCall.status.map { .init(rawValue: $0.rawValue) }
+            ))
+        case .contextCompaction(let text):
+            .contextCompaction(.init(
+                title: text?.nilIfEmpty ?? appServerContextCompactionStartedText,
+                status: legacyStatus(phase: .updated).map { .init(rawValue: $0) }
+            ))
+        case .diagnostic(let text):
+            .diagnostic(.init(
+                message: text,
+                severity: kind == .error ? .error : nil
+            ))
+        case .log(let text):
+            .unknown(.init(title: kind.rawValue, detail: text, rawKind: .init(rawValue: kind.rawValue)))
+        case .unknown(let raw):
+            .unknown(.init(
+                title: raw.rawType,
+                detail: raw.text,
+                rawKind: .init(rawValue: raw.rawType)
+            ))
+        }
+    }
+
+    func reviewItemPhase(defaultingTo phase: AppServerTypedItemPhase) -> ReviewItemPhase {
+        if let status = statusRaw?.nilIfEmpty {
+            let normalized = ReviewItemPhase.normalized(status)
+            if phase == .completed, normalized == .running {
+                return .completed
+            }
+            return normalized
+        }
+        return switch phase {
+        case .started, .updated:
+            .running
+        case .completed:
+            .completed
+        }
+    }
+
+    var statusRaw: String? {
+        switch content {
+        case .command(let command):
+            command.status?.rawValue
+        case .fileChange(let fileChange):
+            fileChange.status?.rawValue
+        case .toolCall(let toolCall):
+            toolCall.status?.rawValue
+        case .contextCompaction, .diagnostic, .log, .message, .plan, .reasoning, .unknown:
+            nil
+        }
+    }
+
+    var toolLabel: String {
+        guard case .toolCall(let toolCall) = content else {
+            return kind.rawValue
+        }
+        return [toolCall.namespace, toolCall.server, toolCall.name]
+            .compactMap { $0?.nilIfEmpty }
+            .joined(separator: ".")
+            .nilIfEmpty ?? kind.rawValue
+    }
+
+    func legacyStatus(phase: AppServerTypedItemPhase) -> String? {
+        if let status = statusRaw?.nilIfEmpty {
+            return status
+        }
+        return switch phase {
+        case .started:
+            "inProgress"
+        case .updated:
+            nil
+        case .completed:
+            "completed"
+        }
+    }
+
+    func logEntry(
+        kind logKind: ReviewLogEntry.Kind,
+        text: String,
+        phase: AppServerTypedItemPhase,
+        title: String?
+    ) -> CodexReviewBackendModel.Review.Event {
+        .logEntry(
+            kind: logKind,
+            text: text,
+            groupID: id,
+            replacesGroup: phase != .started,
+            metadata: reviewLogMetadata(title: title, phase: phase)
+        )
+    }
+
+    private func reviewLogMetadata(
+        title: String?,
+        phase: AppServerTypedItemPhase
+    ) -> ReviewLogEntry.Metadata {
+        let status = legacyStatus(phase: phase)
+        let command: CodexCommand?
+        let fileChange: CodexFileChange?
+        let toolCall: CodexToolCall?
+        switch content {
+        case .command(let value):
+            command = value
+            fileChange = nil
+            toolCall = nil
+        case .fileChange(let value):
+            command = nil
+            fileChange = value
+            toolCall = nil
+        case .toolCall(let value):
+            command = nil
+            fileChange = nil
+            toolCall = value
+        case .contextCompaction, .diagnostic, .log, .message, .plan, .reasoning, .unknown:
+            command = nil
+            fileChange = nil
+            toolCall = nil
+        }
+        return .init(
+            sourceType: kind.rawValue,
+            title: title?.nilIfEmpty,
+            status: status,
+            itemID: kind == .commandExecution || kind == .contextCompaction ? id : nil,
+            command: command?.command,
+            cwd: command?.cwd,
+            exitCode: command?.exitCode,
+            commandStatus: kind == .commandExecution ? status : nil,
+            namespace: toolCall?.namespace,
+            server: toolCall?.server,
+            tool: toolCall?.name,
+            path: fileChange?.path,
+            resultText: toolCall?.result?.nilIfEmpty,
+            errorText: toolCall?.error?.nilIfEmpty
+        )
+    }
+}
+
 private actor AppServerReviewEventSession {
     private static let commandTimeoutExitCode = 124
     private static let longCommandDurationWarningMs = 100_000
@@ -1001,6 +1706,9 @@ private actor AppServerReviewEventSession {
     private var isDrainingStartupNotifications = false
     private var pendingStartupNotifications: [AppServerRoutedReviewNotification] = []
     private var metrics = AppServerReviewEventSessionMetrics()
+    private var typedReviewStreamTask: Task<Void, Never>?
+    private var typedMessageTextByItemID: [String: String] = [:]
+    private var typedReviewResultText: String?
 
     init(
         run: CodexReviewBackendModel.Review.Run,
@@ -1085,6 +1793,7 @@ private actor AppServerReviewEventSession {
         cancellationMessage: String?,
         buffersMissingContinuation _: Bool = false
     ) async {
+        cancelTypedReviewStream()
         var precedingEvents = drainPendingStreamedLogEvents()
         if cancellationMessage == nil {
             cancelPendingStreamedLogFlush()
@@ -1100,6 +1809,7 @@ private actor AppServerReviewEventSession {
         guard finished == false else {
             return
         }
+        cancelTypedReviewStream()
         let precedingEvents = drainPendingStreamedLogEvents()
         finished = true
         completionCoordinator.cancelPendingCompletion()
@@ -1118,6 +1828,7 @@ private actor AppServerReviewEventSession {
         guard finished == false else {
             return
         }
+        cancelTypedReviewStream()
         finished = true
         completionCoordinator.cancelPendingCompletion()
         cancelPendingStreamedLogFlush()
@@ -1138,6 +1849,93 @@ private actor AppServerReviewEventSession {
 
     func detach(subscriptionID _: Int) {}
 
+    func startConsuming(_ review: CodexReviewSession) {
+        guard typedReviewStreamTask == nil else {
+            return
+        }
+        typedReviewStreamTask = Task { [weak self] in
+            await self?.consume(review)
+        }
+    }
+
+    private func consume(_ review: CodexReviewSession) async {
+        defer {
+            typedReviewStreamTask = nil
+        }
+        await receive(AppServerTypedReviewEventAdapter.started(review: review, run: run))
+        do {
+            for try await event in review.events {
+                if Task.isCancelled {
+                    return
+                }
+                await receive(AppServerTypedReviewEventAdapter.convert(event, review: review))
+            }
+            await finish(throwing: nil)
+        } catch is CancellationError {
+            await finish(throwing: CancellationError())
+        } catch {
+            await finish(throwing: error)
+        }
+    }
+
+    private func receive(_ converted: AppServerTypedReviewEvent) async {
+        metrics.routed += 1
+        guard finished == false else {
+            metrics.ignored += 1
+            return
+        }
+        var events = converted.events
+        guard events.isEmpty == false else {
+            metrics.ignored += 1
+            return
+        }
+        metrics.decoded += 1
+        events = eventsWithTypedResultFallback(events)
+        for event in events {
+            if await emit(event, controlThreadID: converted.controlThreadID) {
+                return
+            }
+        }
+    }
+
+    private func eventsWithTypedResultFallback(
+        _ events: [CodexReviewBackendModel.Review.Event]
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        events.map { event in
+            switch event {
+            case .message(let text):
+                if let text = text.nilIfEmpty {
+                    typedReviewResultText = text
+                }
+                return event
+            case .messageDelta(let delta, let itemID):
+                let text = (typedMessageTextByItemID[itemID] ?? "") + delta
+                typedMessageTextByItemID[itemID] = text
+                if let text = text.nilIfEmpty {
+                    typedReviewResultText = text
+                }
+                return event
+            case .logEntry(.agentMessage, let text, _, _, _):
+                if let text = text.nilIfEmpty {
+                    typedReviewResultText = text
+                }
+                return event
+            case .completed(let summary, nil):
+                return .completed(summary: summary, result: typedReviewResultText)
+            case .domainEvents,
+                 .suppressNextLegacyTimelineProjection,
+                 .suppressNextTerminalFailureLogTimelineProjection,
+                 .started,
+                 .log,
+                 .logEntry,
+                 .completed,
+                 .failed,
+                 .cancelled:
+                return event
+            }
+        }
+    }
+
     private func finish(
         precedingEvents: [CodexReviewBackendModel.Review.Event],
         cancellationMessage: String?
@@ -1145,6 +1943,7 @@ private actor AppServerReviewEventSession {
         guard finished == false else {
             return
         }
+        cancelTypedReviewStream()
         completionCoordinator.cancelPendingCompletion()
         cancelPendingStreamedLogFlush()
         pendingStartupNotifications.removeAll(keepingCapacity: true)
@@ -1544,6 +2343,11 @@ private actor AppServerReviewEventSession {
     private func cancelPendingStreamedLogFlush() {
         streamedLogFlushTask?.cancel()
         streamedLogFlushTask = nil
+    }
+
+    private func cancelTypedReviewStream() {
+        typedReviewStreamTask?.cancel()
+        typedReviewStreamTask = nil
     }
 
     private func flushPendingCompletion(
