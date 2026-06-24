@@ -1,19 +1,26 @@
 import Foundation
 
 @MainActor
-extension CodexReviewJob {
-    package func rebuildTimelineFromLogEntries(keepingTerminal: Bool = true) {
-        guard usesDirectTimelineEvents == false else {
-            return
-        }
-        timeline.reset(keepingTerminal: keepingTerminal && core.lifecycle.status.isTerminal)
-        for entry in logEntries {
-            applyTimelineEntry(entry)
-        }
-        syncTimelineTerminalStateFromCore()
+package struct ReviewLogEntryTimelineProjector {
+    private let timeline: ReviewTimeline
+
+    package init(timeline: ReviewTimeline) {
+        self.timeline = timeline
     }
 
-    package func applyTimelineEntry(_ entry: ReviewLogEntry) {
+    package func rebuild(
+        from entries: [ReviewLogEntry],
+        core: ReviewJobCore,
+        keepingTerminal: Bool = true
+    ) {
+        timeline.reset(keepingTerminal: keepingTerminal && core.lifecycle.status.isTerminal)
+        for entry in entries {
+            apply(entry)
+        }
+        syncTerminalState(from: core, fallbackTimestamp: entries.last?.timestamp)
+    }
+
+    package func apply(_ entry: ReviewLogEntry) {
         let itemID = entry.timelineItemID
         let existing = timeline.item(for: itemID)
         let kind = entry.timelineItemKind
@@ -51,17 +58,26 @@ extension CodexReviewJob {
         }
     }
 
-    package func trimTimelineTextContentToLogEntries() {
+    package func trimTextContent(
+        to entries: [ReviewLogEntry],
+        directTimelineTextItemIDs: Set<ReviewTimelineItem.ID>,
+        directTimelineTextItemIDsWithCompatibilityLog: Set<ReviewTimelineItem.ID>,
+        directTimelineTextCompatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>],
+        legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
+    ) {
         guard directTimelineTextItemIDs.isEmpty == false
             || legacyProjectedTimelineTextItemIDs.isEmpty == false else {
             return
         }
         var textByItemID: [ReviewTimelineItem.ID: String] = [:]
-        for entry in logEntries {
+        for entry in entries {
             guard let retainedTimelineText = entry.retainedTimelineText else {
                 continue
             }
-            for itemID in directTimelineTextCandidateIDs(for: entry) {
+            for itemID in directTimelineTextCandidateIDs(
+                for: entry,
+                compatibilityItemIDsByLogEntryID: directTimelineTextCompatibilityItemIDsByLogEntryID
+            ) {
                 if entry.shouldAppendRetainedTimelineText {
                     textByItemID[itemID, default: ""] += retainedTimelineText
                 } else {
@@ -95,11 +111,11 @@ extension CodexReviewJob {
         }
     }
 
-    package func syncTimelineTerminalStateFromCore() {
+    package func syncTerminalState(from core: ReviewJobCore, fallbackTimestamp: Date?) {
         guard core.lifecycle.status.isTerminal else {
             return
         }
-        let timestamp = core.lifecycle.endedAt ?? logEntries.last?.timestamp ?? Date()
+        let timestamp = core.lifecycle.endedAt ?? fallbackTimestamp ?? Date()
         switch core.lifecycle.status {
         case .succeeded:
             timeline.apply(
@@ -125,13 +141,51 @@ extension CodexReviewJob {
         }
     }
 
-    private func directTimelineTextCandidateIDs(for entry: ReviewLogEntry) -> [ReviewTimelineItem.ID] {
+    private func directTimelineTextCandidateIDs(
+        for entry: ReviewLogEntry,
+        compatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
+    ) -> [ReviewTimelineItem.ID] {
         var ids = entry.directTimelineTextCandidateIDs
-        if let compatibilityItemIDs = directTimelineTextCompatibilityItemIDsByLogEntryID[entry.id] {
+        if let compatibilityItemIDs = compatibilityItemIDsByLogEntryID[entry.id] {
             ids.append(contentsOf: compatibilityItemIDs)
         }
         var seen: Set<ReviewTimelineItem.ID> = []
         return ids.filter { seen.insert($0).inserted }
+    }
+}
+
+@MainActor
+extension CodexReviewJob {
+    package func rebuildTimelineFromLogEntries(keepingTerminal: Bool = true) {
+        guard usesDirectTimelineEvents == false else {
+            return
+        }
+        ReviewLogEntryTimelineProjector(timeline: timeline).rebuild(
+            from: logEntries,
+            core: core,
+            keepingTerminal: keepingTerminal
+        )
+    }
+
+    package func applyTimelineEntry(_ entry: ReviewLogEntry) {
+        ReviewLogEntryTimelineProjector(timeline: timeline).apply(entry)
+    }
+
+    package func trimTimelineTextContentToLogEntries() {
+        ReviewLogEntryTimelineProjector(timeline: timeline).trimTextContent(
+            to: logEntries,
+            directTimelineTextItemIDs: directTimelineTextItemIDs,
+            directTimelineTextItemIDsWithCompatibilityLog: directTimelineTextItemIDsWithCompatibilityLog,
+            directTimelineTextCompatibilityItemIDsByLogEntryID: directTimelineTextCompatibilityItemIDsByLogEntryID,
+            legacyProjectedTimelineTextItemIDs: legacyProjectedTimelineTextItemIDs
+        )
+    }
+
+    package func syncTimelineTerminalStateFromCore() {
+        ReviewLogEntryTimelineProjector(timeline: timeline).syncTerminalState(
+            from: core,
+            fallbackTimestamp: logEntries.last?.timestamp
+        )
     }
 }
 

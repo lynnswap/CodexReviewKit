@@ -1,9 +1,22 @@
 import Foundation
 
 @MainActor
+package struct ReviewTimelineLegacyLogProjector {
+    private let timeline: ReviewTimeline
+
+    package init(timeline: ReviewTimeline) {
+        self.timeline = timeline
+    }
+
+    package var logEntries: [ReviewLogEntry] {
+        timeline.items.flatMap { ReviewLogEntry.projectingTimelineItem($0) }
+    }
+}
+
+@MainActor
 extension CodexReviewJob {
     package var timelineLogEntries: [ReviewLogEntry] {
-        timeline.items.flatMap { ReviewLogEntry.projectingTimelineItem($0) }
+        ReviewTimelineLegacyLogProjector(timeline: timeline).logEntries
     }
 }
 
