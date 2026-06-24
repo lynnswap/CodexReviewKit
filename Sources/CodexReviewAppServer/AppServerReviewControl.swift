@@ -13,10 +13,10 @@ package struct AppServerReviewInterruption: Equatable, Sendable {
 }
 
 package final class AppServerReviewControl: @unchecked Sendable {
-    private enum Phase: Equatable {
+    private enum Phase {
         case preparing
-        case threadStarted(threadID: String)
-        case reviewStarted(turnThreadID: String, turnID: String)
+        case threadStarted(CodexThread)
+        case reviewStarted(thread: CodexThread?, turnID: String)
         case finished
     }
 
@@ -25,29 +25,26 @@ package final class AppServerReviewControl: @unchecked Sendable {
         var reviewSession: CodexReviewSession?
     }
 
-    private let client: AppServerClient
     private let phaseLock = NSLock()
     private var phase: Phase = .preparing
     private var reviewSession: CodexReviewSession?
 
-    package init(client: AppServerClient) {
-        self.client = client
-    }
+    package init() {}
 
-    package func recordThreadStarted(threadID: String) {
+    package func recordThreadStarted(_ thread: CodexThread) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        guard phase == .preparing else {
+        guard case .preparing = phase else {
             return
         }
-        phase = .threadStarted(threadID: threadID)
+        phase = .threadStarted(thread)
         reviewSession = nil
     }
 
-    package func recordReviewStarted(turnThreadID: String, turnID: String) {
+    package func recordReviewStarted(thread: CodexThread, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
+        phase = .reviewStarted(thread: thread, turnID: turnID)
         reviewSession = nil
     }
 
@@ -55,17 +52,23 @@ package final class AppServerReviewControl: @unchecked Sendable {
         phaseLock.lock()
         defer { phaseLock.unlock() }
         phase = .reviewStarted(
-            turnThreadID: reviewSession.reviewThreadID.rawValue,
+            thread: nil,
             turnID: reviewSession.turnID.rawValue
         )
         self.reviewSession = reviewSession
     }
 
-    package func recordTurnStarted(turnThreadID: String, turnID: String) {
+    package func recordTurnStarted(thread: CodexThread?, turnID: String) {
         phaseLock.lock()
         defer { phaseLock.unlock() }
-        phase = .reviewStarted(turnThreadID: turnThreadID, turnID: turnID)
-        reviewSession = nil
+        switch phase {
+        case .preparing, .finished:
+            return
+        case .threadStarted(let existingThread):
+            phase = .reviewStarted(thread: thread ?? existingThread, turnID: turnID)
+        case .reviewStarted(let existingThread, _):
+            phase = .reviewStarted(thread: thread ?? existingThread, turnID: turnID)
+        }
     }
 
     @discardableResult
@@ -76,13 +79,13 @@ package final class AppServerReviewControl: @unchecked Sendable {
         switch snapshot.phase {
         case .preparing, .finished:
             return nil
-        case .threadStarted(let threadID):
-            return try await sendInterrupt(
-                threadID: threadID,
-                turnID: "",
+        case .threadStarted(let thread):
+            return try await interrupt(
+                thread,
+                expectedTurnID: nil,
                 willInterruptActiveTurn: willInterruptActiveTurn
             )
-        case .reviewStarted(let turnThreadID, let turnID):
+        case .reviewStarted(let thread, let turnID):
             if let reviewSession = snapshot.reviewSession {
                 return try await interrupt(
                     reviewSession,
@@ -90,9 +93,12 @@ package final class AppServerReviewControl: @unchecked Sendable {
                     willInterruptActiveTurn: willInterruptActiveTurn
                 )
             }
-            return try await sendInterrupt(
-                threadID: turnThreadID,
-                turnID: turnID,
+            guard let thread else {
+                return nil
+            }
+            return try await interrupt(
+                thread,
+                expectedTurnID: turnID.nilIfEmpty.map(CodexTurnID.init(rawValue:)),
                 willInterruptActiveTurn: willInterruptActiveTurn
             )
         }
@@ -126,23 +132,22 @@ package final class AppServerReviewControl: @unchecked Sendable {
         if reviewInterruption.turnID != expectedTurnID {
             setPhase(
                 .reviewStarted(
-                    turnThreadID: reviewInterruption.threadID,
+                    thread: nil,
                     turnID: reviewInterruption.turnID
-                )
+                ),
+                reviewSession: reviewSession
             )
         }
         return reviewInterruption
     }
 
-    private func sendInterrupt(
-        threadID: String,
-        turnID: String,
+    private func interrupt(
+        _ thread: CodexThread,
+        expectedTurnID: CodexTurnID?,
         willInterruptActiveTurn: (@Sendable (AppServerReviewInterruption) async -> Void)?
     ) async throws -> AppServerReviewInterruption {
-        let interruption = try await interruptCodexTurn(
-            threadID: .init(rawValue: threadID),
-            turnID: turnID.nilIfEmpty.map(CodexTurnID.init(rawValue:)),
-            client: client,
+        let interruption = try await thread.interruptActiveTurn(
+            expectedTurnID: expectedTurnID,
             willInterruptActiveTurn: { interruption in
                 guard let willInterruptActiveTurn else {
                     return
@@ -151,8 +156,8 @@ package final class AppServerReviewControl: @unchecked Sendable {
             }
         )
         let reviewInterruption = AppServerReviewInterruption(interruption)
-        if reviewInterruption.turnID != turnID {
-            setPhase(.reviewStarted(turnThreadID: threadID, turnID: reviewInterruption.turnID))
+        if reviewInterruption.turnID != expectedTurnID?.rawValue {
+            setPhase(.reviewStarted(thread: thread, turnID: reviewInterruption.turnID))
         }
         return reviewInterruption
     }

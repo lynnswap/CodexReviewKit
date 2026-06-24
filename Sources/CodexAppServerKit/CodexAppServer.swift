@@ -124,15 +124,6 @@ public actor CodexAppServer {
 
     private let client: AppServerClient
     private let router: CodexAppServerNotificationRouter
-    private let reviewThreadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
-
-    package nonisolated var appServerClient: AppServerClient {
-        client
-    }
-
-    package nonisolated var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy {
-        reviewThreadStartPermissionStrategy
-    }
 
     /// Starts a Codex app-server process and initializes the client session.
     ///
@@ -158,22 +149,18 @@ public actor CodexAppServer {
         await router.start()
         self.client = client
         self.router = router
-        self.reviewThreadStartPermissionStrategy = transportConfiguration.threadStartPermissionStrategy
     }
 
     package init(
         client: AppServerClient,
-        router: CodexAppServerNotificationRouter,
-        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+        router: CodexAppServerNotificationRouter
     ) {
         self.client = client
         self.router = router
-        self.reviewThreadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
     package init(
-        transport: any JSONRPC.Transport,
-        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+        transport: any JSONRPC.Transport
     ) async throws {
         let client = AppServerClient(transport: transport)
         _ = try await client.initialize(
@@ -184,17 +171,12 @@ public actor CodexAppServer {
         await router.start()
         self.client = client
         self.router = router
-        self.reviewThreadStartPermissionStrategy = threadStartPermissionStrategy
     }
 
     package static func testing(
-        transport: any JSONRPC.Transport,
-        threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+        transport: any JSONRPC.Transport
     ) async throws -> CodexAppServer {
-        try await CodexAppServer(
-            transport: transport,
-            threadStartPermissionStrategy: threadStartPermissionStrategy
-        )
+        try await CodexAppServer(transport: transport)
     }
 
     /// Closes the app-server connection and stops notification routing.
@@ -453,6 +435,34 @@ public actor CodexAppServer {
             reviewModel: response.config.reviewModel,
             reasoningEffort: reasoningEffort,
             serviceTier: response.config.serviceTier
+        )
+    }
+
+    package func updateConfiguration(_ patch: CodexConfigurationPatch) async throws {
+        var edits: [AppServerAPI.Config.Edit] = []
+        if patch.updatesReviewModel {
+            edits.append(.init(
+                keyPath: "review_model",
+                value: patch.reviewModel.map(AppServerAPI.Config.Value.string) ?? .null
+            ))
+        }
+        if patch.updatesReasoningEffort {
+            edits.append(.init(
+                keyPath: "model_reasoning_effort",
+                value: patch.reasoningEffort.map { .string($0.rawValue) } ?? .null
+            ))
+        }
+        if patch.updatesServiceTier {
+            edits.append(.init(
+                keyPath: "service_tier",
+                value: patch.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
+            ))
+        }
+        guard edits.isEmpty == false else {
+            return
+        }
+        let _: AppServerAPI.Config.BatchWrite.Response = try await client.send(
+            AppServerAPI.Config.BatchWrite.Request(params: .init(edits: edits))
         )
     }
 

@@ -165,6 +165,19 @@ extension CodexThread {
         )
     }
 
+    @discardableResult
+    package func interruptActiveTurn(
+        expectedTurnID: CodexTurnID? = nil,
+        willInterruptActiveTurn: (@Sendable (CodexTurnInterruption) async -> Void)? = nil
+    ) async throws -> CodexTurnInterruption {
+        try await interruptCodexTurn(
+            threadID: id,
+            turnID: expectedTurnID,
+            client: client,
+            willInterruptActiveTurn: willInterruptActiveTurn
+        )
+    }
+
     package func startTurn(
         _ prompt: CodexPrompt,
         options: CodexGenerationOptions = .init()

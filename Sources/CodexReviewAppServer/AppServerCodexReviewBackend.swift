@@ -20,8 +20,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
     private let appServer: CodexAppServer
-    private let client: AppServerClient
-    private let threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
     private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var activeReviewAttemptIDByThreadID: [String: String] = [:]
@@ -35,8 +33,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package init(appServer: CodexAppServer) {
         self.appServer = appServer
-        self.client = appServer.appServerClient
-        self.threadStartPermissionStrategy = appServer.threadStartPermissionStrategy
     }
 
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
@@ -53,12 +49,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
-        let edits = Self.configEdits(from: change)
-        if edits.isEmpty == false {
-            let _: AppServerAPI.Config.BatchWrite.Response = try await client.send(AppServerAPI.Config.BatchWrite.Request(
-                params: .init(edits: edits)
-            ))
-        }
+        try await appServer.updateConfiguration(Self.configurationPatch(from: change))
         return try await readSettings()
     }
 
@@ -106,7 +97,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        let control = AppServerReviewControl(client: client)
+        let control = AppServerReviewControl()
         let thread = try await startReviewThread(appServer: appServer, request: request)
         threadsByThreadID[thread.id.rawValue] = thread
         controlsByThreadID[thread.id.rawValue] = control
@@ -120,7 +111,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         let session = AppServerReviewEventSession(run: provisionalRun, control: control)
         registerReviewEventSession(session, for: provisionalRun)
-        control.recordThreadStarted(threadID: thread.id.rawValue)
+        control.recordThreadStarted(thread)
 
         let review: CodexReviewSession
         do {
@@ -150,78 +141,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> CodexThread {
         let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
-        if threadStartPermissionStrategy == .legacySandbox {
-            // Deprecated compatibility: installed Codex builds without the app-server v2
-            // session-source flag can ignore permissions without failing the request.
-            return try await appServer.startThread(
-                in: workspace,
-                options: reviewThreadOptions(request, sandbox: .fullAccess)
-            )
-        }
-        do {
-            return try await appServer.startThread(
-                in: workspace,
-                options: reviewThreadOptions(request, permissions: .profile(id: Self.reviewPermissionProfileID))
-            )
-        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithObjectPermissions(error) {
-            // Deprecated compatibility: installed Codex builds can require object-shaped
-            // permissions while the latest local app-server source accepts a profile ID string.
-            do {
-                return try await appServer.startThread(
-                    in: workspace,
-                    options: reviewThreadOptions(
-                        request,
-                        permissions: .profileSelection(id: Self.reviewPermissionProfileID)
-                    )
-                )
-            } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
-                // Deprecated compatibility: installed Codex builds can know the permissions
-                // object shape without registering the danger-full-access built-in profile.
-                return try await appServer.startThread(
-                    in: workspace,
-                    options: reviewThreadOptions(request, sandbox: .fullAccess)
-                )
-            }
-        } catch let error as JSONRPC.Error where Self.shouldRetryThreadStartWithLegacySandbox(error) {
-            // Deprecated compatibility: some builds accept the permissions field shape
-            // without registering the danger-full-access built-in profile.
-            return try await appServer.startThread(
-                in: workspace,
-                options: reviewThreadOptions(request, sandbox: .fullAccess)
-            )
-        }
+        return try await appServer.startThread(
+            in: workspace,
+            options: reviewThreadOptions(request)
+        )
     }
 
     private func reviewThreadOptions(
-        _ request: CodexReviewBackendModel.Review.Start,
-        permissions: CodexThreadPermissions? = nil,
-        sandbox: CodexSandbox? = nil
+        _ request: CodexReviewBackendModel.Review.Start
     ) -> CodexThread.Options {
         .init(
             model: request.model,
             approvalMode: .denyAll,
-            sandbox: sandbox,
-            permissions: permissions,
+            permissions: .profile(id: Self.reviewPermissionProfileID),
             ephemeral: false,
             sessionStartSource: .startup,
             threadSource: .user
         )
-    }
-
-    private nonisolated static func shouldRetryThreadStartWithObjectPermissions(_ error: JSONRPC.Error) -> Bool {
-        guard case .responseError(_, let message) = error else {
-            return false
-        }
-        return message.contains("PermissionProfileSelectionParams")
-            || message.contains("invalid type: string")
-    }
-
-    private nonisolated static func shouldRetryThreadStartWithLegacySandbox(_ error: JSONRPC.Error) -> Bool {
-        guard case .responseError(_, let message) = error else {
-            return false
-        }
-        return message.contains("unknown built-in profile")
-            || message.contains("default_permissions refers to unknown")
     }
 
     package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
@@ -272,8 +208,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let interruptedRun = token.interruptedRun
         try await appServer.rollbackThread(.init(rawValue: token.rollbackThreadID), turnCount: 1)
 
-        let control = controlsByThreadID[interruptedRun.threadID] ?? AppServerReviewControl(client: client)
-        controlsByThreadID[interruptedRun.threadID] = control
+        let control = reviewControl(for: interruptedRun)
         let thread = reviewThread(for: interruptedRun)
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
@@ -397,24 +332,40 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             registerReviewEventSession(session, for: run)
             return session
         }
-        let control = controlsByThreadID[run.threadID] ?? AppServerReviewControl(client: client)
-        controlsByThreadID[run.threadID] = control
-        if let turnID = run.turnID {
-            control.recordReviewStarted(turnThreadID: appServerTurnThreadID(for: run), turnID: turnID)
-        } else {
-            control.recordThreadStarted(threadID: run.threadID)
-        }
+        let control = reviewControl(for: run)
         let session = AppServerReviewEventSession(run: run, control: control)
         registerReviewEventSession(session, for: run)
         return session
     }
 
+    private func reviewControl(for run: CodexReviewBackendModel.Review.Run) -> AppServerReviewControl {
+        if let control = controlsByThreadID[run.threadID] {
+            return control
+        }
+        let control = AppServerReviewControl()
+        if let turnID = run.turnID {
+            control.recordReviewStarted(thread: turnThread(for: run), turnID: turnID)
+        } else {
+            control.recordThreadStarted(reviewThread(for: run))
+        }
+        controlsByThreadID[run.threadID] = control
+        return control
+    }
+
     private func reviewThread(for run: CodexReviewBackendModel.Review.Run) -> CodexThread {
-        if let thread = threadsByThreadID[run.threadID] {
+        threadHandle(id: run.threadID, model: run.model)
+    }
+
+    private func turnThread(for run: CodexReviewBackendModel.Review.Run) -> CodexThread {
+        threadHandle(id: appServerTurnThreadID(for: run), model: run.model)
+    }
+
+    private func threadHandle(id threadID: String, model: String?) -> CodexThread {
+        if let thread = threadsByThreadID[threadID] {
             return thread
         }
-        let thread = appServer.threadHandle(id: .init(rawValue: run.threadID), model: run.model)
-        threadsByThreadID[run.threadID] = thread
+        let thread = appServer.threadHandle(id: .init(rawValue: threadID), model: model)
+        threadsByThreadID[threadID] = thread
         return thread
     }
 
@@ -531,11 +482,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
            let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) {
             return interruption
         }
-        let threadID = appServerTurnThreadID(for: run)
-        let _: EmptyResponse = try await client.send(AppServerAPI.Turn.Interrupt.Request(
-            params: .init(threadID: threadID, turnID: run.turnID ?? "")
-        ))
-        return .init(threadID: threadID, turnID: run.turnID ?? "")
+        let control = reviewControl(for: run)
+        guard let interruption = try await control.interrupt(willInterruptActiveTurn: willInterruptActiveTurn) else {
+            throw CodexReviewAPI.Error.io("Review run has no interruptible app-server session.")
+        }
+        return interruption
     }
 
     private func cleanupThreadIDs(for run: CodexReviewBackendModel.Review.Run) -> [String] {
@@ -1638,7 +1589,7 @@ private actor AppServerReviewEventSession {
     private func recordReviewEvent(_ event: CodexReviewBackendModel.Review.Event, controlThreadID: String? = nil) {
         switch event {
         case .started(let turnID, _, _):
-            control.recordTurnStarted(turnThreadID: controlThreadID ?? appServerTurnThreadID(for: run), turnID: turnID)
+            control.recordTurnStarted(thread: nil, turnID: turnID)
         case .completed, .failed, .cancelled:
             control.finish()
             appServerBackendLogger.debug(
@@ -1813,27 +1764,17 @@ private final class ReviewCompletionCoordinator {
 }
 
 private extension AppServerCodexReviewBackend {
-    static func configEdits(from change: CodexReviewBackendModel.Settings.Change) -> [AppServerAPI.Config.Edit] {
-        var edits: [AppServerAPI.Config.Edit] = []
-        if change.updatesModel {
-            edits.append(.init(
-                keyPath: "review_model",
-                value: change.model.map(AppServerAPI.Config.Value.string) ?? .null
-            ))
-        }
-        if change.updatesReasoningEffort {
-            edits.append(.init(
-                keyPath: "model_reasoning_effort",
-                value: change.reasoningEffort.map(AppServerAPI.Config.Value.string) ?? .null
-            ))
-        }
-        if change.updatesServiceTier {
-            edits.append(.init(
-                keyPath: "service_tier",
-                value: change.serviceTier.map(AppServerAPI.Config.Value.string) ?? .null
-            ))
-        }
-        return edits
+    static func configurationPatch(
+        from change: CodexReviewBackendModel.Settings.Change
+    ) -> CodexConfigurationPatch {
+        .init(
+            reviewModel: change.model,
+            reasoningEffort: change.reasoningEffort.map(CodexReasoningEffort.init(rawValue:)),
+            serviceTier: change.serviceTier,
+            updatesReviewModel: change.updatesModel,
+            updatesReasoningEffort: change.updatesReasoningEffort,
+            updatesServiceTier: change.updatesServiceTier
+        )
     }
 }
 

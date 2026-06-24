@@ -2056,6 +2056,31 @@ public struct CodexConfiguration: Equatable, Sendable {
     }
 }
 
+package struct CodexConfigurationPatch: Equatable, Sendable {
+    package var reviewModel: String?
+    package var reasoningEffort: CodexReasoningEffort?
+    package var serviceTier: String?
+    package var updatesReviewModel: Bool
+    package var updatesReasoningEffort: Bool
+    package var updatesServiceTier: Bool
+
+    package init(
+        reviewModel: String? = nil,
+        reasoningEffort: CodexReasoningEffort? = nil,
+        serviceTier: String? = nil,
+        updatesReviewModel: Bool = false,
+        updatesReasoningEffort: Bool = false,
+        updatesServiceTier: Bool = false
+    ) {
+        self.reviewModel = reviewModel
+        self.reasoningEffort = reasoningEffort
+        self.serviceTier = serviceTier
+        self.updatesReviewModel = updatesReviewModel
+        self.updatesReasoningEffort = updatesReasoningEffort
+        self.updatesServiceTier = updatesServiceTier
+    }
+}
+
 public struct CodexRateLimits: Equatable, Sendable {
     public var planType: String?
     public var windows: [CodexRateLimitWindow]

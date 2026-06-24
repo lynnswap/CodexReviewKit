@@ -102,13 +102,9 @@ private func eventSequence(
 }
 
 private func makeBackend(
-    transport: FakeJSONRPCTransport,
-    threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy = .modernPermissions
+    transport: FakeJSONRPCTransport
 ) async throws -> AppServerCodexReviewBackend {
-    let appServer = try await CodexAppServer.testing(
-        transport: transport,
-        threadStartPermissionStrategy: threadStartPermissionStrategy
-    )
+    let appServer = try await CodexAppServer.testing(transport: transport)
     return AppServerCodexReviewBackend(appServer: appServer)
 }
 
@@ -606,9 +602,14 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
-        let control = AppServerReviewControl(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: CodexAppServerNotificationRouter(client: client)
+        )
+        let control = AppServerReviewControl()
 
-        control.recordThreadStarted(threadID: "thread-1")
+        control.recordThreadStarted(thread)
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: ""))
 
@@ -623,9 +624,14 @@ struct AppServerClientTests {
         let transport = FakeJSONRPCTransport()
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
-        let control = AppServerReviewControl(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: CodexAppServerNotificationRouter(client: client)
+        )
+        let control = AppServerReviewControl()
 
-        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-1")
+        control.recordReviewStarted(thread: thread, turnID: "turn-1")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-1"))
 
@@ -645,9 +651,14 @@ struct AppServerClientTests {
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         let client = AppServerClient(transport: transport)
-        let control = AppServerReviewControl(client: client)
+        let thread = CodexThread(
+            id: "thread-1",
+            client: client,
+            router: CodexAppServerNotificationRouter(client: client)
+        )
+        let control = AppServerReviewControl()
 
-        control.recordReviewStarted(turnThreadID: "thread-1", turnID: "turn-old")
+        control.recordReviewStarted(thread: thread, turnID: "turn-old")
         let interruption = try await control.interrupt()
         #expect(interruption == .init(threadID: "thread-1", turnID: "turn-new"))
 
@@ -903,6 +914,48 @@ struct AppServerClientTests {
 
         #expect(settings.model == nil)
         #expect(settings.fallbackModel == "gpt-5")
+    }
+
+    @Test func settingsApplyWritesConfigurationThroughAppServer() async throws {
+        let transport = FakeJSONRPCTransport()
+        try await enqueueInitialize(transport)
+        try await transport.enqueueJSON(#"{"status":"ok"}"#, for: "config/batchWrite")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(
+                model: "gpt-5",
+                reviewModel: "gpt-5.5",
+                modelReasoningEffort: "xhigh",
+                serviceTier: "flex"
+            )),
+            for: "config/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Model.List.Response(data: [makeModelCatalogItem(model: "gpt-5.5")]),
+            for: "model/list"
+        )
+        let backend = try await makeBackend(transport: transport)
+
+        let settings = try await backend.applySettings(.init(
+            model: "gpt-5.5",
+            reasoningEffort: "xhigh",
+            serviceTier: "flex"
+        ))
+
+        let batchWrite = try #require(await transport.recordedRequests().first {
+            $0.method == "config/batchWrite"
+        })
+        let params = try #require(JSONSerialization.jsonObject(
+            with: batchWrite.params
+        ) as? [String: Any])
+        let edits = try #require(params["edits"] as? [[String: Any]])
+        #expect(edits.compactMap { $0["keyPath"] as? String } == [
+            "review_model",
+            "model_reasoning_effort",
+            "service_tier",
+        ])
+        #expect(settings.model == "gpt-5.5")
+        #expect(settings.reasoningEffort == "xhigh")
+        #expect(settings.serviceTier == "flex")
     }
 
     @Test func settingsReadPagesThroughModelCatalog() async throws {
@@ -1399,156 +1452,6 @@ struct AppServerClientTests {
         let params = try interrupt.decodeParams(AppServerAPI.Turn.Interrupt.Params.self)
         #expect(params.threadID == "review-thread")
         #expect(params.turnID == "turn-1")
-    }
-
-    @Test func backendUsesLegacySandboxWhenProcessDoesNotSupportModernSessionSource() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
-        let backend = try await makeBackend(
-            transport: transport,
-            threadStartPermissionStrategy: .legacySandbox
-        )
-
-        _ = try await backend.startReview(.init(
-            jobID: "job-1",
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        ))
-
-        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
-        #expect(threadStarts.count == 1)
-        let request = try #require(threadStarts.first)
-        let params = try #require(JSONSerialization.jsonObject(with: request.params) as? [String: Any])
-        #expect(params["ephemeral"] as? Bool == false)
-        #expect(params["sandbox"] as? String == "danger-full-access")
-        #expect(params["permissions"] == nil)
-        #expect(params["sessionStartSource"] as? String == "startup")
-        #expect(params["threadSource"] as? String == "user")
-    }
-
-    @Test func backendRetriesThreadStartWithObjectPermissionsForInstalledCodex() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: #"Invalid request: invalid type: string ":danger-full-access", expected internally tagged enum PermissionProfileSelectionParams"#
-            ),
-            for: "thread/start"
-        )
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
-        let backend = try await makeBackend(transport: transport)
-
-        _ = try await backend.startReview(.init(
-            jobID: "job-1",
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        ))
-
-        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
-        #expect(threadStarts.count == 2)
-
-        let firstRequest = try #require(threadStarts.first)
-        let secondRequest = try #require(threadStarts.last)
-        let first = try #require(JSONSerialization.jsonObject(
-            with: firstRequest.params
-        ) as? [String: Any])
-        let second = try #require(JSONSerialization.jsonObject(
-            with: secondRequest.params
-        ) as? [String: Any])
-        let permissions = try #require(second["permissions"] as? [String: Any])
-
-        #expect(first["permissions"] as? String == ":danger-full-access")
-        #expect(first["sandbox"] == nil)
-        #expect(first["sessionStartSource"] as? String == "startup")
-        #expect(first["threadSource"] as? String == "user")
-        #expect(permissions["type"] as? String == "profile")
-        #expect(permissions["id"] as? String == ":danger-full-access")
-        #expect(second["sandbox"] == nil)
-        #expect(second["sessionStartSource"] as? String == "startup")
-        #expect(second["threadSource"] as? String == "user")
-    }
-
-    @Test func backendFallsBackToLegacySandboxWhenInstalledCodexLacksDangerProfile() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: #"Invalid request: invalid type: string ":danger-full-access", expected internally tagged enum PermissionProfileSelectionParams"#
-            ),
-            for: "thread/start"
-        )
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: "failed to load configuration: default_permissions refers to unknown built-in profile `:danger-full-access`"
-            ),
-            for: "thread/start"
-        )
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
-        let backend = try await makeBackend(transport: transport)
-
-        _ = try await backend.startReview(.init(
-            jobID: "job-1",
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        ))
-
-        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
-        #expect(threadStarts.count == 3)
-
-        let fallbackRequest = try #require(threadStarts.last)
-        let fallback = try #require(JSONSerialization.jsonObject(
-            with: fallbackRequest.params
-        ) as? [String: Any])
-        #expect(fallback["sandbox"] as? String == "danger-full-access")
-        #expect(fallback["permissions"] == nil)
-        #expect(fallback["sessionStartSource"] as? String == "startup")
-        #expect(fallback["threadSource"] as? String == "user")
-    }
-
-    @Test func backendFallsBackToLegacySandboxWhenProfileIDPermissionsAreUnknown() async throws {
-        let transport = FakeJSONRPCTransport()
-        try await enqueueInitialize(transport)
-        await transport.enqueueFailure(
-            .responseError(
-                code: -32602,
-                message: "failed to load configuration: default_permissions refers to unknown built-in profile `:danger-full-access`"
-            ),
-            for: "thread/start"
-        )
-        try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
-        try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "thread-1"), for: "review/start")
-        let backend = try await makeBackend(transport: transport)
-
-        _ = try await backend.startReview(.init(
-            jobID: "job-1",
-            sessionID: "session-1",
-            request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-        ))
-
-        let threadStarts = await transport.recordedRequests().filter { $0.method == "thread/start" }
-        #expect(threadStarts.count == 2)
-
-        let firstRequest = try #require(threadStarts.first)
-        let fallbackRequest = try #require(threadStarts.last)
-        let first = try #require(JSONSerialization.jsonObject(
-            with: firstRequest.params
-        ) as? [String: Any])
-        let fallback = try #require(JSONSerialization.jsonObject(
-            with: fallbackRequest.params
-        ) as? [String: Any])
-        #expect(first["permissions"] as? String == ":danger-full-access")
-        #expect(first["sandbox"] == nil)
-        #expect(fallback["sandbox"] as? String == "danger-full-access")
-        #expect(fallback["permissions"] == nil)
-        #expect(fallback["sessionStartSource"] as? String == "startup")
-        #expect(fallback["threadSource"] as? String == "user")
     }
 
     @Test func backendAppliesRequestedReviewModelToThreadStartAndRunMetadata() async throws {
