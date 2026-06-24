@@ -64,15 +64,6 @@ let package = Package(
             ]
         ),
         .target(
-            name: "CodexReviewAppServerWire",
-            dependencies: [
-                "CodexReviewKit",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
             name: "CodexReviewAppServer",
             dependencies: [
                 "CodexAppServerKit",
@@ -150,15 +141,6 @@ let package = Package(
             dependencies: [
                 "CodexAppServerKit",
                 "CodexAppServerKitTesting",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "CodexReviewAppServerWireTests",
-            dependencies: [
-                "CodexReviewAppServerWire",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

@@ -23,9 +23,7 @@ into domain events.
 
 ## Targets
 
-This table describes intended ownership. Some names in this table are target
-ownership names that may still be pending migration in `Package.swift`; do not
-read them as a claim that every symbol has already moved.
+This table describes intended ownership.
 
 | Target | Responsibility |
 | --- | --- |
@@ -42,12 +40,6 @@ read them as a claim that every symbol has already moved.
 
 ReviewMonitor is the product entry point. The host target wires the concrete
 runtime together; lower targets do not import the host.
-
-`CodexReviewAppServerWire` exists today as a transitional raw decoder target.
-It is not an intended ownership boundary. The intended owner for app-server
-review notification schema and high-level review streams is
-`CodexAppServerKit`; raw review DTOs should remain implementation details
-behind that SDK boundary rather than becoming public ReviewMonitor API.
 
 ## Source Of Truth
 
@@ -67,18 +59,10 @@ entries, models, accounts, and login flows. Raw review DTOs may exist as
 internal implementation detail, but they are not the public API boundary. It
 must not import Review, UI, or MCP targets.
 
-`CodexReviewAppServerWire` is a current transitional decoder for raw app-server
-review notification shapes. While it exists during migration, it must not be
-treated as the intended owner of review wire schema or public API. The intended
-direction is for `CodexAppServerKit` to provide the high-level review stream
-boundary and keep raw DTOs out of ReviewMonitor-facing contracts.
-
 `CodexReviewAppServer` owns the adapter from high-level app-server review
 sessions into `CodexReviewKit` backend events. It consumes `CodexReviewSession`
 values from `CodexAppServerKit` and hands application-facing review events to
-the store backend. If current code still passes through
-`CodexReviewAppServerWire`, that is a migration detail, not the ownership
-model.
+the store backend.
 
 `ReviewTimeline` and application/store state are the observable source of truth
 after conversion. UI views, rendering helpers, MCP server projections, and
@@ -160,8 +144,6 @@ flowchart TB
 The diagram describes ownership direction, not every SwiftPM dependency. New
 code should not move domain, application, rendering, UI, or MCP projection
 responsibilities back into runtime owners.
-`CodexReviewAppServerWire` is intentionally omitted from the intended ownership
-graph because it is a current transitional decoder, not a target owner.
 
 ## Observation Ownership
 
@@ -281,7 +263,6 @@ Default tests are deterministic and do not start a live `codex app-server`.
 | Test area | Uses | Verifies |
 | --- | --- | --- |
 | `CodexAppServerKitTests` | Fake JSON-RPC transport | Generic app-server handshake, request serialization, retry, notification routing, domain result aggregation, and high-level review stream behavior |
-| `CodexReviewAppServerWireTests` | Raw notification JSON while the transitional decoder exists | Migration compatibility for decode/conversion behavior, not intended target ownership |
 | `CodexReviewKitTests` | Domain timelines, ObservationBridge awaiters, and fake `CodexReviewStoreBackend` | Semantic timeline mutation, use-case observation behavior, review/auth/settings state machines, cancellation, result retention |
 | `CodexReviewAppServerTests` | Fake app-server review sessions or transport as needed | Adapter behavior from high-level review sessions into backend events, cleanup, and recovery |
 | `CodexReviewMCPServerTests` | Fake review store and domain timeline projections | MCP protocol conversion, response shape, and timeline projection snapshots |
