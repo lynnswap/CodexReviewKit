@@ -57,7 +57,7 @@ public struct CodexReasoningEffortOption: Identifiable, Equatable, Sendable {
         source: CodexSelectionOptionSource = .catalog
     ) {
         self.reasoningEffort = reasoningEffort
-        self.localizedLabel = reasoningEffort.localizedLabel
+        self.localizedLabel = Self.localizedLabel(for: reasoningEffort)
         self.description = description
         self.source = source
     }
@@ -68,6 +68,25 @@ public struct CodexReasoningEffortOption: Identifiable, Equatable, Sendable {
             description: catalogOption.description,
             source: .catalog
         )
+    }
+
+    private static func localizedLabel(for reasoningEffort: CodexReasoningEffort) -> LocalizedStringResource {
+        switch reasoningEffort.rawValue {
+        case CodexReasoningEffort.none.rawValue:
+            "None"
+        case CodexReasoningEffort.minimal.rawValue:
+            "Minimal"
+        case CodexReasoningEffort.low.rawValue:
+            "Low"
+        case CodexReasoningEffort.medium.rawValue:
+            "Medium"
+        case CodexReasoningEffort.high.rawValue:
+            "High"
+        case CodexReasoningEffort.xhigh.rawValue:
+            "Extra high"
+        default:
+            LocalizedStringResource(stringLiteral: reasoningEffort.rawValue)
+        }
     }
 }
 
@@ -88,7 +107,7 @@ public struct CodexServiceTierOption: Identifiable, Equatable, Sendable {
         self.source = source
     }
 
-    public static func localizedLabel(for serviceTierID: String) -> LocalizedStringResource {
+    private static func localizedLabel(for serviceTierID: String) -> LocalizedStringResource {
         switch serviceTierID {
         case "fast":
             "Fast"
@@ -197,27 +216,6 @@ public struct CodexModelSelection: Equatable, Sendable {
                         : .currentSelection
                 )
             }
-    }
-}
-
-public extension CodexReasoningEffort {
-    var localizedLabel: LocalizedStringResource {
-        switch rawValue {
-        case Self.none.rawValue:
-            "None"
-        case Self.minimal.rawValue:
-            "Minimal"
-        case Self.low.rawValue:
-            "Low"
-        case Self.medium.rawValue:
-            "Medium"
-        case Self.high.rawValue:
-            "High"
-        case Self.xhigh.rawValue:
-            "Extra high"
-        default:
-            LocalizedStringResource(stringLiteral: rawValue)
-        }
     }
 }
 
