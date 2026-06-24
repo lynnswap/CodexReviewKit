@@ -29,8 +29,11 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        // Temporary local path for in-flight CodexKit integration; replace with a pinned remote CodexKit dependency before release.
-        .package(path: "/Users/kn/Dev/CodexKit"),
+        // Development-only CodexKit integration checkout. Keep the local CodexKit
+        // worktree at dependencies/CodexKit while this branch tracks in-flight
+        // APIs; replace this with a pinned remote CodexKit dependency before
+        // merging or releasing.
+        .package(path: "dependencies/CodexKit"),
     ],
     targets: [
         .target(

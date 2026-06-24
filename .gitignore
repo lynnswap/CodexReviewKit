@@ -11,3 +11,7 @@ DerivedData/
 .swiftpm/xcode/xcuserdata/
 .netrc
 *.profraw
+
+# Local development dependency checkouts. These are intentionally untracked;
+# Package.swift must replace them with pinned remote dependencies before release.
+/dependencies/
