@@ -61,13 +61,6 @@ extension AppServerAPI {
     }
 }
 
-extension AppServerAPI.Thread.Start {
-    package enum PermissionStrategy: Equatable, Sendable {
-        case modernPermissions
-        case legacySandbox
-    }
-}
-
 extension AppServerAPI.Review.Start {
     package struct Params: Codable, Equatable, Sendable {
         package var threadID: String

@@ -47,11 +47,6 @@ public actor CodexAppServer {
                 self.codexHomeURL = codexHomeURL ?? Self.defaultCodexHomeURL(environment: environment)
             }
 
-            /// A local-process configuration that uses the current process environment.
-            public static var `default`: LocalProcess {
-                LocalProcess()
-            }
-
             /// Returns the default Codex home for a local app-server process.
             ///
             /// The value honors `CODEX_HOME` first. On macOS command-line runs,
@@ -107,18 +102,13 @@ public actor CodexAppServer {
         ///   - clientName: Client name sent during app-server initialization.
         ///   - clientVersion: Client version sent during app-server initialization.
         public init(
-            localProcess: LocalProcess = .default,
+            localProcess: LocalProcess = .init(),
             clientName: String = "CodexAppServerKit",
             clientVersion: String = "1"
         ) {
             self.localProcess = localProcess
             self.clientName = clientName
             self.clientVersion = clientVersion
-        }
-
-        /// A configuration that uses the local `codex` executable and current environment.
-        public static var `default`: Configuration {
-            Configuration()
         }
     }
 
@@ -132,7 +122,7 @@ public actor CodexAppServer {
     ///
     /// - Parameter configuration: Container and local-process configuration.
     /// - Throws: A transport, JSON-RPC, or app-server initialization error.
-    public init(configuration: Configuration = .default) async throws {
+    public init(configuration: Configuration = .init()) async throws {
         let transportConfiguration = AppServerProcessTransport.Configuration(
             executable: configuration.localProcess.executable,
             arguments: configuration.localProcess.arguments,
@@ -162,10 +152,11 @@ public actor CodexAppServer {
     package init(
         transport: any JSONRPC.Transport
     ) async throws {
+        let configuration = Configuration()
         let client = AppServerClient(transport: transport)
         _ = try await client.initialize(
-            clientName: Configuration.default.clientName,
-            clientVersion: Configuration.default.clientVersion
+            clientName: configuration.clientName,
+            clientVersion: configuration.clientVersion
         )
         let router = CodexAppServerNotificationRouter(client: client)
         await router.start()

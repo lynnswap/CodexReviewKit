@@ -10,7 +10,6 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
         package var arguments: [String]
         package var environment: [String: String]
         package var codexHomeURL: URL
-        package var threadStartPermissionStrategy: AppServerAPI.Thread.Start.PermissionStrategy
 
         package init(
             executable: String? = nil,
@@ -23,30 +22,15 @@ package actor AppServerProcessTransport: JSONRPC.Transport {
                 ?? CodexAppServerExecutable.resolveExecutable(
                     environment: environment
                 )
-            let supportsSessionSource: Bool
-            if let arguments {
-                supportsSessionSource = arguments.contains("--session-source")
-            } else {
-                supportsSessionSource = CodexAppServerExecutable.supportsAppServerSessionSource(
-                    executable: resolvedExecutable,
-                    environment: environment
-                )
-            }
             self.executable = resolvedExecutable
             self.arguments =
                 arguments
-                ?? CodexAppServerExecutable.appServerArguments(
-                    supportsSessionSource: supportsSessionSource
-                )
+                ?? CodexAppServerExecutable.appServerArguments()
             self.environment = AppServerCodexHome.environment(
                 environment,
                 codexHomeURL: codexHomeURL
             )
             self.codexHomeURL = codexHomeURL
-            self.threadStartPermissionStrategy =
-                supportsSessionSource
-                ? .modernPermissions
-                : .legacySandbox
         }
     }
 
@@ -883,7 +867,7 @@ package enum CodexAppServerExecutable {
         let executable = resolveExecutable(environment: environment)
         return .init(
             executable: executable,
-            arguments: appServerArguments(for: executable, environment: environment)
+            arguments: appServerArguments()
         )
     }
 
@@ -907,28 +891,13 @@ package enum CodexAppServerExecutable {
         return requestedCommand
     }
 
-    package static func appServerArguments(
-        for executable: String,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [String] {
-        appServerArguments(
-            supportsSessionSource: supportsAppServerSessionSource(
-                executable: executable,
-                environment: environment
-            )
-        )
-    }
-
-    package static func appServerArguments(supportsSessionSource: Bool = false) -> [String] {
-        var arguments = [
+    package static func appServerArguments() -> [String] {
+        [
             "-c", fileBackedAuthConfiguration,
             "app-server",
             "--listen", "stdio://",
+            "--session-source", "app-server",
         ]
-        if supportsSessionSource {
-            arguments.append(contentsOf: ["--session-source", "app-server"])
-        }
-        return arguments
     }
 
     private static func findExecutable(
@@ -952,44 +921,6 @@ package enum CodexAppServerExecutable {
             }
         }
         return nil
-    }
-
-    package static func supportsAppServerSessionSource(
-        executable: String,
-        environment: [String: String]
-    ) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: executable) else {
-            return false
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["app-server", "--help"]
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        let deadline = Date().addingTimeInterval(2)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        guard process.isRunning == false else {
-            process.terminate()
-            return false
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let help = String(decoding: data, as: UTF8.self)
-        // Deprecated compatibility: installed Codex builds can reject this newer app-server flag.
-        // Remove the probe once the packaged Codex app-server consistently accepts --session-source.
-        return help.contains("--session-source")
     }
 
     package static func pathSearchDirectories(environment: [String: String]) -> [String] {

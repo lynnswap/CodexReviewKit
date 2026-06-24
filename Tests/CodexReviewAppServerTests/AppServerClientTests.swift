@@ -140,7 +140,6 @@ struct AppServerClientTests {
             "--session-source", "app-server",
         ])
         #expect(configuration.arguments.contains(#"cli_auth_credentials_store="file""#))
-        #expect(configuration.threadStartPermissionStrategy == .modernPermissions)
         let sessionSourceIndex = try #require(configuration.arguments.firstIndex(of: "--session-source"))
         #expect(configuration.arguments[sessionSourceIndex + 1] == "app-server")
     }
@@ -175,7 +174,7 @@ struct AppServerClientTests {
         #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
     }
 
-    @Test func processTransportConfigurationOmitsUnsupportedSessionSourceFlag() throws {
+    @Test func processTransportConfigurationIncludesSessionSourceWithoutProbing() throws {
         let directory = FileManager.default.temporaryDirectory
             .appending(path: "codex-review-transport-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -183,9 +182,11 @@ struct AppServerClientTests {
             try? FileManager.default.removeItem(at: directory)
         }
         let codex = directory.appending(path: "codex")
+        let probed = directory.appending(path: "probed")
         let script = """
         #!/bin/sh
         if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+          touch "\(probed.path)"
           printf 'Usage: codex app-server --listen <URL>\\n'
         fi
         """
@@ -199,8 +200,8 @@ struct AppServerClientTests {
 
         #expect(configuration.executable == codex.path)
         #expect(configuration.arguments == CodexAppServerExecutable.appServerArguments())
-        #expect(configuration.arguments.contains("--session-source") == false)
-        #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
+        #expect(configuration.arguments.contains("--session-source"))
+        #expect(FileManager.default.fileExists(atPath: probed.path) == false)
     }
 
     @Test func processTransportConfigurationDoesNotProbeWhenArgumentsAreExplicit() throws {
@@ -228,7 +229,6 @@ struct AppServerClientTests {
 
         #expect(configuration.executable == codex.path)
         #expect(configuration.arguments == ["custom", "argument"])
-        #expect(configuration.threadStartPermissionStrategy == .legacySandbox)
         #expect(FileManager.default.fileExists(atPath: probed.path) == false)
     }
 
