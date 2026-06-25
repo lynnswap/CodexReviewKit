@@ -1,33 +1,6 @@
 // swift-tools-version: 6.3
 
-import Foundation
 import PackageDescription
-
-private let packageDirectory = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent()
-private let codexKitDevelopmentPath = "dependencies/CodexKit"
-private let usesLocalCodexKit = ProcessInfo.processInfo.environment["CODEX_REVIEWKIT_USE_LOCAL_CODEXKIT"] == "1"
-private let codexKitDevelopmentManifestPath = packageDirectory
-    .appendingPathComponent(codexKitDevelopmentPath)
-    .appendingPathComponent("Package.swift")
-    .path
-private let codexKitDependency: Package.Dependency = {
-    if usesLocalCodexKit,
-       FileManager.default.fileExists(atPath: codexKitDevelopmentManifestPath) {
-        // Development-only CodexKit integration checkout. Set
-        // CODEX_REVIEWKIT_USE_LOCAL_CODEXKIT=1 to use dependencies/CodexKit while
-        // this branch tracks in-flight APIs. The default stays on the pinned
-        // remote dependency so fresh checkouts and locked resolution remain stable.
-        return .package(path: codexKitDevelopmentPath)
-    }
-
-    // Until CodexKit is released, use the pinned integration revision; replace
-    // this with the final pinned remote CodexKit release dependency before release.
-    return .package(
-        url: "https://github.com/lynnswap/CodexKit.git",
-        revision: "a9c18e92bc3be26093525f6396d82e7050d1acb5"
-    )
-}()
 
 let package = Package(
     name: "CodexReviewKit",
@@ -56,7 +29,12 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        codexKitDependency,
+        // Until CodexKit is released, use the pinned integration revision; replace
+        // this with the final pinned remote CodexKit release dependency before release.
+        .package(
+            url: "https://github.com/lynnswap/CodexKit.git",
+            revision: "a9c18e92bc3be26093525f6396d82e7050d1acb5"
+        ),
     ],
     targets: [
         .target(
