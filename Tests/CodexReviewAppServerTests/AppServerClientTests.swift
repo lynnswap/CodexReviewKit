@@ -292,15 +292,7 @@ struct AppServerClientTests {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
         try await runtime.transport.enqueueEmpty(for: "thread/delete")
-        try await runtime.transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
         try await runtime.transport.enqueueEmpty(for: "thread/delete")
         let backend = AppServerCodexReviewBackend(appServer: runtime.server)
 

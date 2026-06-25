@@ -1321,10 +1321,6 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
-        try await transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
         try await transport.enqueue(EmptyResponse(), for: "thread/delete")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1433,16 +1429,8 @@ struct CodexReviewHostTests {
             AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
             for: "review/start"
         )
-        try await transport.enqueueJSON(
-            #"{"thread":{"id":"review-thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/delete")
-        try await transport.enqueueJSON(
-            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
-            for: "thread/resume"
-        )
         try await transport.enqueue(EmptyResponse(), for: "thread/delete")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],

@@ -319,13 +319,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             }
         }
         for threadID in cleanupThreadIDs {
-            guard let thread = try? await appServer.resumeThread(
-                .init(rawValue: threadID),
-                options: .init(model: run.model)
-            ) else {
-                continue
-            }
-            try? await thread.delete()
+            try? await appServer.deleteThread(.init(rawValue: threadID))
         }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
