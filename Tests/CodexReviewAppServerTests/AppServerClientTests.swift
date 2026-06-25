@@ -305,6 +305,33 @@ struct AppServerClientTests {
         #expect(Set(deletedIDs.compactMap { $0 }) == ["review-thread", "thread-1"])
     }
 
+    @Test func shutdownCleanupDeletesRecoveryWaitingRunsWithoutInterrupt() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueEmpty(for: "thread/delete")
+        try await runtime.transport.enqueueEmpty(for: "thread/delete")
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let run = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovery",
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread",
+            model: "gpt-5"
+        )
+        let request = CodexReviewRuntimeStopReviewCleanupRequest(
+            reason: .init(message: "Review runtime stopped."),
+            recoveryWaitingRuns: [run]
+        )
+
+        await backend.cleanupActiveReviewsForShutdown(request)
+
+        let requests = await runtime.transport.recordedRequests()
+        #expect(requests.map(\.method).contains("turn/interrupt") == false)
+        let deleteRequests = requests.filter { $0.method == "thread/delete" }
+        #expect(deleteRequests.count == 2)
+        let deletedIDs = try deleteRequests.map { try jsonObject(from: $0.params)["threadId"] as? String }
+        #expect(Set(deletedIDs.compactMap { $0 }) == ["review-thread", "thread-1"])
+    }
+
     @Test func interruptReviewCancelsReconstructedRunThroughResumedThread() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueJSON(
