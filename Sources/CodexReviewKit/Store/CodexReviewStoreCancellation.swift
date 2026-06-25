@@ -159,12 +159,9 @@ extension CodexReviewStore {
     private func runtimeStopReviewCleanupRequest(
         reason: ReviewCancellation
     ) -> CodexReviewRuntimeStopReviewCleanupRequest {
-        let recoveryWaitingRuns = reviewRecoveryWaitingJobIDs
-            .sorted()
-            .compactMap { activeRuns[$0] }
         return .init(
             reason: .init(message: reason.message),
-            recoveryWaitingRuns: recoveryWaitingRuns
+            recoveryWaitingRuns: runtimeState.recoveryWaitingRuns()
         )
     }
 
@@ -189,7 +186,7 @@ extension CodexReviewStore {
                 )
             }
             if cancelWorkers {
-                reviewWorkerTasks[jobID]?.cancel()
+                runtimeState.cancelActiveWorker(for: jobID)
             }
         }
         return activeJobIDs
@@ -197,24 +194,18 @@ extension CodexReviewStore {
 
     package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
         for jobID in jobIDs {
-            if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
-                task.cancel()
-                runtimeStopDetachedReviewWorkerTasks[jobID] = task
-            }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
-            startingJobIDs.remove(jobID)
-            startupCancellations.removeValue(forKey: jobID)
+            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(jobID: jobID)
+            runtimeState.clearRuntimeStopState(for: jobID)
         }
     }
 
     package func drainRuntimeStopDetachedReviewWorkers(timeout: Duration) async -> Bool {
-        let tasks = Array(runtimeStopDetachedReviewWorkerTasks.values)
+        let tasks = runtimeState.detachedWorkerTasks()
         return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
     }
 
     package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
-        let tasks = Array(reviewWorkerTasks.values) + Array(runtimeStopDetachedReviewWorkerTasks.values)
+        let tasks = runtimeState.allWorkerTasks()
         return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
     }
 

@@ -18,11 +18,11 @@ extension CodexReviewStore {
         let jobID = try beginReview(sessionID: sessionID, request: request)
         return try await withTaskCancellationHandler {
             _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-            await reviewWorkerTasks[jobID]?.value
+            await runtimeState.awaitActiveWorker(for: jobID)
             return try readReview(sessionID: sessionID, jobID: jobID)
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.reviewWorkerTasks[jobID]?.cancel()
+                self?.runtimeState.cancelActiveWorker(for: jobID)
             }
         }
     }
@@ -78,7 +78,7 @@ extension CodexReviewStore {
         )
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)
-        startingJobIDs.insert(jobID)
+        runtimeState.markStarting(jobID)
         launchReviewWorker(jobID: jobID, sessionID: sessionID, request: validatedRequest)
         return jobID
     }
@@ -88,10 +88,10 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) {
-        reviewWorkerTasks[jobID]?.cancel()
-        reviewWorkerTasks[jobID] = Task { [weak self] in
+        runtimeState.cancelActiveWorker(for: jobID)
+        runtimeState.setActiveWorker(Task { [weak self] in
             await self?.runReviewWorker(jobID: jobID, sessionID: sessionID, request: request)
-        }
+        }, for: jobID)
     }
 
     private func runReviewWorker(
@@ -100,8 +100,8 @@ extension CodexReviewStore {
         request validatedRequest: CodexReviewAPI.Start.Request
     ) async {
         guard let job = job(id: jobID) else {
-            startingJobIDs.remove(jobID)
-            reviewWorkerTasks.removeValue(forKey: jobID)
+            runtimeState.clearStarting(jobID)
+            runtimeState.removeActiveWorker(for: jobID)
             return
         }
         let startRequest = CodexReviewBackendModel.Review.Start(
@@ -114,13 +114,13 @@ extension CodexReviewStore {
         do {
             let backendAttempt = try await backend.startReview(startRequest)
             let backendRun = backendAttempt.run
-            startingJobIDs.remove(jobID)
+            runtimeState.clearStarting(jobID)
             run = backendRun
             if Task.isCancelled {
                 throw CancellationError()
             }
             applyBackendRun(backendRun, to: job)
-            if let startupCancellation = startupCancellations.removeValue(forKey: jobID) {
+            if let startupCancellation = runtimeState.takeStartupCancellation(for: jobID) {
                 try? await backend.interruptReview(
                     backendRun,
                     reason: .init(message: startupCancellation.message)
@@ -146,8 +146,7 @@ extension CodexReviewStore {
 
             if job.isTerminal {
                 await backend.cleanupReview(backendRun)
-                activeRuns.removeValue(forKey: jobID)
-                reviewRecoveryWaitingJobIDs.remove(jobID)
+                runtimeState.clearReviewRunState(for: jobID)
             } else {
                 let currentRun = try await consumeReviewEvents(
                     for: backendAttempt,
@@ -156,13 +155,12 @@ extension CodexReviewStore {
                 )
                 run = currentRun
                 await backend.cleanupReview(currentRun)
-                activeRuns.removeValue(forKey: jobID)
-                reviewRecoveryWaitingJobIDs.remove(jobID)
+                runtimeState.clearReviewRunState(for: jobID)
             }
         } catch let error where error is CancellationError || Task.isCancelled {
-            startingJobIDs.remove(jobID)
-            let startupCancellation = startupCancellations.removeValue(forKey: jobID)
-            if let cleanupRun = activeRuns[jobID] ?? run {
+            runtimeState.clearStarting(jobID)
+            let startupCancellation = runtimeState.takeStartupCancellation(for: jobID)
+            if let cleanupRun = runtimeState.activeRun(for: jobID) ?? run {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
                 await backend.cleanupReview(cleanupRun)
             } else if job.isTerminal == false || startupCancellation != nil {
@@ -172,16 +170,14 @@ extension CodexReviewStore {
                     cancellation: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
                 )
             }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
+            runtimeState.clearReviewRunState(for: jobID)
         } catch {
-            startingJobIDs.remove(jobID)
-            let startupCancellation = startupCancellations.removeValue(forKey: jobID)
-            if let cleanupRun = activeRuns[jobID] ?? run {
+            runtimeState.clearStarting(jobID)
+            let startupCancellation = runtimeState.takeStartupCancellation(for: jobID)
+            if let cleanupRun = runtimeState.activeRun(for: jobID) ?? run {
                 await backend.cleanupReview(cleanupRun)
             }
-            activeRuns.removeValue(forKey: jobID)
-            reviewRecoveryWaitingJobIDs.remove(jobID)
+            runtimeState.clearReviewRunState(for: jobID)
             if job.isTerminal == false, let startupCancellation {
                 try? completeCancellationLocally(
                     jobID: job.id,
@@ -192,8 +188,8 @@ extension CodexReviewStore {
                 markReviewFailed(job, message: error.localizedDescription)
             }
         }
-        reviewWorkerTasks.removeValue(forKey: jobID)
-        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
+        runtimeState.removeActiveWorker(for: jobID)
+        runtimeState.removeDetachedWorker(for: jobID)
     }
 
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: CodexReviewJob) async {
@@ -225,7 +221,7 @@ extension CodexReviewStore {
     }
 
     private func applyBackendRun(_ backendRun: CodexReviewBackendModel.Review.Run, to job: CodexReviewJob) {
-        activeRuns[job.id] = backendRun
+        runtimeState.setActiveRun(backendRun, for: job.id)
         job.core.run = .init(
             reviewThreadID: backendRun.reviewThreadID,
             threadID: backendRun.threadID,
@@ -409,17 +405,17 @@ extension CodexReviewStore {
             return .init(jobID: job.id, cancelled: true, core: job.core)
         }
 
-        if reviewRecoveryWaitingJobIDs.contains(jobID) {
+        if runtimeState.isWaitingForNetworkRecovery(jobID) {
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
-            reviewWorkerTasks[jobID]?.cancel()
+            runtimeState.cancelActiveWorker(for: jobID)
             return .init(jobID: job.id, cancelled: true, core: job.core)
         }
 
-        if let run = activeRuns[jobID] {
+        if let run = runtimeState.activeRun(for: jobID) {
             do {
                 try await backend.interruptReview(
                     run,
@@ -430,7 +426,7 @@ extension CodexReviewStore {
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
-                reviewWorkerTasks[jobID]?.cancel()
+                runtimeState.cancelActiveWorker(for: jobID)
             } catch {
                 try recordCancellationFailure(
                     jobID: job.id,
@@ -450,7 +446,7 @@ extension CodexReviewStore {
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
-                reviewWorkerTasks[jobID]?.cancel()
+                runtimeState.cancelActiveWorker(for: jobID)
             } catch {
                 try recordCancellationFailure(
                     jobID: job.id,
@@ -459,8 +455,8 @@ extension CodexReviewStore {
                 )
                 throw error
             }
-        } else if startingJobIDs.contains(jobID) {
-            startupCancellations[jobID] = cancellation
+        } else if runtimeState.isStarting(jobID) {
+            runtimeState.setStartupCancellation(cancellation, for: jobID)
             try completeCancellationLocally(
                 jobID: job.id,
                 sessionID: job.sessionID,
@@ -666,13 +662,13 @@ extension CodexReviewStore {
                     recoveryState.markWaitingForNetworkRecovery()
                     continue
                 case .finished:
-                    reviewRecoveryWaitingJobIDs.remove(job.id)
+                    runtimeState.clearWaitingForNetworkRecovery(job.id)
                     return recoveryState.currentRun
                 case .recovered(let recoveredAttempt):
                     let recoveredRun = recoveredAttempt.run
                     applyBackendRun(recoveredRun, to: job)
                     recoveryState.markRecovered(with: recoveredRun)
-                    reviewRecoveryWaitingJobIDs.remove(job.id)
+                    runtimeState.clearWaitingForNetworkRecovery(job.id)
                     activeEventSubscriptionID = await inputs.subscribe(to: recoveredAttempt)
                 }
             case .networkOutageConfirmed:
@@ -685,7 +681,7 @@ extension CodexReviewStore {
                 }
                 recoveryState.markWaitingForNetworkRecovery()
                 markReviewWaitingForNetworkRecovery(job)
-                reviewRecoveryWaitingJobIDs.insert(job.id)
+                runtimeState.markWaitingForNetworkRecovery(job.id)
                 activeEventSubscriptionID = nil
                 await inputs.cancelActiveEventSubscription()
                 let restartToken = try await backend.prepareReviewRestart(recoveryState.currentRun)
@@ -855,7 +851,7 @@ extension CodexReviewStore {
             updatedRun.turnID = turnID
             updatedRun.reviewThreadID = reviewThreadID ?? updatedRun.reviewThreadID
             updatedRun.model = model ?? updatedRun.model
-            activeRuns[job.id] = updatedRun
+            runtimeState.setActiveRun(updatedRun, for: job.id)
             job.core.output.summary = "Review started."
             job.timeline.apply(.runStarted(
                 turnID: .init(rawValue: turnID),

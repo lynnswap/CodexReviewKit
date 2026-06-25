@@ -538,14 +538,15 @@ package final class StoreSnapshotProbe {
                 return lhs.sortOrder > rhs.sortOrder
             }
             .map { job in
-                StoreJobSnapshot(
+                let runtimeState = store.runtimeJobState(jobID: job.id)
+                return StoreJobSnapshot(
                     jobID: job.id,
                     status: job.core.lifecycle.status,
                     summary: job.core.output.summary,
                     lastAgentMessage: job.core.output.lastAgentMessage,
                     logs: job.logEntries,
                     run: job.core.run,
-                    activeRun: store.activeRuns[job.id],
+                    activeRun: runtimeState.activeRun,
                     cancellationRequested: job.cancellationRequested
                 )
             }

@@ -3202,7 +3202,8 @@ struct CodexReviewStoreCommandTests {
 
             let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
             let cleanedUp = await waitUntil {
-                store.reviewWorkerTasks["job-1"] == nil && store.activeRuns["job-1"] == nil
+                let runtimeState = store.runtimeJobState(jobID: "job-1")
+                return runtimeState.hasActiveWorker == false && runtimeState.activeRun == nil
             }
             let read = try store.readReview(jobID: "job-1")
 
@@ -3241,13 +3242,15 @@ struct CodexReviewStoreCommandTests {
 
             #expect(locallyCancelledJobIDs == ["job-1"])
             #expect(cancelled.core.lifecycle.status == .cancelled)
-            #expect(store.reviewWorkerTasks["job-1"] != nil)
-            #expect(store.activeRuns["job-1"] == run)
+            let runtimeStateBeforeDetach = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeStateBeforeDetach.hasActiveWorker)
+            #expect(runtimeStateBeforeDetach.activeRun == run)
 
             store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
 
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(store.activeRuns["job-1"] == nil)
+            let runtimeStateAfterDetach = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeStateAfterDetach.hasActiveWorker == false)
+            #expect(runtimeStateAfterDetach.activeRun == nil)
         }
     }
 
@@ -3288,8 +3291,9 @@ struct CodexReviewStoreCommandTests {
             let commands = await backend.recordedCommands()
             #expect(commands.contains(.interruptReview(run, .init(message: "Review runtime stopped."))))
             #expect(stopped.core.lifecycle.status == .cancelled)
-            #expect(store.activeRuns["job-1"] == nil)
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            let runtimeState = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeState.activeRun == nil)
+            #expect(runtimeState.hasActiveWorker == false)
         }
     }
 
@@ -3325,9 +3329,10 @@ struct CodexReviewStoreCommandTests {
             )
             store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
 
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(store.activeRuns["job-1"] == nil)
-            #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
+            let runtimeState = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeState.hasActiveWorker == false)
+            #expect(runtimeState.activeRun == nil)
+            #expect(runtimeState.isWaitingForNetworkRecovery == false)
         }
     }
 
@@ -3372,9 +3377,10 @@ struct CodexReviewStoreCommandTests {
             #expect(request.reason.message == "Review runtime stopped.")
             #expect(request.recoveryWaitingRuns == [run])
             #expect(read.core.lifecycle.status == .cancelled)
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(store.activeRuns["job-1"] == nil)
-            #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
+            let runtimeState = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeState.hasActiveWorker == false)
+            #expect(runtimeState.activeRun == nil)
+            #expect(runtimeState.isWaitingForNetworkRecovery == false)
         }
     }
 
@@ -3405,7 +3411,7 @@ struct CodexReviewStoreCommandTests {
             store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
 
             #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
-            #expect(store.runtimeStopDetachedReviewWorkerTasks["job-1"] == nil)
+            #expect(store.runtimeJobState(jobID: "job-1").hasDetachedWorker == false)
             #expect(await backend.recordedCommands().contains(.cleanupReview(run)))
         }
     }
@@ -3438,8 +3444,9 @@ struct CodexReviewStoreCommandTests {
 
             #expect(locallyCancelledJobIDs == ["job-1"])
             #expect(result.core.lifecycle.status == .cancelled)
-            #expect(store.reviewWorkerTasks["job-1"] == nil)
-            #expect(store.activeRuns["job-1"] == nil)
+            let runtimeState = store.runtimeJobState(jobID: "job-1")
+            #expect(runtimeState.hasActiveWorker == false)
+            #expect(runtimeState.activeRun == nil)
         }
     }
 
