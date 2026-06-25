@@ -99,49 +99,25 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        let thread = try await startReviewThread(appServer: appServer, request: request)
-
-        let attemptID = makeAppServerReviewAttemptID()
-        let provisionalRun = CodexReviewBackendModel.Review.Run(
-            attemptID: attemptID,
-            threadID: thread.id.rawValue,
-            reviewThreadID: thread.id.rawValue,
-            model: thread.model ?? request.model
+        let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
+        let review = try await appServer.startReview(
+            in: workspace,
+            target: request.request.target.appServerReviewTarget,
+            options: reviewThreadOptions(request)
         )
-        let session = AppServerReviewEventSession(run: provisionalRun)
-        registerReviewEventSession(session, for: provisionalRun)
-
-        let review: CodexReviewSession
-        do {
-            review = try await thread.startReview(target: request.request.target.appServerReviewTarget)
-        } catch {
-            await cleanupReview(provisionalRun)
-            throw error
-        }
-
+        let attemptID = makeAppServerReviewAttemptID()
         let run = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
-            threadID: thread.id.rawValue,
+            threadID: review.threadID.rawValue,
             turnID: review.turnID.rawValue,
             reviewThreadID: review.reviewThreadID.rawValue,
-            model: thread.model ?? request.model
+            model: review.model ?? request.model
         )
-        await session.updateRun(run)
+        let session = AppServerReviewEventSession(run: run)
         registerReviewEventSession(session, for: run)
         await session.startConsuming(review)
 
         return await session.attempt()
-    }
-
-    private func startReviewThread(
-        appServer: CodexAppServer,
-        request: CodexReviewBackendModel.Review.Start
-    ) async throws -> CodexThread {
-        let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
-        return try await appServer.startThread(
-            in: workspace,
-            options: reviewThreadOptions(request)
-        )
     }
 
     private func reviewThreadOptions(
