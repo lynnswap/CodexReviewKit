@@ -133,7 +133,7 @@ public final class CodexReviewStore {
 
     public func stop() async {
         let locallyCancelledJobIDs: [String]
-        if backend.handlesActiveReviewStopCleanup {
+        if backend.invokesRuntimeStopReviewCleanupDuringStop {
             locallyCancelledJobIDs = []
         } else {
             locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()

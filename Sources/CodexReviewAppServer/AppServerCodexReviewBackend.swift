@@ -326,33 +326,25 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         retainedCleanupIdentitiesBySourceThreadID.removeValue(forKey: run.threadID)
     }
 
-    package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
+    package func cleanupActiveReviewsForShutdown(_ request: CodexReviewRuntimeStopReviewCleanupRequest) async {
         let runs = await activeReviewRunsForShutdown()
-        guard runs.isEmpty == false else {
-            return
-        }
+        var cleanedAttemptIDs: Set<String> = []
         for run in runs {
             if Task.isCancelled {
                 return
             }
-            try? await interruptReview(run, reason: reason)
+            try? await interruptReview(run, reason: request.reason)
             if Task.isCancelled {
                 return
             }
             await cleanupReview(run)
+            cleanedAttemptIDs.insert(run.attemptID)
         }
-    }
-
-    package func interruptActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
-        let runs = await activeReviewRunsForShutdown()
-        guard runs.isEmpty == false else {
-            return
-        }
-        for run in runs {
+        for run in request.recoveryWaitingRuns where cleanedAttemptIDs.insert(run.attemptID).inserted {
             if Task.isCancelled {
                 return
             }
-            try? await interruptReview(run, reason: reason)
+            await cleanupReview(run)
         }
     }
 

@@ -133,6 +133,41 @@ extension CodexReviewStore {
         return activeJobIDs
     }
 
+    package func cleanupActiveReviewsForRuntimeStop(
+        reason: ReviewCancellation = .system(message: "Review runtime stopped."),
+        workerDrainTimeout: Duration,
+        cleanupBackendReviews: @escaping @Sendable (
+            CodexReviewRuntimeStopReviewCleanupRequest
+        ) async -> Bool
+    ) async -> CodexReviewRuntimeStopReviewCleanupResult {
+        let request = runtimeStopReviewCleanupRequest(reason: reason)
+        let didCompleteBackendCleanup = await cleanupBackendReviews(request)
+        let locallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
+            reason: reason,
+            cancelWorkers: false
+        )
+        cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        let didDrainReviewWorkers = await drainReviewWorkersForRuntimeStop(
+            timeout: workerDrainTimeout
+        )
+        return .init(
+            didCompleteBackendCleanup: didCompleteBackendCleanup,
+            didDrainReviewWorkers: didDrainReviewWorkers
+        )
+    }
+
+    private func runtimeStopReviewCleanupRequest(
+        reason: ReviewCancellation
+    ) -> CodexReviewRuntimeStopReviewCleanupRequest {
+        let recoveryWaitingRuns = reviewRecoveryWaitingJobIDs
+            .sorted()
+            .compactMap { activeRuns[$0] }
+        return .init(
+            reason: .init(message: reason.message),
+            recoveryWaitingRuns: recoveryWaitingRuns
+        )
+    }
+
     @discardableResult
     package func cancelActiveReviewsLocallyForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),

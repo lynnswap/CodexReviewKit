@@ -3331,6 +3331,53 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func runtimeStopCleanupHandsRecoveryWaitingRunsToBackendCleanup() async throws {
+        let run = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: run)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        let recorder = RuntimeStopCleanupRequestRecorder()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let running = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
+                waitTimeout: .milliseconds(20)
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
+            _ = try await running
+
+            let result = await store.cleanupActiveReviewsForRuntimeStop(
+                reason: .system(message: "Review runtime stopped."),
+                workerDrainTimeout: .seconds(2)
+            ) { request in
+                await recorder.record(request)
+                return true
+            }
+            let request = try #require(await recorder.onlyRequest())
+            let read = try store.readReview(jobID: "job-1")
+
+            #expect(result.didComplete)
+            #expect(request.reason.message == "Review runtime stopped.")
+            #expect(request.recoveryWaitingRuns == [run])
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(store.reviewWorkerTasks["job-1"] == nil)
+            #expect(store.activeRuns["job-1"] == nil)
+            #expect(store.reviewRecoveryWaitingJobIDs.contains("job-1") == false)
+        }
+    }
+
     @Test func runtimeStopCanDrainDetachedWorkerCleanup() async throws {
         let run = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -4200,6 +4247,18 @@ private func cleanupStoreCommandTest(
 }
 
 private struct StreamClosedError: Error {}
+
+private actor RuntimeStopCleanupRequestRecorder {
+    private var requests: [CodexReviewRuntimeStopReviewCleanupRequest] = []
+
+    func record(_ request: CodexReviewRuntimeStopReviewCleanupRequest) {
+        requests.append(request)
+    }
+
+    func onlyRequest() -> CodexReviewRuntimeStopReviewCleanupRequest? {
+        requests.count == 1 ? requests[0] : nil
+    }
+}
 
 private actor ControlledTestSleeper {
     private let gate: AsyncGate

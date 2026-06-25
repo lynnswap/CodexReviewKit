@@ -27,7 +27,7 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
-    var handlesActiveReviewStopCleanup: Bool { get }
+    var invokesRuntimeStopReviewCleanupDuringStop: Bool { get }
 
     func attachStore(_ store: CodexReviewStore)
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
@@ -54,8 +54,38 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async
 }
 
+package struct CodexReviewRuntimeStopReviewCleanupRequest: Sendable {
+    package var reason: CodexReviewBackendModel.CancellationReason
+    package var recoveryWaitingRuns: [CodexReviewBackendModel.Review.Run]
+
+    package init(
+        reason: CodexReviewBackendModel.CancellationReason,
+        recoveryWaitingRuns: [CodexReviewBackendModel.Review.Run]
+    ) {
+        self.reason = reason
+        self.recoveryWaitingRuns = recoveryWaitingRuns
+    }
+}
+
+package struct CodexReviewRuntimeStopReviewCleanupResult: Sendable {
+    package var didCompleteBackendCleanup: Bool
+    package var didDrainReviewWorkers: Bool
+
+    package var didComplete: Bool {
+        didCompleteBackendCleanup && didDrainReviewWorkers
+    }
+
+    package init(
+        didCompleteBackendCleanup: Bool,
+        didDrainReviewWorkers: Bool
+    ) {
+        self.didCompleteBackendCleanup = didCompleteBackendCleanup
+        self.didDrainReviewWorkers = didDrainReviewWorkers
+    }
+}
+
 extension CodexReviewStoreBackend {
-    package var handlesActiveReviewStopCleanup: Bool {
+    package var invokesRuntimeStopReviewCleanupDuringStop: Bool {
         false
     }
 }

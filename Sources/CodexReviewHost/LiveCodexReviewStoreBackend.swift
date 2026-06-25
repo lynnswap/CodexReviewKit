@@ -280,7 +280,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         appServer != nil
     }
 
-    var handlesActiveReviewStopCleanup: Bool {
+    var invokesRuntimeStopReviewCleanupDuringStop: Bool {
         true
     }
 
@@ -491,30 +491,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return message
     }
 
-    private func cancelActiveReviewsForRuntimeTeardown(
+    private func cleanupActiveReviewsForRuntimeTeardown(
         store: CodexReviewStore,
         appServerBackend: AppServerCodexReviewBackend,
         reason: ReviewCancellation,
         timeoutWarning: String
     ) async {
-        let recoveryRunsForCleanup = store.reviewRecoveryWaitingJobIDs
-            .sorted()
-            .compactMap { store.activeRuns[$0] }
-        let didCleanup = await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
-            await appServerBackend.cleanupActiveReviewsForShutdown(reason: .init(message: reason.message))
-            for run in recoveryRunsForCleanup {
-                await appServerBackend.cleanupReview(run)
+        let shutdownCleanupTimeout = shutdownCleanupTimeout
+        let cleanupResult = await store.cleanupActiveReviewsForRuntimeStop(
+            reason: reason,
+            workerDrainTimeout: shutdownCleanupTimeout
+        ) { request in
+            await runRuntimeShutdownCleanup(timeout: shutdownCleanupTimeout) {
+                await appServerBackend.cleanupActiveReviewsForShutdown(request)
             }
         }
-        let locallyCancelledJobIDs = store.cancelActiveReviewsLocallyForRuntimeStop(
-            reason: reason,
-            cancelWorkers: false
-        )
-        store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
-        let didDrainReviewWorkers = await store.drainReviewWorkersForRuntimeStop(
-            timeout: shutdownCleanupTimeout
-        )
-        if didCleanup == false || didDrainReviewWorkers == false {
+        if cleanupResult.didComplete == false {
             logger.warning("\(timeoutWarning, privacy: .public)")
         }
     }
@@ -531,7 +523,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         logger.info("Stopping review runtime")
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: "Review runtime stopped.")
-            await cancelActiveReviewsForRuntimeTeardown(
+            await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
                 reason: reason,
@@ -1227,7 +1219,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
         if let appServerBackend {
             let reason = ReviewCancellation.system(message: message)
-            await cancelActiveReviewsForRuntimeTeardown(
+            await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
                 reason: reason,
