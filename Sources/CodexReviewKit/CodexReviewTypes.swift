@@ -287,16 +287,16 @@ struct Run: Codable, Equatable, Sendable {
 
 
 package extension CodexReviewBackendModel.Review {
-struct RecoveryToken: Equatable, Sendable {
+struct RestartToken: Equatable, Sendable {
+    package var id: String
     package var interruptedRun: CodexReviewBackendModel.Review.Run
-    package var rollbackThreadID: String
 
     package init(
-        interruptedRun: CodexReviewBackendModel.Review.Run,
-        rollbackThreadID: String
+        id: String,
+        interruptedRun: CodexReviewBackendModel.Review.Run
     ) {
+        self.id = id
         self.interruptedRun = interruptedRun
-        self.rollbackThreadID = rollbackThreadID
     }
 }
 }

@@ -660,7 +660,7 @@ extension CodexReviewStore {
                     job: job,
                     startRequest: startRequest,
                     inputs: inputs,
-                    recoveryToken: recoveryState.recoveryToken
+                    preparedRestartToken: recoveryState.preparedRestartToken
                 ) {
                 case .continueWaiting:
                     recoveryState.markWaitingForNetworkRecovery()
@@ -688,11 +688,8 @@ extension CodexReviewStore {
                 reviewRecoveryWaitingJobIDs.insert(job.id)
                 activeEventSubscriptionID = nil
                 await inputs.cancelActiveEventSubscription()
-                let recoveryToken = try await backend.beginReviewRecovery(
-                    recoveryState.currentRun,
-                    reason: recoveryState.recoveryReason
-                )
-                recoveryState.markRecoveryToken(recoveryToken)
+                let restartToken = try await backend.prepareReviewRestart(recoveryState.currentRun)
+                recoveryState.markPreparedRestartToken(restartToken)
             }
         }
 
@@ -750,7 +747,7 @@ extension CodexReviewStore {
         job: CodexReviewJob,
         startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
-        recoveryToken: CodexReviewBackendModel.Review.RecoveryToken?
+        preparedRestartToken: CodexReviewBackendModel.Review.RestartToken?
     ) async throws -> NetworkRestoreRestartResult {
         if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
             return .finished
@@ -764,11 +761,11 @@ extension CodexReviewStore {
         guard await inputs.networkStatusTracker.currentStatus() == .satisfied else {
             return .continueWaiting
         }
-        guard let recoveryToken else {
+        guard let preparedRestartToken else {
             return .continueWaiting
         }
-        let recoveredAttempt = try await backend.resumeReviewRecovery(
-            recoveryToken,
+        let recoveredAttempt = try await backend.restartPreparedReview(
+            preparedRestartToken,
             request: startRequest
         )
         let recoveredRun = recoveredAttempt.run
@@ -1184,12 +1181,10 @@ private enum ReviewNetworkSnapshotEffect {
 private struct ReviewNetworkRecoveryLoopState {
     var currentRun: CodexReviewBackendModel.Review.Run
     private(set) var isWaitingForNetworkRecovery = false
-    private(set) var recoveryToken: CodexReviewBackendModel.Review.RecoveryToken?
+    private(set) var preparedRestartToken: CodexReviewBackendModel.Review.RestartToken?
     private var isSettlingForNetworkRecovery = false
     private var recoverySettleGeneration: Int?
     private var pendingOutageStreamFailure: ReviewWorkerEventStreamFailure?
-    let recoveryReason = CodexReviewBackendModel.CancellationReason(message: networkRecoveryUnavailableMessage)
-
     init(currentRun: CodexReviewBackendModel.Review.Run) {
         self.currentRun = currentRun
     }
@@ -1201,14 +1196,14 @@ private struct ReviewNetworkRecoveryLoopState {
         pendingOutageStreamFailure = nil
     }
 
-    mutating func markRecoveryToken(_ token: CodexReviewBackendModel.Review.RecoveryToken) {
-        recoveryToken = token
+    mutating func markPreparedRestartToken(_ token: CodexReviewBackendModel.Review.RestartToken) {
+        preparedRestartToken = token
     }
 
     mutating func markRecovered(with run: CodexReviewBackendModel.Review.Run) {
         currentRun = run
         isWaitingForNetworkRecovery = false
-        recoveryToken = nil
+        preparedRestartToken = nil
         isSettlingForNetworkRecovery = false
         recoverySettleGeneration = nil
         pendingOutageStreamFailure = nil
@@ -1240,7 +1235,7 @@ private struct ReviewNetworkRecoveryLoopState {
         isWaitingForNetworkRecovery
             && isSettlingForNetworkRecovery
             && recoverySettleGeneration == recoveryGeneration
-            && recoveryToken != nil
+            && preparedRestartToken != nil
     }
 
     func shouldConsumeEvent(from run: CodexReviewBackendModel.Review.Run) -> Bool {

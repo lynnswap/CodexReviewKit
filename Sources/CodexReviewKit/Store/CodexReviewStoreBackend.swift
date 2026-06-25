@@ -46,12 +46,9 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
 
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
     func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken
+    func restartPreparedReview(
+        _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async

@@ -230,18 +230,15 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.interruptReview(run, reason: reason)
     }
 
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await backend.beginReviewRecovery(run, reason: reason)
+    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken {
+        try await backend.prepareReviewRestart(run)
     }
 
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+    func restartPreparedReview(
+        _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        try await backend.resumeReviewRecovery(token, request: request)
+        try await backend.restartPreparedReview(token, request: request)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {

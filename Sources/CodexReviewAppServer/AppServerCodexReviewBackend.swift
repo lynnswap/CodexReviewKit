@@ -12,6 +12,11 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+private struct AppServerReviewRestartContext: Sendable {
+    var interruptedRun: CodexReviewBackendModel.Review.Run
+    var rollbackThreadID: String
+}
+
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
@@ -23,6 +28,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
     private var reviewThreadIDsForCleanupByThreadID: [String: Set<String>] = [:]
     private var threadsByThreadID: [String: CodexThread] = [:]
+    private var restartContextsByTokenID: [String: AppServerReviewRestartContext] = [:]
     private var abandonedReviewAttemptIDs: Set<String> = []
     private var abandonedTurnIDs: Set<String> = []
     private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
@@ -185,10 +191,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
     }
 
-    package func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason _: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
+    package func prepareReviewRestart(
+        _ run: CodexReviewBackendModel.Review.Run
+    ) async throws -> CodexReviewBackendModel.Review.RestartToken {
         markTurnAbandoned(run.turnID)
         let cancellation = try await sendTurnCancellation(for: run) { retryCancellation in
             await self.markCancellationTurnAbandoned(retryCancellation, canonicalThreadID: run.threadID)
@@ -201,18 +206,27 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
-        return CodexReviewBackendModel.Review.RecoveryToken(
+        discardRestartContexts(for: run)
+        let tokenID = UUID().uuidString
+        restartContextsByTokenID[tokenID] = AppServerReviewRestartContext(
             interruptedRun: run,
             rollbackThreadID: cancellation.threadID
         )
+        return CodexReviewBackendModel.Review.RestartToken(
+            id: tokenID,
+            interruptedRun: run
+        )
     }
 
-    package func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+    package func restartPreparedReview(
+        _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        let interruptedRun = token.interruptedRun
-        let rollbackThread = try await threadHandle(id: token.rollbackThreadID, model: interruptedRun.model)
+        guard let restartContext = restartContextsByTokenID.removeValue(forKey: token.id) else {
+            throw CodexReviewAPI.Error.io("Prepared review restart is no longer available.")
+        }
+        let interruptedRun = restartContext.interruptedRun
+        let rollbackThread = try await threadHandle(id: restartContext.rollbackThreadID, model: interruptedRun.model)
         try await rollbackThread.rollback(turnCount: 1)
 
         let control = reviewControl(for: interruptedRun)
@@ -252,6 +266,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
+        discardRestartContexts(for: run)
         controlsByThreadID.removeValue(forKey: run.threadID)
         var cleanupThreadIDs = cleanupThreadIDs(for: run)
         if let session = unregisterReviewEventSession(for: run) {
@@ -448,6 +463,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ) {
         markTurnAbandoned(cancellation.turnID)
         noteReviewThreadIDForCleanup(cancellation.threadID, canonicalThreadID: canonicalThreadID)
+    }
+
+    private func discardRestartContexts(for run: CodexReviewBackendModel.Review.Run) {
+        restartContextsByTokenID = restartContextsByTokenID.filter { _, context in
+            context.interruptedRun.attemptID != run.attemptID
+        }
     }
 
     private func markTurnAbandoned(_ turnID: String?) {

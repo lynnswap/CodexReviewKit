@@ -369,7 +369,7 @@ struct AppServerClientTests {
         #expect(interruptParams["turnId"] as? String == "turn-1")
     }
 
-    @Test func beginReviewRecoveryCancelsLiveSessionThroughReviewThreadWhenHookIsNeeded() async throws {
+    @Test func preparedReviewRestartCancelsRollsBackAndRestartsOnSameThread() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "review-thread")
@@ -386,13 +386,16 @@ struct AppServerClientTests {
             for: "turn/interrupt"
         )
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        try await runtime.transport.enqueueEmpty(for: "thread/rollback")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "review-thread")
 
-        let token = try await backend.beginReviewRecovery(
-            attempt.run,
-            reason: .init(message: "Recover after network outage")
-        )
+        let token = try await backend.prepareReviewRestart(attempt.run)
+        let restartedAttempt = try await backend.restartPreparedReview(token, request: makeReviewStart())
 
-        #expect(token.rollbackThreadID == "review-thread")
+        #expect(token.interruptedRun == attempt.run)
+        #expect(restartedAttempt.run.threadID == "thread-1")
+        #expect(restartedAttempt.run.turnID == "turn-restarted")
+        #expect(restartedAttempt.run.reviewThreadID == "review-thread")
         let requests = await runtime.transport.recordedRequests()
         #expect(requests.map(\.method) == [
             "initialize",
@@ -401,6 +404,8 @@ struct AppServerClientTests {
             "thread/resume",
             "turn/interrupt",
             "turn/interrupt",
+            "thread/rollback",
+            "review/start",
         ])
         let resume = try #require(requests.first { $0.method == "thread/resume" })
         let resumeParams = try jsonObject(from: resume.params)
@@ -409,6 +414,14 @@ struct AppServerClientTests {
             try jsonObject(from: $0.params)["turnId"] as? String
         }
         #expect(interruptTurnIDs == ["turn-old", "turn-new"])
+        let rollback = try #require(requests.first { $0.method == "thread/rollback" })
+        let rollbackParams = try jsonObject(from: rollback.params)
+        #expect(rollbackParams["threadId"] as? String == "review-thread")
+        #expect(rollbackParams["numTurns"] as? Int == 1)
+        let reviewStarts = requests.filter { $0.method == "review/start" }
+        let restart = try #require(reviewStarts.last)
+        let restartParams = try jsonObject(from: restart.params)
+        #expect(restartParams["threadId"] as? String == "thread-1")
     }
 }
 
