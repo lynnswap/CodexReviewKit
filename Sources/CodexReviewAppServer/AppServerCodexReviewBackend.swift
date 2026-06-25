@@ -63,7 +63,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var retainedCleanupIdentitiesBySourceThreadID: [String: [CodexReviewIdentity]] = [:]
     private var restartContextsByTokenID: [String: AppServerReviewRestartContext] = [:]
     private var abandonedReviewAttemptIDs: Set<String> = []
-    private var abandonedTurnIDs: Set<String> = []
     private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
 
     package init(appServer: CodexAppServer) {
@@ -222,9 +221,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     package func prepareReviewRestart(
         _ run: CodexReviewBackendModel.Review.Run
     ) async throws -> CodexReviewBackendModel.Review.RestartToken {
-        markTurnAbandoned(run.turnID)
         let cancellation = try await cancelReviewTurn(for: run) { retryCancellation in
-            await self.markCancellationTurnAbandoned(retryCancellation, canonicalThreadID: run.threadID)
+            await self.rememberCancellationCleanupIdentity(retryCancellation, canonicalThreadID: run.threadID)
         }
         markAttemptAbandoned(run, cancellation: cancellation)
         if let session = unregisterReviewEventSession(for: run) {
@@ -459,17 +457,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         cancellation: AppServerReviewCancellation
     ) {
         abandonedReviewAttemptIDs.insert(run.attemptID)
-        markTurnAbandoned(run.turnID)
-        markTurnAbandoned(cancellation.turnID)
         rememberCleanupIdentity(for: run)
         rememberCleanupIdentity(cancellation.cleanupIdentity(sourceRun: run))
     }
 
-    private func markCancellationTurnAbandoned(
+    private func rememberCancellationCleanupIdentity(
         _ cancellation: AppServerReviewCancellation,
         canonicalThreadID: String
     ) {
-        markTurnAbandoned(cancellation.turnID)
         let sourceRun = CodexReviewBackendModel.Review.Run(
             threadID: canonicalThreadID,
             turnID: cancellation.turnID,
@@ -482,13 +477,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         restartContextsByTokenID = restartContextsByTokenID.filter { _, context in
             context.interruptedRun.attemptID != run.attemptID
         }
-    }
-
-    private func markTurnAbandoned(_ turnID: String?) {
-        guard let turnID = turnID?.nilIfEmpty else {
-            return
-        }
-        abandonedTurnIDs.insert(turnID)
     }
 
     private func activeReviewRunsForShutdown() async -> [CodexReviewBackendModel.Review.Run] {
