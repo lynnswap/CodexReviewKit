@@ -409,6 +409,10 @@ struct AppServerClientTests {
             for: "turn/interrupt"
         )
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"review-thread"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
         try await runtime.transport.enqueueEmpty(for: "thread/rollback")
         try await runtime.transport.enqueueJSON(
             #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
@@ -416,7 +420,23 @@ struct AppServerClientTests {
         )
         try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "review-thread")
 
-        let token = try await backend.prepareReviewRestart(attempt.run)
+        let prepareTask = Task {
+            try await backend.prepareReviewRestart(attempt.run)
+        }
+        defer {
+            prepareTask.cancel()
+        }
+        await runtime.transport.waitForRequest(method: "turn/interrupt", count: 2)
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-new", status: "interrupted")
+            )
+        )
+        let token = try await withTimeout {
+            try await prepareTask.value
+        }
         let restartedAttempt = try await backend.restartPreparedReview(token, request: makeReviewStart())
 
         #expect(token.interruptedRun == attempt.run)
@@ -428,6 +448,7 @@ struct AppServerClientTests {
             "initialize",
             "thread/start",
             "review/start",
+            "thread/resume",
             "turn/interrupt",
             "turn/interrupt",
             "thread/resume",
@@ -438,7 +459,11 @@ struct AppServerClientTests {
         let resumeThreadIDs = try requests.filter { $0.method == "thread/resume" }.map {
             try jsonObject(from: $0.params)["threadId"] as? String
         }
-        #expect(resumeThreadIDs == ["review-thread", "thread-1"])
+        #expect(resumeThreadIDs == ["review-thread", "review-thread", "thread-1"])
+        let resumeModels = try requests.filter { $0.method == "thread/resume" }.map {
+            try jsonObject(from: $0.params)["model"] as? String
+        }
+        #expect(resumeModels == ["gpt-5", "gpt-5", "gpt-5"])
         let interruptTurnIDs = try requests.filter { $0.method == "turn/interrupt" }.map {
             try jsonObject(from: $0.params)["turnId"] as? String
         }
@@ -456,6 +481,24 @@ struct AppServerClientTests {
 
 private enum AppServerClientTestTimeout: Error {
     case timedOut
+}
+
+private func withTimeout<T: Sendable>(
+    timeout: Duration = .seconds(1),
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw AppServerClientTestTimeout.timedOut
+        }
+        let result = try #require(await group.next())
+        group.cancelAll()
+        return result
+    }
 }
 
 private func nextEvent(

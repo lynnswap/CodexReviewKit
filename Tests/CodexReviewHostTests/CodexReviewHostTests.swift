@@ -1429,6 +1429,7 @@ struct CodexReviewHostTests {
             AppServerAPI.Review.Start.Response(turnID: "turn-1", reviewThreadID: "review-thread-1"),
             for: "review/start"
         )
+        try await transport.enqueueThreadResume(.init(id: "review-thread-1"))
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
         try await transport.enqueue(EmptyResponse(), for: "thread/delete")
         try await transport.enqueue(EmptyResponse(), for: "thread/delete")
@@ -1442,6 +1443,7 @@ struct CodexReviewHostTests {
         )
 
         await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
         let reviewRead = Task { @MainActor in
             try await store.startReview(
                 sessionID: "session-1",
@@ -1467,7 +1469,7 @@ struct CodexReviewHostTests {
         #expect(await stopFinished.isCompleted())
         #expect(result.core.lifecycle.status == .cancelled)
         #expect(methods.contains("turn/interrupt"))
-        #expect(methods.contains("thread/delete"))
+        #expect(methods.filter { $0 == "thread/delete" }.count == 2)
     }
 
     @Test func liveStoreMarksRuntimeFailedWhenAppServerNotificationStreamCloses() async throws {
