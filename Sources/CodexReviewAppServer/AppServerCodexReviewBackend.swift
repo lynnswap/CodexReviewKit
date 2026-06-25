@@ -21,6 +21,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var activeThreadIDsByAttemptID: [String: Set<String>] = [:]
     private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
     private var abandonedReviewAttemptIDs: Set<String> = []
+    private var inFlightRestartCountByInterruptedAttemptID: [String: Int] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
 
     package init(appServer: CodexAppServer) {
@@ -185,29 +186,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             id: token.id,
             interruptedIdentity: interruptedIdentity
         )
-        let attemptID = makeAppServerReviewAttemptID()
-        let provisionalRun = CodexReviewBackendModel.Review.Run(
-            attemptID: attemptID,
-            threadID: interruptedRun.threadID,
-            reviewThreadID: interruptedRun.threadID,
-            model: interruptedRun.model ?? request.model
-        )
-        let session = AppServerReviewEventSession(run: provisionalRun)
-        registerReviewEventSession(session, for: provisionalRun)
-
-        let review: CodexReviewSession
-        do {
-            review = try await appServer.restartPreparedReview(
-                appServerToken,
-                target: request.request.target.appServerReviewTarget,
-                threadOptions: .init(model: interruptedRun.model ?? request.model)
-            )
-        } catch {
-            _ = unregisterReviewEventSession(for: provisionalRun)
-            await session.abandon()
-            throw error
+        markRestartInFlight(forInterrupted: interruptedRun)
+        defer {
+            clearRestartInFlight(forInterrupted: interruptedRun)
         }
-
+        let review = try await appServer.restartPreparedReview(
+            appServerToken,
+            target: request.request.target.appServerReviewTarget,
+            threadOptions: .init(model: interruptedRun.model ?? request.model)
+        )
+        let attemptID = makeAppServerReviewAttemptID()
         let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
@@ -215,7 +203,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: review.reviewThreadID.rawValue,
             model: review.model ?? interruptedRun.model ?? request.model
         )
-        await session.updateRun(recoveredRun)
+        let session = AppServerReviewEventSession(run: recoveredRun)
         registerReviewEventSession(session, for: recoveredRun)
         await session.startConsuming(review)
 
@@ -259,6 +247,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             cleanedAttemptIDs.insert(run.attemptID)
         }
         for run in request.recoveryWaitingRuns where cleanedAttemptIDs.insert(run.attemptID).inserted {
+            if isRestartInFlight(forInterrupted: run) {
+                continue
+            }
             if Task.isCancelled {
                 return
             }
@@ -354,6 +345,23 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func markAttemptAbandoned(_ run: CodexReviewBackendModel.Review.Run) {
         abandonedReviewAttemptIDs.insert(run.attemptID)
+    }
+
+    private func markRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) {
+        inFlightRestartCountByInterruptedAttemptID[run.attemptID, default: 0] += 1
+    }
+
+    private func clearRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) {
+        let count = inFlightRestartCountByInterruptedAttemptID[run.attemptID, default: 0]
+        if count <= 1 {
+            inFlightRestartCountByInterruptedAttemptID.removeValue(forKey: run.attemptID)
+        } else {
+            inFlightRestartCountByInterruptedAttemptID[run.attemptID] = count - 1
+        }
+    }
+
+    private func isRestartInFlight(forInterrupted run: CodexReviewBackendModel.Review.Run) -> Bool {
+        inFlightRestartCountByInterruptedAttemptID[run.attemptID] != nil
     }
 
     private func activeReviewRunsForShutdown() async -> [CodexReviewBackendModel.Review.Run] {

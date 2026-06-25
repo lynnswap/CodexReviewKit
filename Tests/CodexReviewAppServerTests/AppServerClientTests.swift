@@ -477,6 +477,74 @@ struct AppServerClientTests {
         let restartParams = try jsonObject(from: restart.params)
         #expect(restartParams["threadId"] as? String == "thread-1")
     }
+
+    @Test func shutdownCleanupDoesNotDeleteProvisionalRestartSourceThread() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-old", reviewThreadID: "thread-1")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+        let attempt = try await backend.startReview(makeReviewStart())
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+        let prepareTask = Task {
+            try await backend.prepareReviewRestart(attempt.run)
+        }
+        defer {
+            prepareTask.cancel()
+        }
+        await runtime.transport.waitForRequest(method: "turn/interrupt")
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "thread-1",
+                turn: .init(id: "turn-old", status: "interrupted")
+            )
+        )
+        let token = try await withTimeout {
+            try await prepareTask.value
+        }
+
+        let reviewStartGate = CodexAppServerTestGate()
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await runtime.transport.enqueueEmpty(for: "thread/rollback")
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "thread-1")
+        try await runtime.transport.enqueueEmpty(for: "thread/delete")
+        await runtime.transport.holdNextIgnoringCancellation(
+            method: "review/start",
+            gate: reviewStartGate
+        )
+        let restartTask = Task {
+            try await backend.restartPreparedReview(token, request: makeReviewStart())
+        }
+        defer {
+            restartTask.cancel()
+        }
+        await runtime.transport.waitForRequest(method: "review/start", count: 2)
+
+        await backend.cleanupActiveReviewsForShutdown(.init(
+            reason: .init(message: "Review runtime stopped."),
+            recoveryWaitingRuns: [attempt.run]
+        ))
+
+        #expect(await runtime.transport.recordedRequests(method: "thread/delete").isEmpty)
+        await reviewStartGate.open()
+        let restartedAttempt = try await withTimeout {
+            try await restartTask.value
+        }
+        #expect(restartedAttempt.run.threadID == "thread-1")
+        #expect(restartedAttempt.run.turnID == "turn-restarted")
+    }
 }
 
 private enum AppServerClientTestTimeout: Error {
