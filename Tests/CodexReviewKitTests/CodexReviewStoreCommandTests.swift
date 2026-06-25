@@ -3173,6 +3173,75 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func runtimeStopWhileRecoveryRestartIsInFlightDetachesAndStopsRecoveredRun() async throws {
+        let initialRun = CodexReviewBackendModel.Review.Run(
+            threadID: "thread-1",
+            turnID: "turn-1",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let recoveredRun = CodexReviewBackendModel.Review.Run(
+            attemptID: "attempt-recovered",
+            threadID: "thread-1",
+            turnID: "turn-2",
+            reviewThreadID: "review-thread-1",
+            model: "gpt-5"
+        )
+        let backend = FakeCodexReviewBackend(nextRun: initialRun)
+        await backend.setNextRecoveredRun(recoveredRun)
+        let recoverGate = AsyncGate()
+        await backend.holdRestartPreparedReview(with: recoverGate)
+        let networkMonitor = ManualCodexReviewNetworkMonitor()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "job-1" }),
+            networkMonitor: networkMonitor,
+            networkRecoveryPolicy: .init(sleep: { _ in })
+        )
+        let recorder = RuntimeStopCleanupRequestRecorder()
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+
+            networkMonitor.yield(.init(status: .unsatisfied))
+            try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
+            networkMonitor.yield(.satisfied())
+            try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
+
+            let cleanupTask = Task { @MainActor in
+                await store.cleanupActiveReviewsForRuntimeStop(
+                    reason: .system(message: "Review runtime stopped."),
+                    workerDrainTimeout: .seconds(2)
+                ) { request in
+                    await recorder.record(request)
+                    return true
+                }
+            }
+            try #require(await waitUntil {
+                let state = store.runtimeJobState(jobID: "job-1")
+                return state.hasActiveWorker == false && state.activeRun == nil
+            })
+            await recoverGate.open()
+            let cleanup = await cleanupTask.value
+            let read = try await result
+            let request = try #require(await recorder.onlyRequest())
+
+            #expect(cleanup.didComplete)
+            #expect(request.recoveryWaitingRuns == [initialRun])
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation?.message == "Review runtime stopped.")
+            #expect(read.core.run.turnID == "turn-1")
+            let commands = await backend.recordedCommands()
+            #expect(commands.contains(.interruptReview(
+                recoveredRun,
+                .init(message: "Review runtime stopped.")
+            )))
+            #expect(commands.contains(.cleanupReview(recoveredRun)))
+        }
+    }
+
     @Test func cancellationAfterRecoveryEventStreamFinishesWakesWorker() async throws {
         let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",

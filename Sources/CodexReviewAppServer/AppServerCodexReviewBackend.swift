@@ -185,29 +185,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             id: token.id,
             interruptedIdentity: interruptedIdentity
         )
-        let attemptID = makeAppServerReviewAttemptID()
-        let provisionalRun = CodexReviewBackendModel.Review.Run(
-            attemptID: attemptID,
-            threadID: interruptedRun.threadID,
-            reviewThreadID: interruptedRun.threadID,
-            model: interruptedRun.model ?? request.model
+        let review = try await appServer.restartPreparedReview(
+            appServerToken,
+            target: request.request.target.appServerReviewTarget,
+            threadOptions: .init(model: interruptedRun.model ?? request.model)
         )
-        let session = AppServerReviewEventSession(run: provisionalRun)
-        registerReviewEventSession(session, for: provisionalRun)
-
-        let review: CodexReviewSession
-        do {
-            review = try await appServer.restartPreparedReview(
-                appServerToken,
-                target: request.request.target.appServerReviewTarget,
-                threadOptions: .init(model: interruptedRun.model ?? request.model)
-            )
-        } catch {
-            _ = unregisterReviewEventSession(for: provisionalRun)
-            await session.abandon()
-            throw error
-        }
-
+        let attemptID = makeAppServerReviewAttemptID()
         let recoveredRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
             threadID: interruptedRun.threadID,
@@ -215,7 +198,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: review.reviewThreadID.rawValue,
             model: review.model ?? interruptedRun.model ?? request.model
         )
-        await session.updateRun(recoveredRun)
+        let session = AppServerReviewEventSession(run: recoveredRun)
         registerReviewEventSession(session, for: recoveredRun)
         await session.startConsuming(review)
 
