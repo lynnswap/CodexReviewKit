@@ -534,7 +534,7 @@ struct AppServerClientTests {
 
         await backend.cleanupActiveReviewsForShutdown(.init(
             reason: .init(message: "Review runtime stopped."),
-            recoveryWaitingRuns: []
+            recoveryWaitingRuns: [attempt.run]
         ))
 
         #expect(await runtime.transport.recordedRequests(method: "thread/delete").isEmpty)
