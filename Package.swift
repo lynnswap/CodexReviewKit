@@ -33,7 +33,7 @@ let package = Package(
         // this with the final pinned remote CodexKit release dependency before release.
         .package(
             url: "https://github.com/lynnswap/CodexKit.git",
-            revision: "3bed980f5012eef7d4da4b955441bc3f749ba0ae"
+            revision: "cfaa2f5763014eacc01b728b79791527a17fe07c"
         ),
     ],
     targets: [
