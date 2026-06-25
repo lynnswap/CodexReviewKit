@@ -1321,6 +1321,11 @@ struct CodexReviewHostTests {
         try await transport.enqueue(AppServerAPI.Thread.Start.Response(threadID: "thread-1", model: "gpt-5"), for: "thread/start")
         try await transport.enqueue(AppServerAPI.Review.Start.Response(turnID: "turn-1"), for: "review/start")
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
@@ -1433,6 +1438,12 @@ struct CodexReviewHostTests {
             for: "thread/resume"
         )
         try await transport.enqueue(EmptyResponse(), for: "turn/interrupt")
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
+        try await transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
+        try await transport.enqueue(EmptyResponse(), for: "thread/delete")
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,

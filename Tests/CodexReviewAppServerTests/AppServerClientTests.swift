@@ -297,6 +297,10 @@ struct AppServerClientTests {
             for: "thread/resume"
         )
         try await runtime.transport.enqueueEmpty(for: "thread/delete")
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
         try await runtime.transport.enqueueEmpty(for: "thread/delete")
         let backend = AppServerCodexReviewBackend(appServer: runtime.server)
 
@@ -387,6 +391,10 @@ struct AppServerClientTests {
         )
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
         try await runtime.transport.enqueueEmpty(for: "thread/rollback")
+        try await runtime.transport.enqueueJSON(
+            #"{"thread":{"id":"thread-1"},"model":"gpt-5"}"#,
+            for: "thread/resume"
+        )
         try await runtime.transport.enqueueReviewStart(turnID: "turn-restarted", reviewThreadID: "review-thread")
 
         let token = try await backend.prepareReviewRestart(attempt.run)
@@ -401,15 +409,17 @@ struct AppServerClientTests {
             "initialize",
             "thread/start",
             "review/start",
+            "turn/interrupt",
+            "turn/interrupt",
             "thread/resume",
-            "turn/interrupt",
-            "turn/interrupt",
             "thread/rollback",
+            "thread/resume",
             "review/start",
         ])
-        let resume = try #require(requests.first { $0.method == "thread/resume" })
-        let resumeParams = try jsonObject(from: resume.params)
-        #expect(resumeParams["threadId"] as? String == "review-thread")
+        let resumeThreadIDs = try requests.filter { $0.method == "thread/resume" }.map {
+            try jsonObject(from: $0.params)["threadId"] as? String
+        }
+        #expect(resumeThreadIDs == ["review-thread", "thread-1"])
         let interruptTurnIDs = try requests.filter { $0.method == "turn/interrupt" }.map {
             try jsonObject(from: $0.params)["turnId"] as? String
         }

@@ -25,7 +25,7 @@ private let codexKitDependency: Package.Dependency = {
     // this with the final pinned remote CodexKit release dependency before release.
     return .package(
         url: "https://github.com/lynnswap/CodexKit.git",
-        revision: "717dddc6cb778dfd72435da550b35b1690998ff8"
+        revision: "a9c18e92bc3be26093525f6396d82e7050d1acb5"
     )
 }()
 

@@ -12,22 +12,55 @@ private func makeAppServerReviewAttemptID() -> String {
     UUID().uuidString
 }
 
+private struct AppServerReviewCancellation: Equatable, Sendable {
+    var threadID: String
+    var turnID: String
+
+    init(threadID: String, turnID: String) {
+        self.threadID = threadID
+        self.turnID = turnID
+    }
+
+    init(_ cancellation: CodexTurnCancellation) {
+        self.init(
+            threadID: cancellation.threadID.rawValue,
+            turnID: cancellation.turnID?.rawValue ?? ""
+        )
+    }
+
+    func cleanupIdentity(
+        sourceRun run: CodexReviewBackendModel.Review.Run
+    ) -> CodexReviewIdentity? {
+        let turnID = turnID.nilIfEmpty ?? run.turnID?.nilIfEmpty
+        guard let turnID else {
+            return nil
+        }
+        let sourceThreadID = CodexThreadID(rawValue: run.threadID)
+        let cancelledThreadID = CodexThreadID(rawValue: threadID)
+        return CodexReviewIdentity(
+            threadID: sourceThreadID,
+            turnID: .init(rawValue: turnID),
+            reviewThreadID: cancelledThreadID == sourceThreadID ? nil : cancelledThreadID,
+            model: run.model
+        )
+    }
+}
+
 private struct AppServerReviewRestartContext: Sendable {
     var interruptedRun: CodexReviewBackendModel.Review.Run
-    var rollbackThreadID: String
+    var rollbackThreadID: CodexThreadID
+    var rollbackModel: String?
 }
 
 package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
     private let appServer: CodexAppServer
-    private var controlsByThreadID: [String: AppServerReviewControl] = [:]
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var activeReviewAttemptIDByThreadID: [String: String] = [:]
     private var activeThreadIDsByAttemptID: [String: Set<String>] = [:]
     private var reviewEventSessionCanonicalThreadIDByThreadID: [String: String] = [:]
-    private var reviewThreadIDsForCleanupByThreadID: [String: Set<String>] = [:]
-    private var threadsByThreadID: [String: CodexThread] = [:]
+    private var retainedCleanupIdentitiesBySourceThreadID: [String: [CodexReviewIdentity]] = [:]
     private var restartContextsByTokenID: [String: AppServerReviewRestartContext] = [:]
     private var abandonedReviewAttemptIDs: Set<String> = []
     private var abandonedTurnIDs: Set<String> = []
@@ -109,10 +142,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        let control = AppServerReviewControl()
         let thread = try await startReviewThread(appServer: appServer, request: request)
-        threadsByThreadID[thread.id.rawValue] = thread
-        controlsByThreadID[thread.id.rawValue] = control
 
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
@@ -121,9 +151,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: thread.id.rawValue,
             model: thread.model ?? request.model
         )
-        let session = AppServerReviewEventSession(run: provisionalRun, control: control)
+        let session = AppServerReviewEventSession(run: provisionalRun)
         registerReviewEventSession(session, for: provisionalRun)
-        control.recordThreadStarted()
 
         let review: CodexReviewSession
         do {
@@ -142,7 +171,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(run)
         registerReviewEventSession(session, for: run)
-        control.recordReviewStarted(review)
         await session.startConsuming(review)
 
         return await session.attempt()
@@ -179,7 +207,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let session = await reviewEventSession(for: run)
         await session.requestCancellation(message: reason.message)
         do {
-            _ = try await sendTurnCancellation(for: run)
+            _ = try await cancelReviewTurn(for: run)
             await finishReviewEventStream(
                 threadID: run.threadID,
                 cancellationMessage: reason.message,
@@ -195,14 +223,18 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         _ run: CodexReviewBackendModel.Review.Run
     ) async throws -> CodexReviewBackendModel.Review.RestartToken {
         markTurnAbandoned(run.turnID)
-        let cancellation = try await sendTurnCancellation(for: run) { retryCancellation in
+        let cancellation = try await cancelReviewTurn(for: run) { retryCancellation in
             await self.markCancellationTurnAbandoned(retryCancellation, canonicalThreadID: run.threadID)
         }
         markAttemptAbandoned(run, cancellation: cancellation)
         if let session = unregisterReviewEventSession(for: run) {
             await session.abandon()
             let metrics = await session.metricsSnapshot()
-            for threadID in await session.cleanupThreadIDs() {
+            let cleanupThreadIDs = orderedCleanupThreadIDs(
+                sourceThreadID: run.threadID,
+                cleanupThreadIDSequences(for: run) + [await session.cleanupThreadIDs()]
+            )
+            for threadID in cleanupThreadIDs {
                 completedReviewEventSessionMetricsByThreadID[threadID] = metrics
             }
         }
@@ -210,7 +242,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         let tokenID = UUID().uuidString
         restartContextsByTokenID[tokenID] = AppServerReviewRestartContext(
             interruptedRun: run,
-            rollbackThreadID: cancellation.threadID
+            rollbackThreadID: .init(rawValue: cancellation.threadID),
+            rollbackModel: run.model
         )
         return CodexReviewBackendModel.Review.RestartToken(
             id: tokenID,
@@ -226,11 +259,13 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             throw CodexReviewAPI.Error.io("Prepared review restart is no longer available.")
         }
         let interruptedRun = restartContext.interruptedRun
-        let rollbackThread = try await threadHandle(id: restartContext.rollbackThreadID, model: interruptedRun.model)
+        let rollbackThread = try await appServer.resumeThread(
+            restartContext.rollbackThreadID,
+            options: .init(model: restartContext.rollbackModel)
+        )
         try await rollbackThread.rollback(turnCount: 1)
 
-        let control = reviewControl(for: interruptedRun)
-        let thread = try await reviewThread(for: interruptedRun)
+        let thread = try await sourceReviewThread(for: interruptedRun, fallbackModel: request.model)
         let attemptID = makeAppServerReviewAttemptID()
         let provisionalRun = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
@@ -238,7 +273,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             reviewThreadID: interruptedRun.threadID,
             model: thread.model ?? interruptedRun.model ?? request.model
         )
-        let session = AppServerReviewEventSession(run: provisionalRun, control: control)
+        let session = AppServerReviewEventSession(run: provisionalRun)
         registerReviewEventSession(session, for: provisionalRun)
 
         let review: CodexReviewSession
@@ -259,7 +294,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
         await session.updateRun(recoveredRun)
         registerReviewEventSession(session, for: recoveredRun)
-        controlsByThreadID[interruptedRun.threadID]?.recordReviewStarted(review)
         await session.startConsuming(review)
 
         return await session.attempt()
@@ -267,18 +301,28 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     package func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
         discardRestartContexts(for: run)
-        controlsByThreadID.removeValue(forKey: run.threadID)
-        var cleanupThreadIDs = cleanupThreadIDs(for: run)
+        var cleanupSequences = cleanupThreadIDSequences(for: run)
+        var completedMetrics: ReviewBackendEventSessionMetrics?
         if let session = unregisterReviewEventSession(for: run) {
             await session.finish(cancellationMessage: nil)
             let metrics = await session.metricsSnapshot()
-            cleanupThreadIDs = mergedCleanupThreadIDs(cleanupThreadIDs, await session.cleanupThreadIDs())
+            cleanupSequences.append(await session.cleanupThreadIDs())
+            completedMetrics = metrics
+        }
+        let cleanupThreadIDs = orderedCleanupThreadIDs(
+            sourceThreadID: run.threadID,
+            cleanupSequences
+        )
+        if let completedMetrics {
             for threadID in cleanupThreadIDs {
-                completedReviewEventSessionMetricsByThreadID[threadID] = metrics
+                completedReviewEventSessionMetricsByThreadID[threadID] = completedMetrics
             }
         }
         for threadID in cleanupThreadIDs {
-            guard let thread = try? await threadHandle(id: threadID, model: run.model) else {
+            guard let thread = try? await appServer.resumeThread(
+                .init(rawValue: threadID),
+                options: .init(model: run.model)
+            ) else {
                 continue
             }
             try? await thread.delete()
@@ -286,9 +330,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
             activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
-            threadsByThreadID.removeValue(forKey: threadID)
         }
-        reviewThreadIDsForCleanupByThreadID.removeValue(forKey: run.threadID)
+        retainedCleanupIdentitiesBySourceThreadID.removeValue(forKey: run.threadID)
     }
 
     package func cleanupActiveReviewsForShutdown(reason: CodexReviewBackendModel.CancellationReason) async {
@@ -355,40 +398,19 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             registerReviewEventSession(session, for: run)
             return session
         }
-        let control = reviewControl(for: run)
-        let session = AppServerReviewEventSession(run: run, control: control)
+        let session = AppServerReviewEventSession(run: run)
         registerReviewEventSession(session, for: run)
         return session
     }
 
-    private func reviewControl(for run: CodexReviewBackendModel.Review.Run) -> AppServerReviewControl {
-        if let control = controlsByThreadID[run.threadID] {
-            return control
-        }
-        let control = AppServerReviewControl()
-        if let turnID = run.turnID {
-            control.recordReviewStarted(turnID: turnID)
-        } else {
-            control.recordThreadStarted()
-        }
-        controlsByThreadID[run.threadID] = control
-        return control
-    }
-
-    private func reviewThread(for run: CodexReviewBackendModel.Review.Run) async throws -> CodexThread {
-        try await threadHandle(id: run.threadID, model: run.model)
-    }
-
-    private func threadHandle(id threadID: String, model: String?) async throws -> CodexThread {
-        if let thread = threadsByThreadID[threadID] {
-            return thread
-        }
-        let thread = try await appServer.resumeThread(
-            .init(rawValue: threadID),
-            options: .init(model: model)
+    private func sourceReviewThread(
+        for run: CodexReviewBackendModel.Review.Run,
+        fallbackModel: String?
+    ) async throws -> CodexThread {
+        try await appServer.resumeThread(
+            .init(rawValue: run.threadID),
+            options: .init(model: run.model ?? fallbackModel)
         )
-        threadsByThreadID[threadID] = thread
-        return thread
     }
 
     private func registerReviewEventSession(
@@ -396,7 +418,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         for run: CodexReviewBackendModel.Review.Run
     ) {
         reviewEventSessionsByAttemptID[run.attemptID] = session
-        let activeThreadIDs = Set([run.threadID, run.reviewThreadID].compactMap { $0?.nilIfEmpty })
+        let activeThreadIDs = Set(run.appServerAssociatedThreadIDs)
         for threadID in activeThreadIDsByAttemptID[run.attemptID] ?? [] where activeThreadIDs.contains(threadID) == false {
             if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
                 activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
@@ -407,11 +429,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             activeReviewAttemptIDByThreadID[threadID] = run.attemptID
         }
         reviewEventSessionCanonicalThreadIDByThreadID[run.threadID] = run.threadID
-        noteReviewThreadIDForCleanup(run.threadID, canonicalThreadID: run.threadID)
         if let reviewThreadID = run.reviewThreadID,
            reviewThreadID != run.threadID {
             reviewEventSessionCanonicalThreadIDByThreadID[reviewThreadID] = run.threadID
-            noteReviewThreadIDForCleanup(reviewThreadID, canonicalThreadID: run.threadID)
         }
     }
 
@@ -430,21 +450,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     private func unregisterReviewEventSession(for run: CodexReviewBackendModel.Review.Run) -> AppServerReviewEventSession? {
-        if activeReviewAttemptIDByThreadID[run.threadID] == run.attemptID {
-            activeReviewAttemptIDByThreadID.removeValue(forKey: run.threadID)
-        }
-        if let reviewThreadID = run.reviewThreadID,
-           reviewThreadID != run.threadID {
-            if activeReviewAttemptIDByThreadID[reviewThreadID] == run.attemptID {
-                activeReviewAttemptIDByThreadID.removeValue(forKey: reviewThreadID)
+        let threadIDs = activeThreadIDsByAttemptID.removeValue(forKey: run.attemptID)
+            ?? Set(run.appServerAssociatedThreadIDs)
+        for threadID in threadIDs {
+            if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
+                activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
             }
         }
-        activeThreadIDsByAttemptID.removeValue(forKey: run.attemptID)
         return reviewEventSessionsByAttemptID.removeValue(forKey: run.attemptID)
-    }
-
-    private func noteReviewThreadIDForCleanup(_ threadID: String, canonicalThreadID: String) {
-        reviewThreadIDsForCleanupByThreadID[canonicalThreadID, default: []].insert(threadID)
     }
 
     private func markAttemptAbandoned(
@@ -454,7 +467,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         abandonedReviewAttemptIDs.insert(run.attemptID)
         markTurnAbandoned(run.turnID)
         markTurnAbandoned(cancellation.turnID)
-        noteReviewThreadIDForCleanup(cancellation.threadID, canonicalThreadID: run.threadID)
+        rememberCleanupIdentity(for: run)
+        rememberCleanupIdentity(cancellation.cleanupIdentity(sourceRun: run))
     }
 
     private func markCancellationTurnAbandoned(
@@ -462,7 +476,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         canonicalThreadID: String
     ) {
         markTurnAbandoned(cancellation.turnID)
-        noteReviewThreadIDForCleanup(cancellation.threadID, canonicalThreadID: canonicalThreadID)
+        let sourceRun = CodexReviewBackendModel.Review.Run(
+            threadID: canonicalThreadID,
+            turnID: cancellation.turnID,
+            reviewThreadID: cancellation.threadID
+        )
+        rememberCleanupIdentity(cancellation.cleanupIdentity(sourceRun: sourceRun))
     }
 
     private func discardRestartContexts(for run: CodexReviewBackendModel.Review.Run) {
@@ -502,70 +521,77 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    private func sendTurnCancellation(
+    private func cancelReviewTurn(
         for run: CodexReviewBackendModel.Review.Run,
         willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)? = nil
     ) async throws -> AppServerReviewCancellation {
-        let control = reviewControl(for: run)
-        if let cancellation = try await control.cancel(willCancelActiveTurn: willCancelActiveTurn) {
-            return cancellation
-        }
-
-        guard let expectedTurnID = run.turnID?.nilIfEmpty else {
+        guard let identity = run.appServerReviewIdentity else {
             throw CodexReviewAPI.Error.io("Review run has no cancellable app-server turn.")
         }
-        let thread = try await activeReviewTurnThread(for: run)
-        let cancellation = try await thread.cancelActiveTurn(
-            expectedTurnID: .init(rawValue: expectedTurnID)
-        ) { retryCancellation in
-            let reviewCancellation = AppServerReviewCancellation(retryCancellation)
-            if reviewCancellation.turnID != expectedTurnID,
-               let willCancelActiveTurn {
-                await willCancelActiveTurn(reviewCancellation)
+        if let session = reviewEventSessionsByAttemptID[run.attemptID],
+           let cancellation = try await session.cancelReview(
+                expectedTurnID: identity.turnID.rawValue,
+                willCancelActiveTurn: willCancelActiveTurn
+           ) {
+            return cancellation
+        }
+        let review = try await appServer.resumeReview(
+            identity,
+            threadOptions: .init(model: run.model)
+        )
+        let cancellation: CodexTurnCancellation
+        if let willCancelActiveTurn {
+            cancellation = try await review.cancel { retryCancellation in
+                let reviewCancellation = AppServerReviewCancellation(retryCancellation)
+                if reviewCancellation.turnID != identity.turnID.rawValue {
+                    await willCancelActiveTurn(reviewCancellation)
+                }
             }
+        } else {
+            cancellation = try await review.cancel()
         }
-        let reviewCancellation = AppServerReviewCancellation(cancellation)
-        if reviewCancellation.turnID != expectedTurnID {
-            control.recordReviewStarted(turnID: reviewCancellation.turnID)
-        }
-        return reviewCancellation
+        return AppServerReviewCancellation(cancellation)
     }
 
-    private func cleanupThreadIDs(for run: CodexReviewBackendModel.Review.Run) -> [String] {
+    private func cleanupThreadIDSequences(
+        for run: CodexReviewBackendModel.Review.Run
+    ) -> [[String]] {
+        let retainedSequences = retainedCleanupIdentitiesBySourceThreadID[run.threadID, default: []]
+            .map { $0.cleanupThreadIDs.map(\.rawValue) }
+        return retainedSequences + [run.appServerCleanupThreadIDs]
+    }
+
+    private func orderedCleanupThreadIDs(
+        sourceThreadID: String,
+        _ sequences: [[String]]
+    ) -> [String] {
         var seen: Set<String> = []
         var threadIDs: [String] = []
-        let registeredReviewThreadIDs = (reviewThreadIDsForCleanupByThreadID[run.threadID] ?? [])
-            .filter { $0 != run.threadID }
-            .sorted()
-        for threadID in registeredReviewThreadIDs where seen.insert(threadID).inserted {
-            threadIDs.append(threadID)
+        for sequence in sequences {
+            for threadID in sequence where threadID != sourceThreadID && seen.insert(threadID).inserted {
+                threadIDs.append(threadID)
+            }
         }
-        if let reviewThreadID = run.reviewThreadID,
-           reviewThreadID != run.threadID,
-           seen.insert(reviewThreadID).inserted {
-            threadIDs.append(reviewThreadID)
-        }
-        if seen.insert(run.threadID).inserted {
-            threadIDs.append(run.threadID)
+        if seen.insert(sourceThreadID).inserted {
+            threadIDs.append(sourceThreadID)
         }
         return threadIDs
     }
 
-    private func activeReviewTurnThread(for run: CodexReviewBackendModel.Review.Run) async throws -> CodexThread {
-        try await threadHandle(id: activeReviewTurnThreadID(for: run), model: run.model)
+    private func rememberCleanupIdentity(
+        for run: CodexReviewBackendModel.Review.Run
+    ) {
+        rememberCleanupIdentity(run.appServerReviewIdentity)
     }
 
-    private func activeReviewTurnThreadID(for run: CodexReviewBackendModel.Review.Run) -> String {
-        run.reviewThreadID?.nilIfEmpty ?? run.threadID
-    }
-
-    private func mergedCleanupThreadIDs(_ lhs: [String], _ rhs: [String]) -> [String] {
-        var seen: Set<String> = []
-        var merged: [String] = []
-        for threadID in lhs + rhs where seen.insert(threadID).inserted {
-            merged.append(threadID)
+    private func rememberCleanupIdentity(_ identity: CodexReviewIdentity?) {
+        guard let identity else {
+            return
         }
-        return merged
+        let sourceThreadID = identity.sourceThreadID.rawValue
+        if retainedCleanupIdentitiesBySourceThreadID[sourceThreadID, default: []].contains(identity) == false {
+            retainedCleanupIdentitiesBySourceThreadID[sourceThreadID, default: []].append(identity)
+        }
     }
 
 }
@@ -1183,21 +1209,17 @@ private extension CodexThreadItem {
 private actor AppServerReviewEventSession {
     private let pipeline: ReviewBackendEventSession
     private var typedReviewStreamTask: Task<Void, Never>?
+    private var reviewSession: CodexReviewSession?
 
     init(
         run: CodexReviewBackendModel.Review.Run,
-        control: AppServerReviewControl,
         mailbox: BackendReviewEventMailbox = .init()
     ) {
         self.pipeline = ReviewBackendEventSession(
             run: run,
             mailbox: mailbox,
             callbacks: .init(
-                recordTurnStarted: { turnID in
-                    control.recordTurnStarted(turnID: turnID)
-                },
                 recordFinished: { run, metrics in
-                    control.finish()
                     appServerBackendLogger.debug(
                         "Review event session finished for \(run.threadID, privacy: .public): emitted=\(metrics.emitted, privacy: .public) buffered=\(metrics.buffered, privacy: .public) ignored=\(metrics.ignored, privacy: .public) timeoutWarnings=\(metrics.commandTimeoutWarnings, privacy: .public)"
                     )
@@ -1265,14 +1287,39 @@ private actor AppServerReviewEventSession {
         guard typedReviewStreamTask == nil else {
             return
         }
+        reviewSession = review
         typedReviewStreamTask = Task { [weak self] in
             await self?.consume(review)
         }
     }
 
+    func cancelReview(
+        expectedTurnID: String,
+        willCancelActiveTurn: (@Sendable (AppServerReviewCancellation) async -> Void)? = nil
+    ) async throws -> AppServerReviewCancellation? {
+        guard let reviewSession else {
+            return nil
+        }
+        let cancellation: CodexTurnCancellation
+        if let willCancelActiveTurn {
+            cancellation = try await reviewSession.cancel { retryCancellation in
+                let reviewCancellation = AppServerReviewCancellation(retryCancellation)
+                if reviewCancellation.turnID != expectedTurnID {
+                    await willCancelActiveTurn(reviewCancellation)
+                }
+            }
+        } else {
+            cancellation = try await reviewSession.cancel()
+        }
+        return AppServerReviewCancellation(cancellation)
+    }
+
     private func consume(_ review: CodexReviewSession) async {
         defer {
             typedReviewStreamTask = nil
+            if reviewSession?.id == review.id {
+                reviewSession = nil
+            }
         }
         let run = await pipeline.currentRun()
         await receive(AppServerTypedReviewEventAdapter.started(review: review, run: run))
@@ -1298,6 +1345,59 @@ private actor AppServerReviewEventSession {
     private func cancelTypedReviewStream() {
         typedReviewStreamTask?.cancel()
         typedReviewStreamTask = nil
+        reviewSession = nil
+    }
+}
+
+private extension CodexReviewBackendModel.Review.Run {
+    var appServerReviewIdentity: CodexReviewIdentity? {
+        guard let turnID = turnID?.nilIfEmpty else {
+            return nil
+        }
+        let sourceThreadID = CodexThreadID(rawValue: threadID)
+        let reviewThreadID = reviewThreadID?.nilIfEmpty.map(CodexThreadID.init(rawValue:))
+        return CodexReviewIdentity(
+            threadID: sourceThreadID,
+            turnID: .init(rawValue: turnID),
+            reviewThreadID: reviewThreadID == sourceThreadID ? nil : reviewThreadID,
+            model: model
+        )
+    }
+
+    var appServerAssociatedThreadIDs: [String] {
+        if let identity = appServerReviewIdentity {
+            return identity.associatedThreadIDs.map(\.rawValue)
+        }
+        return fallbackThreadIDs(sourceLast: false)
+    }
+
+    var appServerCleanupThreadIDs: [String] {
+        if let identity = appServerReviewIdentity {
+            return identity.cleanupThreadIDs.map(\.rawValue)
+        }
+        return fallbackThreadIDs(sourceLast: true)
+    }
+
+    private func fallbackThreadIDs(sourceLast: Bool) -> [String] {
+        var seen: Set<String> = []
+        var threadIDs: [String] = []
+        let reviewThreadID = reviewThreadID?.nilIfEmpty
+        if sourceLast,
+           let reviewThreadID,
+           reviewThreadID != threadID,
+           seen.insert(reviewThreadID).inserted {
+            threadIDs.append(reviewThreadID)
+        }
+        if seen.insert(threadID).inserted {
+            threadIDs.append(threadID)
+        }
+        if sourceLast == false,
+           let reviewThreadID,
+           reviewThreadID != threadID,
+           seen.insert(reviewThreadID).inserted {
+            threadIDs.append(reviewThreadID)
+        }
+        return threadIDs
     }
 }
 
