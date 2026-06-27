@@ -6,6 +6,11 @@ import ReviewMonitorRendering
 
 @MainActor
 final class ReviewMonitorTransportViewController: NSViewController {
+    private enum LogRenderTarget: Equatable {
+        case job(String)
+        case chat(CodexThreadID)
+    }
+
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
@@ -212,8 +217,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
             let timeline = selectedJob.timeline
             _ = timeline.revision
             let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline)
-            self.renderBoundJobLog(
+            self.renderBoundLog(
                 timelineDocument: timelineDocument,
+                target: .job(selectedJob.id),
                 restorationTarget: eventKind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
@@ -243,9 +249,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
             guard let timelineDocument = self.selectedCodexChat.timelineDocument else {
                 return
             }
-            self.renderSelectedChatLog(
+            self.renderBoundLog(
                 timelineDocument: timelineDocument,
-                chatID: selectedChat.id,
+                target: .chat(selectedChat.id),
                 restorationTarget: eventKind == .initial
                     ? .bottom
                     : self.logScrollView.currentScrollRestorationTarget,
@@ -436,26 +442,22 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     @discardableResult
-    private func renderBoundJobLog(
+    private func renderBoundLog(
         timelineDocument: ReviewTimelineDocument,
+        target: LogRenderTarget,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
-        guard let boundJob else {
-            return false
-        }
-
         logRenderGeneration &+= 1
         let generation = logRenderGeneration
         let renderer = logRenderer
-        let jobID = boundJob.id
         logRenderTask?.cancel()
         logRenderTask = Task { @MainActor [weak self] in
             let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
             guard Task.isCancelled == false,
                   let self,
                   self.logRenderGeneration == generation,
-                  self.boundJob?.id == jobID
+                  self.isCurrentLogRenderTarget(target)
             else {
                 return
             }
@@ -471,36 +473,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return true
     }
 
-    @discardableResult
-    private func renderSelectedChatLog(
-        timelineDocument: ReviewTimelineDocument,
-        chatID: CodexThreadID,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) -> Bool {
-        logRenderGeneration &+= 1
-        let generation = logRenderGeneration
-        let renderer = logRenderer
-        logRenderTask?.cancel()
-        logRenderTask = Task { @MainActor [weak self] in
-            let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
-            guard Task.isCancelled == false,
-                  let self,
-                  self.logRenderGeneration == generation,
-                  self.boundChatID == chatID
-            else {
-                return
-            }
-            _ = self.logScrollView.render(
-                sourceDocument: renderedDocument.source,
-                displayDocument: renderedDocument.display,
-                restoring: restorationTarget,
-                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundLog
-            )
-            self.appliedLogRenderGeneration = generation
-            self.hasAppliedBoundLog = true
+    private func isCurrentLogRenderTarget(_ target: LogRenderTarget) -> Bool {
+        switch target {
+        case .job(let id):
+            boundJob?.id == id
+        case .chat(let id):
+            boundChatID == id
         }
-        return true
     }
 
     private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
