@@ -129,8 +129,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             _ = try await cancelReviewTurn(for: run)
             await finishReviewEventStream(
                 threadID: run.threadID,
-                cancellationMessage: reason.message,
-                buffersMissingContinuation: true
+                cancellationMessage: reason.message
             )
         } catch {
             await session.clearCancellationRequest()
@@ -361,16 +360,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
 
     private func finishReviewEventStream(
         threadID: String,
-        cancellationMessage: String?,
-        buffersMissingContinuation: Bool = false
+        cancellationMessage: String?
     ) async {
         guard let session = reviewEventSession(forThreadID: threadID) else {
             return
         }
-        await session.finish(
-            cancellationMessage: cancellationMessage,
-            buffersMissingContinuation: buffersMissingContinuation
-        )
+        await session.finish(cancellationMessage: cancellationMessage)
     }
 
     private func cancelReviewTurn(
@@ -1084,15 +1079,9 @@ private actor AppServerReviewEventSession {
         await pipeline.clearCancellationRequest()
     }
 
-    func finish(
-        cancellationMessage: String?,
-        buffersMissingContinuation: Bool = false
-    ) async {
+    func finish(cancellationMessage: String?) async {
         cancelTypedReviewStream()
-        await pipeline.finish(
-            cancellationMessage: cancellationMessage,
-            buffersMissingContinuation: buffersMissingContinuation
-        )
+        await pipeline.finish(cancellationMessage: cancellationMessage)
     }
 
     func finish(throwing error: (any Error)?) async {

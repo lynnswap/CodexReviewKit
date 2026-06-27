@@ -93,10 +93,7 @@ package actor ReviewBackendEventSession {
         cancellationRequestedMessage = nil
     }
 
-    package func finish(
-        cancellationMessage: String?,
-        buffersMissingContinuation _: Bool = false
-    ) async {
+    package func finish(cancellationMessage: String?) async {
         let precedingEvents = drainPendingStreamedLogEvents()
         if cancellationMessage == nil {
             cancelPendingStreamedLogFlush()
