@@ -4,33 +4,12 @@ import ReviewMonitorRendering
 
 @MainActor
 struct ReviewMonitorSelectedCodexChatDocumentProjection {
-    private struct ItemKey: Hashable {
-        var id: String
-        var turnID: CodexTurnID?
-
-        init(id: String, turnID: CodexTurnID?) {
-            self.id = id
-            self.turnID = turnID
-        }
-
-        init(_ item: CodexChatItemSnapshot) {
-            self.id = item.id
-            self.turnID = item.turnID
-        }
-    }
-
-    private var turnsByID: [CodexTurnID: CodexChatTurnStateSnapshot] = [:]
-    private var orderedTurnIDs: [CodexTurnID] = []
-    private var itemsByKey: [ItemKey: CodexChatItemSnapshot] = [:]
-    private var orderedItemKeys: [ItemKey] = []
+    private var turnProjection = CodexChatTurnProjection()
     private var document: ReviewTimelineDocument?
     private var revision: UInt64 = 0
 
     mutating func reset() {
-        turnsByID.removeAll(keepingCapacity: true)
-        orderedTurnIDs.removeAll(keepingCapacity: true)
-        itemsByKey.removeAll(keepingCapacity: true)
-        orderedItemKeys.removeAll(keepingCapacity: true)
+        turnProjection = CodexChatTurnProjection()
         document = nil
         revision = 0
     }
@@ -41,163 +20,57 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewTimelineDocument? {
-        switch change {
-        case .snapshot(let snapshot):
-            apply(snapshot)
-            guard let effectiveTurnID = effectiveTurnID(activeTurnID: activeTurnID) else {
-                document = nil
-                return nil
-            }
+        turnProjection.selection = activeTurnID.map(CodexChatTurnSelection.turn) ?? .latest
+        let update = turnProjection.apply(change)
+        guard update.affectsSelectedTurn else {
+            return document
+        }
+        guard let snapshot = update.snapshot else {
+            document = nil
+            return nil
+        }
+
+        switch update.kind {
+        case .snapshot,
+            .turnUpdated,
+            .phaseChanged:
             return rebuildDocument(
-                activeTurnID: effectiveTurnID,
+                from: snapshot,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )
-
-        case .turnInserted(let turn), .turnUpdated(let turn):
-            upsert(turn)
-            guard let effectiveTurnID = effectiveTurnID(activeTurnID: activeTurnID),
-                  turn.id == effectiveTurnID
-            else {
-                return document
-            }
-            return rebuildDocument(
-                activeTurnID: effectiveTurnID,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt
-            )
-
-        case .itemInserted(let item), .itemUpdated(let item):
-            upsert(item)
-            guard let effectiveTurnID = effectiveTurnID(
-                activeTurnID: activeTurnID,
-                preferredTurnID: item.turnID
-            ),
-                item.turnID == effectiveTurnID
-            else {
-                return document
-            }
+        case .itemUpserted(let item):
             return rebuildOrReplaceBlock(
                 for: item,
-                activeTurnID: effectiveTurnID,
+                turnSnapshot: snapshot.turn,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )
-
         case .itemTextAppended(_, _, _, let item):
-            upsert(item)
-            guard let effectiveTurnID = effectiveTurnID(
-                activeTurnID: activeTurnID,
-                preferredTurnID: item.turnID
-            ),
-                item.turnID == effectiveTurnID
-            else {
-                return document
-            }
             return replaceBlock(
                 for: item,
-                activeTurnID: effectiveTurnID,
+                turnSnapshot: snapshot.turn,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )
-
         case .itemRemoved(let id, let turnID):
-            removeItem(id: id, turnID: turnID)
-            guard let effectiveTurnID = effectiveTurnID(
-                activeTurnID: activeTurnID,
-                preferredTurnID: turnID
-            ),
-                turnID == effectiveTurnID
-            else {
-                return document
-            }
             return removeBlock(
-                id: .init(rawValue: "\(effectiveTurnID.rawValue):\(id)"),
-                activeTurnID: effectiveTurnID
+                id: .init(rawValue: "\(turnID?.rawValue ?? snapshot.turn.id.rawValue):\(id)"),
+                turnSnapshot: snapshot.turn
             )
-
-        case .phaseChanged:
+        case .ignored:
             return document
         }
     }
 
-    private mutating func apply(_ snapshot: CodexChatSnapshot) {
-        turnsByID = Dictionary(uniqueKeysWithValues: snapshot.turns.map { ($0.id, $0) })
-        orderedTurnIDs = snapshot.turns.map(\.id)
-        itemsByKey.removeAll(keepingCapacity: true)
-        orderedItemKeys.removeAll(keepingCapacity: true)
-        for item in snapshot.items {
-            upsert(item)
-        }
-    }
-
-    private mutating func upsert(_ turn: CodexChatTurnStateSnapshot) {
-        if turnsByID[turn.id] == nil {
-            orderedTurnIDs.append(turn.id)
-        }
-        turnsByID[turn.id] = turn
-    }
-
-    private mutating func upsert(_ item: CodexChatItemSnapshot) {
-        let key = ItemKey(item)
-        if itemsByKey[key] == nil {
-            orderedItemKeys.append(key)
-        }
-        itemsByKey[key] = item
-    }
-
-    private mutating func removeItem(id: String, turnID: CodexTurnID?) {
-        let key = ItemKey(id: id, turnID: turnID)
-        itemsByKey.removeValue(forKey: key)
-        orderedItemKeys.removeAll { $0 == key }
-    }
-
-    private func effectiveTurnID(
-        activeTurnID: CodexTurnID?,
-        preferredTurnID: CodexTurnID? = nil
-    ) -> CodexTurnID? {
-        activeTurnID ?? orderedTurnIDs.last ?? preferredTurnID
-    }
-
-    private mutating func rebuildOrReplaceBlock(
-        for item: CodexChatItemSnapshot,
-        activeTurnID: CodexTurnID,
-        chatCreatedAt: Date?,
-        chatUpdatedAt: Date?
-    ) -> ReviewTimelineDocument? {
-        guard document != nil else {
-            return rebuildDocument(
-                activeTurnID: activeTurnID,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt
-            )
-        }
-        return replaceBlock(
-            for: item,
-            activeTurnID: activeTurnID,
-            chatCreatedAt: chatCreatedAt,
-            chatUpdatedAt: chatUpdatedAt
-        )
-    }
-
     private mutating func rebuildDocument(
-        activeTurnID: CodexTurnID,
+        from snapshot: CodexChatProjectedTurnSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewTimelineDocument? {
-        guard let turn = turnsByID[activeTurnID] else {
-            document = nil
-            return nil
-        }
-        let items = orderedItemKeys.compactMap { key -> CodexChatItemSnapshot? in
-            guard key.turnID == activeTurnID else {
-                return nil
-            }
-            return itemsByKey[key]
-        }
         document = ReviewMonitorCodexChatTimelineProjection().document(
-            from: turn,
-            items: items,
+            from: snapshot.turn,
+            items: snapshot.items,
             chatCreatedAt: chatCreatedAt,
             chatUpdatedAt: chatUpdatedAt,
             revision: nextRevision()
@@ -205,22 +78,42 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         return document
     }
 
-    private mutating func replaceBlock(
+    private mutating func rebuildOrReplaceBlock(
         for item: CodexChatItemSnapshot,
-        activeTurnID: CodexTurnID,
+        turnSnapshot: CodexChatTurnStateSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewTimelineDocument? {
-        guard let turn = turnsByID[activeTurnID] else {
+        guard document != nil else {
+            guard let snapshot = turnProjection.snapshot else {
+                return nil
+            }
             return rebuildDocument(
-                activeTurnID: activeTurnID,
+                from: snapshot,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )
         }
+        return replaceBlock(
+            for: item,
+            turnSnapshot: turnSnapshot,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt
+        )
+    }
+
+    private mutating func replaceBlock(
+        for item: CodexChatItemSnapshot,
+        turnSnapshot: CodexChatTurnStateSnapshot,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
+    ) -> ReviewTimelineDocument? {
         guard var document else {
+            guard let snapshot = turnProjection.snapshot else {
+                return nil
+            }
             return rebuildDocument(
-                activeTurnID: activeTurnID,
+                from: snapshot,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )
@@ -229,7 +122,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         let projection = ReviewMonitorCodexChatTimelineProjection()
         let block = projection.block(
             from: item,
-            turnSnapshot: turn,
+            turnSnapshot: turnSnapshot,
             chatCreatedAt: chatCreatedAt,
             chatUpdatedAt: chatUpdatedAt
         )
@@ -241,7 +134,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         }
         refreshMetadata(
             in: &document,
-            turn: turn,
+            turn: turnSnapshot,
             latestActivityBlockID: block.id,
             revision: nextRevision()
         )
@@ -251,7 +144,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
 
     private mutating func removeBlock(
         id: ReviewTimelineDocument.Block.ID,
-        activeTurnID: CodexTurnID
+        turnSnapshot: CodexChatTurnStateSnapshot
     ) -> ReviewTimelineDocument? {
         guard var document else {
             return nil
@@ -259,19 +152,12 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         document.blocks.removeAll { $0.id == id }
         document.orderedBlockIDs.removeAll { $0 == id }
         let latestActivityBlockID = document.blocks.last?.id
-        if let turn = turnsByID[activeTurnID] {
-            refreshMetadata(
-                in: &document,
-                turn: turn,
-                latestActivityBlockID: latestActivityBlockID,
-                revision: nextRevision()
-            )
-        } else {
-            document.timelineRevision = .init(rawValue: nextRevision())
-            document.activeBlockIDs = document.blocks.filter(\.isActive).map(\.id)
-            document.activeBlockCount = document.activeBlockIDs.count
-            document.latestActivityBlockID = latestActivityBlockID
-        }
+        refreshMetadata(
+            in: &document,
+            turn: turnSnapshot,
+            latestActivityBlockID: latestActivityBlockID,
+            revision: nextRevision()
+        )
         self.document = document.blocks.isEmpty ? nil : document
         return self.document
     }
