@@ -68,30 +68,44 @@ final class ReviewMonitorPreviewChatLogSource {
 @MainActor
 private final class PreviewReviewChat {
     let chat: ReviewMonitorCodexSidebarSnapshot.Chat
-    private let job: CodexReviewJob
+    let cwd: String
+    let isRunning: Bool
 
-    var cwd: String {
-        job.cwd
-    }
-
-    var isRunning: Bool {
-        job.core.lifecycle.status == .running
-    }
+    private let turn: CodexChatTurnStateSnapshot
+    private let phase: CodexDataPhase
+    private let timeline: ReviewTimeline
 
     init?(job: CodexReviewJob) {
         guard let chat = job.reviewChatSelection else {
             return nil
         }
         self.chat = chat
-        self.job = job
+        self.cwd = job.cwd
+        self.isRunning = job.core.lifecycle.status == .running
+        self.turn = CodexChatTurnStateSnapshot(
+            id: job.previewTurnID,
+            status: CodexTurnStatus(job.core.lifecycle.status),
+            errorDescription: job.core.lifecycle.errorMessage,
+            usage: nil
+        )
+        self.phase = CodexDataPhase(
+            job.core.lifecycle.status,
+            errorMessage: job.core.lifecycle.errorMessage
+        )
+        self.timeline = job.timeline
     }
 
     func trackTimelineRevision() {
-        _ = job.timeline.revision
+        _ = timeline.revision
     }
 
     func snapshot() -> CodexChatSnapshot {
-        CodexChatSnapshot.previewSnapshot(from: job)
+        CodexChatSnapshot(
+            chatID: chat.id,
+            phase: phase,
+            turns: [turn],
+            items: timeline.items.map { CodexChatItemSnapshot(previewItem: $0, turnID: turn.id) }
+        )
     }
 }
 
@@ -133,27 +147,6 @@ private final class PreviewChatLogSubscription {
         for change in changes {
             continuation.yield(change)
         }
-    }
-}
-
-private extension CodexChatSnapshot {
-    @MainActor
-    static func previewSnapshot(from job: CodexReviewJob) -> Self {
-        let turn = CodexChatTurnStateSnapshot(
-            id: job.previewTurnID,
-            status: CodexTurnStatus(job.core.lifecycle.status),
-            errorDescription: job.core.lifecycle.errorMessage,
-            usage: nil
-        )
-        return .init(
-            chatID: job.previewChatID,
-            phase: CodexDataPhase(
-                job.core.lifecycle.status,
-                errorMessage: job.core.lifecycle.errorMessage
-            ),
-            turns: [turn],
-            items: job.timeline.items.map { CodexChatItemSnapshot(previewItem: $0, turnID: turn.id) }
-        )
     }
 }
 
@@ -372,10 +365,6 @@ private extension CodexDataPhase {
 }
 
 private extension CodexReviewJob {
-    var previewChatID: CodexThreadID {
-        core.run.reviewThreadID.map(CodexThreadID.init(rawValue:)) ?? CodexThreadID(rawValue: id)
-    }
-
     var previewTurnID: CodexTurnID {
         core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
     }
