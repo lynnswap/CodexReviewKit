@@ -176,7 +176,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         }
         window.layoutIfNeeded()
         synchronizeSidebarToolbarState()
-        applyWindowTitle(Self.windowTitlePresentation(for: uiState.selection))
+        applyWindowTitle(windowTitlePresentation(for: uiState.selection))
     }
 
     func detachFromWindow() {
@@ -207,8 +207,11 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         }
 
         windowTitleObservation = withPortableContinuousObservation { [weak self, uiState] _ in
-            let presentation = Self.windowTitlePresentation(for: uiState.selection)
-            self?.applyWindowTitle(presentation)
+            guard let self else {
+                return
+            }
+            let presentation = self.windowTitlePresentation(for: uiState.selection)
+            self.applyWindowTitle(presentation)
         }
     }
 
@@ -239,32 +242,44 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         var subtitle: String
     }
 
-    private static func windowTitlePresentation(
+    private func windowTitlePresentation(
         for selection: ReviewMonitorSelection?
     ) -> WindowTitlePresentation {
         switch selection {
         case .workspaceSection(let section):
-            WindowTitlePresentation(
+            return WindowTitlePresentation(
                 title: section.title,
                 subtitle: section.subtitle
             )
         case .workspace(let workspace):
-            WindowTitlePresentation(
+            return WindowTitlePresentation(
                 title: workspace.title,
                 subtitle: workspace.cwd
             )
         case .chat(let chat):
-            WindowTitlePresentation(
+            if let job = reviewJob(for: chat.id) {
+                return WindowTitlePresentation(
+                    title: job.targetSummary,
+                    subtitle: job.cwd
+                )
+            }
+            return WindowTitlePresentation(
                 title: chat.title,
                 subtitle: chat.workspaceCWD ?? ""
             )
         case .job(let job):
-            WindowTitlePresentation(
+            return WindowTitlePresentation(
                 title: job.targetSummary,
                 subtitle: job.cwd
             )
         case nil:
-            WindowTitlePresentation(title: "", subtitle: "")
+            return WindowTitlePresentation(title: "", subtitle: "")
+        }
+    }
+
+    private func reviewJob(for chatID: CodexThreadID) -> CodexReviewJob? {
+        store.orderedJobs.first { job in
+            job.reviewChatID == chatID
         }
     }
 

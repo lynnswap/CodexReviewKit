@@ -7,7 +7,7 @@ import Testing
 @Suite("ReviewMonitor selected Codex chat", .serialized)
 @MainActor
 struct ReviewMonitorSelectedCodexChatTests {
-    @Test func selectedReviewJobObservesActiveCodexChat() async throws {
+    @Test func selectedReviewChatObservesReviewIdentity() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -44,12 +44,21 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        let job = makeRunningReviewJob(
-            sourceThreadID: "source-thread",
-            reviewThreadID: "review-thread",
-            turnID: "turn-1"
+        let reviewIdentity = CodexReviewIdentity(
+            threadID: CodexThreadID(rawValue: "source-thread"),
+            turnID: CodexTurnID(rawValue: "turn-1"),
+            reviewThreadID: CodexThreadID(rawValue: "review-thread")
         )
-        uiState.selection = .job(job)
+        uiState.selection = .chat(
+            .init(
+                rowID: .chat(reviewIdentity.activeTurnThreadID),
+                id: reviewIdentity.activeTurnThreadID,
+                title: "Review",
+                preview: nil,
+                workspaceCWD: "/tmp/project",
+                updatedAt: nil,
+                reviewIdentity: reviewIdentity
+            ))
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"

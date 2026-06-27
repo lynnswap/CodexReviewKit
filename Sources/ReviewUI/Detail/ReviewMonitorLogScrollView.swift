@@ -130,6 +130,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     func resetFindStateForContentReuse() {
         endFindSession()
         logDocumentView.resetCommandOutputPanelState()
+        displayedPresentationSignature = nil
         displayedFinderSupplementSignature = nil
         sourceDocument = nil
     }

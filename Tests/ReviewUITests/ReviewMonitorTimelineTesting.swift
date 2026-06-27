@@ -226,7 +226,7 @@ func renderTimelineForTesting(
     let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
     return transport.renderTimelineDocumentForTesting(
         timelineDocument,
-        target: .job(job.id),
+        target: timelineRenderTarget(for: job),
         restoring: restorationTarget,
         allowIncrementalUpdate: allowIncrementalUpdate
     )
@@ -242,8 +242,9 @@ func awaitTimelineRenderForTesting(
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     let expectedLog = reviewMonitorLogText(for: job)
+    let expectedTarget = timelineRenderTarget(for: job)
     try await waitForCondition(timeout: timeout) {
-        transport.renderedStateForTesting.selection == .job(job.id)
+        transport.renderedStateForTesting.selection == expectedTarget
             && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
     }
     _ = renderTimelineForTesting(
@@ -258,6 +259,14 @@ func awaitTimelineRenderForTesting(
         }
         return snapshot.log == expectedLog
     }
+}
+
+@MainActor
+private func timelineRenderTarget(for job: CodexReviewJob) -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
+    if let chatID = job.reviewChatID {
+        return .chat(chatID.rawValue)
+    }
+    return .job(job.id)
 }
 
 private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {

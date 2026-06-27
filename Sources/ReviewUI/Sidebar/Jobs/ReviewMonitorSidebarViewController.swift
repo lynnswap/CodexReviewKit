@@ -807,8 +807,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
         case .chat(let selectedChat):
-            guard let currentChat = codexChatSelection(id: selectedChat.id),
-                  let row = row(forCodexSidebarSelectionID: .chat(selectedChat.id))
+            guard let currentChat = codexChatSelection(id: selectedChat.id)
+                    ?? reviewChatSelection(id: selectedChat.id)
             else {
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
@@ -817,6 +817,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
             if currentChat != selectedChat {
                 uiState.selection = .chat(currentChat)
+            }
+
+            guard let row = row(forCodexSidebarSelectionID: .chat(selectedChat.id))
+                    ?? row(forReviewChatID: selectedChat.id)
+            else {
+                return
             }
 
             guard outlineView.selectedRow != row else {
@@ -870,7 +876,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         } else if let section = workspaceSection(from: item) {
             uiState.selection = .workspaceSection(section.selection)
         } else if let job = job(from: item) {
-            uiState.selection = .job(job)
+            uiState.selection = job.reviewChatSelection.map(ReviewMonitorSelection.chat)
         } else {
             uiState.selection = nil
         }
@@ -893,17 +899,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
-        guard let selectedJobID = uiState.selectedJobID,
-              let selectedJob = job(withID: selectedJobID),
+        guard let selectedJob = selectedJobForCurrentSelection(),
               section.workspaces.contains(where: { $0.cwd == selectedJob.cwd })
         else {
             return
         }
+        let selectedJobID = selectedJob.id
         DispatchQueue.main.async { [weak self, weak section] in
             guard let self,
                   let section,
+                  let currentSelectedJob = self.selectedJobForCurrentSelection(),
                   section.isExpanded,
-                  self.uiState.selectedJobID == selectedJobID,
+                  currentSelectedJob.id == selectedJobID,
                   let row = self.row(forJobID: selectedJobID),
                   self.outlineView.selectedRow != row
             else {
@@ -912,6 +919,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             self.isReconcilingSelection = true
             self.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             self.isReconcilingSelection = false
+        }
+    }
+
+    private func selectedJobForCurrentSelection() -> CodexReviewJob? {
+        switch uiState.selection {
+        case .job(let selectedJob):
+            return job(withID: selectedJob.id)
+        case .chat(let chat):
+            return job(withReviewChatID: chat.id)
+        case .workspaceSection, .workspace, nil:
+            return nil
         }
     }
 
@@ -1315,6 +1333,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return row == -1 ? nil : row
     }
 
+    private func row(forReviewChatID chatID: CodexThreadID) -> Int? {
+        guard let job = job(withReviewChatID: chatID) else {
+            return nil
+        }
+        let row = outlineView.row(forItem: job)
+        return row == -1 ? nil : row
+    }
+
     private func row(forCodexSidebarSelectionID selectionID: ReviewMonitorSelectionID) -> Int? {
         let rowID: ReviewMonitorCodexSidebarRowID
         switch selectionID {
@@ -1363,6 +1389,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return codexWorkspaceSelection(id: workspace.id) != nil
         case .chat(let chat):
             return codexChatSelection(id: chat.id) != nil
+                || reviewChatSelection(id: chat.id, in: workspaces) != nil
         case .job:
             guard case .job(let id) = selection.id else {
                 return false
@@ -1382,6 +1409,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
         return job
+    }
+
+    private func job(withReviewChatID chatID: CodexThreadID) -> CodexReviewJob? {
+        job(withReviewChatID: chatID, in: workspaces())
+    }
+
+    private func job(withReviewChatID chatID: CodexThreadID, in workspaces: [CodexReviewWorkspace]) -> CodexReviewJob? {
+        store.orderedJobs.first { job in
+            job.reviewChatID == chatID && workspaces.contains(where: { $0.cwd == job.cwd })
+        }
+    }
+
+    private func reviewChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+        reviewChatSelection(id: id, in: workspaces())
+    }
+
+    private func reviewChatSelection(
+        id: CodexThreadID,
+        in workspaces: [CodexReviewWorkspace]
+    ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+        job(withReviewChatID: id, in: workspaces)?.reviewChatSelection
     }
 
     private func codexWorkspaceSelection(
@@ -2187,7 +2235,7 @@ extension ReviewMonitorSidebarViewController {
     }
 
     var selectedJobForTesting: CodexReviewJob? {
-        uiState.selectedJobEntry
+        selectedJobForCurrentSelection()
     }
 
     var selectedWorkspaceSectionForTesting: ReviewMonitorWorkspaceSectionSelection? {
