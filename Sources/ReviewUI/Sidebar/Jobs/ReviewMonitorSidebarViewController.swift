@@ -2497,13 +2497,6 @@ extension ReviewMonitorSidebarViewController {
         return outlineView.isItemExpanded(rootItem)
     }
 
-    var selectedOutlineJobIDForTesting: String? {
-        guard outlineView.selectedRow != -1 else {
-            return nil
-        }
-        return reviewRow(atRow: outlineView.selectedRow)?.operation.jobID
-    }
-
     func toggleWorkspaceDisclosureForTesting(_ workspace: CodexReviewWorkspace) {
         guard row(for: workspace) != nil else {
             preconditionFailure("Workspace row is not visible.")

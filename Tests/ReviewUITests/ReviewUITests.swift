@@ -1793,7 +1793,7 @@ struct ReviewUITests {
         try await waitForCondition {
             sidebar.workspaceIsExpandedForTesting(storedWorkspace)
                 && sidebar.workspaceOutlineIsExpandedForTesting(storedWorkspace)
-                && sidebar.selectedOutlineJobIDForTesting == job.id
+                && sidebar.selectedReviewChatIDForTesting == job.reviewChatID
         }
     }
 
