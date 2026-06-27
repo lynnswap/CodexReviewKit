@@ -5114,26 +5114,29 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        let previewChatLogSource = ReviewMonitorPreviewChatLogSource(
+            fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: [job])
+        )
         let viewController = ReviewMonitorSplitViewController(
-            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            previewChatLogSource: previewChatLogSource
+        )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 360))
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
-        _ = try await awaitTimelineRenderForTesting(
-            job,
-            in: transport,
-            allowIncrementalUpdate: false
-        )
+        let chatID = try #require(job.reviewChatID)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
+        _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitTransportRender(transport) { $0.log == "Initial log" }
         #expect(snapshot.log == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
