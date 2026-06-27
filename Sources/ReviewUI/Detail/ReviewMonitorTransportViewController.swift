@@ -16,8 +16,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
     private var selectedJobObservation: PortableObservationTracking.Token?
+    private var selectedChatObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var boundJob: CodexReviewJob?
+    private var boundChatID: CodexThreadID?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
     private var displayedSelection: ReviewMonitorSelectionID?
     private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
@@ -57,6 +59,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     isolated deinit {
         selectionObservation?.cancel()
         selectedJobObservation?.cancel()
+        selectedChatObservation?.cancel()
         selectedWorkspaceFindingsObservation?.cancel()
         logRenderTask?.cancel()
     }
@@ -165,8 +168,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
         case .chat:
             clearDisplayedJob()
             clearDisplayedWorkspace()
+            if case .chat(let selectedChat) = selection {
+                displayChat(selectedChat)
+            }
             hidePlaceholder()
-            logScrollView.clear()
             logScrollView.isHidden = false
             workspaceFindingsView.isHidden = true
             displayedSelection = selection?.id
@@ -189,6 +194,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
+        selectedChatObservation?.cancel()
+        selectedChatObservation = nil
+        boundChatID = nil
         resetLogRenderer()
         boundJob = selectedJob
         selectedReviewChat.bind(to: selectedJob.reviewChatIdentity)
@@ -214,12 +222,47 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
+    private func displayChat(_ selectedChat: ReviewMonitorCodexSidebarSnapshot.Chat) {
+        if boundChatID != selectedChat.id {
+            logScrollView.resetFindStateForContentReuse()
+        }
+        selectedChatObservation?.cancel()
+        selectedChatObservation = nil
+        resetLogRenderer()
+        boundChatID = selectedChat.id
+        selectedReviewChat.bind(toChatID: selectedChat.id)
+
+        selectedChatObservation = withPortableContinuousObservation { [weak self] event in
+            let eventKind = event.kind
+            guard let self,
+                  self.boundChatID == selectedChat.id
+            else {
+                return
+            }
+            self.selectedReviewChat.bind(toChatID: selectedChat.id)
+            guard let timelineDocument = self.selectedReviewChat.timelineDocument else {
+                return
+            }
+            self.renderSelectedChatLog(
+                timelineDocument: timelineDocument,
+                chatID: selectedChat.id,
+                restorationTarget: eventKind == .initial
+                    ? .bottom
+                    : self.logScrollView.currentScrollRestorationTarget,
+                allowIncrementalUpdate: eventKind != .initial
+            )
+        }
+    }
+
     private func clearDisplayedJob() {
         cacheBoundJobScrollTarget()
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
+        selectedChatObservation?.cancel()
+        selectedChatObservation = nil
         boundJob = nil
-        selectedReviewChat.bind(to: nil)
+        boundChatID = nil
+        selectedReviewChat.unbind()
         resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
         logScrollView.clear()
@@ -428,6 +471,38 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return true
     }
 
+    @discardableResult
+    private func renderSelectedChatLog(
+        timelineDocument: ReviewTimelineDocument,
+        chatID: CodexThreadID,
+        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
+        allowIncrementalUpdate: Bool
+    ) -> Bool {
+        logRenderGeneration &+= 1
+        let generation = logRenderGeneration
+        let renderer = logRenderer
+        logRenderTask?.cancel()
+        logRenderTask = Task { @MainActor [weak self] in
+            let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
+            guard Task.isCancelled == false,
+                  let self,
+                  self.logRenderGeneration == generation,
+                  self.boundChatID == chatID
+            else {
+                return
+            }
+            _ = self.logScrollView.render(
+                sourceDocument: renderedDocument.source,
+                displayDocument: renderedDocument.display,
+                restoring: restorationTarget,
+                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundJobLog
+            )
+            self.appliedLogRenderGeneration = generation
+            self.hasAppliedBoundJobLog = true
+        }
+        return true
+    }
+
     private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
         if let document = selectedReviewChat.timelineDocument {
             return document
@@ -521,6 +596,10 @@ extension ReviewMonitorTransportViewController {
 
     var selectedJobObservationForTesting: PortableObservationTracking.Token? {
         selectedJobObservation
+    }
+
+    var selectedChatObservationForTesting: PortableObservationTracking.Token? {
+        selectedChatObservation
     }
 
     var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {

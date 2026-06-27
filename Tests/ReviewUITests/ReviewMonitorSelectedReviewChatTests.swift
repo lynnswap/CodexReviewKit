@@ -280,6 +280,80 @@ struct ReviewMonitorSelectedReviewChatTests {
         #expect(updatedSnapshot.log.contains("Legacy fallback") == false)
     }
 
+    @Test func selectedCodexChatRendersThreadAndLiveUpdates() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
+        try await runtime.transport.enqueueThreadResume(.init(id: "chat-thread"))
+        try await runtime.transport.enqueueThreadRead(
+            .init(
+                id: "chat-thread",
+                turns: [
+                    .init(
+                        id: "turn-1",
+                        status: .running,
+                        items: [
+                            .init(
+                                id: "message-1",
+                                kind: .agentMessage,
+                                content: .message(
+                                    .init(
+                                        id: "message-1",
+                                        role: .assistant,
+                                        phase: .finalAnswer,
+                                        text: "Generic chat snapshot"
+                                    ))
+                            )
+                        ]
+                    )
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let transport = ReviewMonitorTransportViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: modelContext
+        )
+        transport.loadViewIfNeeded()
+
+        uiState.selection = .chat(.init(
+            rowID: .chat(CodexThreadID(rawValue: "chat-thread")),
+            id: CodexThreadID(rawValue: "chat-thread"),
+            title: "Generic chat",
+            preview: nil,
+            workspaceCWD: "/tmp/project",
+            updatedAt: nil
+        ))
+
+        _ = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.contains("Generic chat snapshot")
+        }
+        #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
+        #expect(transport.selectedReviewChatIdentityForTesting == nil)
+        #expect(transport.selectedReviewChatIDForTesting == "chat-thread")
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/updated",
+            params: ThreadItemParams(
+                threadID: "chat-thread",
+                turnID: "turn-1",
+                item: .init(
+                    id: "message-1",
+                    type: "agentMessage",
+                    text: "Generic chat stream update",
+                    phase: "final_answer"
+                )
+            )
+        )
+
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.contains("Generic chat stream update")
+        }
+        #expect(updatedSnapshot.log.contains("Generic chat snapshot") == false)
+        #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
+    }
+
     private func makeRunningReviewJob(
         sourceThreadID: String?,
         reviewThreadID: String?,
