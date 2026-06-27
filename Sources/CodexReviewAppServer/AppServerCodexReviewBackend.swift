@@ -1177,36 +1177,14 @@ private extension CodexReviewBackendModel.Review.Run {
         if let identity = appServerReviewIdentity {
             return identity.associatedThreadIDs.map(\.rawValue)
         }
-        return fallbackThreadIDs(sourceLast: false)
+        return [threadID]
     }
 
     var appServerCleanupThreadIDs: [String] {
         if let identity = appServerReviewIdentity {
             return identity.cleanupThreadIDs.map(\.rawValue)
         }
-        return fallbackThreadIDs(sourceLast: true)
-    }
-
-    private func fallbackThreadIDs(sourceLast: Bool) -> [String] {
-        var seen: Set<String> = []
-        var threadIDs: [String] = []
-        let reviewThreadID = reviewThreadID?.nilIfEmpty
-        if sourceLast,
-           let reviewThreadID,
-           reviewThreadID != threadID,
-           seen.insert(reviewThreadID).inserted {
-            threadIDs.append(reviewThreadID)
-        }
-        if seen.insert(threadID).inserted {
-            threadIDs.append(threadID)
-        }
-        if sourceLast == false,
-           let reviewThreadID,
-           reviewThreadID != threadID,
-           seen.insert(reviewThreadID).inserted {
-            threadIDs.append(reviewThreadID)
-        }
-        return threadIDs
+        return [threadID]
     }
 }
 
