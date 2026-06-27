@@ -9,9 +9,9 @@ package struct CodexReviewRuntimeJobState: Sendable {
 
 @MainActor
 final class CodexReviewStoreRuntimeState {
-    typealias ReviewRun = CodexReviewBackendModel.Review.Run
+    typealias BackendReviewRun = CodexReviewBackendModel.Review.Run
 
-    private var activeRuns: [String: ReviewRun] = [:]
+    private var activeRuns: [String: BackendReviewRun] = [:]
     private var reviewRecoveryWaitingJobIDs: Set<String> = []
     private var startingJobIDs: Set<String> = []
     private var startupCancellations: [String: ReviewCancellation] = [:]
@@ -27,11 +27,11 @@ final class CodexReviewStoreRuntimeState {
         )
     }
 
-    func activeRun(for jobID: String) -> ReviewRun? {
+    func activeRun(for jobID: String) -> BackendReviewRun? {
         activeRuns[jobID]
     }
 
-    func setActiveRun(_ run: ReviewRun, for jobID: String) {
+    func setActiveRun(_ run: BackendReviewRun, for jobID: String) {
         activeRuns[jobID] = run
     }
 
@@ -39,7 +39,7 @@ final class CodexReviewStoreRuntimeState {
         activeRuns.removeValue(forKey: jobID)
     }
 
-    func recoveryWaitingRuns() -> [ReviewRun] {
+    func recoveryWaitingRuns() -> [BackendReviewRun] {
         reviewRecoveryWaitingJobIDs
             .sorted()
             .compactMap { activeRuns[$0] }

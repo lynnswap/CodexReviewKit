@@ -18,10 +18,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     private var legacyLogBuffer: ReviewLegacyLogBuffer
 
     public nonisolated let id: String
-    public let domainJob: ReviewJob
-    public var timeline: ReviewTimeline {
-        domainJob.timeline
-    }
+    public let timeline: ReviewTimeline
     public let sessionID: String
     public let cwd: String
     public internal(set) var sortOrder: Double
@@ -86,7 +83,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         let initialLogBuffer = ReviewLegacyLogBuffer(entries: logEntries)
         let initialLogSnapshot = initialLogBuffer.snapshot
         self.id = id
-        self.domainJob = ReviewJob(id: .init(rawValue: id))
+        self.timeline = ReviewTimeline()
         self.sessionID = sessionID
         self.cwd = cwd
         self.sortOrder = sortOrder

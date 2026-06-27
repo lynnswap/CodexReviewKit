@@ -10,30 +10,6 @@ public extension ReviewStringIdentifier {
     }
 }
 
-public struct ReviewJobID: ReviewStringIdentifier, CustomStringConvertible {
-    public var rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
-    public var description: String {
-        rawValue
-    }
-}
-
-public struct ReviewRunID: ReviewStringIdentifier, CustomStringConvertible {
-    public var rawValue: String
-
-    public init(rawValue: String) {
-        self.rawValue = rawValue
-    }
-
-    public var description: String {
-        rawValue
-    }
-}
-
 public struct ReviewThreadID: ReviewStringIdentifier, CustomStringConvertible {
     public var rawValue: String
 
