@@ -954,6 +954,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func runtimeJobForCurrentChatSelection() -> CodexReviewJob? {
+        guard isUsingCodexSidebarOutline == false else {
+            return nil
+        }
         switch uiState.selection {
         case .chat(let chat):
             return store.reviewJob(forChatID: chat.id, in: workspaces())
