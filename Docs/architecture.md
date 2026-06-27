@@ -14,7 +14,6 @@ raw app-server wire
   -> domain review event
   -> observable review timeline
   -> UI / MCP / rendering projections
-  -> log-entry projection only at explicit `review_read` edges
 ```
 
 Raw JSON-RPC notifications are an input boundary only. They must not become the
@@ -29,7 +28,7 @@ This table describes intended ownership.
 | Target | Responsibility |
 | --- | --- |
 | `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, app-server review notification schema, high-level review stream/session API, and Swift domain API for threads, turns, prompts, review sessions, models, accounts, and login. Raw review DTOs are not its public boundary. It has no Review, UI, or MCP dependencies |
-| `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and `review_read` log-entry projections. It has no app-server wire, UI, or MCP dependencies |
+| `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, and auth/settings/runtime product state. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level `CodexReviewSession` review streams into `CodexReviewKit` backend events |
 | `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
@@ -82,15 +81,11 @@ available. Rendering helpers and MCP server projections project from semantic
 state; they do not parse raw app-server events and do not make string logs
 authoritative again.
 
-Log-entry support remains only at explicit `review_read` API edges:
-
 - `ReviewLogEntryTimelineProjection` rebuilds semantic timeline state from
   existing log entries for persisted or test-created job state that predates
   direct timeline events.
-- `ReviewTimelineLogProjection` derives log entries from timeline
-  items when `review_read.logs` needs paged log-entry output.
 
-Those projections are not ReviewMonitor UI owners. New behavior should prefer
+This projection is not a ReviewMonitor UI owner. New behavior should prefer
 domain events, `CodexDataKit` models, and timeline documents as the owner.
 
 ## Target Graph
@@ -109,7 +104,6 @@ flowchart TB
 
     subgraph Product["CodexReviewKit product API"]
         PublicStore["CodexReviewStore"]
-        LogProjection["Log-entry projections"]
     end
 
     subgraph Kit["CodexAppServerKit"]
@@ -145,7 +139,6 @@ flowchart TB
     DomainEvents --> Timeline
     Timeline --> AppStore
     Timeline --> PublicStore
-    Timeline --> LogProjection
     Timeline --> MCPServer
     Timeline --> Renderer
     PublicStore --> UI
@@ -229,10 +222,10 @@ the store.
 ReviewMonitor backend events and adds ReviewMonitor-specific cleanup and
 recovery on top of that generic boundary.
 
-The intended ownership for review logs is that `CodexAppServerKit` supplies
+The intended ownership for review progress is that `CodexAppServerKit` supplies
 generic app-server thread events, log entries, and high-level review session
 events, while ReviewMonitor-specific targets adapt those values into
-`ReviewDomainEvent`, `ReviewTimeline`, and review log-entry projections.
+`ReviewDomainEvent` and `ReviewTimeline`.
 
 Fake and live tests use the same transport protocol.
 
@@ -283,8 +276,8 @@ The current ReviewMonitor UI model boundary is therefore:
 
 - `CodexDataKit`: generic observable app-server models and fetch/query owners.
 - `CodexReviewKit`: review-job, review-timeline, review-auth/settings product
-  state, `review_read` log-entry projections, and product command state until the
-  matching generic CodexDataKit owners are available.
+  state, and product command state until the matching generic CodexDataKit
+  owners are available.
 - `ReviewUI`: native AppKit/SwiftUI rendering state such as sidebar selection,
   filters, installed controllers, row views, and transient presentation.
 

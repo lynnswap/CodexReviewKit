@@ -43,8 +43,9 @@ struct CodexReviewMCPHTTPServerTests {
             let reviewRead = try #require(tools.first { $0["name"] as? String == "review_read" })
             let readSchema = try #require(reviewRead["inputSchema"] as? [String: Any])
             let readProperties = try #require(readSchema["properties"] as? [String: Any])
-            #expect(readProperties["logOffset"] != nil)
-            #expect(readProperties["logLimit"] != nil)
+            #expect(readProperties["logOffset"] == nil)
+            #expect(readProperties["logLimit"] == nil)
+            #expect(readProperties["logFilter"] == nil)
             let reviewAwait = try #require(tools.first { $0["name"] as? String == "review_await" })
             let awaitSchema = try #require(reviewAwait["inputSchema"] as? [String: Any])
             let awaitProperties = try #require(awaitSchema["properties"] as? [String: Any])
@@ -443,37 +444,12 @@ struct CodexReviewMCPHTTPServerTests {
                     ],
                 ]
             )
-            let allLogs = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 4,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-in-session",
-                            "logFilter": "all",
-                        ],
-                    ],
-                ]
-            )
-
             #expect(allowed.value(for: ["result", "isError"]) as? Bool == false)
             #expect(allowed.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-in-session")
-            let defaultLogs = allowed.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
-            #expect(defaultLogs?.compactMap { $0["kind"] as? String } == ["command", "agentMessage"])
-            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
-            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "offset"]) as? Int == 0)
-            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "limit"]) as? Int == 100)
-            #expect(allowed.value(for: ["result", "structuredContent", "logsPage", "returned"]) as? Int == 2)
-            let unfilteredLogs = allLogs.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]]
-            #expect(unfilteredLogs?.compactMap { $0["kind"] as? String } == [
-                "command",
-                "commandOutput",
-                "agentMessage",
-            ])
+            #expect(allowed.value(for: ["result", "structuredContent", "logs"]) == nil)
+            #expect(allowed.value(for: ["result", "structuredContent", "logsPage"]) == nil)
+            let timelineIDs = allowed.value(for: ["result", "structuredContent", "timeline", "orderedItemIds"]) as? [String]
+            #expect(timelineIDs?.contains("cmd-1") == true)
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
             #expect(readText == "Done")
             #expect(readText?.contains("rawLogText") == false)
@@ -482,7 +458,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPReviewReadAddsSemanticTimelineWithoutChangingLogShape() async throws {
+    @Test func streamableHTTPReviewReadAddsSemanticTimeline() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -545,24 +521,6 @@ struct CodexReviewMCPHTTPServerTests {
                         "name": "review_read",
                         "arguments": [
                             "jobId": "job-semantic",
-                            "logLimit": 1,
-                        ],
-                    ],
-                ]
-            )
-            let allResponse = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-semantic",
-                            "logFilter": "all",
-                            "logLimit": 2,
                         ],
                     ],
                 ]
@@ -572,23 +530,18 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) as? String != nil)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 1)
-            let defaultLogs = try #require(defaultResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
-            #expect(defaultLogs.compactMap { $0["kind"] as? String } == ["command"])
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "logs"]) == nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage"]) == nil)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
 
-            #expect(allResponse.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 2)
-            let allLogs = try #require(allResponse.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
-            #expect(allLogs.compactMap { $0["kind"] as? String } == ["command", "commandOutput"])
-
-            let timeline = try #require(allResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let timeline = try #require(defaultResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
             #expect(timeline["orderedItemIds"] as? [String] == ["cmd-1"])
             #expect(timeline["activeItemIds"] as? [String] == [])
             #expect(timeline["activeItemCount"] as? Int == 0)
             #expect(timeline["latestActivityId"] as? String == "cmd-1")
             let itemsPage = try #require(timeline["itemsPage"] as? [String: Any])
             #expect(itemsPage["total"] as? Int == 1)
-            #expect(itemsPage["limit"] as? Int == 2)
+            #expect(itemsPage["limit"] as? Int == 1)
             #expect(itemsPage["returned"] as? Int == 1)
             let items = try #require(timeline["items"] as? [[String: Any]])
             let commandItem = try #require(items.first)
@@ -652,15 +605,14 @@ struct CodexReviewMCPHTTPServerTests {
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-tool-progress",
-                            "logFilter": "all",
+                        "params": [
+                            "name": "review_read",
+                            "arguments": [
+                                "jobId": "job-tool-progress",
+                            ],
                         ],
-                    ],
-                ]
-            )
+                    ]
+                )
 
             let timeline = try #require(response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
             #expect(timeline["activeItemIds"] as? [String] == ["tool-1:progress"])
@@ -675,245 +627,6 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(content["server"] as? String == "codex_review")
             #expect(content["tool"] as? String == "review_read")
             #expect(content["progress"] as? String == "Reading review job")
-        }
-    }
-
-    @Test func streamableHTTPReviewReadPagesTimelineFromRequestedOffsetWhenLogsAreFiltered() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-
-        try await withHTTPServer(store: store) { server in
-            let sessionID = try await initializeSession(endpoint: await server.url)
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
-                    CodexReviewJob.makeForTesting(
-                        id: "job-filtered-timeline",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Included",
-                        status: .succeeded,
-                        summary: "Done",
-                        logEntries: [
-                            .init(
-                                kind: .commandOutput,
-                                text: "output-0",
-                                metadata: .init(
-                                    sourceType: "fileChange",
-                                    title: "File 0",
-                                    status: "completed",
-                                    itemID: "file-0"
-                                )
-                            ),
-                            .init(
-                                kind: .commandOutput,
-                                text: "output-1",
-                                metadata: .init(
-                                    sourceType: "fileChange",
-                                    title: "File 1",
-                                    status: "completed",
-                                    itemID: "file-1"
-                                )
-                            ),
-                            .init(
-                                kind: .commandOutput,
-                                text: "output-2",
-                                metadata: .init(
-                                    sourceType: "fileChange",
-                                    title: "File 2",
-                                    status: "completed",
-                                    itemID: "file-2"
-                                )
-                            ),
-                        ]
-                    ),
-                ]
-            )
-
-            let firstPage = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-filtered-timeline",
-                            "logOffset": 0,
-                            "logLimit": 1,
-                        ],
-                    ],
-                ]
-            )
-            let secondPage = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-filtered-timeline",
-                            "logOffset": 1,
-                            "logLimit": 1,
-                        ],
-                    ],
-                ]
-            )
-
-            #expect(firstPage.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 0)
-            let firstTimeline = try #require(firstPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            let firstItemsPage = try #require(firstTimeline["itemsPage"] as? [String: Any])
-            #expect(firstItemsPage["total"] as? Int == 3)
-            #expect(firstItemsPage["offset"] as? Int == 0)
-            #expect(firstItemsPage["returned"] as? Int == 1)
-            #expect(firstItemsPage["nextOffset"] as? Int == 1)
-            let firstItems = try #require(firstTimeline["items"] as? [[String: Any]])
-            #expect(firstItems.first?["id"] as? String == "file-0")
-
-            let secondTimeline = try #require(secondPage.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            let secondItemsPage = try #require(secondTimeline["itemsPage"] as? [String: Any])
-            #expect(secondItemsPage["offset"] as? Int == 1)
-            #expect(secondItemsPage["previousOffset"] as? Int == 0)
-            let secondItems = try #require(secondTimeline["items"] as? [[String: Any]])
-            #expect(secondItems.first?["id"] as? String == "file-1")
-        }
-    }
-
-    @Test func streamableHTTPReviewReadReturnsPagedRunningSummary() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            clock: .init(now: { Date(timeIntervalSince1970: 10) })
-        )
-
-        try await withHTTPServer(store: store) { server in
-            let sessionID = try await initializeSession(endpoint: await server.url)
-            let longLatest = "latest " + String(repeating: "x", count: 400)
-            let entries = (0..<119).map { index in
-                ReviewLogEntry(kind: .progress, text: "line-\(index)")
-            } + [
-                ReviewLogEntry(kind: .progress, text: longLatest),
-            ]
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
-                    CodexReviewJob.makeForTesting(
-                        id: "job-running",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Running",
-                        status: .running,
-                        startedAt: Date(timeIntervalSince1970: 5),
-                        summary: "Review started.",
-                        logEntries: entries
-                    ),
-                ]
-            )
-
-            let response = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-running",
-                            "logLimit": 5,
-                        ],
-                    ],
-                ]
-            )
-
-            let logs = try #require(response.value(for: ["result", "structuredContent", "logs"]) as? [[String: Any]])
-            let readText = try #require((response.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String)
-            #expect(logs.compactMap { $0["text"] as? String }.first == "line-115")
-            #expect(logs.count == 5)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "total"]) as? Int == 120)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "offset"]) as? Int == 115)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "limit"]) as? Int == 5)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "returned"]) as? Int == 5)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "hasMoreBefore"]) as? Bool == true)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "hasMoreAfter"]) as? Bool == false)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "previousOffset"]) as? Int == 110)
-            #expect(response.value(for: ["result", "structuredContent", "logsPage", "nextOffset"]) is NSNull)
-            #expect(readText.hasPrefix("Review running for 5s. Returned logs 116-120 of 120. Latest: latest "))
-            #expect(readText.count < longLatest.count)
-            #expect(readText.contains("Review started.") == false)
-        }
-    }
-
-    @Test func streamableHTTPReviewReadRejectsInvalidPagingArguments() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-
-        try await withHTTPServer(store: store) { server in
-            let sessionID = try await initializeSession(endpoint: await server.url)
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
-                    CodexReviewJob.makeForTesting(
-                        id: "job-running",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Running",
-                        status: .running,
-                        summary: "Review started."
-                    ),
-                ]
-            )
-
-            let negativeOffset = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-running",
-                            "logOffset": -1,
-                        ],
-                    ],
-                ]
-            )
-            let tooLargeLimit = try await postJSONRPC(
-                endpoint: await server.url,
-                sessionID: sessionID,
-                body: [
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": [
-                        "name": "review_read",
-                        "arguments": [
-                            "jobId": "job-running",
-                            "logLimit": CodexReviewAPI.Log.PageRequest.maxLimit + 1,
-                        ],
-                    ],
-                ]
-            )
-
-            #expect(negativeOffset.value(for: ["result", "isError"]) as? Bool == true)
-            #expect((negativeOffset.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "logOffset must be greater than or equal to 0.")
-            #expect(tooLargeLimit.value(for: ["result", "isError"]) as? Bool == true)
-            #expect((tooLargeLimit.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "logLimit must be between 1 and 500.")
         }
     }
 

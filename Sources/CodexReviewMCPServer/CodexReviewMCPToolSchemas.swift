@@ -43,22 +43,6 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
                 "sessionID": .object(["type": .string("string")]),
                 "jobID": .object(["type": .string("string")]),
                 "jobId": .object(["type": .string("string")]),
-                "logOffset": .object([
-                    "type": .string("integer"),
-                    "minimum": .int(0),
-                ]),
-                "logLimit": .object([
-                    "type": .string("integer"),
-                    "minimum": .int(1),
-                    "maximum": .int(CodexReviewAPI.Log.PageRequest.maxLimit),
-                ]),
-                "logFilter": .object([
-                    "type": .string("string"),
-                    "enum": .array([
-                        .string(CodexReviewAPI.Log.Filter.defaultSetting.rawValue),
-                        .string(CodexReviewAPI.Log.Filter.all.rawValue),
-                    ]),
-                ]),
             ]),
         ])
     case .reviewList:

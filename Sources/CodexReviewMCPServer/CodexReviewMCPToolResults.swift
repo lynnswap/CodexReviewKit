@@ -12,8 +12,8 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
         value = snapshot.result.structuredContentForStartOrAwait(timeline: snapshot.timeline)
         text = snapshot.result.textContentForStartOrAwait()
         isError = snapshot.result.core.lifecycle.status == .failed
-    case .reviewRead(let snapshot, let timelinePage):
-        value = snapshot.result.structuredContentForRead(timeline: snapshot.timeline, timelinePage: timelinePage)
+    case .reviewRead(let snapshot):
+        value = snapshot.result.structuredContentForRead(timeline: snapshot.timeline)
         text = snapshot.result.textContentForRead()
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewList(let result):
@@ -54,31 +54,11 @@ private extension CodexReviewAPI.Read.Result {
             return textContent()
         }
 
-        var parts: [String] = []
         var status = "Review \(core.lifecycle.status.rawValue)"
         if let elapsedSeconds {
             status += " for \(elapsedSeconds)s"
         }
-        parts.append(status + ".")
-        parts.append("Returned logs \(logsPage.rangeDescription) of \(logsPage.total).")
-        if let latest = logs.last(where: { $0.text.nilIfEmpty != nil }) {
-            parts.append("Latest: \(Self.truncatedLatestText(latest.text))")
-        }
-        return parts.joined(separator: " ")
-    }
-
-    private static func truncatedLatestText(_ text: String) -> String {
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .joined(separator: " ")
-        let limit = 300
-        guard normalized.count > limit else {
-            return normalized
-        }
-        let index = normalized.index(normalized.startIndex, offsetBy: limit)
-        return String(normalized[..<index]) + "..."
+        return "\(status)."
     }
 
     func structuredContentForStartOrAwait(timeline: ReviewMCPProjection) -> Value {
@@ -89,23 +69,18 @@ private extension CodexReviewAPI.Read.Result {
         )
     }
 
-    func structuredContentForRead(
-        timeline: ReviewMCPProjection,
-        timelinePage: CodexReviewAPI.Log.PageRequest?
-    ) -> Value {
+    func structuredContentForRead(timeline: ReviewMCPProjection) -> Value {
         structuredContent(
             includeDetails: true,
             includeNextAction: false,
-            timeline: timeline,
-            timelinePage: timelinePage ?? .default
+            timeline: timeline
         )
     }
 
     func structuredContent(
         includeDetails: Bool,
         includeNextAction: Bool,
-        timeline: ReviewMCPProjection,
-        timelinePage: CodexReviewAPI.Log.PageRequest? = nil
+        timeline: ReviewMCPProjection
     ) -> Value {
         var object: [String: Value] = [
             "jobId": .string(jobID),
@@ -116,13 +91,8 @@ private extension CodexReviewAPI.Read.Result {
             ),
             "output": core.output.structuredContent(review: core.reviewText),
         ]
-        if includeDetails {
-            object["logs"] = .array(logs.map { $0.structuredContent() })
-            object["logsPage"] = logsPage.structuredContent()
-            object["rawLogText"] = .string(rawLogText)
-        }
         object["timeline"] = includeDetails
-            ? timeline.structuredContent(pageRequest: timelinePage ?? .default)
+            ? timeline.structuredContentWithItems()
             : timeline.structuredContent()
         if includeNextAction {
             object["nextAction"] = .object([
@@ -161,7 +131,7 @@ private extension ReviewMCPProjection {
         return .object(object)
     }
 
-    func structuredContent(pageRequest: CodexReviewAPI.Log.PageRequest) -> Value {
+    func structuredContentWithItems() -> Value {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
             "revision": timelineRevision.rawValue.structuredRevisionValue(),
@@ -180,8 +150,17 @@ private extension ReviewMCPProjection {
                 truncatedFields: &truncatedFields
             ),
         ]
-        let page = TimelineItemPage(pageRequest: pageRequest, total: items.count)
-        object["items"] = .array(items[page.range].map { $0.structuredContent() })
+        let page = TimelineItemPage(
+            total: items.count,
+            offset: 0,
+            limit: items.count,
+            returned: items.count,
+            hasMoreBefore: false,
+            hasMoreAfter: false,
+            previousOffset: nil,
+            nextOffset: nil
+        )
+        object["items"] = .array(items.map { $0.structuredContent() })
         object["itemsPage"] = page.structuredContent()
         object["truncatedFields"] = .array(truncatedFields.map(Value.string))
         return .object(object)
@@ -443,20 +422,6 @@ private struct TimelineItemPage {
         )
     }
 
-    init(pageRequest: CodexReviewAPI.Log.PageRequest, total: Int) {
-        let limit = pageRequest.limit
-        let offset = min(pageRequest.offset ?? max(0, total - limit), total)
-        let returned = min(limit, max(0, total - offset))
-        self.total = total
-        self.offset = offset
-        self.limit = limit
-        self.returned = returned
-        self.hasMoreBefore = offset > 0
-        self.hasMoreAfter = offset + returned < total
-        self.previousOffset = hasMoreBefore ? max(0, offset - limit) : nil
-        self.nextOffset = hasMoreAfter ? offset + returned : nil
-    }
-
     func structuredContent() -> Value {
         .object([
             "total": .int(total),
@@ -514,27 +479,6 @@ private extension UInt64 {
     }
 }
 
-private extension CodexReviewAPI.Log.Page {
-    var rangeDescription: String {
-        guard returned > 0 else {
-            return "0"
-        }
-        return "\(offset + 1)-\(offset + returned)"
-    }
-
-    func structuredContent() -> Value {
-        .object([
-            "total": .int(total),
-            "offset": .int(offset),
-            "limit": .int(limit),
-            "returned": .int(returned),
-            "hasMoreBefore": .bool(hasMoreBefore),
-            "hasMoreAfter": .bool(hasMoreAfter),
-            "previousOffset": previousOffset.map(Value.int) ?? .null,
-            "nextOffset": nextOffset.map(Value.int) ?? .null,
-        ])
-    }
-}
 
 private extension CodexReviewAPI.Job.ListItem {
     func structuredContent() -> Value {

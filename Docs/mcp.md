@@ -62,8 +62,7 @@ Notes:
   2. the effective dedicated Codex config in `~/.codex_review/config.toml` `review_model`
   3. backend-reported `thread/start.model`
   4. the effective dedicated Codex config in `~/.codex_review/config.toml` `model` only as a pre-thread-start fallback when the backend does not report a model
-- Use `review_read` to fetch paged, ordered `logs`. `rawLogText` is the
-  diagnostic/raw projection and is not a full log transcript.
+- Use `review_read` to fetch the detailed timeline for a job.
 
 If you are unsure how to build the `target` object, read:
 
@@ -85,8 +84,8 @@ Inputs:
 - `jobId` or `jobID`
 
 Returns the same lightweight shape as `review_start`: `jobId`, `run`,
-`lifecycle`, and `output`. It does not include `logs` or `rawLogText`; use
-`review_read` when log pages are needed.
+`lifecycle`, and `output`. Use `review_read` when timeline item details are
+needed.
 
 If the job is still running after the bounded wait, call `review_await` again
 with the same `jobId`.
@@ -96,31 +95,14 @@ with the same `jobId`.
 Reads the current or final state of a review job owned by the current MCP session.
 This is optional for normal clients because `review_start` already returns the final summary.
 
-Optional inputs:
-
-- `logOffset` 0-based log page offset. If omitted, `review_read` returns the
-  latest page.
-- `logLimit` page size, default `100`, max `500`
-- `logFilter` `default` excludes command output; `all` includes it
-
 Returns:
 
 - `jobId`
 - `run`
 - `lifecycle`
 - `output`
-- `logs` paged read projection. Grouped replacement/delta entries are folded
-  into their current value before paging.
-- `logsPage`
-  - `total`
-  - `offset`
-  - `limit`
-  - `returned`
-  - `hasMoreBefore`
-  - `hasMoreAfter`
-  - `previousOffset`
-  - `nextOffset`
-- `rawLogText` diagnostic/raw projection, not a full transcript
+- `timeline` with ordered item IDs, active item IDs, terminal summary/result,
+  and item details.
 
 ### `review_list`
 

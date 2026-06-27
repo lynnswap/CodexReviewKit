@@ -1151,125 +1151,7 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(toolCall.progress == "Reading review job")
-            #expect(try store.readReview(jobID: "job-1", logFilter: .all).logs.contains {
-                $0.kind == .toolCall && $0.text == "Reading review job"
-            })
         }
-    }
-
-    @Test func timelineProjectedReadReviewLogIDsAreStableAcrossReads() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running"
-        )
-        job.timeline.apply(.itemUpdated(.init(
-            id: "tool-1:progress",
-            kind: .mcpToolCall,
-            family: .tool,
-            phase: .running,
-            content: .toolCall(.init(
-                server: "codex_review",
-                tool: "review_read",
-                progress: "Reading review job"
-            ))
-        )))
-        job.timeline.apply(.itemCompleted(.init(
-            id: "command-1",
-            kind: .commandExecution,
-            family: .command,
-            phase: .completed,
-            content: .command(.init(
-                command: "swift test",
-                output: "Tests passed",
-                exitCode: 0
-            ))
-        )))
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let firstRead = try store.readReview(jobID: "job-1", logFilter: .all)
-        let secondRead = try store.readReview(jobID: "job-1", logFilter: .all)
-
-        #expect(firstRead.logs.map(\.text) == secondRead.logs.map(\.text))
-        #expect(firstRead.logs.map(\.id) == secondRead.logs.map(\.id))
-        #expect(Set(firstRead.logs.map(\.id)).count == firstRead.logs.count)
-    }
-
-    @Test func timelineProjectedReadReviewUsesOutputOnlyCommandText() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running"
-        )
-        job.timeline.apply(.textDelta(
-            itemID: "process-1",
-            kind: .commandExecution,
-            family: .command,
-            content: .command(.init(command: "")),
-            delta: "Build complete\n"
-        ))
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let defaultRead = try store.readReview(jobID: "job-1")
-        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
-
-        #expect(defaultRead.logs.isEmpty)
-        #expect(allRead.logs.map(\.kind) == [.commandOutput])
-        #expect(allRead.logs.map(\.text) == ["Build complete\n"])
-        #expect(allRead.logs.first?.metadata?.itemID == "process-1")
-        #expect(allRead.logs.first?.metadata?.command == nil)
-    }
-
-    @Test func timelineProjectedReadReviewSuppressesGenericCommandTitle() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running"
-        )
-        job.timeline.apply(.itemCompleted(.init(
-            id: "process-1",
-            kind: .commandExecution,
-            family: .command,
-            phase: .completed,
-            content: .command(.init(command: "Command", output: "Build complete\n"))
-        )))
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
-
-        #expect(allRead.logs.map(\.kind) == [.commandOutput])
-        #expect(allRead.logs.map(\.text) == ["Build complete\n"])
-        #expect(allRead.logs.first?.metadata?.command == nil)
     }
 
     @Test func timelineProjectedReadReviewPreservesCommandActions() throws {
@@ -1322,10 +1204,6 @@ struct CodexReviewStoreCommandTests {
         } else {
             Issue.record("expected command timeline content")
         }
-
-        let read = try store.readReview(jobID: "job-1", logFilter: .all)
-        #expect(read.logs.map(\.text) == ["$ cat Package.swift"])
-        #expect(read.logs.first?.metadata?.commandActions == [action])
     }
 
     @Test func directToolCallErrorTextIsTrimmedWhenReviewLogLimitApplies() async throws {
@@ -1814,11 +1692,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.run.turnID == "turn-actual")
             #expect(read.core.output.lastAgentMessage == "hello world")
-            #expect(read.rawLogText.isEmpty)
-            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == [
-                "hello world",
-                " with space",
-            ])
             #expect(try #require(store.job(id: "job-1")).reviewOutputText == "hello world\n\n with space")
             #expect(try store.readReview(jobID: "job-1").core.run.model == "gpt-5.5")
         }
@@ -1842,7 +1715,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.output.lastAgentMessage == "second")
             #expect(read.core.reviewText == "second")
-            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["first", "second"])
         }
     }
 
@@ -1868,7 +1740,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.output.lastAgentMessage == "final review text")
             #expect(read.core.reviewText == "final review text")
-            #expect(try store.readReview(jobID: "job-1").logs.map(\.text) == ["final review text"])
         }
     }
 
@@ -1907,277 +1778,6 @@ struct CodexReviewStoreCommandTests {
             #expect(job.logText.hasSuffix(delta))
             #expect(job.lastLogMutation == .reload)
         }
-    }
-
-    @Test func readReviewDefaultsToCommandOutputFilteredLogs() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .succeeded,
-            summary: "Done",
-            logEntries: [
-                .init(kind: .event, text: "Turn started: turn-1"),
-                .init(kind: .progress, text: "Reviewing current changes"),
-                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
-                .init(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
-                .init(kind: .plan, groupID: "plan-1", text: "Plan text"),
-                .init(kind: .todoList, groupID: "turn-1", text: "[inProgress] Inspect diff"),
-                .init(kind: .reasoningSummary, groupID: "reasoning-1:summary:0", text: "Reasoning summary"),
-                .init(kind: .rawReasoning, groupID: "reasoning-1:0", text: "Raw reasoning"),
-                .init(kind: .toolCall, groupID: "tool-1", text: "MCP tool started"),
-                .init(kind: .diagnostic, text: "Warning"),
-                .init(kind: .error, text: "Recoverable error"),
-                .init(kind: .agentMessage, text: "No correctness issues found."),
-            ]
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        #expect(try store.readReview(jobID: "job-1").logs.map(\.kind) == [
-            .event,
-            .progress,
-            .command,
-            .plan,
-            .todoList,
-            .reasoningSummary,
-            .rawReasoning,
-            .toolCall,
-            .diagnostic,
-            .error,
-            .agentMessage,
-        ])
-        #expect(try store.readReview(jobID: "job-1", logFilter: .all).logs.map(\.kind) == [
-            .event,
-            .progress,
-            .command,
-            .commandOutput,
-            .plan,
-            .todoList,
-            .reasoningSummary,
-            .rawReasoning,
-            .toolCall,
-            .diagnostic,
-            .error,
-            .agentMessage,
-        ])
-    }
-
-    @Test func readReviewDefaultsToLatestPagedLogs() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let entries = (0..<125).map { index in
-            ReviewLogEntry(kind: .progress, text: "line-\(index)")
-        }
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: entries
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let read = try store.readReview(jobID: "job-1")
-
-        #expect(read.logs.map(\.text).first == "line-25")
-        #expect(read.logs.map(\.text).last == "line-124")
-        #expect(read.logsPage == CodexReviewAPI.Log.Page(
-            total: 125,
-            offset: 25,
-            limit: 100,
-            returned: 100,
-            hasMoreBefore: true,
-            hasMoreAfter: false,
-            previousOffset: 0,
-            nextOffset: nil
-        ))
-    }
-
-    @Test func readReviewReturnsRequestedLogPage() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let entries = (0..<12).map { index in
-            ReviewLogEntry(kind: .progress, text: "line-\(index)")
-        }
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: entries
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let read = try store.readReview(
-            jobID: "job-1",
-            logPage: .init(offset: 5, limit: 4)
-        )
-
-        #expect(read.logs.map(\.text) == ["line-5", "line-6", "line-7", "line-8"])
-        #expect(read.logsPage == CodexReviewAPI.Log.Page(
-            total: 12,
-            offset: 5,
-            limit: 4,
-            returned: 4,
-            hasMoreBefore: true,
-            hasMoreAfter: true,
-            previousOffset: 1,
-            nextOffset: 9
-        ))
-    }
-
-    @Test func readReviewRejectsInvalidLogPageRequests() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running"
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        #expect(throws: (any Error).self) {
-            try store.readReview(jobID: "job-1", logPage: .init(offset: -1))
-        }
-        #expect(throws: (any Error).self) {
-            try store.readReview(jobID: "job-1", logPage: .init(limit: -1))
-        }
-        #expect(throws: (any Error).self) {
-            try store.readReview(jobID: "job-1", logPage: .init(limit: CodexReviewAPI.Log.PageRequest.maxLimit + 1))
-        }
-    }
-
-    @Test func readReviewProjectsGroupedLogEntriesBeforeFilteringAndPaging() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: [
-                .init(kind: .reasoningSummary, groupID: "reasoning-1", text: "first"),
-                .init(kind: .reasoningSummary, groupID: "reasoning-1", text: " + second"),
-                .init(
-                    kind: .plan,
-                    groupID: "plan-1",
-                    text: "- old",
-                    metadata: .init(sourceType: "plan", status: "inProgress")
-                ),
-                .init(kind: .plan, groupID: "plan-1", replacesGroup: true, text: "- new"),
-                .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
-                .init(kind: .commandOutput, groupID: "cmd-1", text: "output"),
-                .init(kind: .agentMessage, text: "Done"),
-            ]
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let defaultRead = try store.readReview(jobID: "job-1")
-        let allRead = try store.readReview(jobID: "job-1", logFilter: .all)
-
-        #expect(defaultRead.logs.map(\.text) == [
-            "first + second",
-            "- new",
-            "$ swift test",
-            "Done",
-        ])
-        #expect(defaultRead.logs.allSatisfy { $0.replacesGroup == false })
-        #expect(defaultRead.logs.first { $0.groupID == "plan-1" }?.metadata == nil)
-        #expect(defaultRead.logsPage.total == 4)
-        #expect(allRead.logs.map(\.text) == [
-            "first + second",
-            "- new",
-            "$ swift test",
-            "output",
-            "Done",
-        ])
-        #expect(allRead.logsPage.total == 5)
-    }
-
-    @Test func readReviewFoldsReplacementOnlyGroupedKindsBeforePaging() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: [
-                .init(kind: .progress, groupID: "progress-1", replacesGroup: true, text: "Reviewing started"),
-                .init(kind: .progress, groupID: "progress-1", replacesGroup: true, text: "Reviewing completed"),
-                .init(kind: .toolCall, groupID: "tool-1", replacesGroup: true, text: "MCP tool started"),
-                .init(kind: .toolCall, groupID: "tool-1", replacesGroup: true, text: "MCP tool completed"),
-                .init(kind: .todoList, groupID: "turn-1", replacesGroup: true, text: "[inProgress] Inspect"),
-                .init(kind: .todoList, groupID: "turn-1", replacesGroup: true, text: "[completed] Inspect"),
-                .init(kind: .event, groupID: "turn-1", replacesGroup: true, text: "old diff"),
-                .init(kind: .event, groupID: "turn-1", replacesGroup: true, text: "new diff"),
-                .init(kind: .progress, groupID: "progress-2", text: "first progress"),
-                .init(kind: .progress, groupID: "progress-2", text: "second progress"),
-                .init(kind: .toolCall, groupID: "tool-2", replacesGroup: true, text: "Tool 2 started"),
-                .init(kind: .toolCall, groupID: "tool-2", text: "Tool 2 progress"),
-                .init(kind: .toolCall, groupID: "tool-2", replacesGroup: true, text: "Tool 2 completed"),
-            ]
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let read = try store.readReview(jobID: "job-1", logPage: .init(limit: 10))
-
-        #expect(read.logs.map(\.text) == [
-            "Reviewing completed",
-            "MCP tool completed",
-            "[completed] Inspect",
-            "new diff",
-            "first progress",
-            "second progress",
-            "Tool 2 completed",
-            "Tool 2 progress",
-        ])
-        #expect(read.logs.allSatisfy { $0.replacesGroup == false })
-        #expect(read.logsPage.total == 8)
     }
 
     @Test func reviewStartParsesFinalReviewFindings() async throws {
@@ -2603,7 +2203,7 @@ struct CodexReviewStoreCommandTests {
                     false
                 }
             })
-            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("completed review text") == false)
         }
     }
@@ -2670,7 +2270,7 @@ struct CodexReviewStoreCommandTests {
                     false
                 }
             })
-            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("completed during settle") == false)
         }
     }
@@ -2915,7 +2515,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.run.threadID == "thread-1")
             #expect(read.core.output.lastAgentMessage == "recovered review")
-            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("Network unavailable; waiting to reconnect."))
             #expect(logText.contains("Network restored; restarting review."))
             #expect(logText.contains("stale aborted output") == false)
@@ -2972,7 +2572,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.output.lastAgentMessage == "fresh review")
             #expect(read.core.output.hasFinalReview)
-            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("stale output") == false)
             #expect(logText.contains("fresh review"))
         }
@@ -3594,7 +3194,7 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.output.lastAgentMessage == "recovered review")
-            let logText = try store.readReview(jobID: "job-1").logs.map(\.text).joined(separator: "\n")
+            let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("stale old attempt output") == false)
         }
     }
@@ -3664,7 +3264,9 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.lifecycle.errorMessage == "Rollback failed")
-            #expect(read.logs.contains { $0.kind == .error && $0.text == "Rollback failed" })
+            #expect(try #require(store.job(id: "job-1")).logEntries.contains {
+                $0.kind == .error && $0.text == "Rollback failed"
+            })
         }
     }
 
@@ -3714,7 +3316,7 @@ struct CodexReviewStoreCommandTests {
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
-            let read = try store.readReview(jobID: "job-1", logFilter: .all)
+            let read = try store.readReview(jobID: "job-1")
             let commandLogs = try #require(store.job(id: "job-1"))
                 .logEntries
                 .filter { $0.kind == .command && $0.groupID == "cmd-1" }
@@ -3809,7 +3411,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.output.lastAgentMessage == "partial review")
-            #expect(read.logs.map(\.text).contains("partial review"))
         }
     }
 

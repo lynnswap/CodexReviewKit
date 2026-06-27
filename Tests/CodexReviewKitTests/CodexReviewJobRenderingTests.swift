@@ -33,7 +33,7 @@ struct CodexReviewJobRenderingTests {
         """)
     }
 
-    @Test func outputOnlyCommandLogsDoNotSynthesizePlaceholderCommandLine() throws {
+    @Test func outputOnlyCommandLogsProjectToTimelineWithoutPlaceholderCommandLine() throws {
         let outputOnlyJob = CodexReviewJob.makeForTesting(
             id: "job-output-only-command",
             cwd: "/tmp/workspace",
@@ -60,26 +60,7 @@ struct CodexReviewJobRenderingTests {
             return
         }
         #expect(outputOnlyCommand.command == "")
-        #expect(outputOnlyJob.timelineLogEntries.map(\.kind) == [.commandOutput])
-        #expect(outputOnlyJob.timelineLogEntries.map(\.text) == ["Build complete\n"])
-
-        let mixedJob = CodexReviewJob.makeForTesting(
-            id: "job-generic-command-title",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running"
-        )
-        mixedJob.timeline.apply(.itemCompleted(.init(
-            id: "cmd-generic",
-            kind: .commandExecution,
-            family: .command,
-            phase: .completed,
-            content: .command(.init(command: "Command", output: "Build complete\n"))
-        )))
-
-        #expect(mixedJob.timelineLogEntries.map(\.kind) == [.commandOutput])
-        #expect(mixedJob.timelineLogEntries.map(\.text) == ["Build complete\n"])
+        #expect(outputOnlyCommand.output == "Build complete\n")
     }
 
     @Test func fileChangeCommandOutputChunksAccumulateInTimelineProjection() throws {

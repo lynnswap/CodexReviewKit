@@ -27,9 +27,7 @@ func toolRequest(
     case .reviewRead:
         return .reviewRead(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
-            jobID: try requiredJobID(in: arguments),
-            logFilter: try reviewLogFilter(in: arguments),
-            logPage: try reviewLogPageRequest(in: arguments)
+            jobID: try requiredJobID(in: arguments)
         )
     case .reviewList:
         return .reviewList(
@@ -74,50 +72,6 @@ func requiredJobID(in arguments: [String: Value]) throws -> String {
         throw MCPProtocolServerError.missingArgument("jobID/jobId")
     }
     return jobID
-}
-
-func reviewLogFilter(in arguments: [String: Value]) throws -> CodexReviewAPI.Log.Filter {
-    guard let rawValue = arguments["logFilter"]?.stringValue?.nilIfEmpty else {
-        return .defaultSetting
-    }
-    guard let filter = CodexReviewAPI.Log.Filter(rawValue: rawValue) else {
-        throw MCPProtocolServerError.invalidArgument(
-            "Unsupported logFilter: \(rawValue). Use `default` or `all`."
-        )
-    }
-    return filter
-}
-
-func reviewLogPageRequest(in arguments: [String: Value]) throws -> CodexReviewAPI.Log.PageRequest {
-    let offset: Int?
-    if let value = arguments["logOffset"] {
-        guard let parsed = value.intValue else {
-            throw MCPProtocolServerError.invalidArgument("logOffset must be an integer.")
-        }
-        guard parsed >= 0 else {
-            throw MCPProtocolServerError.invalidArgument("logOffset must be greater than or equal to 0.")
-        }
-        offset = parsed
-    } else {
-        offset = nil
-    }
-
-    let limit: Int
-    if let value = arguments["logLimit"] {
-        guard let parsed = value.intValue else {
-            throw MCPProtocolServerError.invalidArgument("logLimit must be an integer.")
-        }
-        guard (1...CodexReviewAPI.Log.PageRequest.maxLimit).contains(parsed) else {
-            throw MCPProtocolServerError.invalidArgument(
-                "logLimit must be between 1 and \(CodexReviewAPI.Log.PageRequest.maxLimit)."
-            )
-        }
-        limit = parsed
-    } else {
-        limit = CodexReviewAPI.Log.PageRequest.defaultLimit
-    }
-
-    return CodexReviewAPI.Log.PageRequest(offset: offset, limit: limit)
 }
 
 func reviewTarget(from object: [String: Value]) throws -> CodexReviewAPI.Target {

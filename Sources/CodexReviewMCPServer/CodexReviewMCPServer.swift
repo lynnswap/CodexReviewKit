@@ -31,7 +31,7 @@ package extension CodexReviewMCP.Tool {
     enum Request: Equatable, Sendable {
         case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
         case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
-        case reviewRead(sessionID: String?, jobID: String, logFilter: CodexReviewAPI.Log.Filter, logPage: CodexReviewAPI.Log.PageRequest)
+        case reviewRead(sessionID: String?, jobID: String)
         case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
         case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
     }
@@ -53,7 +53,7 @@ package extension CodexReviewMCP.Tool {
     internal enum Response: Equatable, Sendable {
         case reviewStart(ReviewSnapshot)
         case reviewAwait(ReviewSnapshot)
-        case reviewRead(ReviewSnapshot, timelinePage: CodexReviewAPI.Log.PageRequest)
+        case reviewRead(ReviewSnapshot)
         case reviewList(CodexReviewAPI.List.Result)
         case reviewCancel(CodexReviewAPI.Cancel.Outcome)
     }
@@ -105,17 +105,15 @@ package final class CodexReviewMCPServer {
                 sessionID: sessionID
             )
             return .reviewAwait(snapshot)
-        case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
+        case .reviewRead(let sessionID, let jobID):
             let snapshot = try reviewSnapshot(
                 try store.readReview(
                     sessionID: sessionID,
-                    jobID: jobID,
-                    logFilter: logFilter,
-                    logPage: logPage
+                    jobID: jobID
                 ),
                 sessionID: sessionID
             )
-            return .reviewRead(snapshot, timelinePage: logPage)
+            return .reviewRead(snapshot)
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
                 sessionID: sessionID,
