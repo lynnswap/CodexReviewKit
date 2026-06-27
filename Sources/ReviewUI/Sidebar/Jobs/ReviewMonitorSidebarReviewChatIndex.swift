@@ -7,13 +7,11 @@ final class ReviewMonitorSidebarReviewChatIndex {
 
     func rows(for jobs: [CodexReviewJob]) -> [ReviewMonitorSidebarReviewChatRow] {
         jobs.map { job in
-            let chat = job.reviewChatSelection
-            let runtime = ReviewMonitorSidebarReviewChatRuntime(job: job)
             if let row = rowsByJobID[job.id] {
-                row.update(chat: chat, runtime: runtime)
+                row.update(job: job)
                 return row
             }
-            let row = ReviewMonitorSidebarReviewChatRow(chat: chat, runtime: runtime)
+            let row = ReviewMonitorSidebarReviewChatRow(job: job)
             rowsByJobID[job.id] = row
             return row
         }
@@ -41,6 +39,24 @@ final class ReviewMonitorSidebarReviewChatIndex {
             return nil
         }
         return row.chat
+    }
+}
+
+extension ReviewMonitorSidebarReviewChatRow {
+    @MainActor
+    convenience init(job: CodexReviewJob) {
+        self.init(
+            chat: job.reviewChatSelection,
+            runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
+        )
+    }
+
+    @MainActor
+    func update(job: CodexReviewJob) {
+        update(
+            chat: job.reviewChatSelection,
+            runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
+        )
     }
 }
 

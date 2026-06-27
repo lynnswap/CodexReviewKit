@@ -66,7 +66,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 )
             )
             let cellView = ReviewMonitorReviewChatCellView()
-            cellView.configure(with: job)
+            cellView.configure(with: ReviewMonitorSidebarReviewChatRow(job: job))
             return ceil(cellView.fittingSize.height)
         }
     }
@@ -1441,10 +1441,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
         return job
-    }
-
-    private func reviewChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
-        reviewChatSelection(id: id, in: workspaces())
     }
 
     private func reviewChatSelection(
@@ -3076,13 +3072,6 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         nil
     }
 
-    func configure(with job: CodexReviewJob) {
-        configure(with: ReviewMonitorSidebarReviewChatRow(
-            chat: job.reviewChatSelection,
-            runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
-        ))
-    }
-
     func configure(with row: ReviewMonitorSidebarReviewChatRow) {
         objectValue = row
         toolTip = row.operation.cwd
@@ -3140,7 +3129,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
 @MainActor
 func makeReviewMonitorReviewChatCellViewForTesting(job: CodexReviewJob) -> NSTableCellView {
     let cellView = ReviewMonitorReviewChatCellView()
-    cellView.configure(with: job)
+    cellView.configure(with: ReviewMonitorSidebarReviewChatRow(job: job))
     return cellView
 }
 
@@ -3152,7 +3141,7 @@ func configureReviewMonitorReviewChatCellViewForTesting(
     guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
         fatalError("Expected ReviewMonitorReviewChatCellView.")
     }
-    cellView.configure(with: job)
+    cellView.configure(with: ReviewMonitorSidebarReviewChatRow(job: job))
 }
 
 @MainActor
