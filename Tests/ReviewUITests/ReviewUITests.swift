@@ -427,7 +427,7 @@ struct ReviewUITests {
             ))
         await Task.yield()
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
-        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-1")
+        #expect(sidebar.selectedReviewChatIDForTesting == firstJob.reviewChatID)
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeDrop)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeDrop)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
@@ -558,7 +558,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.selectReviewChatForTesting(completedJob)
-        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-filter-completed")
+        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.reviewChatID)
 
         uiState.sidebarReviewChatFilter = .running
         try await waitForObservedValueFromCurrentObservation(
@@ -569,7 +569,7 @@ struct ReviewUITests {
         }
 
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-filter-running"])
-        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-filter-completed")
+        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.reviewChatID)
     }
 
     @Test func sidebarLatestFinishedFilterKeepsWorkspacesAndShowsLatestTerminalJob() async throws {
@@ -663,7 +663,7 @@ struct ReviewUITests {
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: gammaWorkspace) == [])
-        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-alpha-running")
+        #expect(sidebar.selectedReviewChatIDForTesting == alphaRunningJob.reviewChatID)
     }
 
     @Test func sidebarLatestFinishedFilterFollowsTerminalDateChanges() async throws {
@@ -2322,7 +2322,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
         #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
@@ -2462,7 +2462,7 @@ struct ReviewUITests {
             viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
                 workspaceCWD
             ])
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(transport.workspaceFindingsTextIsSelectableForTesting)
         #expect(transport.workspaceFindingsTextIsEditableForTesting == false)
         #expect(transport.workspaceFindingsUsesFindBarForTesting)
@@ -3270,12 +3270,12 @@ struct ReviewUITests {
 
         store.loadForTesting(serverState: .running, workspaces: [])
         try await waitForCondition {
-            sidebar.selectedWorkspaceSectionForTesting == nil && sidebar.selectedReviewChatJobForTesting == nil
+            sidebar.selectedWorkspaceSectionForTesting == nil && sidebar.selectedReviewChatIDForTesting == nil
                 && transport.isShowingEmptyStateForTesting
         }
 
         #expect(sidebar.selectedWorkspaceSectionForTesting == nil)
-        #expect(sidebar.selectedReviewChatJobForTesting == nil)
+        #expect(sidebar.selectedReviewChatIDForTesting == nil)
         #expect(transport.isShowingEmptyStateForTesting)
     }
 
@@ -4888,7 +4888,7 @@ struct ReviewUITests {
         )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting?.id == job.id)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatID)
         #expect(transport.renderSnapshotForTesting == selectedSnapshot)
     }
 
@@ -4930,7 +4930,7 @@ struct ReviewUITests {
             viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
                 workspace.cwd
             ])
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(
             transport.workspaceFindingSnapshotForTesting
                 == .init(
@@ -4949,7 +4949,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
 
         store.loadForTesting(
@@ -4957,7 +4957,7 @@ struct ReviewUITests {
             content: makeSidebarContent(from: [activeJob])
         )
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
         #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
@@ -5005,11 +5005,11 @@ struct ReviewUITests {
             from: sidebar.sidebarTopologyObservationForTesting,
             true
         ) {
-            sidebar.selectedReviewChatJobForTesting == nil
+            sidebar.selectedReviewChatIDForTesting == nil
         }
 
         let emptySnapshot = try await awaitContentPaneRender(contentPane)
-        #expect(sidebar.selectedReviewChatJobForTesting == nil)
+        #expect(sidebar.selectedReviewChatIDForTesting == nil)
         #expect(emptySnapshot.isShowingEmptyState)
         #expect(emptySnapshot.title == nil)
         #expect(emptySnapshot.summary == nil)
@@ -5093,7 +5093,7 @@ struct ReviewUITests {
         replaceTimelineLogTextForTesting(job, "Updated log")
 
         let updatedSnapshot = try await awaitTimelineRenderForTesting(job, in: transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting?.id == "job-1")
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatID)
         #expect(updatedSnapshot.summary == nil)
         #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
     }

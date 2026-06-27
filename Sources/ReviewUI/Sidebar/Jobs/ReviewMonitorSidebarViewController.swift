@@ -2221,8 +2221,11 @@ extension ReviewMonitorSidebarViewController {
         return titles
     }
 
-    var selectedReviewChatJobForTesting: CodexReviewJob? {
-        reviewJobForCurrentChatSelection()
+    var selectedReviewChatIDForTesting: CodexThreadID? {
+        guard case .chat(let chat) = uiState.selection else {
+            return nil
+        }
+        return chat.id
     }
 
     var selectedWorkspaceSectionForTesting: ReviewMonitorWorkspaceSectionSelection? {
