@@ -330,7 +330,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         outlineView.intercellSpacing = NSSize(width: 0, height: 12)
         outlineView.allowsEmptySelection = true
         outlineView.allowsMultipleSelection = false
-        outlineView.setAccessibilityIdentifier("review-monitor.job-list")
+        outlineView.setAccessibilityIdentifier("review-monitor.review-chat-list")
         outlineView.registerForDraggedTypes([DragType.sidebarItem])
         outlineView.setDraggingSourceOperationMask(.move, forLocal: true)
         outlineView.setDraggingSourceOperationMask([], forLocal: false)
@@ -2429,7 +2429,7 @@ extension ReviewMonitorSidebarViewController {
         let point = blankPointForTesting()
         precondition(
             outlineView.suppressesSelectionClearingForTesting(at: point),
-            "Expected a blank click target outside any job item."
+            "Expected a blank click target outside any review chat item."
         )
         outlineView.mouseDown(with: mouseEventForTesting(at: point))
     }
@@ -2448,7 +2448,7 @@ extension ReviewMonitorSidebarViewController {
     ) {
         view.layoutSubtreeIfNeeded()
         guard let row = row(forJobID: job.id) else {
-            preconditionFailure("Job row is not visible.")
+            preconditionFailure("Review chat row is not visible.")
         }
         let rect = outlineView.rect(ofRow: row)
         let point = NSPoint(x: rect.midX, y: rect.midY)
@@ -2858,7 +2858,7 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
         withLevel level: Int,
         isSourceListGroupRow: Bool
     ) -> CGFloat {
-        // Workspace rows keep AppKit's native disclosure gutter. Job rows do
+        // Workspace rows keep AppKit's native disclosure gutter. Review chat rows do
         // not add outline-level indentation; the SwiftUI Label icon slot is
         // the visual indent.
         level <= 0 ? max(indentationPerLevel, 0) : 0
