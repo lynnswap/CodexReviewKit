@@ -254,7 +254,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             else {
                 return
             }
-            let entries = self.workspaceFindingEntries(for: self.currentWorkspaces(for: section))
+            let entries = ReviewMonitorWorkspaceFindingsIndex(store: self.store)
+                .entries(for: section)
             self.renderWorkspaceFindings(entries: entries)
         }
     }
@@ -293,109 +294,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let hiddenChanged = placeholderViewController.view.isHidden == false
         placeholderViewController.view.isHidden = true
         return hiddenChanged
-    }
-
-    private func workspaceFindingEntries(
-        for workspaces: [CodexReviewWorkspace]
-    ) -> [ReviewMonitorWorkspaceFindingsView.Entry] {
-        workspaces.flatMap { workspace in
-            workspaceFindingEntries(in: workspace)
-        }
-    }
-
-    private func workspaceFindingEntries(
-        in workspace: CodexReviewWorkspace
-    ) -> [ReviewMonitorWorkspaceFindingsView.Entry] {
-        store.orderedJobs(in: workspace).flatMap { job -> [ReviewMonitorWorkspaceFindingsView.Entry] in
-            guard let result = job.core.output.reviewResult,
-                result.state == .hasFindings
-            else {
-                return []
-            }
-            let threadID = workspaceFindingThreadID(for: job)
-            return result.findings.map { finding in
-                ReviewMonitorWorkspaceFindingsView.Entry(
-                    threadID: threadID,
-                    targetSummary: job.targetSummary,
-                    priority: finding.priority,
-                    title: finding.title,
-                    body: finding.body,
-                    locationText: locationText(for: finding.location, in: workspace)
-                )
-            }
-        }
-    }
-
-    private func currentWorkspaces(
-        for section: ReviewMonitorWorkspaceSectionSelection
-    ) -> [CodexReviewWorkspace] {
-        let workspacesByCWD = Dictionary(
-            uniqueKeysWithValues: store.orderedWorkspaces.map { ($0.cwd, $0) }
-        )
-        return section.workspaceCWDs.compactMap { workspacesByCWD[$0] }
-    }
-
-    private func locationText(
-        for location: ParsedReviewResult.Finding.Location?,
-        in workspace: CodexReviewWorkspace
-    ) -> String? {
-        guard let location else {
-            return nil
-        }
-
-        let path: String
-        if let relativePath = workspaceRelativePath(location.path, in: workspace) {
-            path = relativePath
-        } else {
-            path = location.path
-        }
-        return "\(path):\(location.startLine)-\(location.endLine)"
-    }
-
-    private func workspaceRelativePath(
-        _ path: String,
-        in workspace: CodexReviewWorkspace
-    ) -> String? {
-        guard path.hasPrefix("/"), workspace.cwd.hasPrefix("/") else {
-            return nil
-        }
-        let workspaceURL = standardizedFileURL(workspace.cwd, isDirectory: true)
-        let fileURL = standardizedFileURL(path, isDirectory: false)
-        let workspaceComponents = workspaceURL.pathComponents
-        let fileComponents = fileURL.pathComponents
-        guard fileComponents.count > workspaceComponents.count,
-            fileComponents.starts(with: workspaceComponents)
-        else {
-            return nil
-        }
-        return
-            fileComponents
-            .dropFirst(workspaceComponents.count)
-            .joined(separator: "/")
-    }
-
-    private func standardizedFileURL(_ path: String, isDirectory: Bool) -> URL {
-        URL(fileURLWithPath: path, isDirectory: isDirectory)
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-    }
-
-    private func workspaceFindingThreadID(for job: CodexReviewJob) -> String {
-        if let reviewThreadID = nonEmptyID(job.core.run.reviewThreadID) {
-            return reviewThreadID
-        }
-        if let threadID = nonEmptyID(job.core.run.threadID) {
-            return threadID
-        }
-        return job.id
-    }
-
-    private func nonEmptyID(_ id: String?) -> String? {
-        guard let id else {
-            return nil
-        }
-        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     @discardableResult
