@@ -7,10 +7,11 @@ import ObservationBridge
 struct ReviewMonitorPreviewChatLogFixture {
     let chat: ReviewMonitorCodexSidebarSnapshot.Chat
     let cwd: String
+    let streamID: String
     let isRunning: Bool
     let turn: CodexChatTurnStateSnapshot
     let phase: CodexDataPhase
-    let timeline: ReviewTimeline
+    let initialItems: [ReviewTimelineItem]
 }
 
 @MainActor
@@ -18,11 +19,13 @@ final class ReviewMonitorPreviewChatLogSource {
     let snapshot: ReviewMonitorCodexSidebarSnapshot
     let initialChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
+    private let previewChats: [PreviewReviewChat]
     private let previewChatsByID: [CodexThreadID: PreviewReviewChat]
 
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
         var sections: [ReviewMonitorCodexSidebarSnapshot.Section] = []
         var sectionIndexesByCWD: [String: Int] = [:]
+        var previewChats: [PreviewReviewChat] = []
         var previewChatsByID: [CodexThreadID: PreviewReviewChat] = [:]
         var initialRunningChat: ReviewMonitorCodexSidebarSnapshot.Chat?
         var firstChat: ReviewMonitorCodexSidebarSnapshot.Chat?
@@ -30,6 +33,7 @@ final class ReviewMonitorPreviewChatLogSource {
         for fixture in fixtures {
             let previewChat = PreviewReviewChat(fixture: fixture)
             let chat = previewChat.chat
+            previewChats.append(previewChat)
             previewChatsByID[chat.id] = previewChat
             firstChat = firstChat ?? chat
             if initialRunningChat == nil, previewChat.isRunning {
@@ -53,6 +57,7 @@ final class ReviewMonitorPreviewChatLogSource {
 
         self.snapshot = ReviewMonitorCodexSidebarSnapshot(sections: sections)
         self.initialChat = initialRunningChat ?? firstChat
+        self.previewChats = previewChats
         self.previewChatsByID = previewChatsByID
     }
 
@@ -70,25 +75,53 @@ final class ReviewMonitorPreviewChatLogSource {
         }
         return pair.stream
     }
+
+    func applyPreviewDomainEvent(_ event: ReviewDomainEvent, to chatID: CodexThreadID) {
+        previewChatsByID[chatID]?.apply(event)
+    }
+
+    @discardableResult
+    func appendPreviewStreamTick(after currentTick: Int = 0) -> Int {
+        let runningChats = previewChats.filter(\.isRunning)
+        guard runningChats.isEmpty == false else {
+            return currentTick
+        }
+
+        let nextTick = currentTick + 1
+        for (index, previewChat) in runningChats.enumerated() {
+            guard let frame = ReviewMonitorPreviewContent.streamFrame(
+                forJobAt: index,
+                tick: nextTick
+            ) else {
+                continue
+            }
+            previewChat.applyPreviewStreamStep(frame.step, cycle: frame.cycle)
+        }
+        return nextTick
+    }
 }
 
 @MainActor
 private final class PreviewReviewChat {
     let chat: ReviewMonitorCodexSidebarSnapshot.Chat
     let cwd: String
+    let streamID: String
     let isRunning: Bool
 
     private let turn: CodexChatTurnStateSnapshot
     private let phase: CodexDataPhase
-    private let timeline: ReviewTimeline
+    private let timeline = ReviewTimeline()
 
     init(fixture: ReviewMonitorPreviewChatLogFixture) {
         self.chat = fixture.chat
         self.cwd = fixture.cwd
+        self.streamID = fixture.streamID
         self.isRunning = fixture.isRunning
         self.turn = fixture.turn
         self.phase = fixture.phase
-        self.timeline = fixture.timeline
+        for item in fixture.initialItems {
+            timeline.apply(.itemUpdated(item.seed), at: item.updatedAt)
+        }
     }
 
     func trackTimelineRevision() {
@@ -102,6 +135,70 @@ private final class PreviewReviewChat {
             turns: [turn],
             items: timeline.items.map { CodexChatItemSnapshot(previewItem: $0, turnID: turn.id) }
         )
+    }
+
+    func apply(_ event: ReviewDomainEvent) {
+        timeline.apply(event)
+    }
+
+    func applyPreviewStreamStep(
+        _ step: ReviewMonitorPreviewContent.PreviewTimelineStep,
+        cycle: Int
+    ) {
+        let itemID = ReviewMonitorPreviewContent.previewTimelineItemID(
+            itemName: step.itemName,
+            jobID: streamID,
+            cycle: cycle
+        )
+        switch step.mode {
+        case .update:
+            timeline.apply(.itemUpdated(step.seed(id: itemID)))
+        case .complete:
+            timeline.apply(.itemCompleted(step.seed(id: itemID)))
+        case .textDelta:
+            timeline.apply(
+                .textDelta(
+                    itemID: itemID,
+                    kind: step.kind,
+                    family: step.family,
+                    content: step.content,
+                    delta: step.deltaText ?? ""
+                ))
+        }
+    }
+}
+
+@MainActor
+final class ReviewMonitorPreviewChatLogStreamer {
+    private weak var source: ReviewMonitorPreviewChatLogSource?
+    private let interval: Duration
+    private var task: Task<Void, Never>?
+    private var tick = 0
+
+    init(source: ReviewMonitorPreviewChatLogSource, interval: Duration) {
+        self.source = source
+        self.interval = interval
+        task = Task { [weak self, interval] in
+            while Task.isCancelled == false {
+                try? await Task.sleep(for: interval)
+                guard let self, Task.isCancelled == false else {
+                    return
+                }
+                self.emitTick()
+            }
+        }
+    }
+
+    deinit {
+        task?.cancel()
+    }
+
+    private func emitTick() {
+        guard let source else {
+            task?.cancel()
+            return
+        }
+        tick = source.appendPreviewStreamTick(after: tick)
     }
 }
 
@@ -228,6 +325,21 @@ private extension CodexChatItemSnapshot {
         default:
             false
         }
+    }
+}
+
+private extension ReviewTimelineItem {
+    var seed: ReviewTimelineItemSeed {
+        ReviewTimelineItemSeed(
+            id: id,
+            kind: kind,
+            family: family,
+            phase: phase,
+            content: content,
+            startedAt: startedAt,
+            completedAt: completedAt,
+            durationMs: durationMs
+        )
     }
 }
 

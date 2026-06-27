@@ -62,7 +62,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private enum PreviewStreamMode {
+    package enum PreviewStreamMode {
         case update
         case complete
         case textDelta
@@ -112,7 +112,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private struct PreviewTimelineStep {
+    package struct PreviewTimelineStep {
         let itemName: String
         let kind: ReviewItemKind
         let family: ReviewItemFamily
@@ -138,7 +138,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private struct PreviewStreamFrame {
+    package struct PreviewStreamFrame {
         let step: PreviewTimelineStep
         let cycle: Int
     }
@@ -217,6 +217,7 @@ public enum ReviewMonitorPreviewContent {
             return ReviewMonitorPreviewChatLogFixture(
                 chat: chat,
                 cwd: job.cwd,
+                streamID: job.id,
                 isRunning: job.core.lifecycle.status == .running,
                 turn: CodexChatTurnStateSnapshot(
                     id: job.previewTurnID,
@@ -228,7 +229,7 @@ public enum ReviewMonitorPreviewContent {
                     job.core.lifecycle.status,
                     errorMessage: job.core.lifecycle.errorMessage
                 ),
-                timeline: job.timeline
+                initialItems: job.timeline.items
             )
         }
     }
@@ -292,7 +293,7 @@ public enum ReviewMonitorPreviewContent {
         return nextTick
     }
 
-    private static func streamFrame(
+    package static func streamFrame(
         forJobAt jobIndex: Int,
         tick: Int
     ) -> PreviewStreamFrame? {
@@ -341,7 +342,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private static func previewTimelineItemID(
+    package static func previewTimelineItemID(
         itemName: String,
         jobID: String,
         cycle: Int

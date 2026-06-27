@@ -258,6 +258,11 @@ extension ReviewMonitorRootViewController {
         view.layoutSubtreeIfNeeded()
     }
 
+    @discardableResult
+    func appendPreviewChatLogStreamTickForTesting(after tick: Int = 0) -> Int? {
+        previewChatLogSource?.appendPreviewStreamTick(after: tick)
+    }
+
     var splitViewControllerForTesting: ReviewMonitorSplitViewController {
         splitViewController
     }
@@ -300,9 +305,10 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     previewStore: CodexReviewStore? = nil
 ) -> ReviewMonitorRootViewController {
     let store: CodexReviewStore
+    let ownsPreviewStore = previewStore == nil
     switch serverState {
     case .running:
-        store = previewStore ?? ReviewMonitorPreviewContent.makeStore()
+        store = previewStore ?? ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
     case .failed, .starting, .stopped:
         store = CodexReviewStore.makePreviewStore()
         store.serverState = serverState
@@ -324,6 +330,12 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
         }
     if let initialChat = previewChatLogSource?.initialChat {
         uiState.selection = .chat(initialChat)
+    }
+    if ownsPreviewStore, let previewChatLogSource {
+        store.previewSupportRetainer = ReviewMonitorPreviewChatLogStreamer(
+            source: previewChatLogSource,
+            interval: .milliseconds(40)
+        )
     }
     return ReviewMonitorRootViewController(
         store: store,

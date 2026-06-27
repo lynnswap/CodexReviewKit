@@ -5144,7 +5144,16 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
+        previewChatLogSource.applyPreviewDomainEvent(
+            .textDelta(
+                itemID: .init(rawValue: "msg_1"),
+                kind: .agentMessage,
+                family: .message,
+                content: .message(.init(text: "")),
+                delta: " log"
+            ),
+            to: chatID
+        )
 
         let snapshot = try await awaitTransportRender(transport) { $0.log == "Initial log" }
         #expect(snapshot.log == "Initial log")
@@ -5187,7 +5196,17 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        previewChatLogSource.applyPreviewDomainEvent(
+            .itemUpdated(
+                .init(
+                    id: .init(rawValue: "progress_1"),
+                    kind: ReviewItemKind(rawValue: "progress"),
+                    family: .diagnostic,
+                    phase: .completed,
+                    content: .diagnostic(.init(message: "stream.tick 001"))
+                )),
+            to: chatID
+        )
 
         let snapshot = try await awaitTransportRender(transport) { $0.log.hasSuffix("stream.tick 001") }
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
