@@ -216,6 +216,9 @@ func reviewMonitorLogText(for job: CodexReviewJob) -> String {
     return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
 }
 
+// Direct timeline rendering helpers bypass the production CodexChatChange stream.
+// Keep them for timeline projection tests; new selected-chat detail tests should
+// use ReviewMonitorPreviewChatLogSource or CodexAppServerTestRuntime instead.
 @MainActor
 @discardableResult
 func renderTimelineForTesting(
