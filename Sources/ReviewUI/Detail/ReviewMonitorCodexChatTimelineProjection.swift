@@ -12,13 +12,15 @@ struct ReviewMonitorCodexChatTimelineProjection {
         revision: UInt64
     ) -> ReviewTimelineDocument? {
         let turnID = CodexTurnID(rawValue: link.turnID)
-        let items = chat.items.filter { $0.turnID == turnID }
-        guard items.isEmpty == false else {
+        guard let turnSnapshot = chat.turnSnapshot(for: turnID),
+              turnSnapshot.items.isEmpty == false
+        else {
             return nil
         }
 
-        let turn = chat.turns.first { $0.id == turnID }
-        let blocks = items.map { block(from: $0, turn: turn, chat: chat) }
+        let blocks = turnSnapshot.items.map {
+            block(from: $0, turnSnapshot: turnSnapshot, chat: chat)
+        }
         let activeBlockIDs = blocks.filter(\.isActive).map(\.id)
         return ReviewTimelineDocument(
             timelineRevision: .init(rawValue: revision),
@@ -26,8 +28,8 @@ struct ReviewMonitorCodexChatTimelineProjection {
             activeBlockIDs: activeBlockIDs,
             activeBlockCount: activeBlockIDs.count,
             latestActivityBlockID: blocks.last?.id,
-            terminalStatus: terminalStatus(for: turn),
-            terminalSummary: turn?.errorDescription,
+            terminalStatus: terminalStatus(for: turnSnapshot),
+            terminalSummary: turnSnapshot.errorDescription,
             terminalResult: nil,
             blocks: blocks
         )
@@ -35,11 +37,11 @@ struct ReviewMonitorCodexChatTimelineProjection {
 
     private func block(
         from item: CodexChat.Item,
-        turn: CodexChat.Turn?,
+        turnSnapshot: CodexChatTurnSnapshot,
         chat: CodexChat
     ) -> ReviewTimelineDocument.Block {
-        let content = content(from: item, turn: turn)
-        let phase = phase(for: item, turn: turn)
+        let content = content(from: item, turnSnapshot: turnSnapshot)
+        let phase = phase(for: item, turnSnapshot: turnSnapshot)
         let blockID = blockID(for: item)
         let sourceItemID = ReviewTimelineItem.ID(rawValue: blockID.rawValue)
         let timestamp = chat.updatedAt ?? chat.createdAt ?? Date(timeIntervalSince1970: 0)
@@ -117,7 +119,10 @@ struct ReviewMonitorCodexChatTimelineProjection {
         }
     }
 
-    private func content(from item: CodexChat.Item, turn: CodexChat.Turn?) -> ReviewTimelineDocument.Content {
+    private func content(
+        from item: CodexChat.Item,
+        turnSnapshot: CodexChatTurnSnapshot
+    ) -> ReviewTimelineDocument.Content {
         switch item.content {
         case .message(let message):
             return .message(.init(text: message.text))
@@ -171,7 +176,7 @@ struct ReviewMonitorCodexChatTimelineProjection {
             return .contextCompaction(
                 .init(
                     title: text ?? "Context compaction",
-                    status: contextCompactionStatus(for: turn?.status)
+                    status: contextCompactionStatus(for: turnSnapshot.status)
                 ))
         case .diagnostic(let message):
             return .diagnostic(
@@ -192,12 +197,15 @@ struct ReviewMonitorCodexChatTimelineProjection {
         }
     }
 
-    private func phase(for item: CodexChat.Item, turn: CodexChat.Turn?) -> ReviewItemPhase {
-        statusPhase(item.itemStatus ?? turn?.status)
+    private func phase(
+        for item: CodexChat.Item,
+        turnSnapshot: CodexChatTurnSnapshot
+    ) -> ReviewItemPhase {
+        statusPhase(item.itemStatus ?? turnSnapshot.status)
     }
 
-    private func terminalStatus(for turn: CodexChat.Turn?) -> ReviewLifecycleStatus? {
-        switch turn?.status {
+    private func terminalStatus(for turnSnapshot: CodexChatTurnSnapshot) -> ReviewLifecycleStatus? {
+        switch turnSnapshot.status {
         case .completed:
             return .succeeded
         case .failed, .interrupted:
