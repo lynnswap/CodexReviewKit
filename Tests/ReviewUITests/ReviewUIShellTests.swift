@@ -1079,11 +1079,11 @@ extension ReviewUITests {
     }
 
     @Test func detailLogViewExtendsBehindTitlebarWithoutOverlappingSidebar() async throws {
+        let logText = "Safe area log\n"
         let job = makeJob(
             id: "job-safe-area",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: "Safe area log\n"
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1095,9 +1095,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
 
         let logFrame = transport.logFrameForTesting
         let viewBounds = transport.viewBoundsForTesting
@@ -1120,11 +1118,11 @@ extension ReviewUITests {
     }
 
     @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
+        let logText = "Short log\n"
         let job = makeJob(
             id: "job-short-log-layout",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: "Short log\n"
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1136,9 +1134,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
 
         let textContentFrame = transport.logTextContentFrameForTesting
         let documentViewFrame = transport.logDocumentViewFrameForTesting
@@ -1150,12 +1146,12 @@ extension ReviewUITests {
     }
 
     @Test func detailLogExpandsAfterSidebarReopensFromCompactWidth() async throws {
+        let logText = Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
+            .joined()
         let job = makeJob(
             id: "job-sidebar-width-regression",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
-                .joined()
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1169,8 +1165,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
 
         window.setContentSize(NSSize(width: 360, height: 420))
         sidebarItem.isCollapsed = true
@@ -1197,12 +1192,12 @@ extension ReviewUITests {
     }
 
     @Test func detailLogShrinksAfterSidebarReopensIntoNarrowWidth() async throws {
+        let logText = Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
+            .joined()
         let job = makeJob(
             id: "job-sidebar-width-shrink-regression",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
-                .joined()
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1216,10 +1211,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1240,11 +1232,11 @@ extension ReviewUITests {
     }
 
     @Test func detailLogTracksSimpleWindowResizeInBothDirections() async throws {
+        let logText = Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
         let job = makeJob(
             id: "job-window-resize-width-regression",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1256,10 +1248,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1290,12 +1279,12 @@ extension ReviewUITests {
     }
 
     @Test func detailLogRewrapsVisibleTextDuringLiveWindowResize() async throws {
+        let logText = String(repeating: "wrap-sensitive text ", count: 600)
         let job = makeJob(
             id: "job-window-live-resize-log",
             status: .running,
             targetSummary: "Uncommitted changes",
-            summary: "Running review.",
-            logText: String(repeating: "wrap-sensitive text ", count: 600)
+            summary: "Running review."
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1313,10 +1302,7 @@ extension ReviewUITests {
             }
             window.close()
         }
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         let wideDocumentHeight = transport.logDocumentViewFrameForTesting.height
         let wideFragmentHeight = transport.logVisibleFragmentBoundsForTesting.height
@@ -1354,8 +1340,7 @@ extension ReviewUITests {
             id: "job-window-live-resize-stream-log",
             status: .running,
             targetSummary: "Uncommitted changes",
-            summary: "Running review.",
-            logText: streamLog
+            summary: "Running review."
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1373,10 +1358,7 @@ extension ReviewUITests {
             }
             window.close()
         }
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(streamLog, in: transport, viewController: viewController, job: job)
         #expect(transport.isLogPinnedToBottomForTesting)
 
         transport.beginLogLiveResizeForTesting()
@@ -1396,13 +1378,13 @@ extension ReviewUITests {
     }
 
     @Test func detailLogTextContainerExpandsAfterToolbarSidebarToggleAtCompactWidth() async throws {
+        let logText = Array(
+            repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
+        ).joined()
         let job = makeJob(
             id: "job-toolbar-sidebar-toggle-textkit-width-regression",
             status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(
-                repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
-            ).joined()
+            targetSummary: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1420,8 +1402,7 @@ extension ReviewUITests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
 
         viewController.toggleSidebar(nil)
         await awaitNativeLayoutTurn()
@@ -1650,6 +1631,27 @@ private func contextCompactionStatus(_ item: ReviewTimelineItem) -> ReviewContex
         return contextCompaction.status
     }
     return nil
+}
+
+@MainActor
+private func renderDetailLogForShellLayoutTesting(
+    _ text: String,
+    in transport: ReviewMonitorTransportViewController,
+    viewController: ReviewMonitorSplitViewController,
+    job: CodexReviewJob
+) async throws {
+    viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+    try await waitForCondition {
+        transport.renderedStateForTesting.selection == .job(job.id)
+            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+    }
+    #expect(transport.renderLogForTesting(text: text, allowIncrementalUpdate: false))
+    transport.scrollLogToBottomForTesting()
+    if let window = viewController.view.window {
+        window.layoutIfNeeded()
+    }
+    viewController.view.layoutSubtreeIfNeeded()
+    transport.view.layoutSubtreeIfNeeded()
 }
 
 private func makeSidebarJobFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {

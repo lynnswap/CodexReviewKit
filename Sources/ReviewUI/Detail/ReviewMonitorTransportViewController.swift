@@ -215,34 +215,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
             initialRestorationTarget: restorationTarget(selectedJob)
         )
 
-        selectedJobObservation = withPortableContinuousObservation { [weak self] event in
-            let eventKind = event.kind
+        selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
             guard let self,
                 self.boundJob === selectedJob
             else {
                 return
             }
             self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
-            let timeline = selectedJob.timeline
-            #if DEBUG
-                _ = timeline.revision
-            #endif
-            guard self.selectedCodexChatDocumentHasRendered == false else {
-                return
-            }
-            if let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline) {
-                self.renderBoundLog(
-                    timelineDocument: timelineDocument,
-                    target: .job(selectedJob.id),
-                    restorationTarget: eventKind == .initial
-                        ? self.restorationTarget(selectedJob)
-                        : self.logScrollView.currentScrollRestorationTarget,
-                    allowIncrementalUpdate: eventKind != .initial
-                )
-                return
-            }
-
-            self.logScrollView.clear()
         }
     }
 
@@ -535,15 +514,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         case .chat(let id):
             boundChatID == id
         }
-    }
-
-    private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument? {
-        #if DEBUG
-            let document = ReviewTimelineDocumentRenderer().document(from: timeline)
-            return document.blocks.isEmpty ? nil : document
-        #else
-            return nil
-        #endif
     }
 
     private func cacheBoundJobScrollTarget() {
@@ -1027,19 +997,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
             switch uiState.selection {
-            case .job(let job):
+            case .job:
                 .init(
                     title: nil,
                     summary: nil,
-                    log: {
-                        let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-                        if timelineDocument.blocks.isEmpty == false {
-                            var projection = ReviewMonitorTimelineLogProjection()
-                            let document = projection.render(timelineDocument: timelineDocument)
-                            return logScrollView.displayTextForTesting(sourceDocument: document)
-                        }
-                        return ""
-                    }(),
+                    log: displayedLogForTesting,
                     isShowingEmptyState: false
                 )
             case .workspaceSection:
@@ -1060,7 +1022,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 .init(
                     title: nil,
                     summary: nil,
-                    log: "",
+                    log: displayedLogForTesting,
                     isShowingEmptyState: false
                 )
             case nil:
@@ -1327,6 +1289,41 @@ final class ReviewMonitorTransportViewController: NSViewController {
         @discardableResult
         func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
             logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
+        }
+
+        @discardableResult
+        func renderTimelineDocumentForTesting(
+            _ timelineDocument: ReviewTimelineDocument,
+            target: DisplayedSelectionForTesting? = nil,
+            restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
+            allowIncrementalUpdate: Bool
+        ) -> Bool {
+            let resolvedTarget: LogRenderTarget
+            switch target ?? displayedSelectionForTesting {
+            case .job(let id):
+                resolvedTarget = .job(id)
+            case .chat(let id):
+                resolvedTarget = .chat(CodexThreadID(rawValue: id))
+            case .workspaceSection, .workspace, nil:
+                return false
+            }
+            let resolvedRestorationTarget = restorationTarget ?? {
+                guard hasAppliedBoundLog == false else {
+                    return logScrollView.currentScrollRestorationTarget
+                }
+                switch resolvedTarget {
+                case .job(let id):
+                    return logScrollTargetsByJobID[id] ?? .bottom
+                case .chat:
+                    return .bottom
+                }
+            }()
+            return renderBoundLog(
+                timelineDocument: timelineDocument,
+                target: resolvedTarget,
+                restorationTarget: resolvedRestorationTarget,
+                allowIncrementalUpdate: allowIncrementalUpdate
+            )
         }
 
         func copyLogSelectionForTesting() {

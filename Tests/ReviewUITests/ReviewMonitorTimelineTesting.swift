@@ -180,18 +180,17 @@ func appendTimelineEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewTimelin
     let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
     let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
     let phase = timelinePhase(for: entry)
-    job.timeline.apply(
-        .itemUpdated(
-            .init(
-                id: itemID,
-                kind: timelineKind(for: entry),
-                family: timelineFamily(for: entry),
-                phase: phase,
-                content: timelineContent(for: entry, existing: existingContent),
-                startedAt: entry.metadata?.startedAt,
-                completedAt: entry.metadata?.completedAt,
-                durationMs: entry.metadata?.durationMs
-            )))
+    let seed = ReviewTimelineItemSeed(
+        id: itemID,
+        kind: timelineKind(for: entry),
+        family: timelineFamily(for: entry),
+        phase: phase,
+        content: timelineContent(for: entry, existing: existingContent),
+        startedAt: entry.metadata?.startedAt,
+        completedAt: entry.metadata?.completedAt,
+        durationMs: entry.metadata?.durationMs
+    )
+    job.timeline.apply(phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed))
 }
 
 @MainActor
@@ -211,7 +210,54 @@ func replaceTimelineLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
 func reviewMonitorLogText(for job: CodexReviewJob) -> String {
     var projection = ReviewMonitorTimelineLogProjection()
     let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-    return projection.render(timelineDocument: timelineDocument).text
+    let sourceDocument = projection.render(timelineDocument: timelineDocument)
+    let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceDocument)
+    return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+}
+
+@MainActor
+@discardableResult
+func renderTimelineForTesting(
+    _ job: CodexReviewJob,
+    in transport: ReviewMonitorTransportViewController,
+    restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
+    allowIncrementalUpdate: Bool
+) -> Bool {
+    let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
+    return transport.renderTimelineDocumentForTesting(
+        timelineDocument,
+        target: .job(job.id),
+        restoring: restorationTarget,
+        allowIncrementalUpdate: allowIncrementalUpdate
+    )
+}
+
+@MainActor
+func awaitTimelineRenderForTesting(
+    _ job: CodexReviewJob,
+    in transport: ReviewMonitorTransportViewController,
+    restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
+    allowIncrementalUpdate: Bool = true,
+    timeout: Duration = .seconds(2),
+    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    let expectedLog = reviewMonitorLogText(for: job)
+    try await waitForCondition(timeout: timeout) {
+        transport.renderedStateForTesting.selection == .job(job.id)
+            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+    }
+    _ = renderTimelineForTesting(
+        job,
+        in: transport,
+        restoring: restorationTarget,
+        allowIncrementalUpdate: allowIncrementalUpdate
+    )
+    return try await awaitTransportRender(transport, timeout: timeout) { snapshot in
+        if let predicate {
+            return predicate(snapshot)
+        }
+        return snapshot.log == expectedLog
+    }
 }
 
 private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {
@@ -353,6 +399,10 @@ private func commandText(for entry: ReviewTimelineEntryForTesting) -> String {
 
 private func timelinePhase(for entry: ReviewTimelineEntryForTesting) -> ReviewItemPhase {
     let status = entry.metadata?.commandStatus ?? entry.metadata?.status
+    let normalizedStatus = ReviewItemPhase.normalized(status)
+    if normalizedStatus.isTerminal {
+        return normalizedStatus
+    }
     switch status {
     case "inProgress", "running", "started":
         return .running

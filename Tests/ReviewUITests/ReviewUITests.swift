@@ -1777,7 +1777,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         sidebar.collapseWorkspaceInOutlineForTesting(storedWorkspace)
         try await waitForCondition {
@@ -2343,7 +2347,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
 
-        let selectedSnapshot = try await awaitTransportRender(transport)
+        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(
             selectedSnapshot
                 == .init(
@@ -2375,7 +2383,7 @@ struct ReviewUITests {
         appendTimelineEntryForTesting(
             recentJob, .init(kind: .progress, text: "Current selection log after stale mutation"))
 
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTimelineRenderForTesting(recentJob, in: transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
         }
         #expect(updatedSnapshot.log.contains("Old selection log") == false)
@@ -3324,7 +3332,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let selectedSnapshot = try await awaitTransportRender(transport)
+        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(selectedSnapshot.title == nil)
         #expect(selectedSnapshot.summary == nil)
         #expect(window.title == job.targetSummary)
@@ -3369,7 +3381,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         job.timeline.apply(
             .itemCompleted(
@@ -3381,7 +3397,7 @@ struct ReviewUITests {
                     content: .message(.init(text: "Timeline-only detail update"))
                 )))
 
-        var snapshot = try await awaitTransportRender(transport)
+        var snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log == "Timeline-only detail update")
 
         let startedAt = Date(timeIntervalSince1970: 250)
@@ -3405,7 +3421,7 @@ struct ReviewUITests {
                     durationMs: 2_000
                 )))
 
-        snapshot = try await awaitTransportRender(transport) {
+        snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
             $0.log.contains("Ran swift test for 2s")
         }
         #expect(snapshot.log.contains("Timeline-only detail update"))
@@ -3451,7 +3467,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let startedAt = Date(timeIntervalSince1970: 300)
         job.timeline.apply(
@@ -3471,7 +3491,7 @@ struct ReviewUITests {
                     durationMs: 4_000
                 )))
 
-        let snapshot = try await awaitTransportRender(transport) {
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
             $0.log.contains("Ran swift test for 4s")
         }
         #expect(snapshot.log.contains("Tests failed") == false)
@@ -3512,7 +3532,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         job.timeline.apply(
             .itemStarted(
@@ -3529,7 +3553,7 @@ struct ReviewUITests {
                     startedAt: Date(timeIntervalSince1970: 300)
                 )))
 
-        let snapshot = try await awaitTransportRender(transport) {
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
             $0.log.contains("Running swift test")
         }
         #expect(snapshot.log.contains("Running swift test"))
@@ -3572,7 +3596,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         job.timeline.apply(
             .itemCompleted(
@@ -3589,7 +3617,7 @@ struct ReviewUITests {
                         ))
                 )))
 
-        let snapshot = try await awaitTransportRender(transport) {
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
             $0.log.contains("Ran swift test")
         }
         #expect(snapshot.log.contains("Running swift test") == false)
@@ -3914,7 +3942,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         job.timeline.apply(
             .itemCompleted(
@@ -3932,7 +3964,7 @@ struct ReviewUITests {
                         ))
                 )))
 
-        let snapshot = try await awaitTransportRender(transport) {
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
             $0.log.contains("Updated Sources/App.swift")
         }
         #expect(snapshot.log.contains("Updated Sources/App.swift"))
@@ -3989,7 +4021,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(transport.displayedLogForTesting == "Automatically compacting context")
         #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
@@ -4007,7 +4043,7 @@ struct ReviewUITests {
                     itemID: "compact_1"
                 )
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.displayedLogForTesting == "Context automatically compacted")
         #expect(transport.displayedLogForTesting.contains("Automatically compacting context") == false)
@@ -4062,7 +4098,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
         #expect(transport.displayedLogForTesting.contains("Ran swift test - 9 lines") == false)
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -4128,7 +4168,7 @@ struct ReviewUITests {
                 text: "\noutput line 10",
                 metadata: commandMetadata
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logReloadCountForTesting == expandedOutputAppendReloadCount)
         let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
@@ -4165,7 +4205,7 @@ struct ReviewUITests {
                 metadata: commandMetadata
             ))
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
         #expect(transport.logFindStringForTesting.contains("output line 11") == false)
@@ -4220,7 +4260,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_1")
         let secondBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_2")
@@ -4271,7 +4315,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -4291,7 +4339,7 @@ struct ReviewUITests {
                     commandStatus: "completed"
                 )
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -4330,7 +4378,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
@@ -4353,7 +4405,7 @@ struct ReviewUITests {
 
             appendTimelineEntryForTesting(
                 job, .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -4390,14 +4442,22 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
 
-        let activeSnapshot = try await awaitTransportRender(transport)
+        let activeSnapshot = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(activeSnapshot.title == nil)
         #expect(activeSnapshot.summary == nil)
         #expect(window.title == activeJob.targetSummary)
         #expect(window.subtitle == activeJob.cwd)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
 
-        let recentSnapshot = try await awaitTransportRender(transport)
+        let recentSnapshot = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(
             recentSnapshot
                 == .init(
@@ -4430,7 +4490,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.view.layoutSubtreeIfNeeded()
 
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -4467,18 +4531,30 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToOffsetForTesting(120)
         let activeOffset = transport.logVerticalScrollOffsetForTesting
         #expect(activeOffset > 0)
         #expect(transport.isLogPinnedToBottomForTesting == false)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.isLogPinnedToBottomForTesting)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logVerticalScrollOffsetForTesting == activeOffset)
         #expect(transport.isLogPinnedToBottomForTesting == false)
@@ -4515,18 +4591,30 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.isLogPinnedToBottomForTesting)
 
         appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(snapshot.log.contains("Newest active line"))
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -4552,7 +4640,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToOffsetForTesting(120)
         let preservedOffset = transport.logVerticalScrollOffsetForTesting
@@ -4598,12 +4690,20 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToOffsetForTesting(120)
         #expect(transport.logVerticalScrollOffsetForTesting > 0)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.isLogPinnedToBottomForTesting)
     }
@@ -4635,10 +4735,18 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            shortJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(longJob)
-        let longSnapshot = try await awaitTransportRender(transport)
+        let longSnapshot = try await awaitTimelineRenderForTesting(
+            longJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(longSnapshot.log == reviewMonitorLogText(for: longJob))
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -4673,14 +4781,26 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            shortJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
         replaceTimelineLogTextForTesting(shortJob, longLog)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            shortJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(
             abs(
@@ -4717,13 +4837,21 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            recentJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
         appendTimelineEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
 
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTimelineRenderForTesting(recentJob, in: transport) { snapshot in
             snapshot.log.contains("fresh update")
         }
         #expect(updatedSnapshot.log.contains("stale update") == false)
@@ -4753,7 +4881,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let selectedSnapshot = try await awaitTransportRender(transport)
+        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting?.id == job.id)
@@ -4786,7 +4918,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(workspace)
 
         _ = try await awaitTransportRender(transport)
@@ -4854,7 +4990,11 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
 
-        let activeSnapshot = try await awaitTransportRender(transport)
+        let activeSnapshot = try await awaitTimelineRenderForTesting(
+            activeJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(activeSnapshot.title == nil)
         #expect(activeSnapshot.summary == nil)
         store.loadForTesting(
@@ -4896,7 +5036,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let selectedSnapshot = try await awaitTransportRender(transport)
+        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(selectedSnapshot.title == nil)
         #expect(window.title == job.targetSummary)
         #expect(window.subtitle == job.cwd)
@@ -4935,7 +5079,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let selectedSnapshot = try await awaitTransportRender(transport)
+        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(selectedSnapshot.title == nil)
         #expect(selectedSnapshot.summary == nil)
         job.updateStateForTesting(
@@ -4944,7 +5092,7 @@ struct ReviewUITests {
         )
         replaceTimelineLogTextForTesting(job, "Updated log")
 
-        let updatedSnapshot = try await awaitTransportRender(transport)
+        let updatedSnapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting?.id == "job-1")
         #expect(updatedSnapshot.summary == nil)
         #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
@@ -4975,13 +5123,17 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
@@ -5009,11 +5161,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let wordGlowCount = transport.logWordGlowCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
@@ -5041,7 +5197,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
@@ -5073,11 +5233,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log == "Initial one two")
     }
 
@@ -5102,11 +5266,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
         appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
     }
 
@@ -5131,7 +5299,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.setLogReduceMotionForTesting(false)
         let wordGlowCount = transport.logWordGlowCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
@@ -5143,7 +5315,7 @@ struct ReviewUITests {
                 text: String(repeating: "progress ", count: 20)
             ))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log.contains("progress progress"))
         #expect(transport.logAppendCountForTesting > 0)
         #expect(transport.logWordGlowCountForTesting == wordGlowCount + 1)
@@ -5165,7 +5337,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.view.layoutSubtreeIfNeeded()
 
         let initialDocumentFrame = transport.logDocumentViewFrameForTesting
@@ -5180,7 +5356,7 @@ struct ReviewUITests {
                 text:
                     "stream.tick 001 delta/layout +2 -0 while the short log remains below the scrollable viewport height"
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         transport.view.layoutSubtreeIfNeeded()
 
         let appendedDocumentFrame = transport.logDocumentViewFrameForTesting
@@ -5211,88 +5387,22 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         appendTimelineEntryForTesting(
             job, .init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log == "- updated")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
-    }
-
-    @Test func commandCompletionAndReasoningAppendDoNotReloadFullLog() async throws {
-        let startedAt = Date(timeIntervalSince1970: 200)
-        let completedAt = Date(timeIntervalSince1970: 203)
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-command-close-reasoning-append",
-            cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
-            status: .running,
-            startedAt: startedAt,
-            summary: "Running review.",
-            timelineEntries: [
-                .init(
-                    kind: .command,
-                    groupID: "cmd_1",
-                    text: "$ git diff",
-                    metadata: .init(
-                        sourceType: "commandExecution",
-                        status: "inProgress",
-                        itemID: "cmd_1",
-                        command: "git diff",
-                        startedAt: startedAt,
-                        commandStatus: "inProgress"
-                    )
-                )
-            ]
-        )
-        let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
-        let viewController = harness.viewController
-        let window = harness.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-
-        appendTimelineEntryForTesting(
-            job,
-            .init(
-                kind: .command,
-                groupID: "cmd_1",
-                replacesGroup: true,
-                text: "$ git diff",
-                metadata: .init(
-                    sourceType: "commandExecution",
-                    status: "completed",
-                    itemID: "cmd_1",
-                    command: "git diff",
-                    exitCode: 0,
-                    startedAt: startedAt,
-                    completedAt: completedAt,
-                    durationMs: 3_000,
-                    commandStatus: "completed"
-                )
-            ))
-        appendTimelineEntryForTesting(
-            job,
-            .init(
-                kind: .rawReasoning,
-                groupID: "reasoning_1",
-                text: "I found the relevant update path."
-            ))
-
-        let snapshot = try await awaitTransportRender(transport)
-        #expect(snapshot.log.contains("Ran git diff for 3s"))
-        #expect(snapshot.log.contains("I found the relevant update path."))
     }
 
     @Test func coalescedCommandAppendAfterReasoningKeepsReasoningAndDoesNotReload() async throws {
@@ -5322,7 +5432,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
@@ -5349,7 +5463,7 @@ struct ReviewUITests {
                 text: "Inspecting details after the command starts."
             ))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log.contains("Need to inspect files."))
         #expect(snapshot.log.contains("Running git diff"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
@@ -5378,13 +5492,17 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(snapshot.log == "bold")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
@@ -5412,7 +5530,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         appendTimelineEntryForTesting(
             job,
             .init(
@@ -5421,12 +5543,12 @@ struct ReviewUITests {
                 replacesGroup: true,
                 text: "- updated with longer replacement text"
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         let replaceCount = transport.logReplaceCountForTesting
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
-        _ = try await awaitTransportRender(transport) { snapshot in
+        _ = try await awaitTimelineRenderForTesting(job, in: transport) { snapshot in
             snapshot.log.contains("Command output")
         }
 
@@ -5454,7 +5576,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         job.updateStateForTesting(summary: "Updated summary.")
@@ -5485,11 +5611,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.setLogReduceMotionForTesting(false)
         appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 2)
 
@@ -5497,14 +5627,14 @@ struct ReviewUITests {
         #expect(transport.logWordGlowCountForTesting == 0)
 
         appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
         appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 0)
     }
@@ -5545,18 +5675,30 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         appendTimelineEntryForTesting(
             firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(transport.logWordGlowCountForTesting == 0)
 
         appendTimelineEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
         #expect(transport.logWordGlowCountForTesting > 0)
     }
 
@@ -5582,13 +5724,17 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.setLogReduceMotionForTesting(false)
 
         let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
         appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting > 0)
         #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting > 0)
@@ -5624,11 +5770,15 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.setLogReduceMotionForTesting(false)
 
         appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logWordGlowCountForTesting > 0)
 
         transport.advanceLogWordGlowAnimationsAfterInitialDelayForTesting(5)
@@ -5655,7 +5805,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(transport.isLogPinnedToBottomForTesting)
 
         transport.scrollLogToBottomForTesting()
@@ -5665,7 +5819,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting == false)
         let unpinnedAutoFollow = transport.logAutoFollowCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logAutoFollowCountForTesting == unpinnedAutoFollow)
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
@@ -5673,7 +5827,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
         let pinnedAutoFollow = transport.logAutoFollowCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
     }
@@ -5695,7 +5849,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5704,7 +5862,7 @@ struct ReviewUITests {
             .map { "wrapped-append-segment-\($0)" }
             .joined(separator: " ")
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5734,7 +5892,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let nearBottomOffset = transport.logMaximumVerticalScrollOffsetForTesting - 12
         transport.scrollLogToOffsetForTesting(nearBottomOffset)
@@ -5748,7 +5910,7 @@ struct ReviewUITests {
                 kind: .progress,
                 text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
             ))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logAutoFollowCountForTesting == autoFollowBeforeAppend)
         #expect(transport.logProgrammaticScrollCountForTesting == programmaticScrollsBeforeAppend)
@@ -5776,14 +5938,18 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.isLogPinnedToBottomForTesting)
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend + 1)
@@ -5809,14 +5975,18 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.legacy)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -5840,13 +6010,17 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "short update"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -5878,17 +6052,30 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToOffsetForTesting(120)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let hideCountBeforeRestore = transport.logOverlayScrollerHideRequestCountForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            restoring: .top,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting > hideCountBeforeRestore)
     }
@@ -5913,14 +6100,18 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingScrollerImpPair)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -5945,14 +6136,18 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingHideMethods)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -5972,7 +6167,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logUsesCustomTextKit2SurfaceForTesting)
         #expect(transport.logUsesTextViewForTesting == false)
@@ -6000,7 +6199,11 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         transport.view.layoutSubtreeIfNeeded()
 
         let bottomFragmentCount = transport.logVisibleFragmentViewCountForTesting
@@ -6039,10 +6242,14 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         let appendCount = transport.logAppendCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logVisibleFragmentViewCountForTesting > 0)
@@ -6064,7 +6271,11 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.showFindInterface)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.nextMatch)))
@@ -6145,7 +6356,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         transport.scrollLogToTopForTesting()
         #expect(transport.logVisibleFragmentViewCountForTesting > 0)
@@ -6190,7 +6405,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let renderedInitialLog = reviewMonitorLogText(for: job)
         let renderedInitialLength = (renderedInitialLog as NSString).length
@@ -6214,7 +6433,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logHasActiveFindQueryForTesting)
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         let appendedLength = (reviewMonitorLogText(for: job) as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
@@ -6241,7 +6460,7 @@ struct ReviewUITests {
         let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
         appendTimelineEntryForTesting(
             job, .init(kind: .progress, text: "needle appended while the log is not following bottom"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
         #expect(transport.logSelectedTextForTesting == "needle")
@@ -6336,7 +6555,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6344,7 +6567,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
         viewController.sidebarViewControllerForTesting.clearSelectionForTesting()
@@ -6352,7 +6575,11 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6388,7 +6615,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6396,7 +6627,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
         #expect(
             transport.displayedLogForTesting.trimmingCharacters(in: .newlines)
                 == reviewMonitorLogText(for: secondJob).trimmingCharacters(in: .newlines)
@@ -6405,7 +6636,11 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6439,7 +6674,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            firstJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6452,7 +6691,11 @@ struct ReviewUITests {
 
         let finderIdentifierBeforeSwitch = transport.logTextFinderIdentifierForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            secondJob,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logTextFinderIdentifierForTesting == finderIdentifierBeforeSwitch)
@@ -6479,7 +6722,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6487,7 +6734,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
@@ -6516,7 +6763,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6524,7 +6775,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -6534,7 +6785,7 @@ struct ReviewUITests {
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6560,7 +6811,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
@@ -6568,7 +6823,7 @@ struct ReviewUITests {
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -6579,7 +6834,7 @@ struct ReviewUITests {
             #expect(transport.logHasActiveFindQueryForTesting == false)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
             appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6606,7 +6861,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
@@ -6615,7 +6874,7 @@ struct ReviewUITests {
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
             appendTimelineEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6642,7 +6901,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let initialLength = (reviewMonitorLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
@@ -6652,7 +6915,7 @@ struct ReviewUITests {
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
             #expect(transport.logHasActiveFindQueryForTesting)
             appendTimelineEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
@@ -6681,7 +6944,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         let initialLength = (reviewMonitorLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
@@ -6691,7 +6958,7 @@ struct ReviewUITests {
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
             appendTimelineEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
@@ -6722,7 +6989,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
@@ -6736,7 +7007,7 @@ struct ReviewUITests {
             #expect(transport.logHasActiveFindQueryForTesting == false)
             appendTimelineEntryForTesting(
                 job, .init(kind: .progress, text: "needle appended after normal selection"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6763,7 +7034,11 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         #expect(transport.logFindBarVisibleForTesting)
@@ -6776,7 +7051,7 @@ struct ReviewUITests {
             let initialLength = (reviewMonitorLogText(for: job) as NSString).length
             appendTimelineEntryForTesting(
                 job, .init(kind: .progress, text: "active query appears after no-result search"))
-            _ = try await awaitTransportRender(transport)
+            _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6826,14 +7101,18 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
         #expect(transport.logFindStringLengthForTesting == 0)
         appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTimelineRenderForTesting(job, in: transport)
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
@@ -6860,7 +7139,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(snapshot.summary == nil)
         #expect(snapshot.log == reviewMonitorLogText(for: job))
     }
@@ -6885,7 +7168,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
-        let snapshot = try await awaitTransportRender(transport)
+        let snapshot = try await awaitTimelineRenderForTesting(
+            job,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
         #expect(snapshot.summary == nil)
         #expect(snapshot.log == reviewMonitorLogText(for: job))
     }
