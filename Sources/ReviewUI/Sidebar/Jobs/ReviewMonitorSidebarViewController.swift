@@ -3078,7 +3078,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         hostingView != nil
     }
 
-    var hostedJobIDForTesting: String? {
+    var hostedRowIDForTesting: String? {
         hostingView?.rootView.row.id
     }
 
@@ -3116,11 +3116,11 @@ func configureReviewMonitorReviewChatCellViewForTesting(
 }
 
 @MainActor
-func reviewMonitorReviewChatCellHostedJobIDForTesting(_ cellView: NSTableCellView) -> String? {
+func reviewMonitorReviewChatCellHostedRowIDForTesting(_ cellView: NSTableCellView) -> String? {
     guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
         return nil
     }
-    return cellView.hostedJobIDForTesting
+    return cellView.hostedRowIDForTesting
 }
 
 @MainActor

@@ -1411,17 +1411,17 @@ struct ReviewUITests {
         let initialHostingViewIdentity = try #require(
             reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
-        let initialHostedJobID = reviewMonitorReviewChatCellHostedJobIDForTesting(cellView)
+        let initialHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
 
         configureReviewMonitorReviewChatCellViewForTesting(cellView, job: loadedJob)
 
         let updatedHostingViewIdentity = try #require(
             reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
-        let updatedHostedJobID = reviewMonitorReviewChatCellHostedJobIDForTesting(cellView)
+        let updatedHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
 
-        #expect(initialHostedJobID == placeholderJob.id)
-        #expect(updatedHostedJobID == loadedJob.id)
+        #expect(initialHostedRowID == placeholderJob.id)
+        #expect(updatedHostedRowID == loadedJob.reviewChatID?.rawValue)
         #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
         #expect((cellView.objectValue as? ReviewMonitorSidebarReviewChatRow)?.jobID == loadedJob.id)
         #expect(cellView.toolTip == loadedJob.cwd)

@@ -47,7 +47,7 @@ struct ReviewMonitorSidebarChatRow: Equatable {
         runtime: ReviewMonitorSidebarReviewChatRuntime
     ) {
         self.init(
-            id: runtime.jobID,
+            id: chat?.id.rawValue ?? runtime.jobID,
             title: chat?.title.trimmedNonEmpty ?? runtime.fallbackTitle,
             model: runtime.model,
             subtitle: chat?.preview?.trimmedNonEmpty ?? runtime.fallbackSubtitle,
