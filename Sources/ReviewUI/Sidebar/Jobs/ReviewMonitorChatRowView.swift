@@ -1,10 +1,14 @@
 import Foundation
 import SwiftUI
 
-struct ReviewMonitorSidebarReviewChatRuntime: Equatable {
+struct ReviewMonitorSidebarReviewChatOperation: Equatable {
     var jobID: String
     var sessionID: String
     var cwd: String
+}
+
+struct ReviewMonitorSidebarReviewChatRuntime: Equatable {
+    var operation: ReviewMonitorSidebarReviewChatOperation
     var fallbackTitle: String
     var fallbackSubtitle: String?
     var model: String?
@@ -47,7 +51,7 @@ struct ReviewMonitorSidebarChatRow: Equatable {
         runtime: ReviewMonitorSidebarReviewChatRuntime
     ) {
         self.init(
-            id: chat?.id.rawValue ?? runtime.jobID,
+            id: chat?.id.rawValue ?? runtime.operation.jobID,
             title: chat?.title.trimmedNonEmpty ?? runtime.fallbackTitle,
             model: runtime.model,
             subtitle: chat?.preview?.trimmedNonEmpty ?? runtime.fallbackSubtitle,
@@ -60,21 +64,29 @@ struct ReviewMonitorSidebarChatRow: Equatable {
 
 @MainActor
 final class ReviewMonitorSidebarReviewChatRow {
-    let jobID: String
-    private(set) var sessionID: String
-    private(set) var cwd: String
+    private(set) var operation: ReviewMonitorSidebarReviewChatOperation
     private(set) var chat: ReviewMonitorCodexSidebarSnapshot.Chat?
     private(set) var presentation: ReviewMonitorSidebarChatRow
     private(set) var isTerminal: Bool
     private(set) var cancellationRequested: Bool
 
+    var jobID: String {
+        operation.jobID
+    }
+
+    var sessionID: String {
+        operation.sessionID
+    }
+
+    var cwd: String {
+        operation.cwd
+    }
+
     init(
         chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
         runtime: ReviewMonitorSidebarReviewChatRuntime
     ) {
-        self.jobID = runtime.jobID
-        self.sessionID = runtime.sessionID
-        self.cwd = runtime.cwd
+        self.operation = runtime.operation
         self.chat = chat
         self.presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
         self.isTerminal = runtime.isTerminal
@@ -85,8 +97,7 @@ final class ReviewMonitorSidebarReviewChatRow {
         chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
         runtime: ReviewMonitorSidebarReviewChatRuntime
     ) {
-        sessionID = runtime.sessionID
-        cwd = runtime.cwd
+        operation = runtime.operation
         self.chat = chat
         presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
         isTerminal = runtime.isTerminal

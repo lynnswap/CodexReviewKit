@@ -971,9 +971,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         else {
             return
         }
+        let operation = row.operation
         _ = try await store.cancelReview(
-            jobID: row.jobID,
-            sessionID: row.sessionID,
+            jobID: operation.jobID,
+            sessionID: operation.sessionID,
             cancellation: .userInterface()
         )
     }
@@ -989,9 +990,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func handleCancellationFailure(_ error: Error, for row: ReviewMonitorSidebarReviewChatRow) {
         let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = description.isEmpty ? "Failed to cancel review." : description
+        let operation = row.operation
         try? store.recordCancellationFailure(
-            jobID: row.jobID,
-            sessionID: row.sessionID,
+            jobID: operation.jobID,
+            sessionID: operation.sessionID,
             message: message
         )
     }
@@ -1479,7 +1481,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return .workspaceSection(id: section.id)
         }
         if let row = reviewRow(from: item) {
-            return .reviewChat(jobID: row.jobID, cwd: row.cwd)
+            let operation = row.operation
+            return .reviewChat(jobID: operation.jobID, cwd: operation.cwd)
         }
         return nil
     }

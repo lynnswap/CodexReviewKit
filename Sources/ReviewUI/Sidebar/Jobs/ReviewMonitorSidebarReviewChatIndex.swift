@@ -48,9 +48,11 @@ extension ReviewMonitorSidebarReviewChatRuntime {
     @MainActor
     init(job: CodexReviewJob) {
         self.init(
-            jobID: job.id,
-            sessionID: job.sessionID,
-            cwd: job.cwd,
+            operation: .init(
+                jobID: job.id,
+                sessionID: job.sessionID,
+                cwd: job.cwd
+            ),
             fallbackTitle: job.displayTitle,
             fallbackSubtitle: Self.subtitleText(for: job),
             model: job.core.run.model,
