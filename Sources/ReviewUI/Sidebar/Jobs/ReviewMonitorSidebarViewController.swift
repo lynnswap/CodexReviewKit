@@ -2286,7 +2286,14 @@ extension ReviewMonitorSidebarViewController {
     }
 
     func selectReviewChatForTesting(_ job: CodexReviewJob) {
-        guard let row = row(forJobID: job.id) else {
+        guard let chatID = job.reviewChatID else {
+            return
+        }
+        selectReviewChatForTesting(id: chatID)
+    }
+
+    func selectReviewChatForTesting(id chatID: CodexThreadID) {
+        guard let row = row(forReviewChatID: chatID) else {
             return
         }
         outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
