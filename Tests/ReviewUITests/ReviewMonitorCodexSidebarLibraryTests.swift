@@ -198,7 +198,10 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-job-store")]
+        )
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
@@ -216,6 +219,11 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             sidebar.codexSidebarRootTitlesForTesting == [repo.lastPathComponent]
                 && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == "App review"
         }
+        #expect(sidebar.displayedCodexSidebarTitlesForTesting == [
+            repo.lastPathComponent,
+            repo.lastPathComponent,
+            "App review",
+        ])
     }
 }
 

@@ -358,7 +358,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 sidebarSelection: sidebarSelection,
                 serverState: serverState,
                 hasReviewJobs: hasReviewJobs,
-                hasWorkspaces: hasWorkspaces
+                hasWorkspaces: hasWorkspaces,
+                hasCodexSidebarContent: self.hasCodexSidebarContent
             ))
         }
 
@@ -419,7 +420,31 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func applyCodexSidebarSnapshot(_ snapshot: ReviewMonitorCodexSidebarSnapshot) {
+        let wasUsingCodexSidebarOutline = isUsingCodexSidebarOutline
         codexSidebarOutlineTree.apply(snapshot: snapshot)
+        applySidebarKind(sidebarKind)
+        if wasUsingCodexSidebarOutline || isUsingCodexSidebarOutline {
+            reloadCodexSidebarOutline()
+        }
+    }
+
+    private func reloadCodexSidebarOutline() {
+        isReconcilingSelection = true
+        outlineView.reloadData()
+        expandCodexSidebarNodes(codexSidebarOutlineTree.roots)
+        if isUsingCodexSidebarOutline {
+            reconcileOutlineSelection()
+        } else if outlineView.selectedRow != -1 {
+            outlineView.deselectAll(nil)
+        }
+        isReconcilingSelection = false
+    }
+
+    private func expandCodexSidebarNodes(_ nodes: [ReviewMonitorCodexSidebarOutlineNode]) {
+        for node in nodes where node.isExpandable {
+            outlineView.expandItem(node)
+            expandCodexSidebarNodes(node.children)
+        }
     }
 
     private func bindSidebarStoreTopologyObservation(
@@ -449,7 +474,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             sidebarSelection: uiState.sidebarSelection,
             serverState: store.serverState,
             hasReviewJobs: store.hasReviewJobs,
-            hasWorkspaces: store.workspaces.isEmpty == false
+            hasWorkspaces: store.workspaces.isEmpty == false,
+            hasCodexSidebarContent: hasCodexSidebarContent
         )
     }
 
@@ -457,7 +483,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarSelection: SidebarPickerSelection?,
         serverState: CodexReviewServerState,
         hasReviewJobs: Bool,
-        hasWorkspaces: Bool
+        hasWorkspaces: Bool,
+        hasCodexSidebarContent: Bool
     ) -> SidebarKind {
         if sidebarSelection == .account {
             return .accountList
@@ -468,8 +495,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .running:
             break
         }
-        let hasSidebarContent = hasReviewJobs || hasWorkspaces
+        let hasSidebarContent = hasReviewJobs || hasWorkspaces || hasCodexSidebarContent
         return hasSidebarContent ? .jobList : .empty
+    }
+
+    private var hasCodexSidebarContent: Bool {
+        codexSidebarOutlineTree.roots.isEmpty == false
+    }
+
+    private var isUsingCodexSidebarOutline: Bool {
+        hasCodexSidebarContent
     }
 
     private func sidebarWorkspaceTopologies() -> [SidebarWorkspaceTopology] {
@@ -1132,8 +1167,33 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         item as? CodexReviewJob
     }
 
+    private func codexSidebarNode(from item: Any?) -> ReviewMonitorCodexSidebarOutlineNode? {
+        item as? ReviewMonitorCodexSidebarOutlineNode
+    }
+
     private func shouldAllowSelection(of item: Any?) -> Bool {
-        workspaceSection(from: item) != nil || job(from: item) != nil
+        guard codexSidebarNode(from: item) == nil else {
+            return false
+        }
+        return workspaceSection(from: item) != nil || job(from: item) != nil
+    }
+
+    private func configureCodexSidebarCell(
+        _ view: ReviewMonitorWorkspaceCellView,
+        node: ReviewMonitorCodexSidebarOutlineNode
+    ) {
+        switch node.item {
+        case .section(let section):
+            view.configure(title: section.title, toolTip: section.title, systemSymbolName: "folder")
+        case .workspace(let workspace):
+            view.configure(title: workspace.title, toolTip: workspace.cwd, systemSymbolName: "folder")
+        case .chat(let chat):
+            view.configure(
+                title: chat.title,
+                toolTip: chat.preview ?? chat.title,
+                systemSymbolName: "bubble.left"
+            )
+        }
     }
 
     private func workspaces() -> [CodexReviewWorkspace] {
@@ -1790,6 +1850,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if isUsingCodexSidebarOutline {
+            guard let item else {
+                return codexSidebarOutlineTree.roots.count
+            }
+            if let node = codexSidebarNode(from: item) {
+                return node.children.count
+            }
+            return 0
+        }
         guard let item else {
             return currentRootTopologies.count
         }
@@ -1800,6 +1869,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if isUsingCodexSidebarOutline {
+            guard let item else {
+                return codexSidebarOutlineTree.roots[index]
+            }
+            if let node = codexSidebarNode(from: item) {
+                return node.children[index]
+            }
+            fatalError("Unsupported Codex sidebar item.")
+        }
         guard let item else {
             return currentRootTopologies[index].item
         }
@@ -1810,7 +1888,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        workspaceSection(from: item) != nil
+        if let node = codexSidebarNode(from: item) {
+            return node.isExpandable
+        }
+        return workspaceSection(from: item) != nil
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
@@ -1818,6 +1899,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        if codexSidebarNode(from: item) != nil {
+            return rowHeights.workspace
+        }
         if workspaceSection(from: item) != nil {
             return rowHeights.workspace
         }
@@ -1920,6 +2004,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+        if codexSidebarNode(from: item) != nil {
+            return ReviewMonitorWorkspaceRowView()
+        }
         if workspaceSection(from: item) != nil {
             return ReviewMonitorWorkspaceRowView()
         }
@@ -1934,6 +2021,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         viewFor tableColumn: NSTableColumn?,
         item: Any
     ) -> NSView? {
+        if let node = codexSidebarNode(from: item) {
+            let view = (outlineView.makeView(withIdentifier: Identifier.workspaceCell, owner: self) as? ReviewMonitorWorkspaceCellView)
+                ?? ReviewMonitorWorkspaceCellView()
+            view.identifier = Identifier.workspaceCell
+            view.objectValue = node
+            configureCodexSidebarCell(view, node: node)
+            return view
+        }
+
         if let section = workspaceSection(from: item) {
             let view = (outlineView.makeView(withIdentifier: Identifier.workspaceCell, owner: self) as? ReviewMonitorWorkspaceCellView)
                 ?? ReviewMonitorWorkspaceCellView()
@@ -2005,6 +2101,12 @@ extension ReviewMonitorSidebarViewController {
 
     var codexSidebarRootTitlesForTesting: [String] {
         codexSidebarOutlineTree.roots.map(\.title)
+    }
+
+    var displayedCodexSidebarTitlesForTesting: [String] {
+        (0..<outlineView.numberOfRows).compactMap { row in
+            codexSidebarNode(from: outlineView.item(atRow: row))?.title
+        }
     }
 
     func codexSidebarNodeTitleForTesting(rowID: ReviewMonitorCodexSidebarRowID) -> String? {
@@ -2886,8 +2988,8 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
         configure(title: workspace.displayTitle, toolTip: workspace.cwd)
     }
 
-    func configure(title: String, toolTip: String) {
-        iconView.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+    func configure(title: String, toolTip: String, systemSymbolName: String = "folder") {
+        iconView.image = NSImage(systemSymbolName: systemSymbolName, accessibilityDescription: nil)
         titleLabel.stringValue = title
         self.toolTip = toolTip
     }
