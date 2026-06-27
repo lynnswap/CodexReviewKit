@@ -49,6 +49,36 @@ struct ReviewMonitorSidebarChatRow: Equatable {
     }
 }
 
+@MainActor
+final class ReviewMonitorSidebarReviewChatRow {
+    let jobID: String
+    private(set) var sessionID: String
+    private(set) var cwd: String
+    private(set) var chat: ReviewMonitorCodexSidebarSnapshot.Chat?
+    private(set) var presentation: ReviewMonitorSidebarChatRow
+    private(set) var isTerminal: Bool
+    private(set) var cancellationRequested: Bool
+
+    init(job: CodexReviewJob) {
+        self.jobID = job.id
+        self.sessionID = job.sessionID
+        self.cwd = job.cwd
+        self.chat = job.reviewChatSelection
+        self.presentation = ReviewMonitorSidebarChatRow(job: job)
+        self.isTerminal = job.isTerminal
+        self.cancellationRequested = job.cancellationRequested
+    }
+
+    func update(from job: CodexReviewJob) {
+        sessionID = job.sessionID
+        cwd = job.cwd
+        chat = job.reviewChatSelection
+        presentation = ReviewMonitorSidebarChatRow(job: job)
+        isTerminal = job.isTerminal
+        cancellationRequested = job.cancellationRequested
+    }
+}
+
 struct ReviewMonitorChatRowView: View {
     var row: ReviewMonitorSidebarChatRow
 
