@@ -254,8 +254,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
             else {
                 return
             }
-            let entries = ReviewMonitorWorkspaceFindingsIndex(store: self.store)
-                .entries(for: section)
+            let entries = CodexReviewWorkspaceFindingsIndex(store: self.store)
+                .entries(forWorkspaceCWDs: section.workspaceCWDs)
+                .map(ReviewMonitorWorkspaceFindingsView.Entry.init)
             self.renderWorkspaceFindings(entries: entries)
         }
     }
@@ -481,6 +482,18 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
+}
+private extension ReviewMonitorWorkspaceFindingsView.Entry {
+    init(_ entry: CodexReviewWorkspaceFindingEntry) {
+        self.init(
+            threadID: entry.threadID,
+            targetSummary: entry.targetSummary,
+            priority: entry.priority,
+            title: entry.title,
+            body: entry.body,
+            locationText: entry.locationText
+        )
+    }
 }
 
 #if DEBUG
