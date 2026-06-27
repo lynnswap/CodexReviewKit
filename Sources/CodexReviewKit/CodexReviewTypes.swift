@@ -277,9 +277,9 @@ package extension CodexReviewBackendModel.Review {
 
 package extension CodexReviewBackendModel.Review {
     enum Event: Equatable, Sendable {
-        case domainEvents([ReviewDomainEvent], logProjectionSuppressionCount: Int)
-        case suppressNextLogTimelineProjection
-        case suppressNextTerminalFailureLogTimelineProjection
+        case domainEvents([ReviewDomainEvent], retainedLogEntryCount: Int)
+        case retainNextTimelineTextFromLogEntry
+        case retainNextTerminalFailureTimelineTextFromLogEntry
         case started(turnID: String, reviewThreadID: String?, model: String?)
         case message(String)
         case messageDelta(String, itemID: String)

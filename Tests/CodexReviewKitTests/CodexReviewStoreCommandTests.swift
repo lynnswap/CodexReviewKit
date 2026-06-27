@@ -28,11 +28,14 @@ struct CodexReviewStoreCommandTests {
             #expect(store.listReviews(sessionID: nil).items.map(\.jobID) == ["job-1"])
 
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.cleanupReview(.init(
-                threadID: "thread-1",
-                turnID: "turn-1",
-                reviewThreadID: "review-thread-1"
-            ))))
+            #expect(
+                commands.contains(
+                    .cleanupReview(
+                        .init(
+                            threadID: "thread-1",
+                            turnID: "turn-1",
+                            reviewThreadID: "review-thread-1"
+                        ))))
         }
     }
 
@@ -66,7 +69,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func domainEventsMutateTimelineAndSuppressLogProjection() async throws {
+    @Test func domainEventsMutateTimelineAndLogEntriesDoNotProject() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -82,49 +85,58 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
-            await backend.yield(.domainEvents([
-                .itemStarted(.init(
-                    id: itemID,
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .running,
-                    content: .message(.init(text: ""))
-                )),
-            ], logProjectionSuppressionCount: 0))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.item(for: itemID) != nil
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemStarted(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .running,
+                                content: .message(.init(text: ""))
+                            ))
+                    ], retainedLogEntryCount: 0))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.timeline.item(for: itemID) != nil
+                })
             let originalItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
 
-            await backend.yield(.domainEvents([
-                .textDelta(
-                    itemID: itemID,
-                    kind: .agentMessage,
-                    family: .message,
-                    content: .message(.init(text: "")),
-                    delta: "domain text"
-                ),
-            ], logProjectionSuppressionCount: 1))
-            #expect(await waitUntil {
-                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
-                      case .message(let message) = item.content
-                else {
-                    return false
-                }
-                return message.text == "domain text"
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .agentMessage,
+                            family: .message,
+                            content: .message(.init(text: "")),
+                            delta: "domain text"
+                        )
+                    ], retainedLogEntryCount: 1))
+            #expect(
+                await waitUntil {
+                    guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                        case .message(let message) = item.content
+                    else {
+                        return false
+                    }
+                    return message.text == "domain text"
+                })
             let updatedItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             #expect(originalItem === updatedItem)
 
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: " log text",
-                groupID: "msg-1",
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains { $0.text == " log text" } == true
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .agentMessage,
+                    text: " log text",
+                    groupID: "msg-1",
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains { $0.text == " log text" } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.timeline.items.count == 1)
@@ -135,15 +147,18 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(message.text == "domain text")
 
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: "log-only diagnostic",
-                groupID: nil,
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.items.count == 2
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: "log-only diagnostic",
+                    groupID: nil,
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains { $0.text == "log-only diagnostic" } == true
+                })
+            #expect(store.job(id: "job-1")?.timeline.items.count == 1)
             #expect(store.job(id: "job-1")?.timeline.item(for: itemID) === originalItem)
         }
     }
@@ -163,47 +178,65 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "cmd-1")
-            await backend.yield(.domainEvents([
-                .itemStarted(.init(
-                    id: itemID,
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    content: .command(.init(command: "swift test"))
-                )),
-            ], logProjectionSuppressionCount: 0))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemStarted(
+                            .init(
+                                id: itemID,
+                                kind: .commandExecution,
+                                family: .command,
+                                phase: .running,
+                                content: .command(.init(command: "swift test"))
+                            ))
+                    ], retainedLogEntryCount: 0))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == true
+                })
             let originalItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
 
-            await backend.yield(.logEntry(
-                kind: .command,
-                text: "$ swift test",
-                groupID: "cmd-1",
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "commandExecution",
-                    status: "completed",
-                    itemID: "cmd-1",
-                    command: "swift test",
-                    commandStatus: "completed"
-                )
-            ))
-            #expect(await waitUntil {
-                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID) else {
-                    return false
-                }
-                return item.phase == .completed
-                    && store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == false
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemCompleted(
+                            .init(
+                                id: itemID,
+                                kind: .commandExecution,
+                                family: .command,
+                                phase: .completed,
+                                content: .command(.init(command: "swift test"))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .command,
+                    text: "$ swift test",
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "completed",
+                        itemID: "cmd-1",
+                        command: "swift test",
+                        commandStatus: "completed"
+                    )
+                ))
+            #expect(
+                await waitUntil {
+                    guard let item = store.job(id: "job-1")?.timeline.item(for: itemID) else {
+                        return false
+                    }
+                    return item.phase == .completed
+                        && store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == false
+                })
 
             let updatedItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             #expect(originalItem === updatedItem)
         }
     }
 
-    @Test func skippedLogDeltaConsumesDirectProjectionSuppression() async throws {
+    @Test func skippedLogDeltaConsumesTimelineTextRetention() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -218,38 +251,46 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .completed,
+                                content: .message(.init(text: "final"))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: "final"))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: "final",
-                groupID: "msg-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains { $0.text == "final" } == true
-            })
+                    text: "final",
+                    groupID: "msg-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains { $0.text == "final" } == true
+                })
 
-            await backend.yield(.domainEvents([
-                .textDelta(
-                    itemID: itemID,
-                    kind: .agentMessage,
-                    family: .message,
-                    content: .message(.init(text: "")),
-                    delta: "late"
-                ),
-            ], logProjectionSuppressionCount: 1))
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .agentMessage,
+                            family: .message,
+                            content: .message(.init(text: "")),
+                            delta: "late"
+                        )
+                    ], retainedLogEntryCount: 1))
             await backend.yield(.messageDelta("late", itemID: "msg-1"))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains { $0.text == "late" } == false
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains { $0.text == "late" } == false
+                })
             let messageItem = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             guard case .message(let message) = messageItem.content else {
                 Issue.record("expected message timeline content")
@@ -258,15 +299,18 @@ struct CodexReviewStoreCommandTests {
             #expect(message.text == "final")
 
             let timelineCount = try #require(store.job(id: "job-1")?.timeline.items.count)
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: "log-only diagnostic",
-                groupID: nil,
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.items.count == timelineCount + 1
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: "log-only diagnostic",
+                    groupID: nil,
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains { $0.text == "log-only diagnostic" } == true
+                })
+            #expect(store.job(id: "job-1")?.timeline.items.count == timelineCount)
         }
     }
 
@@ -285,48 +329,55 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .running,
+                                content: .message(.init(text: "partial"))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .running,
-                    content: .message(.init(text: "partial"))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: "partial",
-                groupID: "msg-1",
-                replacesGroup: true,
-                metadata: .init(sourceType: "agentMessage", status: "inProgress")
-            ))
-            await backend.yield(.domainEvents([
-                .textDelta(
-                    itemID: itemID,
-                    kind: .agentMessage,
-                    family: .message,
-                    content: .message(.init(text: "")),
-                    delta: " delta"
-                ),
-            ], logProjectionSuppressionCount: 1))
+                    text: "partial",
+                    groupID: "msg-1",
+                    replacesGroup: true,
+                    metadata: .init(sourceType: "agentMessage", status: "inProgress")
+                ))
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .agentMessage,
+                            family: .message,
+                            content: .message(.init(text: "")),
+                            delta: " delta"
+                        )
+                    ], retainedLogEntryCount: 1))
             await backend.yield(.messageDelta(" delta", itemID: "msg-1"))
 
-            #expect(await waitUntil {
-                guard let job = store.job(id: "job-1"),
-                      let item = job.timeline.item(for: itemID),
-                      case .message(let message) = item.content
-                else {
-                    return false
-                }
-                return message.text == "partial delta"
-                    && job.core.output.lastAgentMessage == "partial delta"
-                    && job.logEntries.contains { $0.kind == .agentMessage && $0.text == " delta" }
-            })
+            #expect(
+                await waitUntil {
+                    guard let job = store.job(id: "job-1"),
+                        let item = job.timeline.item(for: itemID),
+                        case .message(let message) = item.content
+                    else {
+                        return false
+                    }
+                    return message.text == "partial delta"
+                        && job.core.output.lastAgentMessage == "partial delta"
+                        && job.logEntries.contains { $0.kind == .agentMessage && $0.text == " delta" }
+                })
         }
     }
 
-    @Test func directTerminalErrorSuppressesErrorLogTimelineProjection() async throws {
+    @Test func directTerminalErrorRetainsTimelineTextFromErrorLogEntry() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -342,21 +393,25 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "error:turn-1")
             let longError = String(repeating: "App-server failed.", count: 20_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .init(rawValue: "error"),
-                    family: .diagnostic,
-                    phase: .failed,
-                    content: .diagnostic(.init(message: longError))
-                )),
-            ], logProjectionSuppressionCount: 0))
-            await backend.yield(.suppressNextTerminalFailureLogTimelineProjection)
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .init(rawValue: "error"),
+                                family: .diagnostic,
+                                phase: .failed,
+                                content: .diagnostic(.init(message: longError))
+                            ))
+                    ], retainedLogEntryCount: 0))
+            await backend.yield(.retainNextTerminalFailureTimelineTextFromLogEntry)
             await backend.yield(.failed(longError))
 
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.lifecycle.status == .failed
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.lifecycle.status == .failed
+                })
             let job = try #require(store.job(id: "job-1"))
             #expect(job.logEntries.contains { $0.kind == .error })
             let item = try #require(job.timeline.item(for: itemID))
@@ -385,41 +440,47 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
             let longText = String(repeating: "x", count: 300_000)
-            await backend.yield(.domainEvents([
-                .itemStarted(.init(
-                    id: itemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemStarted(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .running,
+                                content: .message(.init(text: ""))
+                            )),
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .agentMessage,
+                            family: .message,
+                            content: .message(.init(text: "")),
+                            delta: longText
+                        ),
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .running,
-                    content: .message(.init(text: ""))
-                )),
-                .textDelta(
-                    itemID: itemID,
-                    kind: .agentMessage,
-                    family: .message,
-                    content: .message(.init(text: "")),
-                    delta: longText
-                ),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: longText,
-                groupID: "msg-1",
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
-                      case .message(let message) = item.content
-                else {
-                    return false
-                }
-                return message.text.count == longText.count
-            })
+                    text: longText,
+                    groupID: "msg-1",
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                        case .message(let message) = item.content
+                    else {
+                        return false
+                    }
+                    return message.text.count == longText.count
+                })
 
             await backend.yield(.failed("Failed."))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.lifecycle.status == .failed
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.lifecycle.status == .failed
+                })
             let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             guard case .message(let message) = item.content else {
                 Issue.record("expected message timeline content")
@@ -445,34 +506,40 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
             let longText = String(repeating: "x", count: 300_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .completed,
+                                content: .message(.init(text: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: longText,
-                groupID: "msg-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
-                      case .message(let message) = item.content
-                else {
-                    return false
-                }
-                return message.text.count == longText.count
-            })
+                    text: longText,
+                    groupID: "msg-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                        case .message(let message) = item.content
+                    else {
+                        return false
+                    }
+                    return message.text.count == longText.count
+                })
 
             await backend.yield(.failed("Failed."))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.lifecycle.status == .failed
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.lifecycle.status == .failed
+                })
             let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             guard case .message(let message) = item.content else {
                 Issue.record("expected message timeline content")
@@ -499,58 +566,65 @@ struct CodexReviewStoreCommandTests {
             let itemID = ReviewTimelineItem.ID(rawValue: "cmd-1")
             let firstChunk = "first retained chunk\n"
             let secondChunk = "second retained chunk\n"
-            await backend.yield(.domainEvents([
-                .itemStarted(.init(
-                    id: itemID,
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    content: .command(.init(command: "swift test"))
-                )),
-                .textDelta(
-                    itemID: itemID,
-                    kind: .commandExecution,
-                    family: .command,
-                    content: .command(.init(command: "swift test")),
-                    delta: firstChunk
-                ),
-                .textDelta(
-                    itemID: itemID,
-                    kind: .commandExecution,
-                    family: .command,
-                    content: .command(.init(command: "swift test")),
-                    delta: secondChunk
-                ),
-            ], logProjectionSuppressionCount: 2))
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemStarted(
+                            .init(
+                                id: itemID,
+                                kind: .commandExecution,
+                                family: .command,
+                                phase: .running,
+                                content: .command(.init(command: "swift test"))
+                            )),
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .commandExecution,
+                            family: .command,
+                            content: .command(.init(command: "swift test")),
+                            delta: firstChunk
+                        ),
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .commandExecution,
+                            family: .command,
+                            content: .command(.init(command: "swift test")),
+                            delta: secondChunk
+                        ),
+                    ], retainedLogEntryCount: 2))
             let outputMetadata = ReviewLogEntry.Metadata(
                 sourceType: "commandExecution",
                 title: "Command output",
                 itemID: itemID.rawValue,
                 command: "swift test"
             )
-            await backend.yield(.logEntry(
-                kind: .commandOutput,
-                text: firstChunk,
-                groupID: itemID.rawValue,
-                replacesGroup: false,
-                metadata: outputMetadata
-            ))
-            await backend.yield(.logEntry(
-                kind: .commandOutput,
-                text: secondChunk,
-                groupID: itemID.rawValue,
-                replacesGroup: false,
-                metadata: outputMetadata
-            ))
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: String(repeating: "x", count: 300_000),
-                groupID: "diagnostic-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 3
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .commandOutput,
+                    text: firstChunk,
+                    groupID: itemID.rawValue,
+                    replacesGroup: false,
+                    metadata: outputMetadata
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .commandOutput,
+                    text: secondChunk,
+                    groupID: itemID.rawValue,
+                    replacesGroup: false,
+                    metadata: outputMetadata
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: String(repeating: "x", count: 300_000),
+                    groupID: "diagnostic-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 3
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -579,26 +653,31 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "msg-1")
             let longText = String(repeating: "x", count: 300_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .completed,
+                                content: .message(.init(text: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: longText,
-                groupID: nil,
-                replacesGroup: true
-            ))
+                    text: longText,
+                    groupID: nil,
+                    replacesGroup: true
+                ))
 
             await backend.yield(.failed("Failed."))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.lifecycle.status == .failed
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.lifecycle.status == .failed
+                })
             let item = try #require(store.job(id: "job-1")?.timeline.item(for: itemID))
             guard case .message(let message) = item.content else {
                 Issue.record("expected message timeline content")
@@ -624,26 +703,31 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "diff-1")
             let longText = String(repeating: "diff --git\n", count: 40_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .init(rawValue: "turn/diff/updated"),
-                    family: .diagnostic,
-                    phase: .completed,
-                    content: .diagnostic(.init(message: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .event,
-                text: longText,
-                groupID: itemID.rawValue,
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .event && $0.groupID == itemID.rawValue
-                } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .init(rawValue: "turn/diff/updated"),
+                                family: .diagnostic,
+                                phase: .completed,
+                                content: .diagnostic(.init(message: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .event,
+                    text: longText,
+                    groupID: itemID.rawValue,
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .event && $0.groupID == itemID.rawValue
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -672,26 +756,31 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "turn-1:turn/diff/updated")
             let longText = String(repeating: "diff --git\n", count: 40_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .init(rawValue: "turn/diff/updated"),
-                    family: .fileChange,
-                    phase: .running,
-                    content: .fileChange(.init(title: "", output: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .event,
-                text: longText,
-                groupID: "turn-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .event && $0.groupID == "turn-1"
-                } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .init(rawValue: "turn/diff/updated"),
+                                family: .fileChange,
+                                phase: .running,
+                                content: .fileChange(.init(title: "", output: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .event,
+                    text: longText,
+                    groupID: "turn-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .event && $0.groupID == "turn-1"
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -720,27 +809,32 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "file-1")
             let longText = String(repeating: "Sources/App.swift | 1 +\n+ new line\n", count: 20_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .fileChange,
-                    family: .fileChange,
-                    phase: .running,
-                    content: .fileChange(.init(title: "Sources/App.swift", output: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .commandOutput,
-                text: longText,
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .commandOutput && $0.groupID == itemID.rawValue
-                } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .fileChange,
+                                family: .fileChange,
+                                phase: .running,
+                                content: .fileChange(.init(title: "Sources/App.swift", output: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .commandOutput,
+                    text: longText,
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .commandOutput && $0.groupID == itemID.rawValue
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -769,31 +863,37 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "file-1:patch")
             let patchText = String(repeating: "diff --git a/Sources/App.swift b/Sources/App.swift\n", count: 8_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .init(rawValue: "item/fileChange/patchUpdated"),
-                    family: .fileChange,
-                    phase: .running,
-                    content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "File changes updated.",
-                groupID: "file-1",
-                replacesGroup: false,
-                metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
-            ))
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: String(repeating: "x", count: 300_000),
-                groupID: "diagnostic-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 2
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .init(rawValue: "item/fileChange/patchUpdated"),
+                                family: .fileChange,
+                                phase: .running,
+                                content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "File changes updated.",
+                    groupID: "file-1",
+                    replacesGroup: false,
+                    metadata: .init(sourceType: "fileChange", title: "File changes", status: "updated")
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: String(repeating: "x", count: 300_000),
+                    groupID: "diagnostic-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 2
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -822,46 +922,52 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "search-1")
             let longResult = String(repeating: "Search result\n", count: 30_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .webSearch,
-                    family: .search,
-                    phase: .completed,
-                    content: .search(.init(query: "ReviewTimeline", result: longResult))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: longResult,
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "webSearch",
-                    title: "Web search",
-                    status: "completed",
-                    query: "ReviewTimeline",
-                    resultText: longResult
-                )
-            ))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "Web search completed: ReviewTimeline.",
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "webSearch",
-                    title: "Web search",
-                    status: "completed",
-                    query: "ReviewTimeline",
-                    resultText: longResult
-                )
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
-                } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .webSearch,
+                                family: .search,
+                                phase: .completed,
+                                content: .search(.init(query: "ReviewTimeline", result: longResult))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: longResult,
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "webSearch",
+                        title: "Web search",
+                        status: "completed",
+                        query: "ReviewTimeline",
+                        resultText: longResult
+                    )
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "Web search completed: ReviewTimeline.",
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "webSearch",
+                        title: "Web search",
+                        status: "completed",
+                        query: "ReviewTimeline",
+                        resultText: longResult
+                    )
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -892,37 +998,43 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let itemID = ReviewTimelineItem.ID(rawValue: "search-1")
-            await backend.yield(.domainEvents([
-                .itemCompleted(.init(
-                    id: itemID,
-                    kind: .webSearch,
-                    family: .search,
-                    phase: .completed,
-                    content: .search(.init(query: "ReviewTimeline", result: "short result"))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "Web search completed: ReviewTimeline.",
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "webSearch",
-                    title: "Web search",
-                    status: "completed",
-                    query: "ReviewTimeline",
-                    resultText: "short result"
-                )
-            ))
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: String(repeating: "x", count: 300_000),
-                groupID: "diagnostic-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 2
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemCompleted(
+                            .init(
+                                id: itemID,
+                                kind: .webSearch,
+                                family: .search,
+                                phase: .completed,
+                                content: .search(.init(query: "ReviewTimeline", result: "short result"))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "Web search completed: ReviewTimeline.",
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "webSearch",
+                        title: "Web search",
+                        status: "completed",
+                        query: "ReviewTimeline",
+                        resultText: "short result"
+                    )
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: String(repeating: "x", count: 300_000),
+                    groupID: "diagnostic-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 2
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -935,7 +1047,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func unownedLargeResultMetadataIsDroppedBeforeLogTimelineProjection() async throws {
+    @Test func unownedLargeResultMetadataIsDroppedBeforeLogStorage() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -950,33 +1062,28 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let longResult = String(repeating: "Search result\n", count: 30_000)
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "Web search completed: ReviewTimeline.",
-                groupID: "search-1",
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "webSearch",
-                    title: "Web search",
-                    status: "completed",
-                    query: "ReviewTimeline",
-                    resultText: longResult
-                )
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 1
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "Web search completed: ReviewTimeline.",
+                    groupID: "search-1",
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "webSearch",
+                        title: "Web search",
+                        status: "completed",
+                        query: "ReviewTimeline",
+                        resultText: longResult
+                    )
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 1
+                })
 
             let job = try #require(store.job(id: "job-1"))
             let entry = try #require(job.logEntries.first)
             #expect(entry.metadata?.resultText == nil)
-            let item = try #require(job.timeline.items.first)
-            guard case .search(let search) = item.content else {
-                Issue.record("expected search timeline content")
-                return
-            }
-            #expect(search.query == "ReviewTimeline")
-            #expect(search.result == nil)
         }
     }
 
@@ -996,32 +1103,36 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "reasoning-1:content:0")
             let longText = String(repeating: "r", count: 300_000)
-            await backend.yield(.domainEvents([
-                .textDelta(
-                    itemID: itemID,
-                    kind: .reasoning,
-                    family: .reasoning,
-                    content: .reasoning(.init(text: "", style: .raw)),
-                    delta: longText
-                ),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .rawReasoning,
-                text: longText,
-                groupID: "reasoning-1:0",
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
-                      case .reasoning(let reasoning) = item.content
-                else {
-                    return false
-                }
-                return reasoning.text.count == longText.count
-                    && store.job(id: "job-1")?.logEntries.contains {
-                        $0.kind == .rawReasoning && $0.groupID == "reasoning-1:0"
-                    } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .textDelta(
+                            itemID: itemID,
+                            kind: .reasoning,
+                            family: .reasoning,
+                            content: .reasoning(.init(text: "", style: .raw)),
+                            delta: longText
+                        )
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .rawReasoning,
+                    text: longText,
+                    groupID: "reasoning-1:0",
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
+                        case .reasoning(let reasoning) = item.content
+                    else {
+                        return false
+                    }
+                    return reasoning.text.count == longText.count
+                        && store.job(id: "job-1")?.logEntries.contains {
+                            $0.kind == .rawReasoning && $0.groupID == "reasoning-1:0"
+                        } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             let revisionBeforeTrim = job.timeline.revision
@@ -1052,26 +1163,31 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "turn-1:turn/plan/updated")
             let longText = String(repeating: "- [pending] Review file\n", count: 15_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .plan,
-                    family: .plan,
-                    phase: .running,
-                    content: .plan(.init(markdown: longText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .todoList,
-                text: longText,
-                groupID: "turn-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .todoList && $0.groupID == "turn-1"
-                } == true
-            })
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .plan,
+                                family: .plan,
+                                phase: .running,
+                                content: .plan(.init(markdown: longText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .todoList,
+                    text: longText,
+                    groupID: "turn-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .todoList && $0.groupID == "turn-1"
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -1099,49 +1215,57 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let progressItemID = ReviewTimelineItem.ID(rawValue: "tool-1:progress")
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: progressItemID,
-                    kind: .mcpToolCall,
-                    family: .tool,
-                    phase: .running,
-                    content: .toolCall(.init(
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: progressItemID,
+                                kind: .mcpToolCall,
+                                family: .tool,
+                                phase: .running,
+                                content: .toolCall(
+                                    .init(
+                                        server: "codex_review",
+                                        tool: "review_read",
+                                        progress: "Reading review job"
+                                    ))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "Reading review job",
+                    groupID: "tool-1",
+                    replacesGroup: false,
+                    metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: "codex_review.review_read completed. Result: ok",
+                    groupID: "tool-1",
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "mcpToolCall",
+                        title: "codex_review.review_read",
+                        status: "completed",
                         server: "codex_review",
                         tool: "review_read",
-                        progress: "Reading review job"
-                    ))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "Reading review job",
-                groupID: "tool-1",
-                replacesGroup: false,
-                metadata: .init(sourceType: "mcpToolCall", title: "Tool progress")
-            ))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: "codex_review.review_read completed. Result: ok",
-                groupID: "tool-1",
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "mcpToolCall",
-                    title: "codex_review.review_read",
-                    status: "completed",
-                    server: "codex_review",
-                    tool: "review_read",
-                    resultText: "ok"
-                )
-            ))
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: String(repeating: "x", count: 300_000),
-                groupID: "diagnostic-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 3
-            })
+                        resultText: "ok"
+                    )
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .diagnostic,
+                    text: String(repeating: "x", count: 300_000),
+                    groupID: "diagnostic-1",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 3
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -1151,58 +1275,6 @@ struct CodexReviewStoreCommandTests {
                 return
             }
             #expect(toolCall.progress == "Reading review job")
-        }
-    }
-
-    @Test func timelineProjectedReadReviewPreservesCommandActions() throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        let action = ReviewLogEntry.Metadata.CommandAction(
-            kind: .read,
-            command: "cat Package.swift",
-            name: "Package.swift",
-            path: "Package.swift"
-        )
-        let timelineAction = ReviewTimelineItem.CommandAction(
-            kind: .read,
-            command: "cat Package.swift",
-            name: "Package.swift",
-            path: "Package.swift"
-        )
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            status: .running,
-            summary: "Running",
-            logEntries: [
-                .init(
-                    kind: .command,
-                    groupID: "cmd-1",
-                    replacesGroup: true,
-                    text: "$ cat Package.swift",
-                    metadata: .init(
-                        sourceType: "commandExecution",
-                        itemID: "cmd-1",
-                        command: "cat Package.swift",
-                        commandActions: [action]
-                    )
-                )
-            ]
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [.init(cwd: "/tmp/project")],
-            jobs: [job]
-        )
-
-        let item = try #require(job.timeline.item(for: "cmd-1"))
-        if case .command(let command) = item.content {
-            #expect(command.actions == [timelineAction])
-        } else {
-            Issue.record("expected command timeline content")
         }
     }
 
@@ -1222,38 +1294,44 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "tool-error-1")
             let longError = String(repeating: "error", count: 60_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .mcpToolCall,
-                    family: .tool,
-                    phase: .failed,
-                    content: .toolCall(.init(
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .mcpToolCall,
+                                family: .tool,
+                                phase: .failed,
+                                content: .toolCall(
+                                    .init(
+                                        server: "codex_review",
+                                        tool: "review_read",
+                                        error: longError
+                                    ))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: longError,
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "mcpToolCall",
+                        title: "codex_review.review_read",
+                        status: "failed",
                         server: "codex_review",
                         tool: "review_read",
-                        error: longError
-                    ))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: longError,
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "mcpToolCall",
-                    title: "codex_review.review_read",
-                    status: "failed",
-                    server: "codex_review",
-                    tool: "review_read",
-                    errorText: longError
-                )
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
-                } == true
-            })
+                        errorText: longError
+                    )
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -1283,38 +1361,44 @@ struct CodexReviewStoreCommandTests {
 
             let itemID = ReviewTimelineItem.ID(rawValue: "tool-result-1")
             let longResult = String(repeating: "result", count: 60_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: itemID,
-                    kind: .mcpToolCall,
-                    family: .tool,
-                    phase: .completed,
-                    content: .toolCall(.init(
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: itemID,
+                                kind: .mcpToolCall,
+                                family: .tool,
+                                phase: .completed,
+                                content: .toolCall(
+                                    .init(
+                                        server: "codex_review",
+                                        tool: "review_read",
+                                        result: longResult
+                                    ))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
+                    kind: .toolCall,
+                    text: longResult,
+                    groupID: itemID.rawValue,
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "mcpToolCall",
+                        title: "codex_review.review_read",
+                        status: "completed",
                         server: "codex_review",
                         tool: "review_read",
-                        result: longResult
-                    ))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .toolCall,
-                text: longResult,
-                groupID: itemID.rawValue,
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "mcpToolCall",
-                    title: "codex_review.review_read",
-                    status: "completed",
-                    server: "codex_review",
-                    tool: "review_read",
-                    resultText: longResult
-                )
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains {
-                    $0.kind == .toolCall && $0.groupID == itemID.rawValue
-                } == true
-            })
+                        resultText: longResult
+                    )
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.contains {
+                        $0.kind == .toolCall && $0.groupID == itemID.rawValue
+                    } == true
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
@@ -1346,171 +1430,61 @@ struct CodexReviewStoreCommandTests {
             let secondItemID = ReviewTimelineItem.ID(rawValue: "msg-2")
             let firstText = String(repeating: "a", count: 300_000)
             let secondText = String(repeating: "b", count: 300_000)
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: firstItemID,
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: firstItemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .completed,
+                                content: .message(.init(text: firstText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: firstText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: firstText,
-                groupID: "msg-1",
-                replacesGroup: true
-            ))
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: secondItemID,
+                    text: firstText,
+                    groupID: "msg-1",
+                    replacesGroup: true
+                ))
+            await backend.yield(
+                .domainEvents(
+                    [
+                        .itemUpdated(
+                            .init(
+                                id: secondItemID,
+                                kind: .agentMessage,
+                                family: .message,
+                                phase: .completed,
+                                content: .message(.init(text: secondText))
+                            ))
+                    ], retainedLogEntryCount: 1))
+            await backend.yield(
+                .logEntry(
                     kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: secondText))
-                )),
-            ], logProjectionSuppressionCount: 1))
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: secondText,
-                groupID: "msg-2",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.count == 2
-            })
+                    text: secondText,
+                    groupID: "msg-2",
+                    replacesGroup: true
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logEntries.count == 2
+                })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
             let firstItem = try #require(job.timeline.item(for: firstItemID))
             let secondItem = try #require(job.timeline.item(for: secondItemID))
             guard case .message(let firstMessage) = firstItem.content,
-                  case .message(let secondMessage) = secondItem.content
+                case .message(let secondMessage) = secondItem.content
             else {
                 Issue.record("expected message timeline content")
                 return
             }
             #expect(firstMessage.text.isEmpty)
             #expect(secondMessage.text.count < secondText.count)
-        }
-    }
-
-    @Test func logTimelineTextFromBeforeDirectEventsIsTrimmed() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            async let result = store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-                waitTimeout: .milliseconds(20)
-            )
-            _ = try await result
-
-            let longText = String(repeating: "log", count: 120_000)
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: longText,
-                groupID: "log-message",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.items.contains { item in
-                    guard case .message(let message) = item.content else {
-                        return false
-                    }
-                    return message.text == longText
-                } == true
-            })
-            let logItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
-                guard case .message(let message) = item.content else {
-                    return false
-                }
-                return message.text == longText
-            }?.id)
-
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: .init(rawValue: "direct-message"),
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: "direct"))
-                )),
-            ], logProjectionSuppressionCount: 0))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.item(for: .init(rawValue: "direct-message")) != nil
-            })
-
-            let job = try #require(store.job(id: "job-1"))
-            #expect(job.applyReviewLogLimit())
-            let item = try #require(job.timeline.item(for: logItemID))
-            guard case .message(let message) = item.content else {
-                Issue.record("expected message timeline content")
-                return
-            }
-            #expect(message.text.count < longText.count)
-        }
-    }
-
-    @Test func logProjectedTimelineTextIsTrimmedAfterDirectEvents() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            async let result = store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
-                waitTimeout: .milliseconds(20)
-            )
-            _ = try await result
-
-            await backend.yield(.domainEvents([
-                .itemUpdated(.init(
-                    id: .init(rawValue: "msg-1"),
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: "direct"))
-                )),
-            ], logProjectionSuppressionCount: 0))
-
-            let longText = String(repeating: "y", count: 300_000)
-            await backend.yield(.logEntry(
-                kind: .diagnostic,
-                text: longText,
-                groupID: "diagnostic-1",
-                replacesGroup: true
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.timeline.items.contains { item in
-                    guard case .diagnostic(let diagnostic) = item.content else {
-                        return false
-                    }
-                    return diagnostic.message == longText
-                } == true
-            })
-            let logItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
-                guard case .diagnostic(let diagnostic) = item.content else {
-                    return false
-                }
-                return diagnostic.message == longText
-            }?.id)
-
-            await backend.yield(.failed("Failed."))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.lifecycle.status == .failed
-            })
-            let item = try #require(store.job(id: "job-1")?.timeline.item(for: logItemID))
-            guard case .diagnostic(let diagnostic) = item.content else {
-                Issue.record("expected diagnostic timeline content")
-                return
-            }
-            #expect(diagnostic.message.count < longText.count)
         }
     }
 
@@ -1681,12 +1655,13 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.started(turnID: "turn-actual", reviewThreadID: "review-thread-1", model: "gpt-5.5"))
             await backend.yield(.messageDelta("hello", itemID: "message-1"))
             await backend.yield(.messageDelta(" world", itemID: "message-1"))
-            await backend.yield(.logEntry(
-                kind: .reasoningSummary,
-                text: " with space",
-                groupID: "reasoning-1",
-                replacesGroup: false
-            ))
+            await backend.yield(
+                .logEntry(
+                    kind: .reasoningSummary,
+                    text: " with space",
+                    groupID: "reasoning-1",
+                    replacesGroup: false
+                ))
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
 
@@ -1729,12 +1704,13 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.logEntry(
-                kind: .agentMessage,
-                text: "final review text",
-                groupID: "review-item-1",
-                replacesGroup: true
-            ))
+            await backend.yield(
+                .logEntry(
+                    kind: .agentMessage,
+                    text: "final review text",
+                    groupID: "review-item-1",
+                    replacesGroup: true
+                ))
             await backend.yield(.completed(summary: "Succeeded.", result: "final review text"))
             let read = try await result
 
@@ -1757,18 +1733,20 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.logEntry(
-                kind: .rawReasoning,
-                text: initialText,
-                groupID: "reasoning-1",
-                replacesGroup: false
-            ))
-            await backend.yield(.logEntry(
-                kind: .rawReasoning,
-                text: delta,
-                groupID: "reasoning-1",
-                replacesGroup: false
-            ))
+            await backend.yield(
+                .logEntry(
+                    kind: .rawReasoning,
+                    text: initialText,
+                    groupID: "reasoning-1",
+                    replacesGroup: false
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .rawReasoning,
+                    text: delta,
+                    groupID: "reasoning-1",
+                    replacesGroup: false
+                ))
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
             let job = try #require(store.job(id: "job-1"))
@@ -1791,11 +1769,14 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: """
-            Full review comments:
-            - [P2] Add parser tests — Sources/Parser.swift:12-15
-              The final review parser should be covered at the model layer.
-            """))
+            await backend.yield(
+                .completed(
+                    summary: "Succeeded.",
+                    result: """
+                        Full review comments:
+                        - [P2] Add parser tests — Sources/Parser.swift:12-15
+                          The final review parser should be covered at the model layer.
+                        """))
             let read = try await result
 
             #expect(read.core.output.hasFinalReview)
@@ -1874,10 +1855,11 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: "second"))
             _ = try await second
 
-            #expect(store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary) == [
-                "Uncommitted changes",
-                "Base branch: main",
-            ])
+            #expect(
+                store.orderedJobs(inWorkspace: "/tmp/project").map(\.targetSummary) == [
+                    "Uncommitted changes",
+                    "Base branch: main",
+                ])
         }
     }
 
@@ -1948,17 +1930,20 @@ struct CodexReviewStoreCommandTests {
             workspaces: [firstGroupedWorkspace, secondWorkspace, thirdWorkspace, secondGroupedWorkspace]
         )
 
-        #expect(store.reorderWorkspaces(
-            cwds: [firstGroupedWorkspace.cwd, secondGroupedWorkspace.cwd],
-            beforeCWD: thirdWorkspace.cwd
-        ))
-        #expect(store.orderedWorkspaces.map(\.cwd) == [
-            secondWorkspace.cwd,
-            firstGroupedWorkspace.cwd,
-            secondGroupedWorkspace.cwd,
-            thirdWorkspace.cwd,
-        ])
-        #expect(store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: firstGroupedWorkspace.cwd) == false)
+        #expect(
+            store.reorderWorkspaces(
+                cwds: [firstGroupedWorkspace.cwd, secondGroupedWorkspace.cwd],
+                beforeCWD: thirdWorkspace.cwd
+            ))
+        #expect(
+            store.orderedWorkspaces.map(\.cwd) == [
+                secondWorkspace.cwd,
+                firstGroupedWorkspace.cwd,
+                secondGroupedWorkspace.cwd,
+                thirdWorkspace.cwd,
+            ])
+        #expect(
+            store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: firstGroupedWorkspace.cwd) == false)
         #expect(store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: "/tmp/missing") == false)
     }
 
@@ -2022,10 +2007,12 @@ struct CodexReviewStoreCommandTests {
             #expect(cancel.cancelled)
             #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Stop")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                        .init(message: "Stop")
+                    )))
         }
     }
 
@@ -2043,21 +2030,24 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            await backend.yield(.logEntry(
-                kind: .rawReasoning,
-                text: initialText,
-                groupID: "reasoning-1",
-                replacesGroup: false
-            ))
-            await backend.yield(.logEntry(
-                kind: .rawReasoning,
-                text: delta,
-                groupID: "reasoning-1",
-                replacesGroup: false
-            ))
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.logText.hasSuffix(delta) == true
-            })
+            await backend.yield(
+                .logEntry(
+                    kind: .rawReasoning,
+                    text: initialText,
+                    groupID: "reasoning-1",
+                    replacesGroup: false
+                ))
+            await backend.yield(
+                .logEntry(
+                    kind: .rawReasoning,
+                    text: delta,
+                    groupID: "reasoning-1",
+                    replacesGroup: false
+                ))
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.logText.hasSuffix(delta) == true
+                })
             _ = try await store.cancelReview(
                 jobID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
@@ -2109,13 +2099,14 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(attemptedRecovery == false)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { command in
-                if case .prepareReviewRestart = command {
-                    true
-                } else {
-                    false
-                }
-            } == false)
+            #expect(
+                commands.contains { command in
+                    if case .prepareReviewRestart = command {
+                        true
+                    } else {
+                        false
+                    }
+                } == false)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
@@ -2196,13 +2187,14 @@ struct CodexReviewStoreCommandTests {
             #expect(final.core.run.turnID == "turn-2")
             #expect(final.core.output.lastAgentMessage == "recovered review")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { command in
-                if case .restartPreparedReview = command {
-                    true
-                } else {
-                    false
-                }
-            })
+            #expect(
+                commands.contains { command in
+                    if case .restartPreparedReview = command {
+                        true
+                    } else {
+                        false
+                    }
+                })
             let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("completed review text") == false)
         }
@@ -2247,9 +2239,10 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
             await sleeper.blockFutureSleeps()
             networkMonitor.yield(.satisfied())
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
+                })
 
             await backend.yield(.message("completed during settle"), for: initialRun)
             await backend.yield(.completed(summary: "Succeeded.", result: nil), for: initialRun)
@@ -2263,13 +2256,14 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.run.turnID == "turn-2")
             #expect(read.core.output.lastAgentMessage == "recovered review")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { command in
-                if case .restartPreparedReview = command {
-                    true
-                } else {
-                    false
-                }
-            })
+            #expect(
+                commands.contains { command in
+                    if case .restartPreparedReview = command {
+                        true
+                    } else {
+                        false
+                    }
+                })
             let logText = try #require(store.job(id: "job-1")).logText
             #expect(logText.contains("completed during settle") == false)
         }
@@ -2314,9 +2308,10 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
             await sleeper.blockFutureSleeps()
             networkMonitor.yield(.satisfied())
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
-            })
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.output.summary == "Network restored; restarting review."
+                })
             networkMonitor.yield(.satisfied())
             await settleGate.open()
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
@@ -2360,20 +2355,21 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main")),
                 waitTimeout: .milliseconds(20)
             )
-            await backend.yield(.logEntry(
-                kind: .command,
-                text: "$ git diff",
-                groupID: "cmd-1",
-                replacesGroup: true,
-                metadata: .init(
-                    sourceType: "commandExecution",
-                    status: "inProgress",
-                    itemID: "cmd-1",
-                    command: "git diff",
-                    startedAt: Date(timeIntervalSince1970: 1),
-                    commandStatus: "inProgress"
-                )
-            ), for: initialRun)
+            await backend.yield(
+                .logEntry(
+                    kind: .command,
+                    text: "$ git diff",
+                    groupID: "cmd-1",
+                    replacesGroup: true,
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: "inProgress",
+                        itemID: "cmd-1",
+                        command: "git diff",
+                        startedAt: Date(timeIntervalSince1970: 1),
+                        commandStatus: "inProgress"
+                    )
+                ), for: initialRun)
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
@@ -2425,14 +2421,16 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
 
-            await backend.yield(.started(
-                turnID: "turn-actual",
-                reviewThreadID: "review-thread-1",
-                model: "gpt-5"
-            ), for: initialRun)
-            #expect(await waitUntil {
-                store.job(id: "job-1")?.core.run.turnID == "turn-actual"
-            })
+            await backend.yield(
+                .started(
+                    turnID: "turn-actual",
+                    reviewThreadID: "review-thread-1",
+                    model: "gpt-5"
+                ), for: initialRun)
+            #expect(
+                await waitUntil {
+                    store.job(id: "job-1")?.core.run.turnID == "turn-actual"
+                })
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
@@ -2500,12 +2498,13 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.cancelled("Network lost"), for: initialRun)
             networkMonitor.yield(.satisfied())
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
-            #expect(await waitUntil {
-                guard let read = try? store.readReview(jobID: "job-1") else {
-                    return false
-                }
-                return read.core.run.turnID == "turn-2"
-            })
+            #expect(
+                await waitUntil {
+                    guard let read = try? store.readReview(jobID: "job-1") else {
+                        return false
+                    }
+                    return read.core.run.turnID == "turn-2"
+                })
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
             await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
@@ -2554,9 +2553,10 @@ struct CodexReviewStoreCommandTests {
 
             await backend.yield(.messageDelta("stale ", itemID: "message-1"), for: initialRun)
             await backend.yield(.messageDelta("output", itemID: "message-1"), for: initialRun)
-            try #require(await StoreSnapshotProbe(store: store).waitUntil(timeout: .seconds(2)) {
-                $0.job("job-1")?.lastAgentMessage == "stale output"
-            } != nil)
+            try #require(
+                await StoreSnapshotProbe(store: store).waitUntil(timeout: .seconds(2)) {
+                    $0.job("job-1")?.lastAgentMessage == "stale output"
+                } != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
@@ -2761,14 +2761,18 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.run.turnID == "turn-1")
 
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                initialRun,
-                .init(message: "Stop")
-            )) == false)
-            #expect(commands.contains(.interruptReview(
-                recoveredRun,
-                .init(message: "Stop")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        initialRun,
+                        .init(message: "Stop")
+                    )) == false)
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        recoveredRun,
+                        .init(message: "Stop")
+                    )))
             #expect(commands.contains(.cleanupReview(recoveredRun)))
         }
     }
@@ -2819,10 +2823,11 @@ struct CodexReviewStoreCommandTests {
                     return true
                 }
             }
-            try #require(await waitUntil {
-                let state = store.runtimeJobState(jobID: "job-1")
-                return state.hasActiveWorker == false && state.activeRun == nil
-            })
+            try #require(
+                await waitUntil {
+                    let state = store.runtimeJobState(jobID: "job-1")
+                    return state.hasActiveWorker == false && state.activeRun == nil
+                })
             await recoverGate.open()
             let cleanup = await cleanupTask.value
             let read = try await result
@@ -2834,10 +2839,12 @@ struct CodexReviewStoreCommandTests {
             #expect(read.core.lifecycle.cancellation?.message == "Review runtime stopped.")
             #expect(read.core.run.turnID == "turn-1")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                recoveredRun,
-                .init(message: "Review runtime stopped.")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        recoveredRun,
+                        .init(message: "Review runtime stopped.")
+                    )))
             #expect(commands.contains(.cleanupReview(recoveredRun)))
         }
     }
@@ -3224,20 +3231,22 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { command in
-                if case .prepareReviewRestart = command {
-                    true
-                } else {
-                    false
-                }
-            } == false)
-            #expect(commands.contains { command in
-                if case .restartPreparedReview = command {
-                    true
-                } else {
-                    false
-                }
-            } == false)
+            #expect(
+                commands.contains { command in
+                    if case .prepareReviewRestart = command {
+                        true
+                    } else {
+                        false
+                    }
+                } == false)
+            #expect(
+                commands.contains { command in
+                    if case .restartPreparedReview = command {
+                        true
+                    } else {
+                        false
+                    }
+                } == false)
         }
     }
 
@@ -3264,9 +3273,10 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.lifecycle.errorMessage == "Rollback failed")
-            #expect(try #require(store.job(id: "job-1")).logEntries.contains {
-                $0.kind == .error && $0.text == "Rollback failed"
-            })
+            #expect(
+                try #require(store.job(id: "job-1")).logEntries.contains {
+                    $0.kind == .error && $0.text == "Rollback failed"
+                })
         }
     }
 
@@ -3360,12 +3370,13 @@ struct CodexReviewStoreCommandTests {
             _ = try await result
 
             let commands = await backend.recordedCommands()
-            #expect(commands.contains {
-                if case .interruptReview = $0 {
-                    return true
-                }
-                return false
-            } == false)
+            #expect(
+                commands.contains {
+                    if case .interruptReview = $0 {
+                        return true
+                    }
+                    return false
+                } == false)
         }
     }
 
@@ -3457,7 +3468,8 @@ struct CodexReviewStoreCommandTests {
             await outageSleepStarted.wait()
             await backend.finishEvents(throwing: StreamClosedError(), for: initialRun)
 
-            let failedBeforeOutageConfirmed = await StoreSnapshotProbe(store: store)
+            let failedBeforeOutageConfirmed =
+                await StoreSnapshotProbe(store: store)
                 .waitUntilJobStatus(.failed, jobID: "job-1", timeout: .milliseconds(100)) != nil
             #expect(failedBeforeOutageConfirmed == false)
 
@@ -3492,10 +3504,12 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Cancellation requested.")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                        .init(message: "Cancellation requested.")
+                    )))
         }
     }
 
@@ -3517,10 +3531,12 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Cancellation requested.")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                        .init(message: "Cancellation requested.")
+                    )))
         }
     }
 
@@ -3629,15 +3645,20 @@ struct CodexReviewStoreCommandTests {
             #expect(cancel.cancelled)
             #expect(read.core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
-                .init(message: "Stop")
-            )))
-            #expect(commands.contains(.cleanupReview(.init(
-                threadID: "thread-1",
-                turnID: "turn-1",
-                reviewThreadID: "review-thread-1"
-            ))))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1"),
+                        .init(message: "Stop")
+                    )))
+            #expect(
+                commands.contains(
+                    .cleanupReview(
+                        .init(
+                            threadID: "thread-1",
+                            turnID: "turn-1",
+                            reviewThreadID: "review-thread-1"
+                        ))))
         }
     }
 
@@ -3720,10 +3741,11 @@ struct CodexReviewStoreCommandTests {
             )
         )
 
-        #expect(store.auth.persistedAccounts.map(\.accountKey) == [
-            inactive.accountKey,
-            active.accountKey,
-        ])
+        #expect(
+            store.auth.persistedAccounts.map(\.accountKey) == [
+                inactive.accountKey,
+                active.accountKey,
+            ])
         #expect(store.auth.persistedActiveAccountKey == active.accountKey)
         #expect(store.auth.selectedAccount?.accountKey == active.accountKey)
     }
@@ -3767,16 +3789,17 @@ struct CodexReviewStoreCommandTests {
             displayName: "GPT-5.5",
             hidden: false,
             supportedReasoningEfforts: [
-                .init(reasoningEffort: .medium, description: "Balanced"),
+                .init(reasoningEffort: .medium, description: "Balanced")
             ],
             defaultReasoningEffort: .medium,
             supportedServiceTiers: [.fast],
             isDefault: true
         )
-        let backend = FakeCodexReviewBackend(settings: .init(
-            fallbackModel: "gpt-5.5",
-            models: [model]
-        ))
+        let backend = FakeCodexReviewBackend(
+            settings: .init(
+                fallbackModel: "gpt-5.5",
+                models: [model]
+            ))
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
@@ -3825,12 +3848,13 @@ struct CodexReviewStoreCommandTests {
             #expect(store.serverState == .running)
             #expect(store.auth.isAuthenticating)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains { command in
-                if case .startLogin = command {
-                    return true
-                }
-                return false
-            })
+            #expect(
+                commands.contains { command in
+                    if case .startLogin = command {
+                        return true
+                    }
+                    return false
+                })
         }
     }
 }

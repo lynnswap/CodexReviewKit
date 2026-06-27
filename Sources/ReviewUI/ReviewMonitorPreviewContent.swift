@@ -176,7 +176,9 @@ public enum ReviewMonitorPreviewContent {
         let nextTick = currentTick + 1
         for (index, job) in runningJobs.enumerated() {
             if let frame = streamFrame(forJobAt: index, tick: nextTick) {
-                job.appendLogEntry(streamEntry(from: frame.step, for: job, cycle: frame.cycle))
+                let entry = streamEntry(from: frame.step, for: job, cycle: frame.cycle)
+                job.appendLogEntry(entry)
+                appendPreviewTimelineEntry(entry, to: job)
             }
         }
         return nextTick
@@ -245,7 +247,7 @@ public enum ReviewMonitorPreviewContent {
                 completedAt: Date()
             )
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
-             .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+            .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return step.metadata
         }
     }
@@ -309,13 +311,14 @@ public enum ReviewMonitorPreviewContent {
                 if index > 0 && template.chunkIntervalFrameCount > 1 {
                     timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
                 }
-                timeline.append(PreviewStreamStep(
-                    kind: template.kind,
-                    groupName: template.groupName,
-                    text: chunk,
-                    metadata: template.metadata,
-                    replacesGroup: template.replacesGroup
-                ))
+                timeline.append(
+                    PreviewStreamStep(
+                        kind: template.kind,
+                        groupName: template.groupName,
+                        text: chunk,
+                        metadata: template.metadata,
+                        replacesGroup: template.replacesGroup
+                    ))
             }
         }
         return timeline
@@ -349,10 +352,10 @@ public enum ReviewMonitorPreviewContent {
             kind: .plan,
             groupName: "plan",
             text: """
-            [completed] Inspect ReviewMonitor log rendering
-            [in_progress] Preserve active find UI while streaming
-            [pending] Run focused UI tests
-            """,
+                [completed] Inspect ReviewMonitor log rendering
+                [in_progress] Preserve active find UI while streaming
+                [pending] Run focused UI tests
+                """,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -365,10 +368,10 @@ public enum ReviewMonitorPreviewContent {
             kind: .commandOutput,
             groupName: "command-search-test",
             text: """
-            Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
-            Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
-            Test Suite 'ReviewUITests' passed.
-            """,
+                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
+                Test Suite 'ReviewUITests' passed.
+                """,
             metadata: .init(
                 sourceType: "command",
                 title: "Ran command for 5s",
@@ -385,7 +388,8 @@ public enum ReviewMonitorPreviewContent {
         .init(
             kind: .reasoningSummary,
             groupName: "reasoning-summary",
-            text: "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
+            text:
+                "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
@@ -399,14 +403,14 @@ public enum ReviewMonitorPreviewContent {
             kind: .commandOutput,
             groupName: "command-open-log-scroll",
             text: """
-            import AppKit
-            import ObjectiveC.runtime
-            import CodexReviewKit
+                import AppKit
+                import ObjectiveC.runtime
+                import CodexReviewKit
 
-            @MainActor
-            final class ReviewMonitorLogScrollView: NSScrollView {
-                private let logDocumentView = ReviewMonitorLogDocumentView()
-            """,
+                @MainActor
+                final class ReviewMonitorLogScrollView: NSScrollView {
+                    private let logDocumentView = ReviewMonitorLogDocumentView()
+                """,
             metadata: .init(
                 sourceType: "command",
                 title: "Ran command for 2s",
@@ -447,21 +451,24 @@ public enum ReviewMonitorPreviewContent {
         .init(
             kind: .rawReasoning,
             groupName: "raw-reasoning",
-            text: "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
+            text:
+                "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .rawReasoning,
             groupName: "raw-reasoning-follow-up",
-            text: "I found the log update path and am keeping the current find session stable while new output streams in.\n",
+            text:
+                "I found the log update path and am keeping the current find session stable while new output streams in.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             kind: .agentMessage,
             groupName: "agent-message-summary",
-            text: "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
+            text:
+                "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]
@@ -470,35 +477,36 @@ public enum ReviewMonitorPreviewContent {
 
     private static func makeCommandOutputPreviewLogEntries() -> [ReviewLogEntry] {
         let output = """
-        Command line invocation:
-            /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
+            Command line invocation:
+                /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
 
-        Resolve Package Graph
+            Resolve Package Graph
 
-        Resolved source packages:
-            ObservationBridge: /Users/kn/Dev/ObservationBridge
-            CodexReviewKit: /Users/kn/Dev/CodexReviewKit
+            Resolved source packages:
+                ObservationBridge: /Users/kn/Dev/ObservationBridge
+                CodexReviewKit: /Users/kn/Dev/CodexReviewKit
 
-        Test Suite 'Selected tests' started.
-        Test Case '-[ReviewUITests commandOutputRendersCollapsedTextKitPanel]' passed (0.142 seconds).
-        Test Suite 'Selected tests' passed.
-        """
+            Test Suite 'Selected tests' started.
+            Test Case '-[ReviewUITests commandOutputRendersCollapsedTextKitPanel]' passed (0.142 seconds).
+            Test Suite 'Selected tests' passed.
+            """
         return [
             .init(kind: .event, text: "Turn started: preview-command-output-panel"),
             .init(
                 kind: .agentMessage,
                 text: """
-                Checking the command output rendering path.
+                    Checking the command output rendering path.
 
-                - Keep the transcript readable.
-                - Collapse terminal output by default.
-                - Expand into a bounded TextKit 2 scroll view.
-                """
+                    - Keep the transcript readable.
+                    - Collapse terminal output by default.
+                    - Expand into a bounded TextKit 2 scroll view.
+                    """
             ),
             .init(
                 kind: .command,
                 groupID: "preview-command-output",
-                text: "$ xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
+                text:
+                    "$ xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
             ),
             .init(
                 kind: .commandOutput,
@@ -662,7 +670,7 @@ public enum ReviewMonitorPreviewContent {
         lastAgentMessage: String,
         logEntries: [ReviewLogEntry]
     ) -> CodexReviewJob {
-        CodexReviewJob.makeForTesting(
+        let job = CodexReviewJob.makeForTesting(
             id: id,
             cwd: cwd,
             targetSummary: targetSummary,
@@ -678,6 +686,236 @@ public enum ReviewMonitorPreviewContent {
             lastAgentMessage: lastAgentMessage,
             logEntries: logEntries
         )
+        seedPreviewTimeline(logEntries, in: job)
+        return job
+    }
+
+    private static func seedPreviewTimeline(_ logEntries: [ReviewLogEntry], in job: CodexReviewJob) {
+        for entry in logEntries {
+            appendPreviewTimelineEntry(entry, to: job)
+        }
+    }
+
+    private static func appendPreviewTimelineEntry(_ entry: ReviewLogEntry, to job: CodexReviewJob) {
+        let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
+        let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
+        job.timeline.apply(
+            .itemUpdated(
+                .init(
+                    id: itemID,
+                    kind: previewTimelineKind(for: entry),
+                    family: previewTimelineFamily(for: entry),
+                    phase: previewTimelinePhase(for: entry),
+                    content: previewTimelineContent(for: entry, existing: existingContent),
+                    startedAt: entry.metadata?.startedAt,
+                    completedAt: entry.metadata?.completedAt,
+                    durationMs: entry.metadata?.durationMs
+                )))
+    }
+
+    private static func previewTimelineKind(for entry: ReviewLogEntry) -> ReviewItemKind {
+        switch entry.kind {
+        case .command, .commandOutput:
+            .commandExecution
+        case .agentMessage:
+            .agentMessage
+        case .plan, .todoList:
+            .plan
+        case .reasoning, .reasoningSummary, .rawReasoning:
+            .reasoning
+        case .contextCompaction:
+            .contextCompaction
+        case .toolCall:
+            .mcpToolCall
+        case .diagnostic, .error, .progress, .event:
+            ReviewItemKind(rawValue: entry.kind.rawValue)
+        }
+    }
+
+    private static func previewTimelineFamily(for entry: ReviewLogEntry) -> ReviewItemFamily {
+        switch entry.kind {
+        case .command, .commandOutput:
+            .command
+        case .agentMessage:
+            .message
+        case .plan, .todoList:
+            .plan
+        case .reasoning, .reasoningSummary, .rawReasoning:
+            .reasoning
+        case .contextCompaction:
+            .contextCompaction
+        case .toolCall:
+            .tool
+        case .diagnostic, .error, .progress, .event:
+            .diagnostic
+        }
+    }
+
+    private static func previewTimelineContent(
+        for entry: ReviewLogEntry,
+        existing: ReviewTimelineItem.Content?
+    ) -> ReviewTimelineItem.Content {
+        switch entry.kind {
+        case .command:
+            return .command(
+                .init(
+                    command: previewCommandText(for: entry),
+                    cwd: entry.metadata?.cwd,
+                    output: "",
+                    exitCode: entry.metadata?.exitCode,
+                    status: previewCommandStatus(for: entry),
+                    durationMs: entry.metadata?.durationMs
+                ))
+        case .commandOutput:
+            let existingOutput: String
+            let existingCommand: String?
+            if case .command(let command) = existing {
+                existingOutput = command.output
+                existingCommand = command.command
+            } else {
+                existingOutput = ""
+                existingCommand = nil
+            }
+            return .command(
+                .init(
+                    command: entry.metadata?.command ?? existingCommand ?? "Command",
+                    cwd: entry.metadata?.cwd,
+                    output: existingOutput + entry.text,
+                    exitCode: entry.metadata?.exitCode,
+                    status: previewCommandStatus(for: entry),
+                    durationMs: entry.metadata?.durationMs
+                ))
+        case .agentMessage:
+            return .message(.init(text: previewExistingText(existing, message: "") + entry.text))
+        case .plan, .todoList:
+            return .plan(.init(markdown: previewExistingText(existing, plan: "") + entry.text))
+        case .reasoning:
+            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .raw))
+        case .reasoningSummary:
+            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .summary))
+        case .rawReasoning:
+            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .raw))
+        case .contextCompaction:
+            return .contextCompaction(
+                .init(
+                    title: entry.text,
+                    status: previewContextCompactionStatus(for: entry)
+                ))
+        case .toolCall:
+            return .toolCall(
+                .init(
+                    result: entry.text,
+                    status: previewToolCallStatus(for: entry)
+                ))
+        case .diagnostic, .error, .progress, .event:
+            return .diagnostic(.init(message: previewExistingText(existing, diagnostic: "") + entry.text))
+        }
+    }
+
+    private static func previewExistingText(
+        _ content: ReviewTimelineItem.Content?,
+        message defaultValue: String
+    ) -> String {
+        if case .message(let message) = content {
+            return message.text
+        }
+        return defaultValue
+    }
+
+    private static func previewExistingText(
+        _ content: ReviewTimelineItem.Content?,
+        plan defaultValue: String
+    ) -> String {
+        if case .plan(let plan) = content {
+            return plan.markdown
+        }
+        return defaultValue
+    }
+
+    private static func previewExistingText(
+        _ content: ReviewTimelineItem.Content?,
+        reasoning defaultValue: String
+    ) -> String {
+        if case .reasoning(let reasoning) = content {
+            return reasoning.text
+        }
+        return defaultValue
+    }
+
+    private static func previewExistingText(
+        _ content: ReviewTimelineItem.Content?,
+        diagnostic defaultValue: String
+    ) -> String {
+        if case .diagnostic(let diagnostic) = content {
+            return diagnostic.message
+        }
+        return defaultValue
+    }
+
+    private static func previewCommandText(for entry: ReviewLogEntry) -> String {
+        if let command = entry.metadata?.command, command.isEmpty == false {
+            return command
+        }
+        if entry.text.hasPrefix("$ ") {
+            return String(entry.text.dropFirst(2))
+        }
+        return entry.text
+    }
+
+    private static func previewTimelinePhase(for entry: ReviewLogEntry) -> ReviewItemPhase {
+        let status = entry.metadata?.commandStatus ?? entry.metadata?.status
+        switch status {
+        case "inProgress", "running", "started":
+            return .running
+        case "failed":
+            return .failed
+        case "cancelled":
+            return .cancelled
+        default:
+            return entry.kind == .command ? .running : .completed
+        }
+    }
+
+    private static func previewCommandStatus(for entry: ReviewLogEntry) -> ReviewCommandStatus? {
+        guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
+            return nil
+        }
+        switch rawValue {
+        case "succeeded", "success":
+            return .completed
+        default:
+            return .init(rawValue: rawValue)
+        }
+    }
+
+    private static func previewContextCompactionStatus(for entry: ReviewLogEntry) -> ReviewContextCompactionStatus? {
+        guard let rawValue = entry.metadata?.status else {
+            return nil
+        }
+        switch rawValue {
+        case "inProgress", "running":
+            return .inProgress
+        case "completed", "succeeded", "success":
+            return .completed
+        default:
+            return .init(rawValue: rawValue)
+        }
+    }
+
+    private static func previewToolCallStatus(for entry: ReviewLogEntry) -> ReviewToolCallStatus? {
+        guard let rawValue = entry.metadata?.status else {
+            return nil
+        }
+        switch rawValue {
+        case "inProgress", "running":
+            return .inProgress
+        case "completed", "succeeded", "success":
+            return .completed
+        case "failed":
+            return .failed
+        default:
+            return .init(rawValue: rawValue)
+        }
     }
 
     private static func makeReviewResult(
@@ -686,7 +924,7 @@ public enum ReviewMonitorPreviewContent {
         cwd: String
     ) -> ParsedReviewResult? {
         guard workspaceIndex == 0,
-              jobIndex == 3
+            jobIndex == 3
         else {
             return nil
         }
@@ -697,7 +935,8 @@ public enum ReviewMonitorPreviewContent {
             findings: [
                 .init(
                     title: "[P1] Keep workspace selection wired to findings",
-                    body: "The preview should make the first workspace show structured review findings as soon as it is selected.",
+                    body:
+                        "The preview should make the first workspace show structured review findings as soon as it is selected.",
                     priority: 1,
                     location: .init(
                         path: "\(cwd)/Sources/ReviewMonitorContentView.swift",
@@ -746,10 +985,10 @@ public enum ReviewMonitorPreviewContent {
                     kind: .commandOutput,
                     groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
                     text: """
-                    Building for debugging...
-                    Test Suite 'ReviewUITests' started.
-                    ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
-                    """,
+                        Building for debugging...
+                        Test Suite 'ReviewUITests' started.
+                        ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
+                        """,
                     metadata: .init(
                         sourceType: "command",
                         title: "Ran command for 10s",
@@ -778,10 +1017,10 @@ public enum ReviewMonitorPreviewContent {
                     kind: .commandOutput,
                     groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
                     text: """
-                    Test Suite 'ReviewUITests' started.
-                    Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
-                    Test Suite 'ReviewUITests' passed.
-                    """,
+                        Test Suite 'ReviewUITests' started.
+                        Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
+                        Test Suite 'ReviewUITests' passed.
+                        """,
                     metadata: .init(
                         sourceType: "command",
                         title: "Ran command for 4s",
@@ -804,7 +1043,8 @@ public enum ReviewMonitorPreviewContent {
         workspaceName: String
     ) -> [ReviewLogEntry] {
         let sourceReadGroupID = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
-        let sourceReadCommand = "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+        let sourceReadCommand =
+            "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
         return [
             .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
             .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
@@ -824,10 +1064,10 @@ public enum ReviewMonitorPreviewContent {
                 groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
                 replacesGroup: true,
                 text: """
-                [completed] Inspect changed files
-                [in_progress] Check ReviewMonitor log behavior
-                [pending] Run focused tests
-                """
+                    [completed] Inspect changed files
+                    [in_progress] Check ReviewMonitor log behavior
+                    [pending] Run focused tests
+                    """
             ),
             .init(
                 kind: .command,
@@ -838,13 +1078,13 @@ public enum ReviewMonitorPreviewContent {
                 kind: .commandOutput,
                 groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
                 text: """
-                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
-                Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
-                Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
+                    Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
+                    Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
 
-                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
-                Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
-                """,
+                    Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                    Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
+                    """,
                 metadata: .init(
                     sourceType: "command",
                     title: "Ran command for 6s",
@@ -877,7 +1117,8 @@ public enum ReviewMonitorPreviewContent {
             .init(
                 kind: .reasoningSummary,
                 groupID: "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
-                text: "I am comparing the current UI state with the streaming log updates before changing the finder integration."
+                text:
+                    "I am comparing the current UI state with the streaming log updates before changing the finder integration."
             ),
             .init(
                 kind: .agentMessage,

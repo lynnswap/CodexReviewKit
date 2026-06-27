@@ -1,288 +1,402 @@
 import Foundation
-import CodexReviewKit
 
 enum ReviewMonitorLog {}
 
 extension ReviewMonitorLog {
-struct BlockID: Codable, Hashable, Sendable {
-    var rawValue: String
+    struct BlockID: Codable, Hashable, Sendable {
+        var rawValue: String
 
-    init(_ rawValue: String) {
-        self.rawValue = rawValue
-    }
-}
-
-struct Block: Equatable, Sendable {
-    var id: ReviewMonitorLog.BlockID
-    var kind: ReviewLogEntry.Kind
-    var groupID: String?
-    var range: NSRange
-    var sourceRange: NSRange
-    var metadata: ReviewLogEntry.Metadata?
-
-    init(
-        id: ReviewMonitorLog.BlockID,
-        kind: ReviewLogEntry.Kind,
-        groupID: String?,
-        range: NSRange,
-        sourceRange: NSRange? = nil,
-        metadata: ReviewLogEntry.Metadata? = nil
-    ) {
-        self.id = id
-        self.kind = kind
-        self.groupID = groupID
-        self.range = range
-        self.sourceRange = sourceRange ?? range
-        self.metadata = metadata
-    }
-}
-
-enum StatusTone: Hashable, Sendable {
-    case neutral
-    case running
-    case success
-    case warning
-    case failure
-}
-
-enum PlanStatus: String, Hashable, Sendable {
-    case pending
-    case inProgress
-    case completed
-    case failed
-}
-
-enum TextStyle: Hashable, Sendable {
-    case body
-    case heading(level: Int)
-    case bullet
-    case blockquote
-    case strong
-    case emphasis
-    case link
-    case strikethrough
-    case inlineCode
-    case codeFence
-    case markdownSyntax
-    case command
-    case terminalOutput
-    case commandOutputControl(keepsTrailingContent: Bool)
-    case plan(status: ReviewMonitorLog.PlanStatus?)
-    case tool
-    case diagnostic
-    case error
-    case event
-    case contextCompaction
-    case muted
-}
-
-struct TextRun: Equatable, Sendable {
-    var range: NSRange
-    var style: ReviewMonitorLog.TextStyle
-}
-
-struct AnimationSpan: Equatable, Sendable {
-    enum Kind: Equatable, Sendable {
-        case wordFade
-    }
-
-    var kind: Kind
-    var range: NSRange
-}
-
-enum DecorationStyle: Hashable, Sendable {
-    case transcript
-    case command(tone: ReviewMonitorLog.StatusTone)
-    case terminal(tone: ReviewMonitorLog.StatusTone)
-    case codeBlock
-    case plan(tone: ReviewMonitorLog.StatusTone)
-    case reasoning
-    case tool(tone: ReviewMonitorLog.StatusTone)
-    case diagnostic(tone: ReviewMonitorLog.StatusTone)
-    case error
-    case event
-    case contextCompaction(label: String, isCompleted: Bool)
-}
-
-struct Decoration: Equatable, Sendable {
-    var blockID: ReviewMonitorLog.BlockID
-    var range: NSRange
-    var style: ReviewMonitorLog.DecorationStyle
-}
-
-struct CommandOutputPanel: Equatable, Sendable {
-    var blockID: ReviewMonitorLog.BlockID
-    var range: NSRange
-    var commandText: String
-    var outputText: String
-    var outputSourceRange: NSRange? = nil
-    var lineCount: Int
-    var isExpanded: Bool
-    var isActive: Bool
-    var startedAt: Date?
-    var title: String
-    var exitText: String?
-}
-
-struct Append: Equatable, Sendable {
-    var kind: ReviewLogEntry.Kind
-    var blockID: ReviewMonitorLog.BlockID
-    var range: NSRange
-    var text: String
-    var textUTF16Length: Int
-    var animationSpans: [ReviewMonitorLog.AnimationSpan]
-
-    init(
-        kind: ReviewLogEntry.Kind,
-        blockID: ReviewMonitorLog.BlockID,
-        range: NSRange,
-        text: String,
-        textUTF16Length: Int? = nil,
-        animationSpans: [ReviewMonitorLog.AnimationSpan] = []
-    ) {
-        self.kind = kind
-        self.blockID = blockID
-        self.range = range
-        self.text = text
-        self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
-        self.animationSpans = animationSpans
-    }
-
-    private static func utf16Length(_ text: String) -> Int {
-        (text as NSString).length
-    }
-
-    static func animationSpans(
-        forKind kind: ReviewLogEntry.Kind,
-        absoluteRange: NSRange,
-        appendBaseLocation: Int
-    ) -> [ReviewMonitorLog.AnimationSpan] {
-        guard Self.wordFadeKinds.contains(kind),
-              absoluteRange.length > 0,
-              absoluteRange.location >= appendBaseLocation
-        else {
-            return []
+        init(_ rawValue: String) {
+            self.rawValue = rawValue
         }
-        return [.init(
-            kind: .wordFade,
-            range: NSRange(
-                location: absoluteRange.location - appendBaseLocation,
-                length: absoluteRange.length
-            )
-        )]
     }
 
-    private static let wordFadeKinds: Set<ReviewLogEntry.Kind> = [
-        .reasoning,
-        .reasoningSummary,
-        .rawReasoning,
-    ]
-}
-
-struct Replacement: Equatable, Sendable {
-    var kind: ReviewLogEntry.Kind
-    var blockID: ReviewMonitorLog.BlockID
-    var range: NSRange
-    var text: String
-    var textUTF16Length: Int
-
-    init(
-        kind: ReviewLogEntry.Kind,
-        blockID: ReviewMonitorLog.BlockID,
-        range: NSRange,
-        text: String,
-        textUTF16Length: Int? = nil
-    ) {
-        self.kind = kind
-        self.blockID = blockID
-        self.range = range
-        self.text = text
-        self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+    enum Kind: String, Codable, Sendable, Hashable {
+        case agentMessage
+        case command
+        case commandOutput
+        case plan
+        case todoList
+        case reasoning
+        case reasoningSummary
+        case rawReasoning
+        case toolCall
+        case diagnostic
+        case error
+        case progress
+        case event
+        case contextCompaction
     }
 
-    private static func utf16Length(_ text: String) -> Int {
-        (text as NSString).length
+    struct Metadata: Codable, Sendable, Hashable {
+        struct CommandAction: Codable, Sendable, Hashable {
+            enum Kind: String, Codable, Sendable, Hashable {
+                case read
+                case listFiles
+                case search
+                case unknown
+            }
+
+            let kind: Kind
+            let command: String?
+            let name: String?
+            let path: String?
+            let query: String?
+
+            init(
+                kind: Kind,
+                command: String? = nil,
+                name: String? = nil,
+                path: String? = nil,
+                query: String? = nil
+            ) {
+                self.kind = kind
+                self.command = command
+                self.name = name
+                self.path = path
+                self.query = query
+            }
+        }
+
+        let sourceType: String
+        let title: String?
+        let status: String?
+        let detail: String?
+        let itemID: String?
+        let command: String?
+        let cwd: String?
+        let exitCode: Int?
+        let startedAt: Date?
+        let completedAt: Date?
+        let durationMs: Int?
+        let commandActions: [CommandAction]?
+        let commandStatus: String?
+        let namespace: String?
+        let server: String?
+        let tool: String?
+        let query: String?
+        let path: String?
+        let resultText: String?
+        let errorText: String?
+
+        init(
+            sourceType: String,
+            title: String? = nil,
+            status: String? = nil,
+            detail: String? = nil,
+            itemID: String? = nil,
+            command: String? = nil,
+            cwd: String? = nil,
+            exitCode: Int? = nil,
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil,
+            commandActions: [CommandAction]? = nil,
+            commandStatus: String? = nil,
+            namespace: String? = nil,
+            server: String? = nil,
+            tool: String? = nil,
+            query: String? = nil,
+            path: String? = nil,
+            resultText: String? = nil,
+            errorText: String? = nil
+        ) {
+            self.sourceType = sourceType
+            self.title = title
+            self.status = status
+            self.detail = detail
+            self.itemID = itemID
+            self.command = command
+            self.cwd = cwd
+            self.exitCode = exitCode
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMs = durationMs
+            self.commandActions = commandActions
+            self.commandStatus = commandStatus
+            self.namespace = namespace
+            self.server = server
+            self.tool = tool
+            self.query = query
+            self.path = path
+            self.resultText = resultText
+            self.errorText = errorText
+        }
     }
-}
 
-enum Change: Equatable, Sendable {
-    case reload
-    case append(ReviewMonitorLog.Append)
-    case replace(ReviewMonitorLog.Replacement)
-}
+    struct Block: Equatable, Sendable {
+        var id: ReviewMonitorLog.BlockID
+        var kind: ReviewMonitorLog.Kind
+        var groupID: String?
+        var range: NSRange
+        var sourceRange: NSRange
+        var metadata: ReviewMonitorLog.Metadata?
 
-struct Document: Equatable, Sendable {
-    var text: String
-    var textUTF16Length: Int
-    var sourceText: String
-    var sourceTextUTF16Length: Int
-    var blocks: [ReviewMonitorLog.Block]
-    var styleRuns: [ReviewMonitorLog.TextRun]
-    var decorations: [ReviewMonitorLog.Decoration]
-    var commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel]
-    var revision: UInt64
-    var lastChange: ReviewMonitorLog.Change
-
-    init(
-        text: String = "",
-        textUTF16Length: Int? = nil,
-        sourceText: String? = nil,
-        sourceTextUTF16Length: Int? = nil,
-        blocks: [ReviewMonitorLog.Block] = [],
-        styleRuns: [ReviewMonitorLog.TextRun] = [],
-        decorations: [ReviewMonitorLog.Decoration] = [],
-        commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel] = [],
-        revision: UInt64 = 0,
-        lastChange: ReviewMonitorLog.Change = .reload
-    ) {
-        self.text = text
-        self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
-        self.sourceText = sourceText ?? text
-        self.sourceTextUTF16Length = sourceTextUTF16Length ?? Self.utf16Length(sourceText ?? text)
-        self.blocks = blocks
-        self.styleRuns = styleRuns
-        self.decorations = decorations
-        self.commandOutputPanels = commandOutputPanels
-        self.revision = revision
-        self.lastChange = lastChange
+        init(
+            id: ReviewMonitorLog.BlockID,
+            kind: ReviewMonitorLog.Kind,
+            groupID: String?,
+            range: NSRange,
+            sourceRange: NSRange? = nil,
+            metadata: ReviewMonitorLog.Metadata? = nil
+        ) {
+            self.id = id
+            self.kind = kind
+            self.groupID = groupID
+            self.range = range
+            self.sourceRange = sourceRange ?? range
+            self.metadata = metadata
+        }
     }
 
-    private static func utf16Length(_ text: String) -> Int {
-        (text as NSString).length
+    enum StatusTone: Hashable, Sendable {
+        case neutral
+        case running
+        case success
+        case warning
+        case failure
     }
 
-    mutating func rebuildPresentation() {
-        styleRuns.removeAll(keepingCapacity: true)
-        decorations.removeAll(keepingCapacity: true)
-        commandOutputPanels.removeAll(keepingCapacity: true)
-        for block in blocks {
+    enum PlanStatus: String, Hashable, Sendable {
+        case pending
+        case inProgress
+        case completed
+        case failed
+    }
+
+    enum TextStyle: Hashable, Sendable {
+        case body
+        case heading(level: Int)
+        case bullet
+        case blockquote
+        case strong
+        case emphasis
+        case link
+        case strikethrough
+        case inlineCode
+        case codeFence
+        case markdownSyntax
+        case command
+        case terminalOutput
+        case commandOutputControl(keepsTrailingContent: Bool)
+        case plan(status: ReviewMonitorLog.PlanStatus?)
+        case tool
+        case diagnostic
+        case error
+        case event
+        case contextCompaction
+        case muted
+    }
+
+    struct TextRun: Equatable, Sendable {
+        var range: NSRange
+        var style: ReviewMonitorLog.TextStyle
+    }
+
+    struct AnimationSpan: Equatable, Sendable {
+        enum Kind: Equatable, Sendable {
+            case wordFade
+        }
+
+        var kind: Kind
+        var range: NSRange
+    }
+
+    enum DecorationStyle: Hashable, Sendable {
+        case transcript
+        case command(tone: ReviewMonitorLog.StatusTone)
+        case terminal(tone: ReviewMonitorLog.StatusTone)
+        case codeBlock
+        case plan(tone: ReviewMonitorLog.StatusTone)
+        case reasoning
+        case tool(tone: ReviewMonitorLog.StatusTone)
+        case diagnostic(tone: ReviewMonitorLog.StatusTone)
+        case error
+        case event
+        case contextCompaction(label: String, isCompleted: Bool)
+    }
+
+    struct Decoration: Equatable, Sendable {
+        var blockID: ReviewMonitorLog.BlockID
+        var range: NSRange
+        var style: ReviewMonitorLog.DecorationStyle
+    }
+
+    struct CommandOutputPanel: Equatable, Sendable {
+        var blockID: ReviewMonitorLog.BlockID
+        var range: NSRange
+        var commandText: String
+        var outputText: String
+        var outputSourceRange: NSRange? = nil
+        var lineCount: Int
+        var isExpanded: Bool
+        var isActive: Bool
+        var startedAt: Date?
+        var title: String
+        var exitText: String?
+    }
+
+    struct Append: Equatable, Sendable {
+        var kind: ReviewMonitorLog.Kind
+        var blockID: ReviewMonitorLog.BlockID
+        var range: NSRange
+        var text: String
+        var textUTF16Length: Int
+        var animationSpans: [ReviewMonitorLog.AnimationSpan]
+
+        init(
+            kind: ReviewMonitorLog.Kind,
+            blockID: ReviewMonitorLog.BlockID,
+            range: NSRange,
+            text: String,
+            textUTF16Length: Int? = nil,
+            animationSpans: [ReviewMonitorLog.AnimationSpan] = []
+        ) {
+            self.kind = kind
+            self.blockID = blockID
+            self.range = range
+            self.text = text
+            self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+            self.animationSpans = animationSpans
+        }
+
+        private static func utf16Length(_ text: String) -> Int {
+            (text as NSString).length
+        }
+
+        static func animationSpans(
+            forKind kind: ReviewMonitorLog.Kind,
+            absoluteRange: NSRange,
+            appendBaseLocation: Int
+        ) -> [ReviewMonitorLog.AnimationSpan] {
+            guard Self.wordFadeKinds.contains(kind),
+                absoluteRange.length > 0,
+                absoluteRange.location >= appendBaseLocation
+            else {
+                return []
+            }
+            return [
+                .init(
+                    kind: .wordFade,
+                    range: NSRange(
+                        location: absoluteRange.location - appendBaseLocation,
+                        length: absoluteRange.length
+                    )
+                )
+            ]
+        }
+
+        private static let wordFadeKinds: Set<ReviewMonitorLog.Kind> = [
+            .reasoning,
+            .reasoningSummary,
+            .rawReasoning,
+        ]
+    }
+
+    struct Replacement: Equatable, Sendable {
+        var kind: ReviewMonitorLog.Kind
+        var blockID: ReviewMonitorLog.BlockID
+        var range: NSRange
+        var text: String
+        var textUTF16Length: Int
+
+        init(
+            kind: ReviewMonitorLog.Kind,
+            blockID: ReviewMonitorLog.BlockID,
+            range: NSRange,
+            text: String,
+            textUTF16Length: Int? = nil
+        ) {
+            self.kind = kind
+            self.blockID = blockID
+            self.range = range
+            self.text = text
+            self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+        }
+
+        private static func utf16Length(_ text: String) -> Int {
+            (text as NSString).length
+        }
+    }
+
+    enum Change: Equatable, Sendable {
+        case reload
+        case append(ReviewMonitorLog.Append)
+        case replace(ReviewMonitorLog.Replacement)
+    }
+
+    struct Document: Equatable, Sendable {
+        var text: String
+        var textUTF16Length: Int
+        var sourceText: String
+        var sourceTextUTF16Length: Int
+        var blocks: [ReviewMonitorLog.Block]
+        var styleRuns: [ReviewMonitorLog.TextRun]
+        var decorations: [ReviewMonitorLog.Decoration]
+        var commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel]
+        var revision: UInt64
+        var lastChange: ReviewMonitorLog.Change
+
+        init(
+            text: String = "",
+            textUTF16Length: Int? = nil,
+            sourceText: String? = nil,
+            sourceTextUTF16Length: Int? = nil,
+            blocks: [ReviewMonitorLog.Block] = [],
+            styleRuns: [ReviewMonitorLog.TextRun] = [],
+            decorations: [ReviewMonitorLog.Decoration] = [],
+            commandOutputPanels: [ReviewMonitorLog.CommandOutputPanel] = [],
+            revision: UInt64 = 0,
+            lastChange: ReviewMonitorLog.Change = .reload
+        ) {
+            self.text = text
+            self.textUTF16Length = textUTF16Length ?? Self.utf16Length(text)
+            self.sourceText = sourceText ?? text
+            self.sourceTextUTF16Length = sourceTextUTF16Length ?? Self.utf16Length(sourceText ?? text)
+            self.blocks = blocks
+            self.styleRuns = styleRuns
+            self.decorations = decorations
+            self.commandOutputPanels = commandOutputPanels
+            self.revision = revision
+            self.lastChange = lastChange
+        }
+
+        private static func utf16Length(_ text: String) -> Int {
+            (text as NSString).length
+        }
+
+        mutating func rebuildPresentation() {
+            styleRuns.removeAll(keepingCapacity: true)
+            decorations.removeAll(keepingCapacity: true)
+            commandOutputPanels.removeAll(keepingCapacity: true)
+            for block in blocks {
+                ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
+            }
+        }
+
+        mutating func rebuildPresentation(forBlockAt blockIndex: Int) {
+            guard blocks.indices.contains(blockIndex) else {
+                rebuildPresentation()
+                return
+            }
+
+            let block = blocks[blockIndex]
+            styleRuns.removeAll {
+                NSIntersectionRange($0.range, block.range).length > 0
+            }
+            decorations.removeAll {
+                $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
+            }
+            commandOutputPanels.removeAll {
+                $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
+            }
             ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
         }
-    }
 
-    mutating func rebuildPresentation(forBlockAt blockIndex: Int) {
-        guard blocks.indices.contains(blockIndex) else {
-            rebuildPresentation()
-            return
+        var finderSupplementSignature: Int {
+            0
         }
-
-        let block = blocks[blockIndex]
-        styleRuns.removeAll {
-            NSIntersectionRange($0.range, block.range).length > 0
-        }
-        decorations.removeAll {
-            $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
-        }
-        commandOutputPanels.removeAll {
-            $0.blockID == block.id || NSIntersectionRange($0.range, block.range).length > 0
-        }
-        ReviewMonitorLogStyler.appendPresentation(for: block, to: &self)
     }
-
-    var finderSupplementSignature: Int {
-        0
-    }
-}
 }
 
 enum ReviewMonitorLogStyler {
@@ -293,7 +407,7 @@ enum ReviewMonitorLogStyler {
     }
 
     static func renderedText(
-        for kind: ReviewLogEntry.Kind,
+        for kind: ReviewMonitorLog.Kind,
         source: String,
         blockID: ReviewMonitorLog.BlockID
     ) -> String {
@@ -302,11 +416,11 @@ enum ReviewMonitorLogStyler {
 
     static func appendPresentation(for block: ReviewMonitorLog.Block, to document: inout ReviewMonitorLog.Document) {
         guard block.range.location >= 0,
-              block.range.length >= 0,
-              NSMaxRange(block.range) <= document.textUTF16Length,
-              block.sourceRange.location >= 0,
-              block.sourceRange.length >= 0,
-              NSMaxRange(block.sourceRange) <= document.sourceTextUTF16Length
+            block.range.length >= 0,
+            NSMaxRange(block.range) <= document.textUTF16Length,
+            block.sourceRange.location >= 0,
+            block.sourceRange.length >= 0,
+            NSMaxRange(block.sourceRange) <= document.sourceTextUTF16Length
         else {
             return
         }
@@ -315,15 +429,16 @@ enum ReviewMonitorLogStyler {
         let presentation = presentation(for: block.kind, source: source, blockID: block.id)
         if block.range.length > 0 {
             document.styleRuns.append(.init(range: block.range, style: baseTextStyle(for: block.kind)))
-            document.decorations.append(.init(
-                blockID: block.id,
-                range: block.range,
-                style: decorationStyle(
-                    for: block.kind,
-                    source: source,
-                    metadata: block.metadata
-                )
-            ))
+            document.decorations.append(
+                .init(
+                    blockID: block.id,
+                    range: block.range,
+                    style: decorationStyle(
+                        for: block.kind,
+                        source: source,
+                        metadata: block.metadata
+                    )
+                ))
         }
 
         for run in presentation.styleRuns {
@@ -338,16 +453,17 @@ enum ReviewMonitorLogStyler {
             guard range.length > 0 else {
                 continue
             }
-            document.decorations.append(.init(
-                blockID: decoration.blockID,
-                range: range,
-                style: decoration.style
-            ))
+            document.decorations.append(
+                .init(
+                    blockID: decoration.blockID,
+                    range: range,
+                    style: decoration.style
+                ))
         }
     }
 
     private static func presentation(
-        for kind: ReviewLogEntry.Kind,
+        for kind: ReviewMonitorLog.Kind,
         source: String,
         blockID: ReviewMonitorLog.BlockID
     ) -> Presentation {
@@ -361,7 +477,7 @@ enum ReviewMonitorLogStyler {
         }
     }
 
-    private static func baseTextStyle(for kind: ReviewLogEntry.Kind) -> ReviewMonitorLog.TextStyle {
+    private static func baseTextStyle(for kind: ReviewMonitorLog.Kind) -> ReviewMonitorLog.TextStyle {
         switch kind {
         case .agentMessage:
             .body
@@ -385,9 +501,9 @@ enum ReviewMonitorLogStyler {
     }
 
     private static func decorationStyle(
-        for kind: ReviewLogEntry.Kind,
+        for kind: ReviewMonitorLog.Kind,
         source: String,
-        metadata: ReviewLogEntry.Metadata?
+        metadata: ReviewMonitorLog.Metadata?
     ) -> ReviewMonitorLog.DecorationStyle {
         let tone = statusTone(for: metadata)
         switch kind {
@@ -417,7 +533,7 @@ enum ReviewMonitorLogStyler {
         }
     }
 
-    private static func contextCompactionIsCompleted(_ metadata: ReviewLogEntry.Metadata?) -> Bool {
+    private static func contextCompactionIsCompleted(_ metadata: ReviewMonitorLog.Metadata?) -> Bool {
         let normalized = metadata?.status?
             .lowercased()
             .replacingOccurrences(of: "_", with: "")
@@ -432,7 +548,7 @@ enum ReviewMonitorLogStyler {
         }
     }
 
-    private static func statusTone(for metadata: ReviewLogEntry.Metadata?) -> ReviewMonitorLog.StatusTone {
+    private static func statusTone(for metadata: ReviewMonitorLog.Metadata?) -> ReviewMonitorLog.StatusTone {
         if let exitCode = metadata?.exitCode {
             return exitCode == 0 ? .success : .failure
         }
@@ -485,12 +601,9 @@ enum ReviewMonitorLogStyler {
     }
 
     private static func containsMarkdownSyntax(in source: String) -> Bool {
-        if source.contains("```") ||
-            source.contains("`") ||
-            source.contains("**") ||
-            source.contains("__") ||
-            source.contains("~~") ||
-            source.contains("](") {
+        if source.contains("```") || source.contains("`") || source.contains("**") || source.contains("__")
+            || source.contains("~~") || source.contains("](")
+        {
             return true
         }
 
@@ -539,10 +652,11 @@ enum ReviewMonitorLogStyler {
 
             let length = utf16Length(renderedLine)
             if length > 0, status != nil {
-                result.styleRuns.append(.init(
-                    range: NSRange(location: offset, length: length),
-                    style: .plan(status: status)
-                ))
+                result.styleRuns.append(
+                    .init(
+                        range: NSRange(location: offset, length: length),
+                        style: .plan(status: status)
+                    ))
             }
             result.text += renderedLine
             offset += length
@@ -562,10 +676,11 @@ enum ReviewMonitorLogStyler {
         planStatusAndContent(in: line)?.status
     }
 
-    private static func planStatusAndContent(in line: String) -> (status: ReviewMonitorLog.PlanStatus, content: String)? {
+    private static func planStatusAndContent(in line: String) -> (status: ReviewMonitorLog.PlanStatus, content: String)?
+    {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("["),
-              let closingIndex = trimmed.firstIndex(of: "]")
+            let closingIndex = trimmed.firstIndex(of: "]")
         else {
             return nil
         }
@@ -759,10 +874,10 @@ enum ReviewMonitorLogStyler {
             }
             switch (previous.kind, kind) {
             case (.unorderedListItem(_, let previousList), .unorderedListItem(_, let currentList))
-                where previousList == currentList:
+            where previousList == currentList:
                 return 1
             case (.orderedListItem(_, let previousList), .orderedListItem(_, let currentList))
-                where previousList == currentList:
+            where previousList == currentList:
                 return 1
             default:
                 return 2
@@ -900,758 +1015,4 @@ enum ReviewMonitorLogStyler {
         }
     }
 
-}
-
-extension ReviewMonitorLog {
-struct Projection: Sendable {
-    private struct GroupKey: Hashable, Sendable {
-        var kind: ReviewLogEntry.Kind
-        var groupID: String
-    }
-
-    private struct RenderedBlock: Sendable {
-        var id: ReviewMonitorLog.BlockID
-        var kind: ReviewLogEntry.Kind
-        var groupID: String?
-        var text: String
-        var metadata: ReviewLogEntry.Metadata?
-    }
-
-    private struct EntrySignature: Equatable, Sendable {
-        var id: UUID
-        var kind: ReviewLogEntry.Kind
-        var groupID: String?
-        var replacesGroup: Bool
-        var textUTF16Length: Int
-        var textHash: Int
-        var metadataHash: Int?
-        var timestamp: Date
-
-        init(_ entry: ReviewLogEntry) {
-            var textHasher = Hasher()
-            textHasher.combine(entry.text)
-            if let metadata = entry.metadata {
-                var metadataHasher = Hasher()
-                metadataHasher.combine(metadata)
-                metadataHash = metadataHasher.finalize()
-            } else {
-                metadataHash = nil
-            }
-            self.id = entry.id
-            self.kind = entry.kind
-            self.groupID = entry.groupID
-            self.replacesGroup = entry.replacesGroup
-            self.textUTF16Length = ReviewMonitorLog.Projection.utf16Length(entry.text)
-            self.textHash = textHasher.finalize()
-            self.timestamp = entry.timestamp
-        }
-    }
-
-    private enum AppendResult: Sendable {
-        case noVisibleChange
-        case changed(ReviewMonitorLog.Change)
-        case needsReload(replacementBlockID: ReviewMonitorLog.BlockID?)
-    }
-
-    private struct Accumulator: Sendable {
-        private(set) var document = ReviewMonitorLog.Document()
-        private(set) var hasVisibleSections = false
-        private(set) var lastBlockIndex: Int?
-
-        mutating func appendBlock(
-            _ block: RenderedBlock,
-            at blockIndex: Int
-        ) -> ReviewMonitorLog.Append {
-            let renderedText = ReviewMonitorLogStyler.renderedText(
-                for: block.kind,
-                source: block.text,
-                blockID: block.id
-            )
-            let appended = appendedText(
-                renderedText,
-                after: document.text
-            )
-            let appendedSource = appendedText(
-                block.text,
-                after: document.sourceText
-            )
-            if hasVisibleSections == false {
-                hasVisibleSections = true
-            }
-
-            let previousLength = document.textUTF16Length
-            let previousSourceLength = document.sourceTextUTF16Length
-            let suffixLength = ReviewMonitorLog.Projection.utf16Length(appended)
-            let sourceSuffixLength = ReviewMonitorLog.Projection.utf16Length(appendedSource)
-            let blockLength = ReviewMonitorLog.Projection.utf16Length(renderedText)
-            let sourceBlockLength = ReviewMonitorLog.Projection.utf16Length(block.text)
-            let blockRange = NSRange(
-                location: previousLength + max(0, suffixLength - blockLength),
-                length: blockLength
-            )
-            let sourceBlockRange = NSRange(
-                location: previousSourceLength + max(0, sourceSuffixLength - sourceBlockLength),
-                length: sourceBlockLength
-            )
-
-            document.text += appended
-            document.textUTF16Length += suffixLength
-            document.sourceText += appendedSource
-            document.sourceTextUTF16Length += sourceSuffixLength
-            let logBlock = ReviewMonitorLog.Block(
-                id: block.id,
-                kind: block.kind,
-                groupID: block.groupID,
-                range: blockRange,
-                sourceRange: sourceBlockRange,
-                metadata: block.metadata
-            )
-            document.blocks.append(logBlock)
-            ReviewMonitorLogStyler.appendPresentation(for: logBlock, to: &document)
-            lastBlockIndex = blockIndex
-            return .init(
-                kind: block.kind,
-                blockID: block.id,
-                range: blockRange,
-                text: appended,
-                textUTF16Length: suffixLength,
-                animationSpans: ReviewMonitorLog.Append.animationSpans(
-                    forKind: block.kind,
-                    absoluteRange: blockRange,
-                    appendBaseLocation: previousLength
-                )
-            )
-        }
-
-        mutating func appendToCurrentBlock(
-            _ block: RenderedBlock,
-            at blockIndex: Int,
-            sourceDelta: String,
-            renderedDelta: String
-        ) -> ReviewMonitorLog.Append? {
-            guard renderedDelta.isEmpty == false,
-                  let blockIndexInDocument = document.blocks.lastIndex(where: { $0.id == block.id })
-            else {
-                return nil
-            }
-
-            let previousLength = document.textUTF16Length
-            let deltaLength = ReviewMonitorLog.Projection.utf16Length(renderedDelta)
-            let sourceDeltaLength = ReviewMonitorLog.Projection.utf16Length(sourceDelta)
-            document.text += renderedDelta
-            document.textUTF16Length += deltaLength
-            document.sourceText += sourceDelta
-            document.sourceTextUTF16Length += sourceDeltaLength
-            document.blocks[blockIndexInDocument].range.length += deltaLength
-            document.blocks[blockIndexInDocument].sourceRange.length += sourceDeltaLength
-            document.blocks[blockIndexInDocument].metadata = block.metadata
-            document.rebuildPresentation(forBlockAt: blockIndexInDocument)
-            lastBlockIndex = blockIndex
-            return .init(
-                kind: block.kind,
-                blockID: block.id,
-                range: NSRange(location: previousLength, length: document.textUTF16Length - previousLength),
-                text: renderedDelta,
-                textUTF16Length: document.textUTF16Length - previousLength,
-                animationSpans: ReviewMonitorLog.Append.animationSpans(
-                    forKind: block.kind,
-                    absoluteRange: NSRange(
-                        location: previousLength,
-                        length: document.textUTF16Length - previousLength
-                    ),
-                    appendBaseLocation: previousLength
-                )
-            )
-        }
-
-        mutating func replaceCurrentBlock(
-            _ block: RenderedBlock,
-            at blockIndex: Int
-        ) -> ReviewMonitorLog.Replacement? {
-            guard let blockIndexInDocument = document.blocks.lastIndex(where: { $0.id == block.id })
-            else {
-                return nil
-            }
-
-            let previousBlock = document.blocks[blockIndexInDocument]
-            guard NSMaxRange(previousBlock.range) == document.textUTF16Length,
-                  NSMaxRange(previousBlock.sourceRange) == document.sourceTextUTF16Length
-            else {
-                return nil
-            }
-
-            let renderedText = ReviewMonitorLogStyler.renderedText(
-                for: block.kind,
-                source: block.text,
-                blockID: block.id
-            )
-            let renderedLength = ReviewMonitorLog.Projection.utf16Length(renderedText)
-            let sourceLength = ReviewMonitorLog.Projection.utf16Length(block.text)
-            let textPrefix = (document.text as NSString).substring(
-                with: NSRange(location: 0, length: previousBlock.range.location)
-            )
-            let sourcePrefix = (document.sourceText as NSString).substring(
-                with: NSRange(location: 0, length: previousBlock.sourceRange.location)
-            )
-
-            document.text = textPrefix + renderedText
-            document.textUTF16Length = previousBlock.range.location + renderedLength
-            document.sourceText = sourcePrefix + block.text
-            document.sourceTextUTF16Length = previousBlock.sourceRange.location + sourceLength
-            document.blocks[blockIndexInDocument] = ReviewMonitorLog.Block(
-                id: block.id,
-                kind: block.kind,
-                groupID: block.groupID,
-                range: NSRange(location: previousBlock.range.location, length: renderedLength),
-                sourceRange: NSRange(location: previousBlock.sourceRange.location, length: sourceLength),
-                metadata: block.metadata
-            )
-            document.styleRuns.removeAll {
-                $0.range.location >= previousBlock.range.location ||
-                    NSIntersectionRange($0.range, previousBlock.range).length > 0
-            }
-            document.decorations.removeAll {
-                $0.blockID == block.id ||
-                    $0.range.location >= previousBlock.range.location ||
-                    NSIntersectionRange($0.range, previousBlock.range).length > 0
-            }
-            ReviewMonitorLogStyler.appendPresentation(for: document.blocks[blockIndexInDocument], to: &document)
-            lastBlockIndex = blockIndex
-            return .init(
-                kind: block.kind,
-                blockID: block.id,
-                range: previousBlock.range,
-                text: renderedText,
-                textUTF16Length: renderedLength
-            )
-        }
-
-        private func appendedText(_ blockText: String, after existingText: String) -> String {
-            guard hasVisibleSections else {
-                return blockText
-            }
-            if blockText.isEmpty {
-                return "\n\n"
-            }
-            if existingText.hasSuffix("\n\n") {
-                return blockText
-            }
-            if existingText.hasSuffix("\n") || blockText.hasPrefix("\n") {
-                return "\n" + blockText
-            }
-            return "\n\n" + blockText
-        }
-    }
-
-    private struct State: Sendable {
-        var entries: [ReviewLogEntry]
-        var entrySignatures: [EntrySignature]
-        var blocks: [RenderedBlock]
-        var indexByGroup: [GroupKey: Int]
-        var projection: Accumulator
-
-        init(entries: [ReviewLogEntry]) {
-            self = Self.rebuild(entries: entries)
-        }
-
-        var document: ReviewMonitorLog.Document {
-            projection.document
-        }
-
-        static func rebuild(entries: [ReviewLogEntry]) -> State {
-            var state = State(
-                entries: entries,
-                entrySignatures: entries.map(EntrySignature.init),
-                blocks: [],
-                indexByGroup: [:],
-                projection: .init()
-            )
-
-            for entry in entries {
-                if let key = ReviewMonitorLog.Projection.mergeKey(for: entry) {
-                    if let index = state.indexByGroup[key] {
-                        if entry.replacesGroup {
-                            state.blocks[index].text = entry.text
-                            state.blocks[index].metadata = entry.metadata
-                        } else {
-                            state.blocks[index].text.append(entry.text)
-                            if let metadata = entry.metadata {
-                                state.blocks[index].metadata = metadata
-                            }
-                        }
-                        continue
-                    }
-                    state.indexByGroup[key] = state.blocks.count
-                }
-
-                state.blocks.append(.init(
-                    id: ReviewMonitorLog.Projection.blockID(for: entry),
-                    kind: entry.kind,
-                    groupID: entry.groupID,
-                    text: entry.text,
-                    metadata: entry.metadata
-                ))
-            }
-
-            for (index, block) in state.blocks.enumerated() {
-                _ = state.appendBlock(block, at: index)
-            }
-            return state
-        }
-
-        private init(
-            entries: [ReviewLogEntry],
-            entrySignatures: [EntrySignature],
-            blocks: [RenderedBlock],
-            indexByGroup: [GroupKey: Int],
-            projection: Accumulator
-        ) {
-            self.entries = entries
-            self.entrySignatures = entrySignatures
-            self.blocks = blocks
-            self.indexByGroup = indexByGroup
-            self.projection = projection
-        }
-
-        mutating func append(_ entry: ReviewLogEntry) -> AppendResult {
-            entries.append(entry)
-            entrySignatures.append(.init(entry))
-
-            if let key = ReviewMonitorLog.Projection.mergeKey(for: entry) {
-                if let blockIndex = indexByGroup[key] {
-                    let oldText = blocks[blockIndex].text
-                    if entry.replacesGroup || blockIndex != blocks.indices.last {
-                        return .needsReload(
-                            replacementBlockID: entry.replacesGroup ? blocks[blockIndex].id : nil
-                        )
-                    }
-
-                    blocks[blockIndex].text.append(entry.text)
-                    if let metadata = entry.metadata {
-                        blocks[blockIndex].metadata = metadata
-                    }
-                    let newText = blocks[blockIndex].text
-                    let wasVisible = ReviewMonitorLog.Projection.isVisible(kind: entry.kind, text: oldText)
-                    let isVisible = ReviewMonitorLog.Projection.isVisible(kind: entry.kind, text: newText)
-                    if wasVisible,
-                       isVisible,
-                       ReviewMonitorLog.Projection.requiresBlockRerenderOnDelta(kind: entry.kind) {
-                        let blockID = blocks[blockIndex].id
-                        let oldRendered = ReviewMonitorLogStyler.renderedText(
-                            for: entry.kind,
-                            source: oldText,
-                            blockID: blockID
-                        )
-                        let newRendered = ReviewMonitorLogStyler.renderedText(
-                            for: entry.kind,
-                            source: newText,
-                            blockID: blockID
-                        )
-                        if let renderedDelta = ReviewMonitorLog.Projection.suffix(
-                            in: newRendered,
-                            afterPrefix: oldRendered
-                        ) {
-                            if let append = projection.appendToCurrentBlock(
-                                blocks[blockIndex],
-                                at: blockIndex,
-                                sourceDelta: entry.text,
-                                renderedDelta: renderedDelta
-                            ) {
-                                return .changed(.append(append))
-                            }
-                            if let replacement = projection.replaceCurrentBlock(
-                                blocks[blockIndex],
-                                at: blockIndex
-                            ) {
-                                return .changed(.replace(replacement))
-                            }
-                            return .noVisibleChange
-                        }
-                        if let replacement = projection.replaceCurrentBlock(
-                            blocks[blockIndex],
-                            at: blockIndex
-                        ) {
-                            return .changed(.replace(replacement))
-                        }
-                        return .needsReload(replacementBlockID: blockID)
-                    }
-                    if let append = appendTailGroupDelta(
-                        block: blocks[blockIndex],
-                        oldText: oldText,
-                        newText: newText,
-                        blockIndex: blockIndex,
-                        delta: entry.text
-                    ) {
-                        return .changed(.append(append))
-                    }
-                    return .noVisibleChange
-                }
-
-                indexByGroup[key] = blocks.count
-            }
-
-            let blockIndex = blocks.count
-            let block = RenderedBlock(
-                id: ReviewMonitorLog.Projection.blockID(for: entry),
-                kind: entry.kind,
-                groupID: entry.groupID,
-                text: entry.text,
-                metadata: entry.metadata
-            )
-            blocks.append(block)
-            if let append = appendBlock(block, at: blockIndex) {
-                return .changed(.append(append))
-            }
-            return .noVisibleChange
-        }
-
-        mutating func rebuildResolvingReplacement(
-            previousDocument: ReviewMonitorLog.Document,
-            replacementBlockID: ReviewMonitorLog.BlockID
-        ) -> ReviewMonitorLog.Replacement? {
-            let rebuilt = Self.rebuild(entries: entries)
-            guard let replacement = Self.replacement(
-                previous: previousDocument,
-                current: rebuilt.document,
-                blockID: replacementBlockID
-            ) else {
-                return nil
-            }
-            self = rebuilt
-            return replacement
-        }
-
-        private mutating func appendBlock(
-            _ block: RenderedBlock,
-            at blockIndex: Int
-        ) -> ReviewMonitorLog.Append? {
-            guard ReviewMonitorLog.Projection.isVisible(
-                kind: block.kind,
-                text: block.text
-            ) else {
-                return nil
-            }
-            return projection.appendBlock(block, at: blockIndex)
-        }
-
-        private mutating func appendTailGroupDelta(
-            block: RenderedBlock,
-            oldText: String,
-            newText: String,
-            blockIndex: Int,
-            delta: String
-        ) -> ReviewMonitorLog.Append? {
-            let wasVisible = ReviewMonitorLog.Projection.isVisible(
-                kind: block.kind,
-                text: oldText
-            )
-            let isVisible = ReviewMonitorLog.Projection.isVisible(
-                kind: block.kind,
-                text: newText
-            )
-
-            switch (wasVisible, isVisible) {
-            case (false, false):
-                return nil
-            case (false, true):
-                return projection.appendBlock(block, at: blockIndex)
-            case (true, true):
-                return projection.appendToCurrentBlock(
-                    block,
-                    at: blockIndex,
-                    sourceDelta: delta,
-                    renderedDelta: delta
-                )
-            case (true, false):
-                return nil
-            }
-        }
-
-        static func replacement(
-            previous: ReviewMonitorLog.Document,
-            current: ReviewMonitorLog.Document,
-            blockID: ReviewMonitorLog.BlockID
-        ) -> ReviewMonitorLog.Replacement? {
-            guard let previousBlock = previous.blocks.first(where: { $0.id == blockID }),
-                  let currentBlock = current.blocks.first(where: { $0.id == blockID }),
-                  previousBlock.range.location == currentBlock.range.location,
-                  NSMaxRange(currentBlock.range) <= current.textUTF16Length
-            else {
-                return nil
-            }
-
-            let replacementText = (current.text as NSString).substring(with: currentBlock.range)
-            return .init(
-                kind: currentBlock.kind,
-                blockID: currentBlock.id,
-                range: previousBlock.range,
-                text: replacementText,
-                textUTF16Length: currentBlock.range.length
-            )
-        }
-    }
-
-    private var state = State(entries: [])
-    private var document = ReviewMonitorLog.Document()
-
-    var entryCount: Int {
-        state.entrySignatures.count
-    }
-
-    var currentDocument: ReviewMonitorLog.Document {
-        document
-    }
-
-    mutating func render(entries: [ReviewLogEntry]) -> ReviewMonitorLog.Document {
-        let entrySignatures = entries.map(EntrySignature.init)
-        guard entrySignatures != state.entrySignatures else {
-            return document
-        }
-
-        let previousDocument = document
-        let preferredChange: ReviewMonitorLog.Change?
-        if entrySignatures.count == state.entrySignatures.count + 1,
-           entrySignatures.dropLast().elementsEqual(state.entrySignatures),
-           let entry = entries.last {
-            switch state.append(entry) {
-            case .changed(let change):
-                preferredChange = change
-            case .noVisibleChange:
-                preferredChange = nil
-            case .needsReload(let replacementBlockID):
-                state = State.rebuild(entries: entries)
-                if let replacementBlockID,
-                   let replacement = State.replacement(
-                       previous: previousDocument,
-                       current: state.document,
-                       blockID: replacementBlockID
-                   ) {
-                    preferredChange = .replace(replacement)
-                } else {
-                    preferredChange = .reload
-                }
-            }
-        } else {
-            state = State.rebuild(entries: entries)
-            preferredChange = .reload
-        }
-
-        if let resolved = Self.resolveDocument(
-            previous: previousDocument,
-            current: state.document,
-            preferredChange: preferredChange
-        ) {
-            document = resolved
-        }
-        return document
-    }
-
-    mutating func append(
-        entries: [ReviewLogEntry],
-        sourceRange: Range<Int>
-    ) -> ReviewMonitorLog.Document? {
-        guard sourceRange.lowerBound <= state.entrySignatures.count else {
-            return nil
-        }
-        guard state.entrySignatures.count < sourceRange.upperBound else {
-            return document
-        }
-
-        let skipCount = state.entrySignatures.count - sourceRange.lowerBound
-        guard skipCount >= 0,
-              skipCount <= entries.count
-        else {
-            return nil
-        }
-
-        for entry in entries.dropFirst(skipCount) {
-            let previousDocument = document
-            let previousState = state
-            switch state.append(entry) {
-            case .changed(let preferredChange):
-                if let resolved = Self.resolveDocument(
-                    previous: previousDocument,
-                    current: state.document,
-                    preferredChange: preferredChange
-                ) {
-                    document = resolved
-                } else {
-                    state = previousState
-                    return nil
-                }
-            case .noVisibleChange:
-                continue
-            case .needsReload(let replacementBlockID):
-                guard let replacementBlockID,
-                      let replacement = state.rebuildResolvingReplacement(
-                        previousDocument: previousDocument,
-                        replacementBlockID: replacementBlockID
-                      ),
-                      let resolved = Self.resolveDocument(
-                        previous: previousDocument,
-                        current: state.document,
-                        preferredChange: .replace(replacement)
-                      )
-                else {
-                    state = previousState
-                    return nil
-                }
-                document = resolved
-            }
-        }
-        return document
-    }
-
-    private static func resolveDocument(
-        previous: ReviewMonitorLog.Document,
-        current: ReviewMonitorLog.Document,
-        preferredChange: ReviewMonitorLog.Change?
-    ) -> ReviewMonitorLog.Document? {
-        guard let preferredChange else {
-            return nil
-        }
-
-        guard contentChanged(previous: previous, current: current) else {
-            return nil
-        }
-
-        var resolved = current
-        resolved.revision = previous.revision &+ 1
-
-        switch preferredChange {
-        case .append(let append)
-            where isContiguousAppend(
-                append,
-                previousUTF16Length: previous.textUTF16Length,
-                currentUTF16Length: current.textUTF16Length
-            ):
-            resolved.lastChange = .append(append)
-        case .replace(let replacement)
-            where isValidReplacement(
-                replacement,
-                previousUTF16Length: previous.textUTF16Length,
-                currentUTF16Length: current.textUTF16Length
-            ):
-            resolved.lastChange = .replace(replacement)
-        default:
-            resolved.lastChange = .reload
-        }
-        return resolved
-    }
-
-    private static func contentChanged(
-        previous: ReviewMonitorLog.Document,
-        current: ReviewMonitorLog.Document
-    ) -> Bool {
-        if previous.textUTF16Length != current.textUTF16Length {
-            return true
-        }
-        if previous.sourceTextUTF16Length != current.sourceTextUTF16Length {
-            return true
-        }
-        if previous.blocks != current.blocks {
-            return true
-        }
-        if previous.styleRuns != current.styleRuns {
-            return true
-        }
-        if previous.decorations != current.decorations {
-            return true
-        }
-        return previous.text != current.text || previous.sourceText != current.sourceText
-    }
-
-    private static func isContiguousAppend(
-        _ append: ReviewMonitorLog.Append,
-        previousUTF16Length: Int,
-        currentUTF16Length: Int
-    ) -> Bool {
-        let appendEnd = previousUTF16Length + append.textUTF16Length
-        return append.textUTF16Length > 0 &&
-            currentUTF16Length == appendEnd &&
-            append.range.location >= previousUTF16Length &&
-            NSMaxRange(append.range) <= appendEnd
-    }
-
-    private static func isValidReplacement(
-        _ replacement: ReviewMonitorLog.Replacement,
-        previousUTF16Length: Int,
-        currentUTF16Length: Int
-    ) -> Bool {
-        let replacementEnd = replacement.range.location + replacement.textUTF16Length
-        return replacement.textUTF16Length >= 0 &&
-            NSMaxRange(replacement.range) <= previousUTF16Length &&
-            currentUTF16Length == previousUTF16Length - replacement.range.length + replacement.textUTF16Length &&
-            replacementEnd <= currentUTF16Length
-    }
-
-    private static func requiresBlockRerenderOnDelta(kind: ReviewLogEntry.Kind) -> Bool {
-        switch kind {
-        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning:
-            return true
-        case .command, .commandOutput, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
-            return false
-        }
-    }
-
-    private static func suffix(in text: String, afterPrefix prefix: String) -> String? {
-        guard text.hasPrefix(prefix) else {
-            return nil
-        }
-        return String(text.dropFirst(prefix.count))
-    }
-
-    private static func blockID(for entry: ReviewLogEntry) -> ReviewMonitorLog.BlockID {
-        if let key = mergeKey(for: entry) {
-            return ReviewMonitorLog.BlockID("\(key.kind.rawValue):\(key.groupID)")
-        }
-        return ReviewMonitorLog.BlockID(entry.id.uuidString)
-    }
-
-    private static func mergeKey(for entry: ReviewLogEntry) -> GroupKey? {
-        guard let groupID = entry.groupID,
-              groupID.isEmpty == false
-        else {
-            return nil
-        }
-
-        switch entry.kind {
-        case .agentMessage, .command, .commandOutput, .plan, .reasoning, .reasoningSummary, .rawReasoning, .contextCompaction:
-            return GroupKey(kind: entry.kind, groupID: groupID)
-        case .todoList, .toolCall, .diagnostic, .error, .progress, .event:
-            return nil
-        }
-    }
-
-    private static func isVisible(kind: ReviewLogEntry.Kind, text: String) -> Bool {
-        guard displayedKinds.contains(kind) else {
-            return false
-        }
-        if kind == .diagnostic {
-            return true
-        }
-        return text.isEmpty == false
-    }
-
-    private static func utf16Length(_ text: String) -> Int {
-        (text as NSString).length
-    }
-
-    private static let displayedKinds: Set<ReviewLogEntry.Kind> = [
-        .agentMessage,
-        .command,
-        .commandOutput,
-        .plan,
-        .todoList,
-        .reasoning,
-        .reasoningSummary,
-        .rawReasoning,
-        .toolCall,
-        .diagnostic,
-        .error,
-        .progress,
-        .event,
-        .contextCompaction,
-    ]
-}
 }

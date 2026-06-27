@@ -1,8 +1,7 @@
 import AppKit
-import CodexReviewKit
 import QuartzCore
 
-private extension ReviewLogEntry.Kind {
+private extension ReviewMonitorLog.Kind {
     var requiresMarkdownPresentationInvalidationOnAppend: Bool {
         switch self {
         case .agentMessage, .plan, .reasoning, .reasoningSummary, .rawReasoning:
@@ -14,7 +13,9 @@ private extension ReviewLogEntry.Kind {
 }
 
 @MainActor
-final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @preconcurrency NSTextViewportLayoutControllerDelegate {
+final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
+    @preconcurrency NSTextViewportLayoutControllerDelegate
+{
     private let textContentStorage = NSTextContentStorage()
     private let textLayoutManager = NSTextLayoutManager()
     private let textContainer = NSTextContainer(
@@ -51,10 +52,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     var onLayoutInvalidated: (() -> Void)?
     var onUserSelectionChanged: (() -> Void)?
     var onCommandOutputPanelToggle: ((ReviewMonitorLog.BlockID) -> Void)?
-#if DEBUG
-    var reduceMotionOverrideForTesting: Bool?
-    private var wordFadeDisplayInvalidationCount = 0
-#endif
+    #if DEBUG
+        var reduceMotionOverrideForTesting: Bool?
+        private var wordFadeDisplayInvalidationCount = 0
+    #endif
 
     private let baseFont = NSFont.systemFont(
         ofSize: NSFont.preferredFont(forTextStyle: .body).pointSize
@@ -380,7 +381,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         replacement: ReviewMonitorLog.Replacement? = nil
     ) {
         guard document.textUTF16Length == textStorage.length,
-              append != nil || replacement != nil || document.text == textStorage.string
+            append != nil || replacement != nil || document.text == textStorage.string
         else {
             currentDecorations = []
             currentCommandOutputPanels = []
@@ -399,14 +400,16 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         currentCommandOutputPanels = commandOutputPanels
         invalidateFinderStringMapping()
         if let append,
-           let invalidationRange = styleInvalidationRange(for: append, in: document) {
+            let invalidationRange = styleInvalidationRange(for: append, in: document)
+        {
             applyStyleRuns(
                 document.styleRuns,
                 commandOutputPanels: commandOutputPanels,
                 in: [invalidationRange] + changedPanelRanges
             )
         } else if let replacement,
-                  let invalidationRange = styleInvalidationRange(for: replacement, in: document) {
+            let invalidationRange = styleInvalidationRange(for: replacement, in: document)
+        {
             applyStyleRuns(
                 document.styleRuns,
                 commandOutputPanels: commandOutputPanels,
@@ -556,8 +559,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
         textContentStorage.performEditingTransaction {
             if let panelAttachmentRange = commandOutputPanelAttachmentRange(for: panel),
-               NSIntersectionRange(panelAttachmentRange, targetRange).length == panelAttachmentRange.length,
-               panelAttachmentRange.location < textStorage.length {
+                NSIntersectionRange(panelAttachmentRange, targetRange).length == panelAttachmentRange.length,
+                panelAttachmentRange.location < textStorage.length
+            {
                 textStorage.setAttributes(baseAttributes, range: panelAttachmentRange)
             }
             textStorage.removeAttribute(.attachment, range: targetRange)
@@ -566,7 +570,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func normalizedRanges(_ ranges: [NSRange], in fullRange: NSRange) -> [NSRange] {
-        let clippedRanges = ranges
+        let clippedRanges =
+            ranges
             .map { NSIntersectionRange($0, fullRange) }
             .filter { $0.length > 0 }
             .sorted { $0.location < $1.location }
@@ -595,8 +600,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         for panel in panels {
             let attachmentRange = NSRange(location: panel.range.location, length: min(1, panel.range.length))
             guard NSIntersectionRange(attachmentRange, targetRange).length == attachmentRange.length,
-                  attachmentRange.length == 1,
-                  attachmentRange.location < textStorage.length
+                attachmentRange.length == 1,
+                attachmentRange.location < textStorage.length
             else {
                 continue
             }
@@ -611,10 +616,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             )
 
             if panel.isActive,
-               let startedAt = panel.startedAt,
-               let timerAttachmentRange = commandOutputTimerAttachmentRange(for: panel),
-               NSIntersectionRange(timerAttachmentRange, targetRange).length == timerAttachmentRange.length,
-               timerAttachmentRange.location < textStorage.length {
+                let startedAt = panel.startedAt,
+                let timerAttachmentRange = commandOutputTimerAttachmentRange(for: panel),
+                NSIntersectionRange(timerAttachmentRange, targetRange).length == timerAttachmentRange.length,
+                timerAttachmentRange.location < textStorage.length
+            {
                 textStorage.addAttribute(
                     .attachment,
                     value: ReviewMonitorCommandOutputTimerAttachment(
@@ -627,9 +633,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             }
 
             guard let panelAttachmentRange = commandOutputPanelAttachmentRange(for: panel),
-                  panelAttachmentRange.location >= panel.range.location,
-                  NSIntersectionRange(panelAttachmentRange, targetRange).length == panelAttachmentRange.length,
-                  panelAttachmentRange.location < textStorage.length
+                panelAttachmentRange.location >= panel.range.location,
+                NSIntersectionRange(panelAttachmentRange, targetRange).length == panelAttachmentRange.length,
+                panelAttachmentRange.location < textStorage.length
             else {
                 continue
             }
@@ -675,17 +681,18 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         guard panel.startedAt != nil else {
             return nil
         }
-        let location = panel.range.location
+        let location =
+            panel.range.location
             + (ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter + panel.title).utf16.count
         return NSRange(location: location, length: 1)
     }
 
     private func commandOutputHeaderUTF16Length(for panel: ReviewMonitorLog.CommandOutputPanel) -> Int {
-        (
-            ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
-                + panel.title
-                + (panel.isActive && panel.startedAt != nil ? ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter : "")
-        ).utf16.count
+        (ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter
+            + panel.title
+            + (panel.isActive && panel.startedAt != nil
+                ? ReviewMonitorCommandOutputDisplayDocument.toggleAttachmentCharacter : ""))
+            .utf16.count
     }
 
     private func styleInvalidationRange(
@@ -808,20 +815,20 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private var shouldAnimateGlow: Bool {
-#if DEBUG
-        if let reduceMotionOverrideForTesting {
-            return reduceMotionOverrideForTesting == false
-        }
-#endif
+        #if DEBUG
+            if let reduceMotionOverrideForTesting {
+                return reduceMotionOverrideForTesting == false
+            }
+        #endif
         return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
     }
 
     var shouldAnimateCommandOutputPanelTransitions: Bool {
-#if DEBUG
-        if let reduceMotionOverrideForTesting {
-            return reduceMotionOverrideForTesting == false
-        }
-#endif
+        #if DEBUG
+            if let reduceMotionOverrideForTesting {
+                return reduceMotionOverrideForTesting == false
+            }
+        #endif
         return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion == false
     }
 
@@ -863,12 +870,12 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             for (index, fragmentView) in orderedFragmentViews.enumerated() {
                 let finalFrame = fragmentView.frame
                 let range = nsRange(for: fragmentView.layoutFragment.rangeInElement)
-                let fallbackFrame = index < animation.orderedFragmentFrames.count
+                let fallbackFrame =
+                    index < animation.orderedFragmentFrames.count
                     ? animation.orderedFragmentFrames[index]
                     : nil
-                guard let initialFrame = animation.fragmentFramesByRange[FragmentRangeKey(range)] ??
-                    fallbackFrame,
-                      verticalFrameComponentsAreNearlyEqual(initialFrame, finalFrame) == false
+                guard let initialFrame = animation.fragmentFramesByRange[FragmentRangeKey(range)] ?? fallbackFrame,
+                    verticalFrameComponentsAreNearlyEqual(initialFrame, finalFrame) == false
                 else {
                     continue
                 }
@@ -884,7 +891,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             for panelView in panelViews {
                 let finalFrame = panelView.frame
                 let initialHeight: CGFloat = finalFrame.height > 1 ? 1 : max(1, panelView.frame.height)
-                panelView.frame = NSRect(x: finalFrame.minX, y: finalFrame.minY, width: finalFrame.width, height: initialHeight)
+                panelView.frame = NSRect(
+                    x: finalFrame.minX, y: finalFrame.minY, width: finalFrame.width, height: initialHeight)
                 panelView.animator().frame = finalFrame
             }
         }
@@ -902,10 +910,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 continue
             }
             let baseColor = foregroundColor(at: range.location)
-            initialColorUpdates.append((
-                range,
-                wordFadeColor(progress: 0, baseColor: baseColor)
-            ))
+            initialColorUpdates.append(
+                (
+                    range,
+                    wordFadeColor(progress: 0, baseColor: baseColor)
+                ))
             wordFadeAnimations.append(
                 ReviewMonitorLog.WordFadeAnimation(
                     range: range,
@@ -926,7 +935,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         animationSpans: [ReviewMonitorLog.AnimationSpan]
     ) -> [NSRange] {
         guard shouldAnimateGlow,
-              animationSpans.isEmpty == false
+            animationSpans.isEmpty == false
         else {
             return []
         }
@@ -958,12 +967,13 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
                 in: cappedRange,
                 options: [.byLines, .substringNotRequired, .localized]
             ) { _, lineRange, _, stop in
-                ranges.append(contentsOf: self.lineFadeRanges(
-                    in: nsString,
-                    localLineRange: lineRange,
-                    baseLocation: suffixRange.location,
-                    limit: Self.maxWordFadeCount - ranges.count
-                ))
+                ranges.append(
+                    contentsOf: self.lineFadeRanges(
+                        in: nsString,
+                        localLineRange: lineRange,
+                        baseLocation: suffixRange.location,
+                        limit: Self.maxWordFadeCount - ranges.count
+                    ))
                 if ranges.count >= Self.maxWordFadeCount {
                     stop.pointee = true
                 }
@@ -979,7 +989,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         limit: Int
     ) -> [NSRange] {
         guard localLineRange.length > 0,
-              limit > 0
+            limit > 0
         else {
             return []
         }
@@ -997,8 +1007,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             chunkEnd = NSMaxRange(characterRange)
 
             if let start = chunkStart,
-               let end = chunkEnd,
-               end - start >= Self.maxLineFadeChunkUTF16Length {
+                let end = chunkEnd,
+                end - start >= Self.maxLineFadeChunkUTF16Length
+            {
                 ranges.append(NSRange(location: baseLocation + start, length: end - start))
                 chunkStart = nil
                 chunkEnd = nil
@@ -1010,9 +1021,10 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
 
         if ranges.count < limit,
-           let start = chunkStart,
-           let end = chunkEnd,
-           end > start {
+            let start = chunkStart,
+            let end = chunkEnd,
+            end > start
+        {
             ranges.append(NSRange(location: baseLocation + start, length: end - start))
         }
         return ranges
@@ -1063,13 +1075,14 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             let progress = min(1, max(0, (now - startedAt) / Self.wordFadeDuration))
             let step = wordFadeAlphaStep(for: progress)
             if step != animation.renderedStep {
-                colorUpdates.append((
-                    animation.range,
-                    wordFadeColor(
-                        progress: wordFadeProgress(forAlphaStep: step),
-                        baseColor: animation.baseColor
-                    )
-                ))
+                colorUpdates.append(
+                    (
+                        animation.range,
+                        wordFadeColor(
+                            progress: wordFadeProgress(forAlphaStep: step),
+                            baseColor: animation.baseColor
+                        )
+                    ))
                 updatedRanges.append(animation.range)
                 animation.renderedStep = step
             }
@@ -1111,7 +1124,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         for (range, color) in updates {
             let range = clamp(range)
             guard range.length > 0,
-                  let textRange = textRange(for: range)
+                let textRange = textRange(for: range)
             else {
                 continue
             }
@@ -1127,7 +1140,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         for range in ranges {
             let range = clamp(range)
             guard range.length > 0,
-                  let textRange = textRange(for: range)
+                let textRange = textRange(for: range)
             else {
                 continue
             }
@@ -1143,9 +1156,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             invalidationRange = NSUnionRange(invalidationRange, range)
         }
 
-#if DEBUG
-        wordFadeDisplayInvalidationCount += 1
-#endif
+        #if DEBUG
+            wordFadeDisplayInvalidationCount += 1
+        #endif
         for fragmentView in visibleFragmentViews {
             let fragmentRange = nsRange(for: fragmentView.layoutFragment.rangeInElement)
             if NSIntersectionRange(fragmentRange, invalidationRange).length > 0 {
@@ -1156,7 +1169,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func startGlowTimerIfNeeded() {
         guard glowTimer == nil,
-              hasActiveGlowAnimations
+            hasActiveGlowAnimations
         else {
             return
         }
@@ -1199,9 +1212,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             return
         }
         let viewportBounds = currentViewportBounds()
-        guard force ||
-              needsViewportLayout ||
-              lastViewportLayoutBounds.map({ rectsAreNearlyEqual($0, viewportBounds) == false }) ?? true
+        guard
+            force || needsViewportLayout
+                || lastViewportLayoutBounds.map({ rectsAreNearlyEqual($0, viewportBounds) == false }) ?? true
         else {
             return
         }
@@ -1272,7 +1285,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         }
         if let textRange = textRange(for: clampedRange) {
             textLayoutManager.textSelections = [
-                NSTextSelection([textRange], affinity: .downstream, granularity: .character),
+                NSTextSelection([textRange], affinity: .downstream, granularity: .character)
             ]
         } else {
             textLayoutManager.textSelections = []
@@ -1377,8 +1390,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     func drawCharacters(in range: NSRange, forContentView view: NSView) {
         guard view === finderContentView,
-              let textRange = textRange(for: range),
-              let context = NSGraphicsContext.current?.cgContext
+            let textRange = textRange(for: range),
+            let context = NSGraphicsContext.current?.cgContext
         else {
             return
         }
@@ -1447,8 +1460,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
         func appendDocumentRange(_ range: NSRange) {
             guard range.length > 0,
-                  range.location >= 0,
-                  NSMaxRange(range) <= documentString.length
+                range.location >= 0,
+                NSMaxRange(range) <= documentString.length
             else {
                 return
             }
@@ -1508,7 +1521,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         let fullRange = NSRange(location: 0, length: (mapping.string as NSString).length)
         let intersection = NSIntersectionRange(range, fullRange)
         if intersection.location == range.location,
-           intersection.length == range.length {
+            intersection.length == range.length
+        {
             return range
         }
         return NSRange(location: min(max(0, range.location), fullRange.length), length: 0)
@@ -1671,7 +1685,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func invalidateTextLayout(measureEstimatedHeightImmediately: Bool) {
-        invalidateTextLayout(in: NSRange(location: 0, length: textStorage.length), measureEstimatedHeightImmediately: measureEstimatedHeightImmediately)
+        invalidateTextLayout(
+            in: NSRange(location: 0, length: textStorage.length),
+            measureEstimatedHeightImmediately: measureEstimatedHeightImmediately)
     }
 
     private func invalidateTextLayout(
@@ -1727,7 +1743,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func textReplacementInvalidationStartUTF16Offset(for range: NSRange) -> Int {
         let string = textStorage.string as NSString
         guard string.length > 0,
-              range.location < string.length
+            range.location < string.length
         else {
             return clampUTF16Offset(range.location)
         }
@@ -1738,8 +1754,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func syncTextContainerSize() -> Bool {
         let targetWidth = max(0, preferredTextContainerWidth - textContainerInset.width * 2)
         let targetSize = NSSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
-        guard abs(textContainer.size.width - targetSize.width) > 0.5 ||
-              textContainer.size.height != targetSize.height
+        guard abs(textContainer.size.width - targetSize.width) > 0.5 || textContainer.size.height != targetSize.height
         else {
             return false
         }
@@ -1794,7 +1809,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func updateSelectionRects() {
         guard selectedRange.length > 0,
-              let textRange = textRange(for: selectedRange)
+            let textRange = textRange(for: selectedRange)
         else {
             selectionView.selectionRects = []
             return
@@ -1816,7 +1831,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     private func updateDecorationRects() {
         let visibleDecorations = currentDecorations.filter { decorationNeedsResolvedRect($0.style) }
         guard visibleDecorations.isEmpty == false,
-              bounds.width > 0
+            bounds.width > 0
         else {
             decorationView.decorations = []
             return
@@ -1853,8 +1868,9 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private var commandOutputPanelBackgroundAlpha: CGFloat {
         let workspace = NSWorkspace.shared
-        if workspace.accessibilityDisplayShouldReduceTransparency ||
-            workspace.accessibilityDisplayShouldIncreaseContrast {
+        if workspace.accessibilityDisplayShouldReduceTransparency
+            || workspace.accessibilityDisplayShouldIncreaseContrast
+        {
             return 1
         }
         return 0.3
@@ -2031,7 +2047,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         let clampedOffset = clampUTF16Offset(offset)
         let boundaryOffset = characterBoundaryOffset(at: clampedOffset, rounding: direction)
         guard boundaryOffset == clampedOffset,
-              let currentIndex = stringIndex(atUTF16Offset: boundaryOffset, in: string)
+            let currentIndex = stringIndex(atUTF16Offset: boundaryOffset, in: string)
         else {
             return boundaryOffset
         }
@@ -2095,7 +2111,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
         func isWordCharacter(at index: Int) -> Bool {
             guard index >= 0, index < length,
-                  let scalar = UnicodeScalar(string.character(at: index))
+                let scalar = UnicodeScalar(string.character(at: index))
             else {
                 return false
             }
@@ -2175,13 +2191,14 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
         layoutTextViewport()
         textLayoutManager.ensureLayout(for: textRange)
-        guard let destinationSelection = textLayoutManager.textSelectionNavigation.destinationSelection(
-            for: NSTextSelection([textRange], affinity: .downstream, granularity: .character),
-            direction: direction,
-            destination: destination,
-            extending: false,
-            confined: false
-        ),
+        guard
+            let destinationSelection = textLayoutManager.textSelectionNavigation.destinationSelection(
+                for: NSTextSelection([textRange], affinity: .downstream, granularity: .character),
+                direction: direction,
+                destination: destination,
+                extending: false,
+                confined: false
+            ),
             let destinationRange = destinationSelection.textRanges.first
         else {
             return nil
@@ -2211,10 +2228,11 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func textRange(for range: NSRange) -> NSTextRange? {
         let clampedRange = clamp(range)
-        guard let startLocation = textContentStorage.location(
-            textContentStorage.documentRange.location,
-            offsetBy: clampedRange.location
-        ),
+        guard
+            let startLocation = textContentStorage.location(
+                textContentStorage.documentRange.location,
+                offsetBy: clampedRange.location
+            ),
             let endLocation = textContentStorage.location(
                 startLocation,
                 offsetBy: clampedRange.length
@@ -2315,14 +2333,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func isUsableViewportRect(_ rect: NSRect) -> Bool {
-        rect.minX.isFinite &&
-            rect.minY.isFinite &&
-            rect.width.isFinite &&
-            rect.height.isFinite &&
-            abs(rect.minX) < 1_000_000_000 &&
-            abs(rect.minY) < 1_000_000_000 &&
-            rect.width >= 0 &&
-            rect.height >= 0
+        rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
+            && abs(rect.minX) < 1_000_000_000 && abs(rect.minY) < 1_000_000_000 && rect.width >= 0 && rect.height >= 0
     }
 
     func textViewportLayoutControllerWillLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
@@ -2363,7 +2375,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
             fragmentNeedsImmediateDisplay = true
         }
 
-        let attachmentViewProviders = textLayoutFragment.textAttachmentViewProviders.isEmpty
+        let attachmentViewProviders =
+            textLayoutFragment.textAttachmentViewProviders.isEmpty
             ? commandOutputAttachmentViewProviders(in: textLayoutFragment, parentView: fragmentView)
             : textLayoutFragment.textAttachmentViewProviders
         fragmentView.syncTextAttachmentViews(
@@ -2388,15 +2401,15 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
         var providers: [NSTextAttachmentViewProvider] = []
         textStorage.enumerateAttribute(.attachment, in: fragmentRange) { value, range, _ in
             guard let attachment = value as? NSTextAttachment,
-                  (attachment is ReviewMonitorCommandOutputToggleAttachment ||
-                    attachment is ReviewMonitorCommandOutputTimerAttachment ||
-                    attachment is ReviewMonitorCommandOutputPanelAttachment),
-                  let location = textLocation(forUTF16Offset: range.location),
-                  let provider = attachment.viewProvider(
-                      for: parentView,
-                      location: location,
-                      textContainer: textContainer
-                  )
+                (attachment is ReviewMonitorCommandOutputToggleAttachment
+                    || attachment is ReviewMonitorCommandOutputTimerAttachment
+                    || attachment is ReviewMonitorCommandOutputPanelAttachment),
+                let location = textLocation(forUTF16Offset: range.location),
+                let provider = attachment.viewProvider(
+                    for: parentView,
+                    location: location,
+                    textContainer: textContainer
+                )
             else {
                 return
             }
@@ -2424,20 +2437,16 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
     }
 
     private func rectsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
-        abs(lhs.minX - rhs.minX) <= 0.5 &&
-            abs(lhs.minY - rhs.minY) <= 0.5 &&
-            abs(lhs.width - rhs.width) <= 0.5 &&
-            abs(lhs.height - rhs.height) <= 0.5
+        abs(lhs.minX - rhs.minX) <= 0.5 && abs(lhs.minY - rhs.minY) <= 0.5 && abs(lhs.width - rhs.width) <= 0.5
+            && abs(lhs.height - rhs.height) <= 0.5
     }
 
     private func verticalFrameComponentsAreNearlyEqual(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
-        abs(lhs.minY - rhs.minY) <= 0.5 &&
-            abs(lhs.height - rhs.height) <= 0.5
+        abs(lhs.minY - rhs.minY) <= 0.5 && abs(lhs.height - rhs.height) <= 0.5
     }
 
     private func sizesAreNearlyEqual(_ lhs: NSSize, _ rhs: NSSize) -> Bool {
-        abs(lhs.width - rhs.width) <= 0.5 &&
-            abs(lhs.height - rhs.height) <= 0.5
+        abs(lhs.width - rhs.width) <= 0.5 && abs(lhs.height - rhs.height) <= 0.5
     }
 
     private func commandOutputPanelAttachmentViews() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
@@ -2448,410 +2457,408 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations, @p
 
     private func visibleCommandOutputPanelAttachmentViews() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
         commandOutputPanelAttachmentViews().filter {
-            $0.isHidden == false &&
-                $0.alphaValue > 0 &&
-                $0.frame.width > 1 &&
-                $0.frame.height > 1
+            $0.isHidden == false && $0.alphaValue > 0 && $0.frame.width > 1 && $0.frame.height > 1
         }
     }
 
     private func edgeInsetsAreNearlyEqual(_ lhs: NSEdgeInsets, _ rhs: NSEdgeInsets) -> Bool {
-        abs(lhs.top - rhs.top) <= 0.5 &&
-            abs(lhs.left - rhs.left) <= 0.5 &&
-            abs(lhs.bottom - rhs.bottom) <= 0.5 &&
-            abs(lhs.right - rhs.right) <= 0.5
+        abs(lhs.top - rhs.top) <= 0.5 && abs(lhs.left - rhs.left) <= 0.5 && abs(lhs.bottom - rhs.bottom) <= 0.5
+            && abs(lhs.right - rhs.right) <= 0.5
     }
 }
-
 
 #if DEBUG
-@MainActor
-extension ReviewMonitorLogDocumentView {
-    var selectedRangeForTesting: NSRange {
-        selectedRange
-    }
-
-    var usesTextKit2ForTesting: Bool {
-        textLayoutManager.textContainer === textContainer &&
-            textContentStorage.textLayoutManagers.contains(textLayoutManager)
-    }
-
-    var hitTestTargetsDocumentViewForTesting: Bool {
-        guard bounds.isEmpty == false else {
-            return false
+    @MainActor
+    extension ReviewMonitorLogDocumentView {
+        var selectedRangeForTesting: NSRange {
+            selectedRange
         }
-        syncContentSubviewFrames()
-        let point = NSPoint(x: bounds.midX, y: bounds.midY)
-        return hitTest(point) === self
-    }
 
-    var visibleFragmentViewCountForTesting: Int {
-        visibleFragmentViews.count
-    }
+        var usesTextKit2ForTesting: Bool {
+            textLayoutManager.textContainer === textContainer
+                && textContentStorage.textLayoutManagers.contains(textLayoutManager)
+        }
 
-    var commandOutputPanelCountForTesting: Int {
-        layoutTextViewport(force: true)
-        return currentCommandOutputPanels.count
-    }
+        var hitTestTargetsDocumentViewForTesting: Bool {
+            guard bounds.isEmpty == false else {
+                return false
+            }
+            syncContentSubviewFrames()
+            let point = NSPoint(x: bounds.midX, y: bounds.midY)
+            return hitTest(point) === self
+        }
 
-    var terminalDecorationRectCountForTesting: Int {
-        layoutTextViewport(force: true)
-        return decorationView.decorations.filter { decoration in
-            if case .terminal = decoration.style {
+        var visibleFragmentViewCountForTesting: Int {
+            visibleFragmentViews.count
+        }
+
+        var commandOutputPanelCountForTesting: Int {
+            layoutTextViewport(force: true)
+            return currentCommandOutputPanels.count
+        }
+
+        var terminalDecorationRectCountForTesting: Int {
+            layoutTextViewport(force: true)
+            return decorationView.decorations.filter { decoration in
+                if case .terminal = decoration.style {
+                    return true
+                }
+                return false
+            }.count
+        }
+
+        var expandedCommandOutputPanelCountForTesting: Int {
+            layoutTextViewport(force: true)
+            return currentCommandOutputPanels.filter(\.isExpanded).count
+        }
+
+        var commandOutputPanelUsesTextKit2ForTesting: Bool {
+            layoutTextViewport(force: true)
+            let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
+            guard visiblePanelViews.isEmpty == false else {
+                return false
+            }
+            return visiblePanelViews.allSatisfy(\.usesTextKit2ForTesting)
+        }
+
+        var commandOutputPanelUsesInlineAttachmentForTesting: Bool {
+            layoutTextViewport(force: true)
+            return firstCommandOutputToggleAttachmentForTesting() != nil
+        }
+
+        var commandOutputPanelUsesButtonAttachmentForTesting: Bool {
+            layoutTextViewport(force: true)
+            return firstCommandOutputToggleButtonForTesting() != nil
+        }
+
+        var collapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
+                return nil
+            }
+            guard let attachmentRange = commandOutputPanelAttachmentRange(for: panel) else {
+                return nil
+            }
+            return rects(forCharacterRange: attachmentRange).first?.rectValue.height ?? 0
+        }
+
+        var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+            layoutTextViewport(force: true)
+            guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
+                return false
+            }
+            guard let attachmentRange = commandOutputPanelAttachmentRange(for: panel) else {
                 return true
             }
-            return false
-        }.count
-    }
-
-    var expandedCommandOutputPanelCountForTesting: Int {
-        layoutTextViewport(force: true)
-        return currentCommandOutputPanels.filter(\.isExpanded).count
-    }
-
-    var commandOutputPanelUsesTextKit2ForTesting: Bool {
-        layoutTextViewport(force: true)
-        let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
-        guard visiblePanelViews.isEmpty == false else {
-            return false
+            guard attachmentRange.location < textStorage.length,
+                let attachment = textStorage.attribute(
+                    .attachment,
+                    at: attachmentRange.location,
+                    effectiveRange: nil
+                ) as? ReviewMonitorCommandOutputPanelAttachment
+            else {
+                return false
+            }
+            return attachment.panel.commandText.isEmpty && attachment.panel.outputText.isEmpty
+                && attachment.panel.lineCount == 0
         }
-        return visiblePanelViews.allSatisfy(\.usesTextKit2ForTesting)
-    }
 
-    var commandOutputPanelUsesInlineAttachmentForTesting: Bool {
-        layoutTextViewport(force: true)
-        return firstCommandOutputToggleAttachmentForTesting() != nil
-    }
-
-    var commandOutputPanelUsesButtonAttachmentForTesting: Bool {
-        layoutTextViewport(force: true)
-        return firstCommandOutputToggleButtonForTesting() != nil
-    }
-
-    var collapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
-            return nil
+        var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+            layoutTextViewport(force: true)
+            let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
+            guard visiblePanelViews.isEmpty == false else {
+                return false
+            }
+            return visiblePanelViews.allSatisfy(\.usesSystemMaterialBackgroundForTesting)
         }
-        guard let attachmentRange = commandOutputPanelAttachmentRange(for: panel) else {
-            return nil
+
+        var commandOutputPanelVisibleLineCapacityForTesting: Int {
+            layoutTextViewport(force: true)
+            return visibleCommandOutputPanelAttachmentViewsForTesting()
+                .map(\.visibleLineCapacityForTesting)
+                .max() ?? 0
         }
-        return rects(forCharacterRange: attachmentRange).first?.rectValue.height ?? 0
-    }
 
-    var collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
-        layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.isExpanded == false }) else {
-            return false
+        var commandOutputPanelResultTextForTesting: String? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.resultTextForTesting
         }
-        guard let attachmentRange = commandOutputPanelAttachmentRange(for: panel) else {
-            return true
+
+        var commandOutputPanelTerminalTextForTesting: String? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.terminalTextForTesting
         }
-        guard attachmentRange.location < textStorage.length,
-              let attachment = textStorage.attribute(
-                  .attachment,
-                  at: attachmentRange.location,
-                  effectiveRange: nil
-              ) as? ReviewMonitorCommandOutputPanelAttachment
-        else {
-            return false
+
+        func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
+            layoutTextViewport(force: true)
+            return visibleCommandOutputPanelAttachmentViewForTesting(blockID: blockID)?.terminalTextForTesting
         }
-        return attachment.panel.commandText.isEmpty &&
-            attachment.panel.outputText.isEmpty &&
-            attachment.panel.lineCount == 0
-    }
 
-    var commandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
-        layoutTextViewport(force: true)
-        let visiblePanelViews = visibleCommandOutputPanelAttachmentViewsForTesting()
-        guard visiblePanelViews.isEmpty == false else {
-            return false
+        var commandOutputPanelCommandLineTextForTesting: String? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.commandLineTextForTesting
         }
-        return visiblePanelViews.allSatisfy(\.usesSystemMaterialBackgroundForTesting)
-    }
 
-    var commandOutputPanelVisibleLineCapacityForTesting: Int {
-        layoutTextViewport(force: true)
-        return visibleCommandOutputPanelAttachmentViewsForTesting()
-            .map(\.visibleLineCapacityForTesting)
-            .max() ?? 0
-    }
-
-    var commandOutputPanelResultTextForTesting: String? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.resultTextForTesting
-    }
-
-    var commandOutputPanelTerminalTextForTesting: String? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.terminalTextForTesting
-    }
-
-    func commandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
-        layoutTextViewport(force: true)
-        return visibleCommandOutputPanelAttachmentViewForTesting(blockID: blockID)?.terminalTextForTesting
-    }
-
-    var commandOutputPanelCommandLineTextForTesting: String? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.commandLineTextForTesting
-    }
-
-    var commandOutputPanelOutputScrollTextForTesting: String? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollTextForTesting
-    }
-
-    var commandOutputPanelOutputScrollIsScrollableForTesting: Bool {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollIsScrollableForTesting ?? false
-    }
-
-    var commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollUsesHorizontalScrollingForTesting ?? false
-    }
-
-    var commandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollVerticalOffsetForTesting
-    }
-
-    var commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollMaximumVerticalOffsetForTesting
-    }
-
-    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.scrollOutputForTesting(deltaY: deltaY) ?? false
-    }
-
-    var commandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
-        layoutTextViewport(force: true)
-        return firstVisibleCommandOutputPanelViewForTesting()?.outputHitTestTargetsTextViewForTesting ?? false
-    }
-
-    func finderRectsForTesting(_ range: NSRange) -> [NSRect] {
-        layoutTextViewport(force: true)
-        return rects(forFinderCharacterRange: range).map(\.rectValue)
-    }
-
-    var firstCommandOutputPanelRectForTesting: NSRect? {
-        layoutTextViewport(force: true)
-        guard let panelView = firstVisibleCommandOutputPanelViewForTesting() else {
-            return nil
+        var commandOutputPanelOutputScrollTextForTesting: String? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollTextForTesting
         }
-        return panelView.convert(panelView.bounds, to: self)
-    }
 
-    var commandOutputPanelToggleSymbolNameForTesting: String? {
-        layoutTextViewport(force: true)
-        return firstCommandOutputToggleAttachmentForTesting()?.symbolName
-    }
-
-    var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first,
-              let panelView = firstVisibleCommandOutputPanelViewForTesting(),
-              let attachmentLeadingX = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
-                .first?.rectValue.minX
-        else {
-            return nil
+        var commandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollIsScrollableForTesting ?? false
         }
-        let panelLeadingX = panelView.convert(panelView.bounds.origin, to: self).x
-        return panelLeadingX - attachmentLeadingX
-    }
 
-    var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        guard let attachment = firstCommandOutputToggleAttachmentForTesting() else {
-            return nil
+        var commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollUsesHorizontalScrollingForTesting
+                ?? false
         }
-        return attachment.symbolSize - attachment.fontPointSize
-    }
 
-    var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
-        layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first,
-              panel.range.length > 1,
-              let attachmentMidY = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
-                .first?.rectValue.midY,
-              let labelMidY = rects(
-                forCharacterRange: NSRange(location: panel.range.location + 1, length: panel.title.utf16.count)
-              )
+        var commandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollVerticalOffsetForTesting
+        }
+
+        var commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputScrollMaximumVerticalOffsetForTesting
+        }
+
+        func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.scrollOutputForTesting(deltaY: deltaY) ?? false
+        }
+
+        var commandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+            layoutTextViewport(force: true)
+            return firstVisibleCommandOutputPanelViewForTesting()?.outputHitTestTargetsTextViewForTesting ?? false
+        }
+
+        func finderRectsForTesting(_ range: NSRange) -> [NSRect] {
+            layoutTextViewport(force: true)
+            return rects(forFinderCharacterRange: range).map(\.rectValue)
+        }
+
+        var firstCommandOutputPanelRectForTesting: NSRect? {
+            layoutTextViewport(force: true)
+            guard let panelView = firstVisibleCommandOutputPanelViewForTesting() else {
+                return nil
+            }
+            return panelView.convert(panelView.bounds, to: self)
+        }
+
+        var commandOutputPanelToggleSymbolNameForTesting: String? {
+            layoutTextViewport(force: true)
+            return firstCommandOutputToggleAttachmentForTesting()?.symbolName
+        }
+
+        var commandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            guard let panel = currentCommandOutputPanels.first,
+                let panelView = firstVisibleCommandOutputPanelViewForTesting(),
+                let attachmentLeadingX = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
+                    .first?.rectValue.minX
+            else {
+                return nil
+            }
+            let panelLeadingX = panelView.convert(panelView.bounds.origin, to: self).x
+            return panelLeadingX - attachmentLeadingX
+        }
+
+        var commandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            guard let attachment = firstCommandOutputToggleAttachmentForTesting() else {
+                return nil
+            }
+            return attachment.symbolSize - attachment.fontPointSize
+        }
+
+        var commandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+            layoutTextViewport(force: true)
+            guard let panel = currentCommandOutputPanels.first,
+                panel.range.length > 1,
+                let attachmentMidY = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1))
+                    .first?.rectValue.midY,
+                let labelMidY = rects(
+                    forCharacterRange: NSRange(location: panel.range.location + 1, length: panel.title.utf16.count)
+                )
                 .first?.rectValue.midY
-        else {
-            return nil
-        }
-        return attachmentMidY - labelMidY
-    }
-
-    func hitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
-        layoutTextViewport(force: true)
-        let range = (textStorage.string as NSString).range(of: text)
-        guard range.location != NSNotFound,
-              let rect = rects(forCharacterRange: range).first?.rectValue
-        else {
-            return false
-        }
-        return hitTest(NSPoint(x: rect.midX, y: rect.midY)) === self
-    }
-
-    func toggleFirstCommandOutputPanelForTesting() {
-        layoutTextViewport(force: true)
-        guard let blockID = currentCommandOutputPanels.first?.blockID else {
-            return
-        }
-        onCommandOutputPanelToggle?(blockID)
-    }
-
-    @discardableResult
-    func clickFirstCommandOutputPanelHeaderForTesting() -> Bool {
-        guard let blockID = currentCommandOutputPanels.first?.blockID else {
-            return false
-        }
-        return clickCommandOutputPanelHeaderForTesting(blockID: blockID)
-    }
-
-    @discardableResult
-    func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
-        layoutTextViewport(force: true)
-        guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == blockID }),
-              let rect = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1)).first?.rectValue,
-              let event = NSEvent.mouseEvent(
-                  with: .leftMouseDown,
-                  location: convert(NSPoint(x: rect.midX, y: rect.midY), to: nil),
-                  modifierFlags: [],
-                  timestamp: 0,
-                  windowNumber: window?.windowNumber ?? 0,
-                  context: nil,
-                  eventNumber: 0,
-                  clickCount: 1,
-                  pressure: 1
-              )
-        else {
-            return false
-        }
-
-        let documentPoint = convert(event.locationInWindow, from: nil)
-        guard let target = hitTest(documentPoint) else {
-            return false
-        }
-        if let button = target as? ReviewMonitorCommandOutputToggleButton {
-            button.performClick(nil)
-            return true
-        }
-        target.mouseDown(with: event)
-        return true
-    }
-
-    private func firstCommandOutputToggleAttachmentForTesting() -> ReviewMonitorCommandOutputToggleAttachment? {
-        guard let panel = currentCommandOutputPanels.first,
-              panel.range.location < textStorage.length
-        else {
-            return nil
-        }
-        return textStorage.attribute(.attachment, at: panel.range.location, effectiveRange: nil)
-            as? ReviewMonitorCommandOutputToggleAttachment
-    }
-
-    private func firstCommandOutputToggleButtonForTesting() -> ReviewMonitorCommandOutputToggleButton? {
-        visibleFragmentViews
-            .sorted { $0.frame.minY < $1.frame.minY }
-            .compactMap(\.firstCommandOutputToggleButtonForTesting)
-            .first
-    }
-
-    private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {
-        visibleCommandOutputPanelAttachmentViews()
-            .sorted { lhs, rhs in
-                lhs.convert(lhs.bounds.origin, to: self).y < rhs.convert(rhs.bounds.origin, to: self).y
+            else {
+                return nil
             }
-            .first
-    }
+            return attachmentMidY - labelMidY
+        }
 
-    private func visibleCommandOutputPanelAttachmentViewForTesting(
-        blockID: ReviewMonitorLog.BlockID
-    ) -> ReviewMonitorCommandOutputPanelAttachmentView? {
-        visibleCommandOutputPanelAttachmentViewsForTesting()
-            .first { $0.blockID == blockID }
-    }
-
-    private func visibleCommandOutputPanelAttachmentViewsForTesting() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
-        visibleCommandOutputPanelAttachmentViews()
-    }
-
-    var wordGlowCountForTesting: Int {
-        wordFadeAnimations.count
-    }
-
-    var wordFadeRenderingAttributeRangeCountForTesting: Int {
-        var count = 0
-        textLayoutManager.enumerateRenderingAttributes(
-            from: textContentStorage.documentRange.location,
-            reverse: false
-        ) { _, attributes, _ in
-            if attributes[.foregroundColor] != nil {
-                count += 1
+        func hitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
+            layoutTextViewport(force: true)
+            let range = (textStorage.string as NSString).range(of: text)
+            guard range.location != NSNotFound,
+                let rect = rects(forCharacterRange: range).first?.rectValue
+            else {
+                return false
             }
-            return true
-        }
-        return count
-    }
-
-    var wordFadeStorageUsesOpaqueTextColorForTesting: Bool {
-        guard textStorage.length > 0 else {
-            return true
+            return hitTest(NSPoint(x: rect.midX, y: rect.midY)) === self
         }
 
-        var usesOpaqueTextColor = true
-        textStorage.enumerateAttribute(
-            .foregroundColor,
-            in: NSRange(location: 0, length: textStorage.length)
-        ) { value, _, stop in
-            guard let color = value as? NSColor else {
+        func toggleFirstCommandOutputPanelForTesting() {
+            layoutTextViewport(force: true)
+            guard let blockID = currentCommandOutputPanels.first?.blockID else {
                 return
             }
-            if color.alphaComponent < 0.999 {
-                usesOpaqueTextColor = false
-                stop.pointee = true
+            onCommandOutputPanelToggle?(blockID)
+        }
+
+        @discardableResult
+        func clickFirstCommandOutputPanelHeaderForTesting() -> Bool {
+            guard let blockID = currentCommandOutputPanels.first?.blockID else {
+                return false
+            }
+            return clickCommandOutputPanelHeaderForTesting(blockID: blockID)
+        }
+
+        @discardableResult
+        func clickCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
+            layoutTextViewport(force: true)
+            guard let panel = currentCommandOutputPanels.first(where: { $0.blockID == blockID }),
+                let rect = rects(forCharacterRange: NSRange(location: panel.range.location, length: 1)).first?
+                    .rectValue,
+                let event = NSEvent.mouseEvent(
+                    with: .leftMouseDown,
+                    location: convert(NSPoint(x: rect.midX, y: rect.midY), to: nil),
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: window?.windowNumber ?? 0,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1
+                )
+            else {
+                return false
+            }
+
+            let documentPoint = convert(event.locationInWindow, from: nil)
+            guard let target = hitTest(documentPoint) else {
+                return false
+            }
+            if let button = target as? ReviewMonitorCommandOutputToggleButton {
+                button.performClick(nil)
+                return true
+            }
+            target.mouseDown(with: event)
+            return true
+        }
+
+        private func firstCommandOutputToggleAttachmentForTesting() -> ReviewMonitorCommandOutputToggleAttachment? {
+            guard let panel = currentCommandOutputPanels.first,
+                panel.range.location < textStorage.length
+            else {
+                return nil
+            }
+            return textStorage.attribute(.attachment, at: panel.range.location, effectiveRange: nil)
+                as? ReviewMonitorCommandOutputToggleAttachment
+        }
+
+        private func firstCommandOutputToggleButtonForTesting() -> ReviewMonitorCommandOutputToggleButton? {
+            visibleFragmentViews
+                .sorted { $0.frame.minY < $1.frame.minY }
+                .compactMap(\.firstCommandOutputToggleButtonForTesting)
+                .first
+        }
+
+        private func firstVisibleCommandOutputPanelViewForTesting() -> ReviewMonitorCommandOutputPanelAttachmentView? {
+            visibleCommandOutputPanelAttachmentViews()
+                .sorted { lhs, rhs in
+                    lhs.convert(lhs.bounds.origin, to: self).y < rhs.convert(rhs.bounds.origin, to: self).y
+                }
+                .first
+        }
+
+        private func visibleCommandOutputPanelAttachmentViewForTesting(
+            blockID: ReviewMonitorLog.BlockID
+        ) -> ReviewMonitorCommandOutputPanelAttachmentView? {
+            visibleCommandOutputPanelAttachmentViewsForTesting()
+                .first { $0.blockID == blockID }
+        }
+
+        private func visibleCommandOutputPanelAttachmentViewsForTesting()
+            -> [ReviewMonitorCommandOutputPanelAttachmentView]
+        {
+            visibleCommandOutputPanelAttachmentViews()
+        }
+
+        var wordGlowCountForTesting: Int {
+            wordFadeAnimations.count
+        }
+
+        var wordFadeRenderingAttributeRangeCountForTesting: Int {
+            var count = 0
+            textLayoutManager.enumerateRenderingAttributes(
+                from: textContentStorage.documentRange.location,
+                reverse: false
+            ) { _, attributes, _ in
+                if attributes[.foregroundColor] != nil {
+                    count += 1
+                }
+                return true
+            }
+            return count
+        }
+
+        var wordFadeStorageUsesOpaqueTextColorForTesting: Bool {
+            guard textStorage.length > 0 else {
+                return true
+            }
+
+            var usesOpaqueTextColor = true
+            textStorage.enumerateAttribute(
+                .foregroundColor,
+                in: NSRange(location: 0, length: textStorage.length)
+            ) { value, _, stop in
+                guard let color = value as? NSColor else {
+                    return
+                }
+                if color.alphaComponent < 0.999 {
+                    usesOpaqueTextColor = false
+                    stop.pointee = true
+                }
+            }
+            return usesOpaqueTextColor
+        }
+
+        var wordFadeDisplayInvalidationCountForTesting: Int {
+            wordFadeDisplayInvalidationCount
+        }
+
+        func completeWordGlowAnimationsForTesting() {
+            glowTimer?.invalidate()
+            glowTimer = nil
+            updateWordFadeAnimations(at: CACurrentMediaTime())
+            let completionTime =
+                wordFadeAnimations
+                .compactMap(\.startedAt)
+                .max()
+                .map { $0 + Self.wordFadeDuration }
+                ?? CACurrentMediaTime()
+            updateWordFadeAnimations(at: completionTime)
+        }
+
+        func advanceWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+            updateWordFadeAnimations(at: CACurrentMediaTime() + delay)
+        }
+
+        var visibleFragmentBoundsForTesting: NSRect {
+            guard let firstFragmentView = visibleFragmentViews.first else {
+                return .zero
+            }
+            return visibleFragmentViews.reduce(firstFragmentView.frame) { bounds, fragmentView in
+                bounds.union(fragmentView.frame)
             }
         }
-        return usesOpaqueTextColor
-    }
 
-    var wordFadeDisplayInvalidationCountForTesting: Int {
-        wordFadeDisplayInvalidationCount
-    }
-
-    func completeWordGlowAnimationsForTesting() {
-        glowTimer?.invalidate()
-        glowTimer = nil
-        updateWordFadeAnimations(at: CACurrentMediaTime())
-        let completionTime = wordFadeAnimations
-            .compactMap(\.startedAt)
-            .max()
-            .map { $0 + Self.wordFadeDuration }
-            ?? CACurrentMediaTime()
-        updateWordFadeAnimations(at: completionTime)
-    }
-
-    func advanceWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
-        updateWordFadeAnimations(at: CACurrentMediaTime() + delay)
-    }
-
-    var visibleFragmentBoundsForTesting: NSRect {
-        guard let firstFragmentView = visibleFragmentViews.first else {
-            return .zero
-        }
-        return visibleFragmentViews.reduce(firstFragmentView.frame) { bounds, fragmentView in
-            bounds.union(fragmentView.frame)
+        var staleFragmentViewCountForTesting: Int {
+            lastUsedFragmentViews.filter { $0.superview != nil }.count
         }
     }
-
-    var staleFragmentViewCountForTesting: Int {
-        lastUsedFragmentViews.filter { $0.superview != nil }.count
-    }
-}
 #endif

@@ -42,13 +42,15 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarViewControllerForTesting.displayedSectionTitlesForTesting == [
-            "workspace-alpha",
-            "workspace-beta",
-        ])
+        #expect(
+            viewController.sidebarViewControllerForTesting.displayedSectionTitlesForTesting == [
+                "workspace-alpha",
+                "workspace-beta",
+            ])
         #expect(viewController.splitViewItems.count == 2)
         #expect(viewController.splitViewItems[0].behavior == .sidebar)
         #expect(viewController.splitViewItems[1].behavior == .default)
@@ -74,7 +76,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -88,10 +91,11 @@ struct ReviewUITests {
         #expect(sidebar.performWorkspaceDropForTesting(workspaceAlpha, toIndex: store.workspaces.count))
         await Task.yield()
 
-        #expect(sidebar.displayedSectionTitlesForTesting == [
-            "workspace-beta",
-            "workspace-alpha",
-        ])
+        #expect(
+            sidebar.displayedSectionTitlesForTesting == [
+                "workspace-beta",
+                "workspace-alpha",
+            ])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeDrop)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeDrop)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
@@ -115,22 +119,24 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
         guard let workspaceAlpha = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }),
-              let workspaceBeta = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-beta" })
+            let workspaceBeta = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-beta" })
         else {
             Issue.record("workspaces were not loaded.")
             return
         }
 
         #expect(sidebar.performWorkspaceDropForTesting(workspaceBeta, proposedWorkspace: workspaceAlpha))
-        #expect(sidebar.displayedSectionTitlesForTesting == [
-            "workspace-beta",
-            "workspace-alpha",
-        ])
+        #expect(
+            sidebar.displayedSectionTitlesForTesting == [
+                "workspace-beta",
+                "workspace-alpha",
+            ])
     }
 
     @Test func workspaceMembershipChangeUsesRootInsertWithoutFullReload() async throws {
@@ -154,13 +160,15 @@ struct ReviewUITests {
             workspaces: [alphaWorkspace],
             jobs: [alphaJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
         let fullReloadCountBeforeMembershipChange = sidebar.sidebarFullReloadCountForTesting
         let incrementalMoveCountBeforeMembershipChange = sidebar.sidebarIncrementalMoveCountForTesting
-        let incrementalMembershipChangeCountBeforeMembershipChange = sidebar.sidebarIncrementalMembershipChangeCountForTesting
+        let incrementalMembershipChangeCountBeforeMembershipChange = sidebar
+            .sidebarIncrementalMembershipChangeCountForTesting
 
         store.loadForTesting(
             serverState: .running,
@@ -177,13 +185,16 @@ struct ReviewUITests {
             sidebar.displayedSectionTitlesForTesting
         }
 
-        #expect(sidebar.displayedSectionTitlesForTesting == [
-            "workspace-alpha",
-            "workspace-beta",
-        ])
+        #expect(
+            sidebar.displayedSectionTitlesForTesting == [
+                "workspace-alpha",
+                "workspace-beta",
+            ])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeMembershipChange)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChange)
-        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeMembershipChange + 1)
+        #expect(
+            sidebar.sidebarIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeMembershipChange + 1)
     }
 
     @Test func workspaceSameMembershipSortOrderChangeMovesRowsWithoutReload() async throws {
@@ -207,7 +218,8 @@ struct ReviewUITests {
             workspaces: [alphaWorkspace, betaWorkspace],
             jobs: [alphaJob, betaJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -231,7 +243,8 @@ struct ReviewUITests {
         }
 
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
-        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange)
+        #expect(
+            sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange + 1)
     }
 
@@ -253,7 +266,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -283,7 +297,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -309,24 +324,26 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [workspaceBetaJob, workspaceAlphaJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
         guard let workspaceBeta = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-beta" }),
-              let workspaceAlpha = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }),
-              let betaJob = store.orderedJobs(in: workspaceBeta).first
+            let workspaceAlpha = store.workspaces.first(where: { $0.cwd == "/tmp/workspace-alpha" }),
+            let betaJob = store.orderedJobs(in: workspaceBeta).first
         else {
             Issue.record("workspace/job state was not loaded.")
             return
         }
 
         #expect(sidebar.displayedSectionTitlesForTesting == [workspaceAlpha.displayTitle, workspaceBeta.displayTitle])
-        #expect(sidebar.performWorkspaceDropForTesting(
-            workspaceAlpha,
-            proposedJob: betaJob,
-            hoveringBelowMidpoint: true
-        ))
+        #expect(
+            sidebar.performWorkspaceDropForTesting(
+                workspaceAlpha,
+                proposedJob: betaJob,
+                hoveringBelowMidpoint: true
+            ))
         await Task.yield()
         #expect(sidebar.displayedSectionTitlesForTesting == [workspaceBeta.displayTitle, workspaceAlpha.displayTitle])
     }
@@ -351,7 +368,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [firstJob, secondJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -381,7 +399,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [firstJob, secondJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -392,18 +411,20 @@ struct ReviewUITests {
         let firstJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(firstJob))
         let secondJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(secondJob))
         #expect(firstJobRowHeightBeforeDrop == secondJobRowHeightBeforeDrop)
-        #expect(sidebar.performJobDropForTesting(
-            firstJob,
-            proposedJob: secondJob,
-            hoveringBelowMidpoint: false
-        ) == false)
+        #expect(
+            sidebar.performJobDropForTesting(
+                firstJob,
+                proposedJob: secondJob,
+                hoveringBelowMidpoint: false
+            ) == false)
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-1", "job-2"])
 
-        #expect(sidebar.performJobDropForTesting(
-            firstJob,
-            proposedJob: secondJob,
-            hoveringBelowMidpoint: true
-        ))
+        #expect(
+            sidebar.performJobDropForTesting(
+                firstJob,
+                proposedJob: secondJob,
+                hoveringBelowMidpoint: true
+            ))
         await Task.yield()
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
         #expect(sidebar.selectedJobForTesting?.id == "job-1")
@@ -460,10 +481,11 @@ struct ReviewUITests {
         ) {
             sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
         }
-        #expect(sidebar.displayedSectionTitlesForTesting == [
-            "workspace-alpha",
-            "workspace-beta",
-        ])
+        #expect(
+            sidebar.displayedSectionTitlesForTesting == [
+                "workspace-alpha",
+                "workspace-beta",
+            ])
         #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running", "job-alpha-queued"])
         #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == [])
     }
@@ -632,11 +654,12 @@ struct ReviewUITests {
         ) {
             sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
         }
-        #expect(sidebar.displayedSectionTitlesForTesting == [
-            "workspace-alpha",
-            "workspace-beta",
-            "workspace-gamma",
-        ])
+        #expect(
+            sidebar.displayedSectionTitlesForTesting == [
+                "workspace-alpha",
+                "workspace-beta",
+                "workspace-gamma",
+            ])
         #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
         #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
         #expect(sidebar.displayedJobIDsForTesting(in: gammaWorkspace) == [])
@@ -742,11 +765,12 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == [
-            "job-running",
-            "job-queued",
-            "job-finished-latest",
-        ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: workspace) == [
+                "job-running",
+                "job-queued",
+                "job-finished-latest",
+            ])
     }
 
     @Test func jobDropWhileFilteredMapsVisibleIndexToStoreOrder() async throws {
@@ -795,49 +819,54 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
 
-        #expect(sidebar.performJobDropForTesting(
-            runningA,
-            proposedJob: runningB,
-            hoveringBelowMidpoint: false
-        ) == false)
+        #expect(
+            sidebar.performJobDropForTesting(
+                runningA,
+                proposedJob: runningB,
+                hoveringBelowMidpoint: false
+            ) == false)
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
-        #expect(store.orderedJobs(in: workspace).map(\.id) == [
-            "job-hidden-prefix",
-            "job-running-a",
-            "job-hidden-middle",
-            "job-running-b",
-            "job-hidden-suffix",
-        ])
+        #expect(
+            store.orderedJobs(in: workspace).map(\.id) == [
+                "job-hidden-prefix",
+                "job-running-a",
+                "job-hidden-middle",
+                "job-running-b",
+                "job-hidden-suffix",
+            ])
 
-        #expect(sidebar.performJobDropForTesting(
-            runningA,
-            proposedJob: runningB,
-            hoveringBelowMidpoint: true
-        ))
+        #expect(
+            sidebar.performJobDropForTesting(
+                runningA,
+                proposedJob: runningB,
+                hoveringBelowMidpoint: true
+            ))
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
-        #expect(store.orderedJobs(in: workspace).map(\.id) == [
-            "job-hidden-prefix",
-            "job-hidden-middle",
-            "job-running-b",
-            "job-running-a",
-            "job-hidden-suffix",
-        ])
+        #expect(
+            store.orderedJobs(in: workspace).map(\.id) == [
+                "job-hidden-prefix",
+                "job-hidden-middle",
+                "job-running-b",
+                "job-running-a",
+                "job-hidden-suffix",
+            ])
 
         #expect(sidebar.performJobBlankAreaDropForTesting(runningA))
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
-        #expect(store.orderedJobs(in: workspace).map(\.id) == [
-            "job-hidden-prefix",
-            "job-hidden-middle",
-            "job-running-b",
-            "job-hidden-suffix",
-            "job-running-a",
-        ])
+        #expect(
+            store.orderedJobs(in: workspace).map(\.id) == [
+                "job-hidden-prefix",
+                "job-hidden-middle",
+                "job-running-b",
+                "job-hidden-suffix",
+                "job-running-a",
+            ])
     }
 
     @Test func jobDropIsRejectedForLatestFinishedOnlyFilter() {
@@ -924,11 +953,12 @@ struct ReviewUITests {
         ) {
             sidebar.displayedJobIDsForTesting(in: workspace)
         }
-        #expect(store.orderedJobs(in: workspace).map(\.id) == [
-            "job-finished-older",
-            "job-finished-latest",
-            "job-running",
-        ])
+        #expect(
+            store.orderedJobs(in: workspace).map(\.id) == [
+                "job-finished-older",
+                "job-finished-latest",
+                "job-running",
+            ])
     }
 
     @Test func jobSameMembershipSortOrderChangeMovesRowsWithoutReloadingWorkspace() async throws {
@@ -951,7 +981,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [firstJob, secondJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -977,7 +1008,8 @@ struct ReviewUITests {
 
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeChange)
-        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange)
+        #expect(
+            sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange + 1)
     }
 
@@ -1001,7 +1033,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [firstJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -1028,7 +1061,9 @@ struct ReviewUITests {
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-membership-1", "job-membership-2"])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeChange)
-        #expect(sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange + 1)
+        #expect(
+            sidebar.sidebarIncrementalMembershipChangeCountForTesting == incrementalMembershipChangeCountBeforeChange
+                + 1)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeChange)
     }
 
@@ -1237,10 +1272,11 @@ struct ReviewUITests {
         )
 
         #expect(accountsViewController.accountListUsesOutlineViewForTesting)
-        #expect(accountsViewController.displayedAccountEmailsForTesting == [
-            "active@example.com",
-            "other@example.com",
-        ])
+        #expect(
+            accountsViewController.displayedAccountEmailsForTesting == [
+                "active@example.com",
+                "other@example.com",
+            ])
         #expect(accountsViewController.accountRowUsesReviewMonitorAccountCellViewForTesting(displayedActiveAccount))
         #expect(accountsViewController.accountRowUsesSwiftUIRowViewForTesting(displayedActiveAccount))
     }
@@ -1272,15 +1308,17 @@ struct ReviewUITests {
             .accountIncrementalMembershipChangeCountForTesting
         let incrementalMoveCountBeforeDrop = accountsViewController.accountIncrementalMoveCountForTesting
 
-        #expect(await accountsViewController.performAccountDropForTesting(
-            displayedFirstAccount,
-            proposedChildIndex: 2
-        ))
-        #expect(store.auth.persistedAccounts.map(\.email) == [
-            "second@example.com",
-            "first@example.com",
-            "third@example.com",
-        ])
+        #expect(
+            await accountsViewController.performAccountDropForTesting(
+                displayedFirstAccount,
+                proposedChildIndex: 2
+            ))
+        #expect(
+            store.auth.persistedAccounts.map(\.email) == [
+                "second@example.com",
+                "first@example.com",
+                "third@example.com",
+            ])
         try await waitForObservedValue(
             from: accountsViewController.accountListObservationForTesting,
             [
@@ -1293,8 +1331,8 @@ struct ReviewUITests {
         }
         #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeDrop)
         #expect(
-            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
-                incrementalMembershipChangeCountBeforeDrop
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeDrop
         )
         #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
@@ -1322,20 +1360,23 @@ struct ReviewUITests {
             store.auth.persistedAccounts.first { $0.email == "first@example.com" }
         )
 
-        #expect(accountsViewController.displayedAccountEmailsForTesting == [
-            "first@example.com",
-            "second@example.com",
-            "detached@example.com",
-        ])
-        #expect(await accountsViewController.performAccountDropForTesting(
-            displayedFirstAccount,
-            proposedItem: detachedAccount,
-            proposedChildIndex: NSOutlineViewDropOnItemIndex
-        ))
-        #expect(store.auth.persistedAccounts.map(\.email) == [
-            "second@example.com",
-            "first@example.com",
-        ])
+        #expect(
+            accountsViewController.displayedAccountEmailsForTesting == [
+                "first@example.com",
+                "second@example.com",
+                "detached@example.com",
+            ])
+        #expect(
+            await accountsViewController.performAccountDropForTesting(
+                displayedFirstAccount,
+                proposedItem: detachedAccount,
+                proposedChildIndex: NSOutlineViewDropOnItemIndex
+            ))
+        #expect(
+            store.auth.persistedAccounts.map(\.email) == [
+                "second@example.com",
+                "first@example.com",
+            ])
         try await waitForObservedValue(
             from: accountsViewController.accountListObservationForTesting,
             [
@@ -1346,11 +1387,12 @@ struct ReviewUITests {
         ) {
             accountsViewController.displayedAccountEmailsForTesting
         }
-        #expect(accountsViewController.displayedAccountEmailsForTesting == [
-            "second@example.com",
-            "first@example.com",
-            "detached@example.com",
-        ])
+        #expect(
+            accountsViewController.displayedAccountEmailsForTesting == [
+                "second@example.com",
+                "first@example.com",
+                "detached@example.com",
+            ])
     }
 
     @Test func jobCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() throws {
@@ -1407,7 +1449,8 @@ struct ReviewUITests {
             workspaces: [alphaWorkspace, betaWorkspace],
             jobs: [alphaJob, betaJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -1438,7 +1481,8 @@ struct ReviewUITests {
             workspaces: [alphaWorkspace, betaWorkspace],
             jobs: [alphaJob, betaJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -1460,7 +1504,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [job]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -1485,7 +1530,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [job]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 260))
@@ -1513,7 +1559,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [job]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 260))
@@ -1539,7 +1586,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [job]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 260))
@@ -1560,7 +1608,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 260))
@@ -1596,7 +1645,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [secondaryJob] + primaryJobs)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 220))
@@ -1624,7 +1674,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: jobs)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 320))
@@ -1652,7 +1703,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: jobs)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 220))
@@ -1682,7 +1734,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: jobs)
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 360, height: 220))
@@ -1714,7 +1767,8 @@ struct ReviewUITests {
             jobs: [job]
         )
         let storedWorkspace = try #require(store.workspaces.first)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -1752,7 +1806,8 @@ struct ReviewUITests {
             content: makeSidebarContent(from: [job])
         )
         let workspace = try #require(store.workspaces.first(where: { $0.cwd == job.cwd }))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -1789,7 +1844,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
@@ -1816,7 +1872,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
@@ -1840,7 +1897,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -1910,12 +1968,13 @@ struct ReviewUITests {
             #expect(accountsViewController.hasTemporaryContextMenuForTesting)
         }
 
-        #expect(presentedTitles == [
-            "other@example.com",
-            "Switch",
-            "Refresh",
-            "Sign Out",
-        ])
+        #expect(
+            presentedTitles == [
+                "other@example.com",
+                "Switch",
+                "Refresh",
+                "Sign Out",
+            ])
         #expect(presentedHostingMenu)
         #expect(accountsViewController.isPresentingContextMenuForTesting == false)
         #expect(accountsViewController.acceptsFirstResponderForTesting)
@@ -1995,7 +2054,9 @@ struct ReviewUITests {
             accountsViewController.selectedAccountEmailForTesting == "active@example.com"
         }
 
-        #expect(accountsViewController.dragPasteboardAccountKeyForTesting(displayedOtherAccount) == displayedOtherAccount.accountKey)
+        #expect(
+            accountsViewController.dragPasteboardAccountKeyForTesting(displayedOtherAccount)
+                == displayedOtherAccount.accountKey)
         #expect(accountsViewController.selectedAccountEmailForTesting == "active@example.com")
         #expect(store.auth.selectedAccount?.email == "active@example.com")
     }
@@ -2086,10 +2147,11 @@ struct ReviewUITests {
         #expect(accountsViewController.displayedAccountEmailsForTesting == displayedEmails)
         #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeSelectionChange)
         #expect(
-            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
-                incrementalMembershipChangeCountBeforeSelectionChange
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeSelectionChange
         )
-        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeSelectionChange)
+        #expect(
+            accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeSelectionChange)
     }
 
     @Test func accountContentUpdateDoesNotReloadOutlineTopology() async throws {
@@ -2126,8 +2188,8 @@ struct ReviewUITests {
         #expect(accountsViewController.displayedAccountEmailsForTesting == ["active@example.com"])
         #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeUpdate)
         #expect(
-            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
-                incrementalMembershipChangeCountBeforeUpdate
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeUpdate
         )
         #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeUpdate)
     }
@@ -2169,17 +2231,19 @@ struct ReviewUITests {
             accountsViewController.displayedAccountEmailsForTesting
         }
 
-        #expect(accountsViewController.displayedAccountEmailsForTesting == [
-            "saved@example.com",
-            "detached@example.com",
-        ])
+        #expect(
+            accountsViewController.displayedAccountEmailsForTesting == [
+                "saved@example.com",
+                "detached@example.com",
+            ])
         #expect(accountsViewController.selectedAccountEmailForTesting == "detached@example.com")
         #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeMembershipChanges)
         #expect(
-            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
-                incrementalMembershipChangeCountBeforeMembershipChanges + 1
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeMembershipChanges + 1
         )
-        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
+        #expect(
+            accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
 
         store.auth.selectPersistedAccount(savedAccount.accountKey)
         try await waitForObservedValue(
@@ -2193,10 +2257,11 @@ struct ReviewUITests {
         #expect(accountsViewController.selectedAccountEmailForTesting == "saved@example.com")
         #expect(accountsViewController.accountFullReloadCountForTesting == fullReloadCountBeforeMembershipChanges)
         #expect(
-            accountsViewController.accountIncrementalMembershipChangeCountForTesting ==
-                incrementalMembershipChangeCountBeforeMembershipChanges + 2
+            accountsViewController.accountIncrementalMembershipChangeCountForTesting
+                == incrementalMembershipChangeCountBeforeMembershipChanges + 2
         )
-        #expect(accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
+        #expect(
+            accountsViewController.accountIncrementalMoveCountForTesting == incrementalMoveCountBeforeMembershipChanges)
     }
 
     @Test func accountActionAlertRestoresSelectionToAuthenticatedAccount() async throws {
@@ -2249,7 +2314,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [activeJob, recentJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
@@ -2279,12 +2345,13 @@ struct ReviewUITests {
 
         let selectedSnapshot = try await awaitTransportRender(transport)
         #expect(
-            selectedSnapshot == .init(
-                title: nil,
-                summary: nil,
-                log: recentJob.logText,
-                isShowingEmptyState: false
-            )
+            selectedSnapshot
+                == .init(
+                    title: nil,
+                    summary: nil,
+                    log: reviewMonitorLogText(for: recentJob),
+                    isShowingEmptyState: false
+                )
         )
         #expect(window.title == recentJob.targetSummary)
         #expect(window.subtitle == recentJob.cwd)
@@ -2305,7 +2372,8 @@ struct ReviewUITests {
         #expect(window.subtitle == recentJob.cwd)
         activeJob.updateStateForTesting(summary: "Old selection should not render.")
         activeJob.replaceLogEntries([.init(kind: .agentMessage, text: "Old selection log")])
-        recentJob.appendLogEntry(.init(kind: .progress, text: "Current selection log after stale mutation"))
+        appendTimelineLogEntryForTesting(
+            recentJob, .init(kind: .progress, text: "Current selection log after stale mutation"))
 
         let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
@@ -2342,7 +2410,7 @@ struct ReviewUITests {
                             endLine: 12
                         ),
                         rawText: ""
-                    )
+                    ),
                 ],
                 source: .parsedFinalReviewText
             )
@@ -2382,7 +2450,10 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectWorkspaceForTesting(workspace)
 
         _ = try await awaitTransportRender(transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [workspaceCWD])
+        #expect(
+            viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
+                workspaceCWD
+            ])
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
         #expect(transport.workspaceFindingsTextIsSelectableForTesting)
         #expect(transport.workspaceFindingsTextIsEditableForTesting == false)
@@ -2395,8 +2466,7 @@ struct ReviewUITests {
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingFindingsList)
         try await waitForCondition {
-            window.title == workspace.displayTitle &&
-                window.subtitle == workspace.cwd
+            window.title == workspace.displayTitle && window.subtitle == workspace.cwd
         }
         #expect(window.title == workspace.displayTitle)
         #expect(window.subtitle == workspace.cwd)
@@ -2491,8 +2561,7 @@ struct ReviewUITests {
         #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Sources/First.swift:1-1"))
         #expect(transport.workspaceFindingSnapshotForTesting.text.contains("Sources/Second.swift:2-2"))
         try await waitForCondition {
-            window.title == "CodexReviewKit" &&
-            window.subtitle == "2 workspaces"
+            window.title == "CodexReviewKit" && window.subtitle == "2 workspaces"
         }
     }
 
@@ -2607,41 +2676,48 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
-            "job-first-worktree-running-a",
-            "job-first-worktree-queued-b",
-        ])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-worktree-queued",
-            "job-second-worktree-latest-finished",
-        ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+                "job-first-worktree-running-a",
+                "job-first-worktree-queued-b",
+            ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+                "job-second-worktree-queued",
+                "job-second-worktree-latest-finished",
+            ])
 
-        #expect(sidebar.performJobDropForTesting(
-            firstRunningJob,
-            proposedWorkspaceSectionContaining: secondWorkspace,
-            childIndex: 3
-        ) == false)
+        #expect(
+            sidebar.performJobDropForTesting(
+                firstRunningJob,
+                proposedWorkspaceSectionContaining: secondWorkspace,
+                childIndex: 3
+            ) == false)
 
-        #expect(sidebar.performJobDropForTesting(
-            firstRunningJob,
-            proposedWorkspaceSectionContaining: firstWorkspace,
-            childIndex: 2
-        ))
+        #expect(
+            sidebar.performJobDropForTesting(
+                firstRunningJob,
+                proposedWorkspaceSectionContaining: firstWorkspace,
+                childIndex: 2
+            ))
         await Task.yield()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
-            "job-first-worktree-queued-b",
-            "job-first-worktree-running-a",
-        ])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-worktree-queued",
-            "job-second-worktree-latest-finished",
-        ])
-        #expect(store.orderedJobs(in: firstWorkspace).map(\.id) == [
-            "job-first-worktree-hidden-finished",
-            "job-first-worktree-queued-b",
-            "job-first-worktree-running-a",
-        ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+                "job-first-worktree-queued-b",
+                "job-first-worktree-running-a",
+            ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+                "job-second-worktree-queued",
+                "job-second-worktree-latest-finished",
+            ])
+        #expect(
+            store.orderedJobs(in: firstWorkspace).map(\.id) == [
+                "job-first-worktree-hidden-finished",
+                "job-first-worktree-queued-b",
+                "job-first-worktree-running-a",
+            ])
     }
 
     @Test func workspaceSectionSelectionExpandsWhenLinkedWorktreeArrives() async throws {
@@ -2777,7 +2853,8 @@ struct ReviewUITests {
             workspaces: [firstWorkspace, secondWorkspace, standaloneWorkspace],
             jobs: [firstJob, secondJob, standaloneJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "Standalone"])
@@ -2824,25 +2901,28 @@ struct ReviewUITests {
             workspaces: [firstWorkspace, secondWorkspace, standaloneWorkspace],
             jobs: [firstJob, secondJob, standaloneJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "Standalone"])
         #expect(sidebar.workspaceSectionCanStartDragForTesting(containing: firstWorkspace))
 
         let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
-        #expect(sidebar.performWorkspaceSectionDropForTesting(
-            containing: firstWorkspace,
-            toIndex: 2
-        ))
+        #expect(
+            sidebar.performWorkspaceSectionDropForTesting(
+                containing: firstWorkspace,
+                toIndex: 2
+            ))
         await Task.yield()
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["Standalone", "CodexReviewKit"])
-        #expect(store.orderedWorkspaces.map(\.cwd) == [
-            standaloneWorkspace.cwd,
-            firstWorkspace.cwd,
-            secondWorkspace.cwd,
-        ])
+        #expect(
+            store.orderedWorkspaces.map(\.cwd) == [
+                standaloneWorkspace.cwd,
+                firstWorkspace.cwd,
+                secondWorkspace.cwd,
+            ])
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
     }
 
@@ -2889,24 +2969,27 @@ struct ReviewUITests {
             workspaces: [firstWorkspace, standaloneBWorkspace, standaloneCWorkspace, secondWorkspace],
             jobs: [firstJob, standaloneBJob, standaloneCJob, secondJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit", "StandaloneB", "StandaloneC"])
 
-        #expect(sidebar.performWorkspaceSectionDropForTesting(
-            containing: firstWorkspace,
-            toIndex: 2
-        ))
+        #expect(
+            sidebar.performWorkspaceSectionDropForTesting(
+                containing: firstWorkspace,
+                toIndex: 2
+            ))
         await Task.yield()
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["StandaloneB", "CodexReviewKit", "StandaloneC"])
-        #expect(store.orderedWorkspaces.map(\.cwd) == [
-            standaloneBWorkspace.cwd,
-            firstWorkspace.cwd,
-            secondWorkspace.cwd,
-            standaloneCWorkspace.cwd,
-        ])
+        #expect(
+            store.orderedWorkspaces.map(\.cwd) == [
+                standaloneBWorkspace.cwd,
+                firstWorkspace.cwd,
+                secondWorkspace.cwd,
+                standaloneCWorkspace.cwd,
+            ])
     }
 
     @Test func workspaceSectionJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
@@ -2940,39 +3023,45 @@ struct ReviewUITests {
             workspaces: [firstWorkspace, secondWorkspace],
             jobs: [firstWorkspaceJob, secondWorkspaceFirstJob, secondWorkspaceSecondJob]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-workspace-first",
-            "job-second-workspace-second",
-        ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+                "job-second-workspace-first",
+                "job-second-workspace-second",
+            ])
 
-        #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
-            proposedWorkspaceSectionContaining: secondWorkspace,
-            childIndex: 0
-        ) == false)
+        #expect(
+            sidebar.performJobDropForTesting(
+                secondWorkspaceFirstJob,
+                proposedWorkspaceSectionContaining: secondWorkspace,
+                childIndex: 0
+            ) == false)
 
-        #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
-            proposedJob: firstWorkspaceJob,
-            hoveringBelowMidpoint: true
-        ) == false)
+        #expect(
+            sidebar.performJobDropForTesting(
+                secondWorkspaceFirstJob,
+                proposedJob: firstWorkspaceJob,
+                hoveringBelowMidpoint: true
+            ) == false)
 
-        #expect(sidebar.performJobDropForTesting(
-            secondWorkspaceFirstJob,
-            proposedJob: secondWorkspaceSecondJob,
-            hoveringBelowMidpoint: true
-        ))
+        #expect(
+            sidebar.performJobDropForTesting(
+                secondWorkspaceFirstJob,
+                proposedJob: secondWorkspaceSecondJob,
+                hoveringBelowMidpoint: true
+            ))
         await Task.yield()
 
         #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
-            "job-second-workspace-second",
-            "job-second-workspace-first",
-        ])
+        #expect(
+            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+                "job-second-workspace-second",
+                "job-second-workspace-first",
+            ])
     }
 
     @Test func workspaceFindingsTextWrapsWithinDetailWidth() async throws {
@@ -3078,10 +3167,11 @@ struct ReviewUITests {
         #expect(transport.workspaceFindingsAutomaticallyAdjustsContentInsetsForTesting)
         #expect(contentInsets.top > 0)
         #expect(abs(transport.workspaceFindingsVerticalScrollOffsetForTesting + contentInsets.top) < 0.5)
-        #expect(abs(
-            transport.workspaceFindingsMaximumVerticalScrollOffsetForTesting
-                - transport.workspaceFindingsMinimumVerticalScrollOffsetForTesting
-        ) < 0.5)
+        #expect(
+            abs(
+                transport.workspaceFindingsMaximumVerticalScrollOffsetForTesting
+                    - transport.workspaceFindingsMinimumVerticalScrollOffsetForTesting
+            ) < 0.5)
     }
 
     @Test func selectingWorkspaceWithoutStructuredFindingsShowsNoFindingsState() async throws {
@@ -3117,11 +3207,12 @@ struct ReviewUITests {
         let safeAreaFrame = transport.safeAreaFrameForTesting
 
         #expect(
-            transport.workspaceFindingSnapshotForTesting == .init(
-                text: "",
-                isShowingNoFindingsState: true,
-                isShowingFindingsList: false
-            )
+            transport.workspaceFindingSnapshotForTesting
+                == .init(
+                    text: "",
+                    isShowingNoFindingsState: true,
+                    isShowingFindingsList: false
+                )
         )
         #expect(abs(findingsFrame.minX - safeAreaFrame.minX) < 0.5)
         #expect(abs(findingsFrame.maxX - safeAreaFrame.maxX) < 0.5)
@@ -3133,8 +3224,7 @@ struct ReviewUITests {
         #expect(abs(noFindingsPlaceholderFrame.maxY - viewBounds.maxY) < 0.5)
         #expect(safeAreaFrame.maxY < viewBounds.maxY)
         try await waitForCondition {
-            window.title == workspace.displayTitle &&
-                window.subtitle == workspace.cwd
+            window.title == workspace.displayTitle && window.subtitle == workspace.cwd
         }
         #expect(window.title == workspace.displayTitle)
         #expect(window.subtitle == workspace.cwd)
@@ -3150,7 +3240,8 @@ struct ReviewUITests {
         let workspace = CodexReviewWorkspace(cwd: job.cwd)
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, workspaces: [workspace], jobs: [job])
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let sidebar = viewController.sidebarViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
@@ -3171,9 +3262,8 @@ struct ReviewUITests {
 
         store.loadForTesting(serverState: .running, workspaces: [])
         try await waitForCondition {
-            sidebar.selectedWorkspaceSectionForTesting == nil &&
-            sidebar.selectedJobForTesting == nil &&
-            transport.isShowingEmptyStateForTesting
+            sidebar.selectedWorkspaceSectionForTesting == nil && sidebar.selectedJobForTesting == nil
+                && transport.isShowingEmptyStateForTesting
         }
 
         #expect(sidebar.selectedWorkspaceSectionForTesting == nil)
@@ -3219,7 +3309,7 @@ struct ReviewUITests {
                         commandStatus: "completed"
                     )
                 ),
-                .init(kind: .agentMessage, text: "No correctness issues found.")
+                .init(kind: .agentMessage, text: "No correctness issues found."),
             ]
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -3282,35 +3372,40 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         let initialLogEntries = job.logEntries
 
-        job.timeline.apply(.itemCompleted(.init(
-            id: "message-direct",
-            kind: .agentMessage,
-            family: .message,
-            phase: .completed,
-            content: .message(.init(text: "Timeline-only detail update"))
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: "message-direct",
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: "Timeline-only detail update"))
+                )))
 
         var snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Timeline-only detail update")
         #expect(job.logEntries == initialLogEntries)
 
         let startedAt = Date(timeIntervalSince1970: 250)
-        job.timeline.apply(.itemCompleted(.init(
-            id: "cmd-direct",
-            kind: .commandExecution,
-            family: .command,
-            phase: .completed,
-            content: .command(.init(
-                command: "swift test",
-                output: "Tests passed",
-                exitCode: 0,
-                status: .completed,
-                durationMs: 2_000
-            )),
-            startedAt: startedAt,
-            completedAt: startedAt.addingTimeInterval(2),
-            durationMs: 2_000
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: "cmd-direct",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .completed,
+                    content: .command(
+                        .init(
+                            command: "swift test",
+                            output: "Tests passed",
+                            exitCode: 0,
+                            status: .completed,
+                            durationMs: 2_000
+                        )),
+                    startedAt: startedAt,
+                    completedAt: startedAt.addingTimeInterval(2),
+                    durationMs: 2_000
+                )))
 
         snapshot = try await awaitTransportRender(transport) {
             $0.log.contains("Ran swift test for 2s")
@@ -3325,8 +3420,12 @@ struct ReviewUITests {
         let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("$ swift test") == true)
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("$ swift test")
+                == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed")
+                == true)
     }
 
     @Test func directTimelineFailedCommandPreservesFailedPanelStatus() async throws {
@@ -3358,19 +3457,22 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
 
         let startedAt = Date(timeIntervalSince1970: 300)
-        job.timeline.apply(.itemCompleted(.init(
-            id: "cmd-failed-direct",
-            kind: .commandExecution,
-            family: .command,
-            phase: .failed,
-            content: .command(.init(
-                command: "swift test",
-                output: "Tests failed"
-            )),
-            startedAt: startedAt,
-            completedAt: startedAt.addingTimeInterval(4),
-            durationMs: 4_000
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: "cmd-failed-direct",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .failed,
+                    content: .command(
+                        .init(
+                            command: "swift test",
+                            output: "Tests failed"
+                        )),
+                    startedAt: startedAt,
+                    completedAt: startedAt.addingTimeInterval(4),
+                    durationMs: 4_000
+                )))
 
         let snapshot = try await awaitTransportRender(transport) {
             $0.log.contains("Ran swift test for 4s")
@@ -3382,7 +3484,9 @@ struct ReviewUITests {
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Failed")
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests failed") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests failed")
+                == true)
     }
 
     @Test func directTimelineRunningCommandOutputStaysActive() async throws {
@@ -3413,17 +3517,20 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        job.timeline.apply(.itemStarted(.init(
-            id: "cmd-running-direct",
-            kind: .commandExecution,
-            family: .command,
-            phase: .running,
-            content: .command(.init(
-                command: "swift test",
-                output: "Building..."
-            )),
-            startedAt: Date(timeIntervalSince1970: 300)
-        )))
+        job.timeline.apply(
+            .itemStarted(
+                .init(
+                    id: "cmd-running-direct",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .running,
+                    content: .command(
+                        .init(
+                            command: "swift test",
+                            output: "Building..."
+                        )),
+                    startedAt: Date(timeIntervalSince1970: 300)
+                )))
 
         let snapshot = try await awaitTransportRender(transport) {
             $0.log.contains("Running swift test")
@@ -3437,7 +3544,9 @@ struct ReviewUITests {
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "running")
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Building...") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Building...")
+                == true)
     }
 
     @Test func directTimelineTerminalPhaseOverridesStaleCommandStatus() async throws {
@@ -3468,17 +3577,20 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        job.timeline.apply(.itemCompleted(.init(
-            id: "cmd-stale-status-direct",
-            kind: .commandExecution,
-            family: .command,
-            phase: .completed,
-            content: .command(.init(
-                command: "swift test",
-                output: "Tests passed",
-                status: .inProgress
-            ))
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: "cmd-stale-status-direct",
+                    kind: .commandExecution,
+                    family: .command,
+                    phase: .completed,
+                    content: .command(
+                        .init(
+                            command: "swift test",
+                            output: "Tests passed",
+                            status: .inProgress
+                        ))
+                )))
 
         let snapshot = try await awaitTransportRender(transport) {
             $0.log.contains("Ran swift test")
@@ -3490,7 +3602,9 @@ struct ReviewUITests {
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed")
+                == true)
     }
 
     @Test func timelineProjectionDoesNotAppendWhenExistingBlockPresentationChanges() {
@@ -3528,13 +3642,14 @@ struct ReviewUITests {
                 isActive: isActive,
                 primaryText: "Tool output",
                 rawTranscriptText: "Tool output",
-                content: .toolCall(.init(
-                    namespace: "codex_review",
-                    server: "codex_review",
-                    name: "review_start",
-                    result: "Tool output",
-                    status: status
-                )),
+                content: .toolCall(
+                    .init(
+                        namespace: "codex_review",
+                        server: "codex_review",
+                        name: "review_start",
+                        result: "Tool output",
+                        status: status
+                    )),
                 createdAt: timestamp,
                 updatedAt: timestamp
             )
@@ -3543,7 +3658,7 @@ struct ReviewUITests {
         let initialDocument = document(
             revision: 1,
             blocks: [
-                toolBlock(phase: .running, isActive: true, status: .inProgress),
+                toolBlock(phase: .running, isActive: true, status: .inProgress)
             ]
         )
         _ = projection.render(timelineDocument: initialDocument)
@@ -3599,28 +3714,31 @@ struct ReviewUITests {
                         isActive: true,
                         primaryText: "codex_review.review_start",
                         rawTranscriptText: progress,
-                        content: .toolCall(.init(
-                            namespace: "codex_review",
-                            server: "codex_review",
-                            name: "review_start",
-                            status: .inProgress,
-                            progress: progress
-                        )),
+                        content: .toolCall(
+                            .init(
+                                namespace: "codex_review",
+                                server: "codex_review",
+                                name: "review_start",
+                                status: .inProgress,
+                                progress: progress
+                            )),
                         createdAt: timestamp,
                         updatedAt: timestamp
-                    ),
+                    )
                 ]
             )
         }
 
-        let initialLog = projection.render(timelineDocument: document(
-            revision: 1,
-            progress: "MCP codex_review.review_start started."
-        ))
-        let updatedLog = projection.render(timelineDocument: document(
-            revision: 2,
-            progress: "MCP codex_review.review_start still running."
-        ))
+        let initialLog = projection.render(
+            timelineDocument: document(
+                revision: 1,
+                progress: "MCP codex_review.review_start started."
+            ))
+        let updatedLog = projection.render(
+            timelineDocument: document(
+                revision: 2,
+                progress: "MCP codex_review.review_start still running."
+            ))
 
         #expect(initialLog.text == "MCP codex_review.review_start started.")
         #expect(updatedLog.text == "MCP codex_review.review_start still running.")
@@ -3649,20 +3767,21 @@ struct ReviewUITests {
                     isActive: false,
                     primaryText: "Command output",
                     rawTranscriptText: "stderr",
-                    content: .command(.init(
-                        title: "",
-                        command: "",
-                        output: "stderr",
-                        exitCode: 2,
-                        status: .failed,
-                        durationMs: 4_000
-                    )),
+                    content: .command(
+                        .init(
+                            title: "",
+                            command: "",
+                            output: "stderr",
+                            exitCode: 2,
+                            status: .failed,
+                            durationMs: 4_000
+                        )),
                     createdAt: startedAt,
                     updatedAt: completedAt,
                     startedAt: startedAt,
                     completedAt: completedAt,
                     durationMs: 4_000
-                ),
+                )
             ]
         )
 
@@ -3703,15 +3822,16 @@ struct ReviewUITests {
                     isActive: true,
                     primaryText: "Running swift test",
                     rawTranscriptText: "$ swift test\nTests failed",
-                    content: .command(.init(
-                        title: "Command",
-                        command: "swift test",
-                        output: "Tests failed",
-                        exitCode: 1
-                    )),
+                    content: .command(
+                        .init(
+                            title: "Command",
+                            command: "swift test",
+                            output: "Tests failed",
+                            exitCode: 1
+                        )),
                     createdAt: Date(timeIntervalSince1970: 400),
                     updatedAt: Date(timeIntervalSince1970: 400)
-                ),
+                )
             ]
         )
 
@@ -3748,14 +3868,15 @@ struct ReviewUITests {
                     isActive: false,
                     primaryText: "Running swift test",
                     rawTranscriptText: "$ swift test",
-                    content: .command(.init(
-                        title: "Command",
-                        command: "swift test",
-                        status: .inProgress
-                    )),
+                    content: .command(
+                        .init(
+                            title: "Command",
+                            command: "swift test",
+                            status: .inProgress
+                        )),
                     createdAt: Date(timeIntervalSince1970: 400),
                     updatedAt: Date(timeIntervalSince1970: 400)
-                ),
+                )
             ]
         )
 
@@ -3798,18 +3919,21 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        job.timeline.apply(.itemCompleted(.init(
-            id: "file-change-direct",
-            kind: .fileChange,
-            family: .fileChange,
-            phase: .completed,
-            content: .fileChange(.init(
-                title: "Updated Sources/App.swift",
-                output: "Sources/App.swift | 12 ++++++------",
-                paths: ["Sources/App.swift"],
-                status: .started
-            ))
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: "file-change-direct",
+                    kind: .fileChange,
+                    family: .fileChange,
+                    phase: .completed,
+                    content: .fileChange(
+                        .init(
+                            title: "Updated Sources/App.swift",
+                            output: "Sources/App.swift | 12 ++++++------",
+                            paths: ["Sources/App.swift"],
+                            status: .started
+                        ))
+                )))
 
         let snapshot = try await awaitTransportRender(transport) {
             $0.log.contains("Updated Sources/App.swift")
@@ -3850,7 +3974,7 @@ struct ReviewUITests {
                         status: "inProgress",
                         itemID: "compact_1"
                     )
-                ),
+                )
             ]
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -3873,17 +3997,19 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
 
-        job.appendLogEntry(.init(
-            kind: .contextCompaction,
-            groupID: "compact_1",
-            replacesGroup: true,
-            text: "Context automatically compacted",
-            metadata: .init(
-                sourceType: "contextCompaction",
-                status: "completed",
-                itemID: "compact_1"
-            )
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .contextCompaction,
+                groupID: "compact_1",
+                replacesGroup: true,
+                text: "Context automatically compacted",
+                metadata: .init(
+                    sourceType: "contextCompaction",
+                    status: "completed",
+                    itemID: "compact_1"
+                )
+            ))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.displayedLogForTesting == "Context automatically compacted")
@@ -3900,7 +4026,9 @@ struct ReviewUITests {
             sourceType: "command",
             title: "Ran command for 17s",
             status: "succeeded",
-            exitCode: 0
+            command: "swift test",
+            exitCode: 0,
+            commandStatus: "completed"
         )
         let job = CodexReviewJob.makeForTesting(
             id: "job-command-output-panel",
@@ -3919,7 +4047,7 @@ struct ReviewUITests {
                     text: outputText,
                     metadata: commandMetadata
                 ),
-                .init(kind: .agentMessage, text: "Continuing after the command.")
+                .init(kind: .agentMessage, text: "Continuing after the command."),
             ]
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -3985,19 +4113,24 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
         #expect(transport.logFindStringForTesting.contains("output line 3") == false)
         #expect(transport.logCommandOutputPanelOutputScrollIsScrollableForTesting)
-        let initialOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
-        let initialOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
+        let initialOutputScrollOffset = try #require(
+            transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        let initialOutputScrollMaximumOffset = try #require(
+            transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
         #expect(abs(initialOutputScrollOffset - initialOutputScrollMaximumOffset) <= 0.5)
         #expect(transport.scrollCommandOutputPanelOutputForTesting(deltaY: -24))
-        let scrolledOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        let scrolledOutputScrollOffset = try #require(
+            transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
         let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
-        job.appendLogEntry(.init(
-            kind: .commandOutput,
-            groupID: "cmd_1",
-            text: "\noutput line 10",
-            metadata: commandMetadata
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "\noutput line 10",
+                metadata: commandMetadata
+            ))
         _ = try await awaitTransportRender(transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logReloadCountForTesting == expandedOutputAppendReloadCount)
@@ -4015,8 +4148,10 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reopenReloadCount)
         #expect(transport.logExpandedCommandOutputPanelCountForTesting == 1)
         await awaitNativeLayoutTurn()
-        let reopenedOutputScrollOffset = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
-        let reopenedOutputScrollMaximumOffset = try #require(transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
+        let reopenedOutputScrollOffset = try #require(
+            transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
+        let reopenedOutputScrollMaximumOffset = try #require(
+            transport.logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting)
         #expect(abs(reopenedOutputScrollOffset - reopenedOutputScrollMaximumOffset) <= 0.5)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("$ swift test") == true)
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 1") == true)
@@ -4024,13 +4159,15 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
-        job.appendLogEntry(.init(
-            kind: .commandOutput,
-            groupID: "cmd_1",
-            text: "\noutput line 11",
-            metadata: commandMetadata
-        ))
-        job.appendLogEntry(.init(kind: .agentMessage, text: "Visible text after command output."))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "\noutput line 11",
+                metadata: commandMetadata
+            ))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
         _ = try await awaitTransportRender(transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
@@ -4093,16 +4230,19 @@ struct ReviewUITests {
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: firstBlockID))
         await awaitNativeLayoutTurn()
 
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
-            .contains("first output line 80") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
+                .contains("first output line 80") == true)
 
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: secondBlockID))
         await awaitNativeLayoutTurn()
 
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
-            .contains("first output line 80") == true)
-        #expect(transport.logCommandOutputPanelTerminalTextForTesting(blockID: secondBlockID)?
-            .contains("second output line 80") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: firstBlockID)?
+                .contains("first output line 80") == true)
+        #expect(
+            transport.logCommandOutputPanelTerminalTextForTesting(blockID: secondBlockID)?
+                .contains("second output line 80") == true)
     }
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
@@ -4139,12 +4279,21 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
-        job.appendLogEntry(.init(
-            kind: .commandOutput,
-            groupID: "cmd_1",
-            text: "output line 1",
-            metadata: .init(sourceType: "commandExecution", title: "Command output", status: "succeeded", exitCode: 0)
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "output line 1",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    title: "Command output",
+                    status: "succeeded",
+                    command: "swift test",
+                    exitCode: 0,
+                    commandStatus: "completed"
+                )
+            ))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
@@ -4167,7 +4316,7 @@ struct ReviewUITests {
             summary: "Running review.",
             logEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
-                .init(kind: .commandOutput, groupID: "cmd_1", text: outputText)
+                .init(kind: .commandOutput, groupID: "cmd_1", text: outputText),
             ]
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -4189,10 +4338,10 @@ struct ReviewUITests {
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
-            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Running swift test"))
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Running swift test"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -4201,17 +4350,18 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Running swift test"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
-            job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
+            appendTimelineLogEntryForTesting(
+                job, .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
             _ = try await awaitTransportRender(transport)
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Running swift test"))
+            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }
     }
@@ -4252,12 +4402,13 @@ struct ReviewUITests {
 
         let recentSnapshot = try await awaitTransportRender(transport)
         #expect(
-            recentSnapshot == .init(
-                title: nil,
-                summary: nil,
-                log: recentJob.logText,
-                isShowingEmptyState: false
-            )
+            recentSnapshot
+                == .init(
+                    title: nil,
+                    summary: nil,
+                    log: reviewMonitorLogText(for: recentJob),
+                    isShowingEmptyState: false
+                )
         )
         #expect(window.title == recentJob.targetSummary)
         #expect(window.subtitle == recentJob.cwd)
@@ -4274,7 +4425,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4309,7 +4461,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [activeJob, recentJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4356,7 +4509,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [activeJob, recentJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4373,7 +4527,7 @@ struct ReviewUITests {
 
         #expect(transport.isLogPinnedToBottomForTesting)
 
-        activeJob.appendLogEntry(.init(kind: .progress, text: "Newest active line"))
+        appendTimelineLogEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
         let snapshot = try await awaitTransportRender(transport)
 
@@ -4392,7 +4546,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4415,7 +4570,7 @@ struct ReviewUITests {
         )
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [replacement]))
 
-        #expect(transport.displayedLogForTesting == longLog)
+        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: replacement))
         #expect(transport.logVerticalScrollOffsetForTesting == preservedOffset)
     }
 
@@ -4437,7 +4592,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4487,7 +4643,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(longJob)
         let longSnapshot = try await awaitTransportRender(transport)
 
-        #expect(longSnapshot.log == longLog)
+        #expect(longSnapshot.log == reviewMonitorLogText(for: longJob))
         #expect(transport.isLogPinnedToBottomForTesting)
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
@@ -4511,7 +4667,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [shortJob, recentJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4524,14 +4681,15 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
-        shortJob.replaceLogEntries([.init(kind: .agentMessage, text: longLog)])
+        replaceTimelineLogTextForTesting(shortJob, longLog)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
         _ = try await awaitTransportRender(transport)
 
-        #expect(abs(
-            transport.logVerticalScrollOffsetForTesting
-                - transport.logMinimumVerticalScrollOffsetForTesting
-        ) < 0.5)
+        #expect(
+            abs(
+                transport.logVerticalScrollOffsetForTesting
+                    - transport.logMinimumVerticalScrollOffsetForTesting
+            ) < 0.5)
         #expect(transport.isLogPinnedToBottomForTesting == false)
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
@@ -4553,7 +4711,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [activeJob, recentJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4564,8 +4723,8 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
         _ = try await awaitTransportRender(transport)
-        activeJob.appendLogEntry(.init(kind: .progress, text: "stale update"))
-        recentJob.appendLogEntry(.init(kind: .progress, text: "fresh update"))
+        appendTimelineLogEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
+        appendTimelineLogEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
 
         let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("fresh update")
@@ -4587,7 +4746,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4619,7 +4779,8 @@ struct ReviewUITests {
             workspaces: [workspace],
             jobs: [job]
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -4632,14 +4793,18 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(workspace)
 
         _ = try await awaitTransportRender(transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [workspace.cwd])
+        #expect(
+            viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
+                workspace.cwd
+            ])
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
         #expect(
-            transport.workspaceFindingSnapshotForTesting == .init(
-                text: "",
-                isShowingNoFindingsState: true,
-                isShowingFindingsList: false
-            )
+            transport.workspaceFindingSnapshotForTesting
+                == .init(
+                    text: "",
+                    isShowingNoFindingsState: true,
+                    isShowingFindingsList: false
+                )
         )
     }
 
@@ -4647,7 +4812,8 @@ struct ReviewUITests {
         let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, workspaces: [])
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
@@ -4683,7 +4849,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [activeJob, recentJob])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
@@ -4765,7 +4932,8 @@ struct ReviewUITests {
             serverState: .running,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -4777,12 +4945,12 @@ struct ReviewUITests {
             status: .succeeded,
             summary: "Review completed successfully."
         )
-        job.replaceLogEntries([.init(kind: .agentMessage, text: "Updated log")])
+        replaceTimelineLogTextForTesting(job, "Updated log")
 
         let updatedSnapshot = try await awaitTransportRender(transport)
         #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting?.id == "job-1")
         #expect(updatedSnapshot.summary == nil)
-        #expect(updatedSnapshot.log == "Updated log")
+        #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
     }
 
     @Test func selectedJobLogAppendUsesAppendPath() async throws {
@@ -4801,7 +4969,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 360))
@@ -4813,7 +4982,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: " log"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Initial log")
@@ -4838,13 +5007,14 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        job.appendLogEntry(.init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
@@ -4869,7 +5039,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -4900,13 +5071,14 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: " one"))
-        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: " two"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Initial one two")
@@ -4928,13 +5100,14 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        job.appendLogEntry(.init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
-        job.appendLogEntry(.init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
@@ -4956,19 +5129,22 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
-        job.appendLogEntry(.init(
-            kind: .progress,
-            groupID: "progress_1",
-            text: String(repeating: "progress ", count: 20)
-        ))
+        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .progress,
+                groupID: "progress_1",
+                text: String(repeating: "progress ", count: 20)
+            ))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.contains("progress progress"))
@@ -4997,17 +5173,24 @@ struct ReviewUITests {
 
         let initialDocumentFrame = transport.logDocumentViewFrameForTesting
         #expect(transport.isLogPinnedToBottomForTesting)
-        #expect(abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting) < 0.5)
-        job.appendLogEntry(.init(
-            kind: .progress,
-            text: "stream.tick 001 delta/layout +2 -0 while the short log remains below the scrollable viewport height"
-        ))
+        #expect(
+            abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting)
+                < 0.5)
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .progress,
+                text:
+                    "stream.tick 001 delta/layout +2 -0 while the short log remains below the scrollable viewport height"
+            ))
         _ = try await awaitTransportRender(transport)
         transport.view.layoutSubtreeIfNeeded()
 
         let appendedDocumentFrame = transport.logDocumentViewFrameForTesting
         #expect(abs(appendedDocumentFrame.height - initialDocumentFrame.height) < 0.5)
-        #expect(abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting) < 0.5)
+        #expect(
+            abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting)
+                < 0.5)
     }
 
     @Test func selectedJobGroupedReplacementUsesReplacementPath() async throws {
@@ -5026,7 +5209,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -5034,7 +5218,8 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        job.appendLogEntry(.init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
+        appendTimelineLogEntryForTesting(
+            job, .init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "- updated")
@@ -5081,28 +5266,32 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        job.appendLogEntry(.init(
-            kind: .command,
-            groupID: "cmd_1",
-            replacesGroup: true,
-            text: "$ git diff",
-            metadata: .init(
-                sourceType: "commandExecution",
-                status: "completed",
-                itemID: "cmd_1",
-                command: "git diff",
-                exitCode: 0,
-                startedAt: startedAt,
-                completedAt: completedAt,
-                durationMs: 3_000,
-                commandStatus: "completed"
-            )
-        ))
-        job.appendLogEntry(.init(
-            kind: .rawReasoning,
-            groupID: "reasoning_1",
-            text: "I found the relevant update path."
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .command,
+                groupID: "cmd_1",
+                replacesGroup: true,
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    exitCode: 0,
+                    startedAt: startedAt,
+                    completedAt: completedAt,
+                    durationMs: 3_000,
+                    commandStatus: "completed"
+                )
+            ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "I found the relevant update path."
+            ))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.contains("Ran git diff for 3s"))
@@ -5140,24 +5329,28 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
-        job.appendLogEntry(.init(
-            kind: .command,
-            groupID: "cmd_1",
-            text: "$ git diff",
-            metadata: .init(
-                sourceType: "commandExecution",
-                status: "inProgress",
-                itemID: "cmd_1",
-                command: "git diff",
-                startedAt: startedAt,
-                commandStatus: "inProgress"
-            )
-        ))
-        job.appendLogEntry(.init(
-            kind: .rawReasoning,
-            groupID: "reasoning_2",
-            text: "Inspecting details after the command starts."
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "inProgress",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "inProgress"
+                )
+            ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_2",
+                text: "Inspecting details after the command starts."
+            ))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.contains("Need to inspect files."))
@@ -5183,7 +5376,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -5191,33 +5385,13 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        job.appendLogEntry(.init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "bold")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
-    }
-
-    @Test func skippedMarkdownRestyleReloadsBeforeSuffixAppendFallback() {
-        let logScrollView = ReviewMonitorLogScrollView()
-        let initialEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: "bold")
-        let restyledEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", replacesGroup: true, text: "**bold**")
-        let appendedEntry = ReviewLogEntry(kind: .agentMessage, groupID: "msg_1", text: " tail")
-        var projection = ReviewMonitorLog.Projection()
-        let initialDocument = projection.render(entries: [initialEntry])
-        logScrollView.render(document: initialDocument, restoring: .top, allowIncrementalUpdate: false)
-        let appendCount = logScrollView.appendCount
-        let reloadCount = logScrollView.reloadCount
-
-        _ = projection.render(entries: [initialEntry, restyledEntry])
-        let latestDocument = projection.render(entries: [initialEntry, restyledEntry, appendedEntry])
-        logScrollView.render(document: latestDocument, restoring: .top, allowIncrementalUpdate: true)
-
-        #expect(logScrollView.displayedTextForTesting == "bold tail")
-        #expect(logScrollView.appendCount == appendCount)
-        #expect(logScrollView.reloadCount == reloadCount + 1)
     }
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
@@ -5236,22 +5410,25 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        job.appendLogEntry(.init(
-            kind: .plan,
-            groupID: "plan_1",
-            replacesGroup: true,
-            text: "- updated with longer replacement text"
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .plan,
+                groupID: "plan_1",
+                replacesGroup: true,
+                text: "- updated with longer replacement text"
+            ))
         _ = try await awaitTransportRender(transport)
         let replaceCount = transport.logReplaceCountForTesting
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        job.appendLogEntry(.init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Command output")
         }
@@ -5275,7 +5452,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -5284,7 +5462,7 @@ struct ReviewUITests {
         let reloadCount = transport.logReloadCountForTesting
         job.updateStateForTesting(summary: "Updated summary.")
 
-        #expect(transport.displayedLogForTesting == "Initial log")
+        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: job))
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
@@ -5305,13 +5483,15 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
+        appendTimelineLogEntryForTesting(
+            job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting == 2)
@@ -5319,13 +5499,14 @@ struct ReviewUITests {
         transport.completeLogWordGlowAnimationsForTesting()
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
+        appendTimelineLogEntryForTesting(
+            job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting == 0)
@@ -5360,7 +5541,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         transport.setLogReduceMotionForTesting(false)
@@ -5369,13 +5551,14 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
         _ = try await awaitTransportRender(transport)
-        firstJob.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
+        appendTimelineLogEntryForTesting(
+            firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        firstJob.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
+        appendTimelineLogEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting > 0)
     }
@@ -5406,7 +5589,8 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
+        appendTimelineLogEntryForTesting(
+            job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting > 0)
@@ -5446,7 +5630,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
 
-        job.appendLogEntry(.init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting > 0)
 
@@ -5465,7 +5649,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5482,7 +5667,7 @@ struct ReviewUITests {
         transport.scrollLogToTopForTesting()
         #expect(transport.isLogPinnedToBottomForTesting == false)
         let unpinnedAutoFollow = transport.logAutoFollowCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Unpinned update"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logAutoFollowCountForTesting == unpinnedAutoFollow)
         #expect(transport.isLogPinnedToBottomForTesting == false)
@@ -5490,7 +5675,7 @@ struct ReviewUITests {
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         let pinnedAutoFollow = transport.logAutoFollowCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Pinned update"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5521,7 +5706,7 @@ struct ReviewUITests {
         let wrappedLine = (0..<140)
             .map { "wrapped-append-segment-\($0)" }
             .joined(separator: " ")
-        job.appendLogEntry(.init(kind: .progress, text: wrappedLine))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
@@ -5543,7 +5728,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5559,10 +5745,12 @@ struct ReviewUITests {
         let offsetBeforeAppend = transport.logVerticalScrollOffsetForTesting
         let autoFollowBeforeAppend = transport.logAutoFollowCountForTesting
         let programmaticScrollsBeforeAppend = transport.logProgrammaticScrollCountForTesting
-        job.appendLogEntry(.init(
-            kind: .progress,
-            text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
-        ))
+        appendTimelineLogEntryForTesting(
+            job,
+            .init(
+                kind: .progress,
+                text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
+            ))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logAutoFollowCountForTesting == autoFollowBeforeAppend)
@@ -5582,7 +5770,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5596,7 +5785,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Newest line"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5614,7 +5803,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5628,7 +5818,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Newest line"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5644,7 +5834,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5657,7 +5848,7 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "short update"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "short update"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5681,7 +5872,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5715,7 +5907,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5729,7 +5922,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingScrollerImpPair)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Newest line"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5746,7 +5939,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -5760,7 +5954,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingHideMethods)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Newest line"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5776,7 +5970,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -5849,7 +6044,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         let appendCount = transport.logAppendCountForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "Newest fragment line"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logAppendCountForTesting == appendCount + 1)
@@ -5867,7 +6062,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
@@ -5876,7 +6072,7 @@ struct ReviewUITests {
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.showFindInterface)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.nextMatch)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.replace)) == false)
-        #expect(transport.logAccessibilityValueForTesting == job.logText)
+        #expect(transport.logAccessibilityValueForTesting == reviewMonitorLogText(for: job))
         #expect(transport.logDocumentViewExportsUserInterfaceValidationForTesting)
 
         let copyItem = commandMenuItemForTesting("copy:")
@@ -5891,7 +6087,7 @@ struct ReviewUITests {
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(deleteItem) == false)
 
         transport.selectAllLogForTesting()
-        #expect(transport.logSelectedTextForTesting == job.logText)
+        #expect(transport.logSelectedTextForTesting == reviewMonitorLogText(for: job))
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(cutItem) == false)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(pasteItem) == false)
@@ -5899,30 +6095,35 @@ struct ReviewUITests {
 
         NSPasteboard.general.clearContents()
         transport.copyLogSelectionForTesting()
-        #expect(NSPasteboard.general.string(forType: .string) == job.logText)
+        #expect(NSPasteboard.general.string(forType: .string) == reviewMonitorLogText(for: job))
 
         transport.clearLogFinderSelectedRangesForTesting()
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem) == false)
 
         transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "Fi")
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
         transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRight(_:)))
         #expect(transport.logSelectedTextForTesting == nil)
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "r")
 
         let graphemeLog = "A🙂e\u{301}B\n"
         transport.renderLogForTesting(text: graphemeLog, allowIncrementalUpdate: false)
         transport.setSelectedLogRangeForTesting(NSRange(location: ("A" as NSString).length, length: 0))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "🙂")
 
         transport.setSelectedLogRangeForTesting(NSRange(location: ("A🙂" as NSString).length, length: 0))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveRightAndModifySelection(_:)))
         #expect(transport.logSelectedTextForTesting == "e\u{301}")
     }
 
@@ -5953,14 +6154,16 @@ struct ReviewUITests {
         #expect(transport.logVisibleFragmentViewCountForTesting > 0)
 
         transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveToEndOfLineAndModifySelection(_:)))
         let selectedVisualLineEnd = try #require(transport.logSelectedTextForTesting)
         #expect(selectedVisualLineEnd.isEmpty == false)
         #expect(selectedVisualLineEnd.contains("\n") == false)
         #expect((selectedVisualLineEnd as NSString).length < (wrappedLine as NSString).length)
 
         transport.setSelectedLogRangeForTesting(NSRange(location: 0, length: 0))
-        transport.performLogKeyboardCommandForTesting(#selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)))
+        transport.performLogKeyboardCommandForTesting(
+            #selector(NSStandardKeyBindingResponding.moveDownAndModifySelection(_:)))
         let selectedVisualLineMove = try #require(transport.logSelectedTextForTesting)
         #expect(selectedVisualLineMove.isEmpty == false)
         #expect(selectedVisualLineMove.contains("\n") == false)
@@ -5968,7 +6171,8 @@ struct ReviewUITests {
     }
 
     @Test func logFindPreservesVisibleSearchStateDuringLogUpdatesUntilHidden() async throws {
-        let initialLog = (1...140)
+        let initialLog =
+            (1...140)
             .map { "needle \($0) with enough trailing text to wrap in the visible log surface" }
             .joined(separator: "\n") + "\n"
         let job = makeJob(
@@ -5980,7 +6184,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 360))
@@ -6011,7 +6216,7 @@ struct ReviewUITests {
         }
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logHasActiveFindQueryForTesting)
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
 
         let appendedLength = (reviewMonitorLogText(for: job) as NSString).length
@@ -6031,11 +6236,14 @@ struct ReviewUITests {
         let middleOffset = transport.logMaximumVerticalScrollOffsetForTesting / 2
         let findIndicatorInvalidationCountBeforeSnapshotScroll = transport.logFindIndicatorInvalidationCountForTesting
         transport.scrollLogToOffsetForTesting(middleOffset)
-        #expect(transport.logFindIndicatorInvalidationCountForTesting == findIndicatorInvalidationCountBeforeSnapshotScroll + 1)
+        #expect(
+            transport.logFindIndicatorInvalidationCountForTesting == findIndicatorInvalidationCountBeforeSnapshotScroll
+                + 1)
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
         let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended while the log is not following bottom"))
+        appendTimelineLogEntryForTesting(
+            job, .init(kind: .progress, text: "needle appended while the log is not following bottom"))
         _ = try await awaitTransportRender(transport)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
@@ -6057,10 +6265,11 @@ struct ReviewUITests {
 
         let reloadedText = "replacement header\nneedle after structural reload\n"
         let reloadedLength = (reloadedText as NSString).length
-        #expect(transport.renderLogForTesting(
-            text: reloadedText,
-            allowIncrementalUpdate: false
-        ))
+        #expect(
+            transport.renderLogForTesting(
+                text: reloadedText,
+                allowIncrementalUpdate: false
+            ))
 
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindBarVisibleForTesting)
@@ -6072,18 +6281,20 @@ struct ReviewUITests {
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(NSMaxRange(transport.logSelectedRangeForTesting) <= reloadedLength)
 
-        #expect(transport.renderLogForTesting(
-            text: "",
-            allowIncrementalUpdate: false
-        ))
+        #expect(
+            transport.renderLogForTesting(
+                text: "",
+                allowIncrementalUpdate: false
+            ))
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         #expect(transport.logFindStringLengthForTesting == 0)
 
         let liveReloadText = "needle after empty structural reload\n"
-        #expect(transport.renderLogForTesting(
-            text: liveReloadText,
-            allowIncrementalUpdate: false
-        ))
+        #expect(
+            transport.renderLogForTesting(
+                text: liveReloadText,
+                allowIncrementalUpdate: false
+            ))
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         #expect(transport.logFindStringLengthForTesting == (liveReloadText as NSString).length)
 
@@ -6093,10 +6304,11 @@ struct ReviewUITests {
         #expect(transport.logFindIncrementalSearchUsesSystemHighlightingForTesting)
 
         let hiddenUpdateText = liveReloadText + "\nneedle after close\n"
-        #expect(transport.renderLogForTesting(
-            text: hiddenUpdateText,
-            allowIncrementalUpdate: true
-        ))
+        #expect(
+            transport.renderLogForTesting(
+                text: hiddenUpdateText,
+                allowIncrementalUpdate: true
+            ))
 
         #expect(transport.logFindStringLengthForTesting == (hiddenUpdateText as NSString).length)
     }
@@ -6118,7 +6330,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6133,7 +6346,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        firstJob.appendLogEntry(.init(kind: .progress, text: "needle appended"))
+        appendTimelineLogEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6169,7 +6382,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6184,9 +6398,12 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        firstJob.appendLogEntry(.init(kind: .progress, text: appendedLine))
+        appendTimelineLogEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
         _ = try await awaitTransportRender(transport)
-        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: secondJob))
+        #expect(
+            transport.displayedLogForTesting.trimmingCharacters(in: .newlines)
+                == reviewMonitorLogText(for: secondJob).trimmingCharacters(in: .newlines)
+        )
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -6216,7 +6433,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6255,7 +6473,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6270,7 +6489,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -6291,7 +6510,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6306,7 +6526,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended into snapshot"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6316,7 +6536,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended after cleared selection"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logFindBarVisibleForTesting)
@@ -6334,7 +6554,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6349,7 +6570,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        job.appendLogEntry(.init(kind: .progress, text: "needle appended into snapshot"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6360,7 +6581,7 @@ struct ReviewUITests {
             #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
             #expect(transport.logHasActiveFindQueryForTesting == false)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            job.appendLogEntry(.init(kind: .progress, text: "needle appended after cleared query"))
+            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6379,7 +6600,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6395,7 +6617,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            job.appendLogEntry(.init(kind: .progress, text: "future-only needle"))
+            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6414,7 +6636,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6431,7 +6654,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("core"))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
             #expect(transport.logHasActiveFindQueryForTesting)
-            job.appendLogEntry(.init(kind: .progress, text: "core appended while query is visible"))
+            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6452,7 +6675,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6469,7 +6693,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("alpha"))
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
-            job.appendLogEntry(.init(kind: .progress, text: "beta appended after active search"))
+            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
             _ = try await awaitTransportRender(transport)
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindStringLengthForTesting == initialLength)
@@ -6492,7 +6716,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6512,7 +6737,8 @@ struct ReviewUITests {
             transport.setSelectedLogRangeForTesting(normalSelectionRange)
             #expect(transport.logSelectedTextForTesting == "copyable")
             #expect(transport.logHasActiveFindQueryForTesting == false)
-            job.appendLogEntry(.init(kind: .progress, text: "needle appended after normal selection"))
+            appendTimelineLogEntryForTesting(
+                job, .init(kind: .progress, text: "needle appended after normal selection"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6531,7 +6757,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6550,7 +6777,8 @@ struct ReviewUITests {
             #expect(transport.logHasActiveFindQueryForTesting)
 
             let initialLength = (reviewMonitorLogText(for: job) as NSString).length
-            job.appendLogEntry(.init(kind: .progress, text: "active query appears after no-result search"))
+            appendTimelineLogEntryForTesting(
+                job, .init(kind: .progress, text: "active query appears after no-result search"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6592,7 +6820,8 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 720, height: 320))
@@ -6606,7 +6835,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
         #expect(transport.logFindStringLengthForTesting == 0)
-        job.appendLogEntry(.init(kind: .progress, text: "needle first content"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logFindBarVisibleForTesting)
@@ -6628,14 +6857,15 @@ struct ReviewUITests {
             authState: .signedOut,
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.summary == nil)
-        #expect(snapshot.log == "Authentication required. Sign in to ReviewMonitor and retry.")
+        #expect(snapshot.log == reviewMonitorLogText(for: job))
     }
 
     @Test func authenticatedAuthFailedJobStillShowsNormalFailureDetails() async throws {
@@ -6652,14 +6882,15 @@ struct ReviewUITests {
             authState: .signedIn(accountID: "review@example.com"),
             content: makeSidebarContent(from: [job])
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.summary == nil)
-        #expect(snapshot.log == "Authentication required. Sign in to ReviewMonitor and retry.")
+        #expect(snapshot.log == reviewMonitorLogText(for: job))
     }
 
 }
@@ -6692,7 +6923,8 @@ func makeWindowHarness(
     authState: TestAuthState = .signedIn(accountID: "review@example.com"),
     contentSize: NSSize? = nil,
     sidebarJobFilterDefaults: UserDefaults? = nil,
-    contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator
+    contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController
+        .defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
     let windowController = ReviewMonitorWindowController(
@@ -6756,7 +6988,6 @@ final class ManualContentTransitionAnimator {
         }
     }
 }
-
 
 @MainActor
 func waitForWindowShowingSplitView(
@@ -7015,7 +7246,11 @@ func awaitTransportRender(
     if transport.logRenderIsIdleForTesting, resolvedPredicate(state) {
         return state.snapshot
     }
-    throw TestFailure("timed out waiting for rendered transport state")
+    throw TestFailure(
+        "timed out waiting for rendered transport state: "
+            + "idle=\(transport.logRenderIsIdleForTesting), "
+            + "actual=\(state), expected=\(expectedState)"
+    )
 }
 
 @MainActor
@@ -7092,7 +7327,7 @@ func makeJob(
     logText: String = "",
     rawLogText: String = ""
 ) -> CodexReviewJob {
-    CodexReviewJob.makeForTesting(
+    let job = CodexReviewJob.makeForTesting(
         id: id,
         cwd: cwd,
         targetSummary: targetSummary,
@@ -7104,13 +7339,11 @@ func makeJob(
         summary: summary ?? status.displayText,
         reviewResult: reviewResult,
         lastAgentMessage: "",
-        logEntries:
-            (logText.isEmpty ? [] : [.init(kind: .agentMessage, text: logText.trimmingCharacters(in: .newlines))])
-            + (rawLogText.isEmpty ? [] : rawLogText.split(separator: "\n", omittingEmptySubsequences: false).map {
-                .init(kind: .diagnostic, text: String($0))
-            }),
+        logEntries: [],
         errorMessage: status == .failed ? summary ?? status.displayText : nil
     )
+    seedTimelineForTesting(job, logText: logText, rawLogText: rawLogText)
+    return job
 }
 
 @MainActor
@@ -7128,7 +7361,10 @@ func makeWorkspaces(from jobs: [CodexReviewJob]) -> [CodexReviewWorkspace] {
 
 @MainActor
 func makeSidebarContent(from jobs: [CodexReviewJob]) -> (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]) {
-    (makeWorkspaces(from: jobs), Array(jobs.reversed()))
+    for job in jobs {
+        seedTimelineForTesting(job, logEntries: job.logEntries)
+    }
+    return (makeWorkspaces(from: jobs), Array(jobs.reversed()))
 }
 
 struct LinkedWorktreeFixtureForTesting {
@@ -7146,16 +7382,20 @@ func makeLinkedWorktreeFixtureForTesting(
     let repositoryURL = rootURL.appendingPathComponent(repositoryName, isDirectory: true)
     let repositoryGitURL = repositoryURL.appendingPathComponent(".git", isDirectory: true)
     let worktreesURL = rootURL.appendingPathComponent("worktrees", isDirectory: true)
-    let firstWorktreeURL = worktreesURL
+    let firstWorktreeURL =
+        worktreesURL
         .appendingPathComponent("825b", isDirectory: true)
         .appendingPathComponent(repositoryName, isDirectory: true)
-    let secondWorktreeURL = worktreesURL
+    let secondWorktreeURL =
+        worktreesURL
         .appendingPathComponent("be78", isDirectory: true)
         .appendingPathComponent(repositoryName, isDirectory: true)
-    let firstGitDirURL = repositoryGitURL
+    let firstGitDirURL =
+        repositoryGitURL
         .appendingPathComponent("worktrees", isDirectory: true)
         .appendingPathComponent("825b", isDirectory: true)
-    let secondGitDirURL = repositoryGitURL
+    let secondGitDirURL =
+        repositoryGitURL
         .appendingPathComponent("worktrees", isDirectory: true)
         .appendingPathComponent("be78", isDirectory: true)
 
@@ -7469,7 +7709,9 @@ final class FailingCancellationBackend: PreviewCodexReviewStoreBackend {
 
     override func waitUntilStopped() async {}
 
-    override func interruptReview(_: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason) async throws {
+    override func interruptReview(
+        _: CodexReviewBackendModel.Review.Run, reason _: CodexReviewBackendModel.CancellationReason
+    ) async throws {
         throw CodexReviewAPI.Error.io("Cancellation failed.")
     }
 

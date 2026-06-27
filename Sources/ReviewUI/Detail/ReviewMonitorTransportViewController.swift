@@ -23,6 +23,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var selectedJobObservation: PortableObservationTracking.Token?
     private var selectedChatObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
+    private var selectedCodexChatDocumentTask: Task<Void, Never>?
     private var boundJob: CodexReviewJob?
     private var boundChatID: CodexThreadID?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
@@ -32,6 +33,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var hasAppliedBoundLog = false
+    private var selectedCodexChatDocumentHasRendered = false
 
     convenience init(
         store: CodexReviewStore,
@@ -66,6 +68,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation?.cancel()
         selectedChatObservation?.cancel()
         selectedWorkspaceFindingsObservation?.cancel()
+        selectedCodexChatDocumentTask?.cancel()
         logRenderTask?.cancel()
     }
 
@@ -105,17 +108,17 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         NSLayoutConstraint.activate(
             displayedContentConstraints
-            + [
-                workspaceFindingsView.topAnchor.constraint(equalTo: view.topAnchor),
-                workspaceFindingsView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
-                workspaceFindingsView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
-                workspaceFindingsView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                + [
+                    workspaceFindingsView.topAnchor.constraint(equalTo: view.topAnchor),
+                    workspaceFindingsView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
+                    workspaceFindingsView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
+                    workspaceFindingsView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-                placeholderView.topAnchor.constraint(equalTo: view.topAnchor),
-                placeholderView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
-                placeholderView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
-                placeholderView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            ]
+                    placeholderView.topAnchor.constraint(equalTo: view.topAnchor),
+                    placeholderView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
+                    placeholderView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
+                    placeholderView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                ]
         )
     }
 
@@ -201,35 +204,45 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation = nil
         selectedChatObservation?.cancel()
         selectedChatObservation = nil
+        selectedCodexChatDocumentTask?.cancel()
+        selectedCodexChatDocumentTask = nil
         boundChatID = nil
         resetLogRenderer()
         boundJob = selectedJob
         selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
+        startSelectedCodexChatDocumentStream(
+            target: .job(selectedJob.id),
+            initialRestorationTarget: restorationTarget(selectedJob)
+        )
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             let eventKind = event.kind
             guard let self,
-                  self.boundJob === selectedJob
+                self.boundJob === selectedJob
             else {
                 return
             }
             self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
             let timeline = selectedJob.timeline
-#if DEBUG
-            _ = timeline.revision
-#endif
-            guard let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline) else {
-                self.logScrollView.clear()
+            #if DEBUG
+                _ = timeline.revision
+            #endif
+            guard self.selectedCodexChatDocumentHasRendered == false else {
                 return
             }
-            self.renderBoundLog(
-                timelineDocument: timelineDocument,
-                target: .job(selectedJob.id),
-                restorationTarget: eventKind == .initial
-                    ? self.restorationTarget(selectedJob)
-                    : self.logScrollView.currentScrollRestorationTarget,
-                allowIncrementalUpdate: eventKind != .initial
-            )
+            if let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline) {
+                self.renderBoundLog(
+                    timelineDocument: timelineDocument,
+                    target: .job(selectedJob.id),
+                    restorationTarget: eventKind == .initial
+                        ? self.restorationTarget(selectedJob)
+                        : self.logScrollView.currentScrollRestorationTarget,
+                    allowIncrementalUpdate: eventKind != .initial
+                )
+                return
+            }
+
+            self.logScrollView.clear()
         }
     }
 
@@ -239,30 +252,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedChatObservation?.cancel()
         selectedChatObservation = nil
+        selectedCodexChatDocumentTask?.cancel()
+        selectedCodexChatDocumentTask = nil
         resetLogRenderer()
         boundChatID = selectedChat.id
         selectedCodexChat.bind(toChatID: selectedChat.id)
-
-        selectedChatObservation = withPortableContinuousObservation { [weak self] event in
-            let eventKind = event.kind
-            guard let self,
-                  self.boundChatID == selectedChat.id
-            else {
-                return
-            }
-            self.selectedCodexChat.bind(toChatID: selectedChat.id)
-            guard let timelineDocument = self.selectedCodexChat.timelineDocument else {
-                return
-            }
-            self.renderBoundLog(
-                timelineDocument: timelineDocument,
-                target: .chat(selectedChat.id),
-                restorationTarget: eventKind == .initial
-                    ? .bottom
-                    : self.logScrollView.currentScrollRestorationTarget,
-                allowIncrementalUpdate: eventKind != .initial
-            )
-        }
+        startSelectedCodexChatDocumentStream(target: .chat(selectedChat.id), initialRestorationTarget: .bottom)
     }
 
     private func clearDisplayedLogSelection() {
@@ -271,6 +266,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation = nil
         selectedChatObservation?.cancel()
         selectedChatObservation = nil
+        selectedCodexChatDocumentTask?.cancel()
+        selectedCodexChatDocumentTask = nil
+        selectedCodexChatDocumentHasRendered = false
         boundJob = nil
         boundChatID = nil
         selectedCodexChat.unbind()
@@ -299,7 +297,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func bindWorkspaceSectionObservation(_ section: ReviewMonitorWorkspaceSectionSelection) {
         selectedWorkspaceFindingsObservation = withPortableContinuousObservation { [weak self] _ in
             guard let self,
-                  self.boundWorkspaceSection?.id == section.id
+                self.boundWorkspaceSection?.id == section.id
             else {
                 return
             }
@@ -357,7 +355,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) -> [ReviewMonitorWorkspaceFindingsView.Entry] {
         store.orderedJobs(in: workspace).flatMap { job -> [ReviewMonitorWorkspaceFindingsView.Entry] in
             guard let result = job.core.output.reviewResult,
-                  result.state == .hasFindings
+                result.state == .hasFindings
             else {
                 return []
             }
@@ -413,11 +411,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let workspaceComponents = workspaceURL.pathComponents
         let fileComponents = fileURL.pathComponents
         guard fileComponents.count > workspaceComponents.count,
-              fileComponents.starts(with: workspaceComponents)
+            fileComponents.starts(with: workspaceComponents)
         else {
             return nil
         }
-        return fileComponents
+        return
+            fileComponents
             .dropFirst(workspaceComponents.count)
             .joined(separator: "/")
     }
@@ -460,9 +459,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderTask = Task { @MainActor [weak self] in
             let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
             guard Task.isCancelled == false,
-                  let self,
-                  self.logRenderGeneration == generation,
-                  self.isCurrentLogRenderTarget(target)
+                let self,
+                self.logRenderGeneration == generation,
+                self.isCurrentLogRenderTarget(target)
             else {
                 return
             }
@@ -478,6 +477,35 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return true
     }
 
+    private func startSelectedCodexChatDocumentStream(
+        target: LogRenderTarget,
+        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
+    ) {
+        selectedCodexChatDocumentTask?.cancel()
+        selectedCodexChatDocumentHasRendered = false
+        let stream = selectedCodexChat.timelineDocumentStream()
+        selectedCodexChatDocumentTask = Task { @MainActor [weak self] in
+            var didRenderInitialDocument = false
+            for await timelineDocument in stream {
+                guard let self,
+                    self.isCurrentLogRenderTarget(target)
+                else {
+                    return
+                }
+                self.selectedCodexChatDocumentHasRendered = true
+                self.renderBoundLog(
+                    timelineDocument: timelineDocument,
+                    target: target,
+                    restorationTarget: didRenderInitialDocument
+                        ? self.logScrollView.currentScrollRestorationTarget
+                        : initialRestorationTarget,
+                    allowIncrementalUpdate: didRenderInitialDocument
+                )
+                didRenderInitialDocument = true
+            }
+        }
+    }
+
     private func isCurrentLogRenderTarget(_ target: LogRenderTarget) -> Bool {
         switch target {
         case .job(let id):
@@ -488,15 +516,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument? {
-        if let document = selectedCodexChat.timelineDocument {
-            return document
-        }
-
-#if DEBUG
-        return ReviewTimelineDocumentRenderer().document(from: timeline)
-#else
-        return nil
-#endif
+        #if DEBUG
+            let document = ReviewTimelineDocumentRenderer().document(from: timeline)
+            return document.blocks.isEmpty ? nil : document
+        #else
+            return nil
+        #endif
     }
 
     private func cacheBoundJobScrollTarget() {
@@ -551,768 +576,769 @@ final class ReviewMonitorTransportViewController: NSViewController {
 }
 
 #if DEBUG
-@MainActor
-extension ReviewMonitorTransportViewController {
-    struct RenderSnapshotForTesting: Sendable, Equatable {
-        let title: String?
-        let summary: String?
-        let log: String
-        let isShowingEmptyState: Bool
-    }
-
-    struct WorkspaceFindingSnapshotForTesting: Sendable, Equatable {
-        let text: String
-        let isShowingNoFindingsState: Bool
-        let isShowingFindingsList: Bool
-    }
-
-    enum DisplayedSelectionForTesting: Sendable, Equatable {
-        case job(String)
-        case workspaceSection(String)
-        case workspace(String)
-        case chat(String)
-    }
-
-    struct RenderedStateForTesting: Sendable, Equatable {
-        let snapshot: RenderSnapshotForTesting
-        let selection: DisplayedSelectionForTesting?
-    }
-
-    var selectionObservationForTesting: PortableObservationTracking.Token? {
-        selectionObservation
-    }
-
-    var selectedJobObservationForTesting: PortableObservationTracking.Token? {
-        selectedJobObservation
-    }
-
-    var selectedChatObservationForTesting: PortableObservationTracking.Token? {
-        selectedChatObservation
-    }
-
-    var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
-        selectedWorkspaceFindingsObservation
-    }
-
-    var selectedCodexChatReviewIdentityForTesting: CodexReviewIdentity? {
-        selectedCodexChat.identity
-    }
-
-    var selectedCodexChatIDForTesting: String? {
-        selectedCodexChat.chat?.id.rawValue
-    }
-
-    var selectedCodexChatPhaseForTesting: CodexDataPhase {
-        selectedCodexChat.phase
-    }
-
-    var selectedCodexChatItemTextsForTesting: [String] {
-        selectedCodexChat.chat?.items.compactMap(\.text) ?? []
-    }
-
-    var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {
-        let expectedSelection = expectedRenderedStateForTesting.selection
-        if displayedSelectionForTesting != expectedSelection {
-            return selectionObservation
+    @MainActor
+    extension ReviewMonitorTransportViewController {
+        struct RenderSnapshotForTesting: Sendable, Equatable {
+            let title: String?
+            let summary: String?
+            let log: String
+            let isShowingEmptyState: Bool
         }
-        switch expectedSelection {
-        case .job:
-            return selectedJobObservation ?? selectionObservation
-        case .workspaceSection:
-            return selectedWorkspaceFindingsObservation ?? selectionObservation
-        case .workspace, .chat:
-            return selectionObservation
-        case nil:
-            return selectionObservation
+
+        struct WorkspaceFindingSnapshotForTesting: Sendable, Equatable {
+            let text: String
+            let isShowingNoFindingsState: Bool
+            let isShowingFindingsList: Bool
         }
-    }
-
-    var displayedTitleForTesting: String? {
-        nil
-    }
-
-    var displayedLogForTesting: String {
-        logScrollView.displayedTextForTesting
-    }
-
-    var displayedWorkspaceFindingsForTesting: String {
-        workspaceFindingsView.displayedTextForTesting
-    }
-
-    var displayedSummaryForTesting: String? {
-        nil
-    }
-
-    var isShowingEmptyStateForTesting: Bool {
-        placeholderViewController.view.isHidden == false &&
-            placeholderViewController.content == .noSelection
-    }
-
-    var emptyStateFrameForTesting: NSRect {
-        placeholderViewController.view.frame
-    }
-
-    var isShowingNoFindingsStateForTesting: Bool {
-        placeholderViewController.view.isHidden == false &&
-            placeholderViewController.content == .noFindings
-    }
-
-    var isShowingWorkspaceFindingsListForTesting: Bool {
-        workspaceFindingsView.isShowingFindingsListForTesting
-    }
-
-    var logAppendCountForTesting: Int {
-        logScrollView.appendCount
-    }
-
-    var logReplaceCountForTesting: Int {
-        logScrollView.replaceCount
-    }
-
-    var logReloadCountForTesting: Int {
-        logScrollView.reloadCount
-    }
-
-    var logAutoFollowCountForTesting: Int {
-        logScrollView.autoFollowCount
-    }
-
-    var logWordGlowCountForTesting: Int {
-        logScrollView.wordGlowCountForTesting
-    }
-
-    var logWordFadeRenderingAttributeRangeCountForTesting: Int {
-        logScrollView.wordFadeRenderingAttributeRangeCountForTesting
-    }
-
-    var logWordFadeStorageUsesOpaqueTextColorForTesting: Bool {
-        logScrollView.wordFadeStorageUsesOpaqueTextColorForTesting
-    }
-
-    var logWordFadeDisplayInvalidationCountForTesting: Int {
-        logScrollView.wordFadeDisplayInvalidationCountForTesting
-    }
-
-    var logCommandOutputPanelCountForTesting: Int {
-        logScrollView.commandOutputPanelCountForTesting
-    }
-
-    var logTerminalDecorationRectCountForTesting: Int {
-        logScrollView.terminalDecorationRectCountForTesting
-    }
-
-    var logExpandedCommandOutputPanelCountForTesting: Int {
-        logScrollView.expandedCommandOutputPanelCountForTesting
-    }
-
-    var logCommandOutputPanelUsesTextKit2ForTesting: Bool {
-        logScrollView.commandOutputPanelUsesTextKit2ForTesting
-    }
-
-    var logCommandOutputPanelUsesInlineAttachmentForTesting: Bool {
-        logScrollView.commandOutputPanelUsesInlineAttachmentForTesting
-    }
-
-    var logCommandOutputPanelUsesButtonAttachmentForTesting: Bool {
-        logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
-    }
-
-    var logCollapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
-        logScrollView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
-    }
-
-    var logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
-        logScrollView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
-    }
-
-    var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
-        logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
-    }
-
-    var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
-        logScrollView.commandOutputPanelVisibleLineCapacityForTesting
-    }
-
-    var logCommandOutputPanelResultTextForTesting: String? {
-        logScrollView.commandOutputPanelResultTextForTesting
-    }
-
-    var logCommandOutputPanelTerminalTextForTesting: String? {
-        logScrollView.commandOutputPanelTerminalTextForTesting
-    }
-
-    func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
-        logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
-    }
-
-    var logCommandOutputPanelCommandLineTextForTesting: String? {
-        logScrollView.commandOutputPanelCommandLineTextForTesting
-    }
-
-    var logCommandOutputPanelOutputScrollTextForTesting: String? {
-        logScrollView.commandOutputPanelOutputScrollTextForTesting
-    }
-
-    var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
-        logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
-    }
-
-    var logCommandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
-        logScrollView.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
-    }
-
-    var logCommandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
-        logScrollView.commandOutputPanelOutputScrollVerticalOffsetForTesting
-    }
-
-    var logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
-        logScrollView.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
-    }
-
-    func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
-        logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
-    }
-
-    var logCommandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
-        logScrollView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
-    }
-
-    func logFinderRectsForTesting(_ range: NSRange) -> [NSRect] {
-        logScrollView.finderRectsForTesting(range)
-    }
-
-    var logFirstCommandOutputPanelRectForTesting: NSRect? {
-        logScrollView.firstCommandOutputPanelRectForTesting
-    }
-
-    var logCommandOutputPanelToggleSymbolNameForTesting: String? {
-        logScrollView.commandOutputPanelToggleSymbolNameForTesting
-    }
-
-    var logCommandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
-        logScrollView.commandOutputPanelLeadingAlignmentDeltaForTesting
-    }
-
-    var logCommandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
-        logScrollView.commandOutputPanelChevronSizeDeltaForTesting
-    }
-
-    var logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
-        logScrollView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
-    }
-
-    func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
-        logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
-    }
-
-    func toggleFirstLogCommandOutputPanelForTesting() {
-        logScrollView.toggleFirstCommandOutputPanelForTesting()
-    }
-
-    @discardableResult
-    func clickFirstLogCommandOutputPanelHeaderForTesting() -> Bool {
-        logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
-    }
-
-    @discardableResult
-    func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
-        logScrollView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
-    }
-
-    func completeLogWordGlowAnimationsForTesting() {
-        logScrollView.completeWordGlowAnimationsForTesting()
-    }
-
-    func advanceLogWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
-        logScrollView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
-    }
-
-    func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
-        logScrollView.setReduceMotionForTesting(reduceMotion)
-    }
-
-    var logUsesCustomTextKit2SurfaceForTesting: Bool {
-        logScrollView.usesCustomTextKit2SurfaceForTesting
-    }
-
-    var logUsesTextViewForTesting: Bool {
-        logScrollView.usesTextViewForTesting
-    }
-
-    var logUsesLogLayoutManagerForTesting: Bool {
-        logScrollView.usesLogLayoutManagerForTesting
-    }
-
-    var logIsEditableForTesting: Bool {
-        logScrollView.isEditableForTesting
-    }
-
-    var logIsSelectableForTesting: Bool {
-        logScrollView.isSelectableForTesting
-    }
-
-    var logUsesFindBarForTesting: Bool {
-        logScrollView.usesFindBarForTesting
-    }
-
-    var logIsIncrementalSearchingEnabledForTesting: Bool {
-        logScrollView.isIncrementalSearchingEnabledForTesting
-    }
-
-    var logFindBarVisibleForTesting: Bool {
-        logScrollView.isFindBarVisibleForTesting
-    }
-
-    var logTextFinderIdentifierForTesting: ObjectIdentifier {
-        logScrollView.textFinderIdentifierForTesting
-    }
-
-    var logFindVisibleCharacterRangesForTesting: [NSRange] {
-        logScrollView.findVisibleCharacterRangesForTesting
-    }
-
-    var logFindStringLengthForTesting: Int {
-        logScrollView.findStringLengthForTesting
-    }
-
-    var logFindClientUsesSnapshotForTesting: Bool {
-        logScrollView.findClientUsesSnapshotForTesting
-    }
-
-    var logFindClientSnapshotMapsToDocumentForTesting: Bool {
-        logScrollView.findClientSnapshotMapsToDocumentForTesting
-    }
-
-    var logFindClientFirstSelectedRangeForTesting: NSRange {
-        logScrollView.findClientFirstSelectedRangeForTesting
-    }
-
-    var logHasActiveFindQueryForTesting: Bool {
-        logScrollView.hasActiveFindQueryForTesting
-    }
-
-    var logVisibleFindBarSearchStringForTesting: String? {
-        logScrollView.visibleFindBarSearchStringForTesting
-    }
-
-    @discardableResult
-    func setLogVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
-        logScrollView.setVisibleFindBarSearchStringForTesting(string)
-    }
-
-    var logFindIndicatorInvalidationCountForTesting: Int {
-        logScrollView.findIndicatorInvalidationCountForTesting
-    }
-
-    var logFindIncrementalMatchRangeCountForTesting: Int {
-        logScrollView.findIncrementalMatchRangeCountForTesting
-    }
-
-    var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
-        logScrollView.findBarContainerContentViewIsTextContentViewForTesting
-    }
-
-    var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
-        logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
-    }
-
-    var logHitTestTargetsDocumentViewForTesting: Bool {
-        logScrollView.hitTestTargetsDocumentViewForTesting
-    }
-
-    var logWritingToolsDisabledForTesting: Bool {
-        logScrollView.writingToolsDisabledForTesting
-    }
-
-    var logOverlayScrollerHideRequestCountForTesting: Int {
-        logScrollView.overlayScrollerHideRequestCountForTesting
-    }
-
-    var logRenderIsIdleForTesting: Bool {
-        appliedLogRenderGeneration == logRenderGeneration
-    }
-
-    var logFrameForTesting: NSRect {
-        logScrollView.frame
-    }
-
-    var viewFrameForTesting: NSRect {
-        view.frame
-    }
-
-    var viewBoundsForTesting: NSRect {
-        view.bounds
-    }
-
-    var safeAreaFrameForTesting: NSRect {
-        view.safeAreaRect
-    }
-
-    var displayedViewFrameForTesting: NSRect {
-        logScrollView.frame
-    }
-
-    var activeDisplayedViewConstraintCountForTesting: Int {
-        displayedContentConstraints.filter(\.isActive).count
-    }
-
-    var renderSnapshotForTesting: RenderSnapshotForTesting {
-        if isShowingEmptyStateForTesting {
+
+        enum DisplayedSelectionForTesting: Sendable, Equatable {
+            case job(String)
+            case workspaceSection(String)
+            case workspace(String)
+            case chat(String)
+        }
+
+        struct RenderedStateForTesting: Sendable, Equatable {
+            let snapshot: RenderSnapshotForTesting
+            let selection: DisplayedSelectionForTesting?
+        }
+
+        var selectionObservationForTesting: PortableObservationTracking.Token? {
+            selectionObservation
+        }
+
+        var selectedJobObservationForTesting: PortableObservationTracking.Token? {
+            selectedJobObservation
+        }
+
+        var selectedChatObservationForTesting: PortableObservationTracking.Token? {
+            selectedChatObservation
+        }
+
+        var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
+            selectedWorkspaceFindingsObservation
+        }
+
+        var selectedCodexChatReviewIdentityForTesting: CodexReviewIdentity? {
+            selectedCodexChat.identity
+        }
+
+        var selectedCodexChatIDForTesting: String? {
+            selectedCodexChat.chat?.id.rawValue
+        }
+
+        var selectedCodexChatPhaseForTesting: CodexDataPhase {
+            selectedCodexChat.phase
+        }
+
+        var selectedCodexChatItemTextsForTesting: [String] {
+            selectedCodexChat.chat?.items.compactMap(\.text) ?? []
+        }
+
+        var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {
+            let expectedSelection = expectedRenderedStateForTesting.selection
+            if displayedSelectionForTesting != expectedSelection {
+                return selectionObservation
+            }
+            switch expectedSelection {
+            case .job:
+                return selectedJobObservation ?? selectionObservation
+            case .workspaceSection:
+                return selectedWorkspaceFindingsObservation ?? selectionObservation
+            case .workspace, .chat:
+                return selectionObservation
+            case nil:
+                return selectionObservation
+            }
+        }
+
+        var displayedTitleForTesting: String? {
+            nil
+        }
+
+        var displayedLogForTesting: String {
+            logScrollView.displayedTextForTesting
+        }
+
+        var displayedWorkspaceFindingsForTesting: String {
+            workspaceFindingsView.displayedTextForTesting
+        }
+
+        var displayedSummaryForTesting: String? {
+            nil
+        }
+
+        var isShowingEmptyStateForTesting: Bool {
+            placeholderViewController.view.isHidden == false && placeholderViewController.content == .noSelection
+        }
+
+        var emptyStateFrameForTesting: NSRect {
+            placeholderViewController.view.frame
+        }
+
+        var isShowingNoFindingsStateForTesting: Bool {
+            placeholderViewController.view.isHidden == false && placeholderViewController.content == .noFindings
+        }
+
+        var isShowingWorkspaceFindingsListForTesting: Bool {
+            workspaceFindingsView.isShowingFindingsListForTesting
+        }
+
+        var logAppendCountForTesting: Int {
+            logScrollView.appendCount
+        }
+
+        var logReplaceCountForTesting: Int {
+            logScrollView.replaceCount
+        }
+
+        var logReloadCountForTesting: Int {
+            logScrollView.reloadCount
+        }
+
+        var logAutoFollowCountForTesting: Int {
+            logScrollView.autoFollowCount
+        }
+
+        var logWordGlowCountForTesting: Int {
+            logScrollView.wordGlowCountForTesting
+        }
+
+        var logWordFadeRenderingAttributeRangeCountForTesting: Int {
+            logScrollView.wordFadeRenderingAttributeRangeCountForTesting
+        }
+
+        var logWordFadeStorageUsesOpaqueTextColorForTesting: Bool {
+            logScrollView.wordFadeStorageUsesOpaqueTextColorForTesting
+        }
+
+        var logWordFadeDisplayInvalidationCountForTesting: Int {
+            logScrollView.wordFadeDisplayInvalidationCountForTesting
+        }
+
+        var logCommandOutputPanelCountForTesting: Int {
+            logScrollView.commandOutputPanelCountForTesting
+        }
+
+        var logTerminalDecorationRectCountForTesting: Int {
+            logScrollView.terminalDecorationRectCountForTesting
+        }
+
+        var logExpandedCommandOutputPanelCountForTesting: Int {
+            logScrollView.expandedCommandOutputPanelCountForTesting
+        }
+
+        var logCommandOutputPanelUsesTextKit2ForTesting: Bool {
+            logScrollView.commandOutputPanelUsesTextKit2ForTesting
+        }
+
+        var logCommandOutputPanelUsesInlineAttachmentForTesting: Bool {
+            logScrollView.commandOutputPanelUsesInlineAttachmentForTesting
+        }
+
+        var logCommandOutputPanelUsesButtonAttachmentForTesting: Bool {
+            logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
+        }
+
+        var logCollapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
+            logScrollView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
+        }
+
+        var logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
+            logScrollView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
+        }
+
+        var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
+            logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
+        }
+
+        var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
+            logScrollView.commandOutputPanelVisibleLineCapacityForTesting
+        }
+
+        var logCommandOutputPanelResultTextForTesting: String? {
+            logScrollView.commandOutputPanelResultTextForTesting
+        }
+
+        var logCommandOutputPanelTerminalTextForTesting: String? {
+            logScrollView.commandOutputPanelTerminalTextForTesting
+        }
+
+        func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
+            logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
+        }
+
+        var logCommandOutputPanelCommandLineTextForTesting: String? {
+            logScrollView.commandOutputPanelCommandLineTextForTesting
+        }
+
+        var logCommandOutputPanelOutputScrollTextForTesting: String? {
+            logScrollView.commandOutputPanelOutputScrollTextForTesting
+        }
+
+        var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
+            logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
+        }
+
+        var logCommandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
+            logScrollView.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
+        }
+
+        var logCommandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
+            logScrollView.commandOutputPanelOutputScrollVerticalOffsetForTesting
+        }
+
+        var logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
+            logScrollView.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
+        }
+
+        func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
+            logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
+        }
+
+        var logCommandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
+            logScrollView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
+        }
+
+        func logFinderRectsForTesting(_ range: NSRange) -> [NSRect] {
+            logScrollView.finderRectsForTesting(range)
+        }
+
+        var logFirstCommandOutputPanelRectForTesting: NSRect? {
+            logScrollView.firstCommandOutputPanelRectForTesting
+        }
+
+        var logCommandOutputPanelToggleSymbolNameForTesting: String? {
+            logScrollView.commandOutputPanelToggleSymbolNameForTesting
+        }
+
+        var logCommandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
+            logScrollView.commandOutputPanelLeadingAlignmentDeltaForTesting
+        }
+
+        var logCommandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
+            logScrollView.commandOutputPanelChevronSizeDeltaForTesting
+        }
+
+        var logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
+            logScrollView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
+        }
+
+        func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
+            logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
+        }
+
+        func toggleFirstLogCommandOutputPanelForTesting() {
+            logScrollView.toggleFirstCommandOutputPanelForTesting()
+        }
+
+        @discardableResult
+        func clickFirstLogCommandOutputPanelHeaderForTesting() -> Bool {
+            logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
+        }
+
+        @discardableResult
+        func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
+            logScrollView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
+        }
+
+        func completeLogWordGlowAnimationsForTesting() {
+            logScrollView.completeWordGlowAnimationsForTesting()
+        }
+
+        func advanceLogWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
+            logScrollView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
+        }
+
+        func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
+            logScrollView.setReduceMotionForTesting(reduceMotion)
+        }
+
+        var logUsesCustomTextKit2SurfaceForTesting: Bool {
+            logScrollView.usesCustomTextKit2SurfaceForTesting
+        }
+
+        var logUsesTextViewForTesting: Bool {
+            logScrollView.usesTextViewForTesting
+        }
+
+        var logUsesLogLayoutManagerForTesting: Bool {
+            logScrollView.usesLogLayoutManagerForTesting
+        }
+
+        var logIsEditableForTesting: Bool {
+            logScrollView.isEditableForTesting
+        }
+
+        var logIsSelectableForTesting: Bool {
+            logScrollView.isSelectableForTesting
+        }
+
+        var logUsesFindBarForTesting: Bool {
+            logScrollView.usesFindBarForTesting
+        }
+
+        var logIsIncrementalSearchingEnabledForTesting: Bool {
+            logScrollView.isIncrementalSearchingEnabledForTesting
+        }
+
+        var logFindBarVisibleForTesting: Bool {
+            logScrollView.isFindBarVisibleForTesting
+        }
+
+        var logTextFinderIdentifierForTesting: ObjectIdentifier {
+            logScrollView.textFinderIdentifierForTesting
+        }
+
+        var logFindVisibleCharacterRangesForTesting: [NSRange] {
+            logScrollView.findVisibleCharacterRangesForTesting
+        }
+
+        var logFindStringLengthForTesting: Int {
+            logScrollView.findStringLengthForTesting
+        }
+
+        var logFindClientUsesSnapshotForTesting: Bool {
+            logScrollView.findClientUsesSnapshotForTesting
+        }
+
+        var logFindClientSnapshotMapsToDocumentForTesting: Bool {
+            logScrollView.findClientSnapshotMapsToDocumentForTesting
+        }
+
+        var logFindClientFirstSelectedRangeForTesting: NSRange {
+            logScrollView.findClientFirstSelectedRangeForTesting
+        }
+
+        var logHasActiveFindQueryForTesting: Bool {
+            logScrollView.hasActiveFindQueryForTesting
+        }
+
+        var logVisibleFindBarSearchStringForTesting: String? {
+            logScrollView.visibleFindBarSearchStringForTesting
+        }
+
+        @discardableResult
+        func setLogVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
+            logScrollView.setVisibleFindBarSearchStringForTesting(string)
+        }
+
+        var logFindIndicatorInvalidationCountForTesting: Int {
+            logScrollView.findIndicatorInvalidationCountForTesting
+        }
+
+        var logFindIncrementalMatchRangeCountForTesting: Int {
+            logScrollView.findIncrementalMatchRangeCountForTesting
+        }
+
+        var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
+            logScrollView.findBarContainerContentViewIsTextContentViewForTesting
+        }
+
+        var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
+            logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
+        }
+
+        var logHitTestTargetsDocumentViewForTesting: Bool {
+            logScrollView.hitTestTargetsDocumentViewForTesting
+        }
+
+        var logWritingToolsDisabledForTesting: Bool {
+            logScrollView.writingToolsDisabledForTesting
+        }
+
+        var logOverlayScrollerHideRequestCountForTesting: Int {
+            logScrollView.overlayScrollerHideRequestCountForTesting
+        }
+
+        var logRenderIsIdleForTesting: Bool {
+            appliedLogRenderGeneration == logRenderGeneration
+        }
+
+        var logFrameForTesting: NSRect {
+            logScrollView.frame
+        }
+
+        var viewFrameForTesting: NSRect {
+            view.frame
+        }
+
+        var viewBoundsForTesting: NSRect {
+            view.bounds
+        }
+
+        var safeAreaFrameForTesting: NSRect {
+            view.safeAreaRect
+        }
+
+        var displayedViewFrameForTesting: NSRect {
+            logScrollView.frame
+        }
+
+        var activeDisplayedViewConstraintCountForTesting: Int {
+            displayedContentConstraints.filter(\.isActive).count
+        }
+
+        var renderSnapshotForTesting: RenderSnapshotForTesting {
+            if isShowingEmptyStateForTesting {
+                return .init(
+                    title: nil,
+                    summary: nil,
+                    log: "",
+                    isShowingEmptyState: true
+                )
+            }
             return .init(
-                title: nil,
-                summary: nil,
-                log: "",
-                isShowingEmptyState: true
-            )
-        }
-        return .init(
-            title: displayedTitleForTesting,
-            summary: displayedSummaryForTesting,
-            log: displayedLogForTesting,
-            isShowingEmptyState: false
-        )
-    }
-
-    var renderedStateForTesting: RenderedStateForTesting {
-        .init(
-            snapshot: renderSnapshotForTesting,
-            selection: displayedSelectionForTesting
-        )
-    }
-
-    var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
-        switch uiState.selection {
-        case .job(let job):
-            .init(
-                title: nil,
-                summary: nil,
-                log: {
-                    let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-                    var projection = ReviewMonitorTimelineLogProjection()
-                    let document = projection.render(timelineDocument: timelineDocument)
-                    return logScrollView.displayTextForTesting(sourceDocument: document)
-                }(),
+                title: displayedTitleForTesting,
+                summary: displayedSummaryForTesting,
+                log: displayedLogForTesting,
                 isShowingEmptyState: false
             )
-        case .workspaceSection:
+        }
+
+        var renderedStateForTesting: RenderedStateForTesting {
             .init(
-                title: nil,
-                summary: nil,
-                log: "",
-                isShowingEmptyState: false
-            )
-        case .workspace:
-            .init(
-                title: nil,
-                summary: nil,
-                log: "",
-                isShowingEmptyState: false
-            )
-        case .chat:
-            .init(
-                title: nil,
-                summary: nil,
-                log: "",
-                isShowingEmptyState: false
-            )
-        case nil:
-            .init(
-                title: nil,
-                summary: nil,
-                log: "",
-                isShowingEmptyState: true
+                snapshot: renderSnapshotForTesting,
+                selection: displayedSelectionForTesting
             )
         }
-    }
 
-    var expectedRenderedStateForTesting: RenderedStateForTesting {
-        .init(
-            snapshot: expectedRenderSnapshotForTesting,
-            selection: expectedDisplayedSelectionForTesting
-        )
-    }
+        var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
+            switch uiState.selection {
+            case .job(let job):
+                .init(
+                    title: nil,
+                    summary: nil,
+                    log: {
+                        let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
+                        if timelineDocument.blocks.isEmpty == false {
+                            var projection = ReviewMonitorTimelineLogProjection()
+                            let document = projection.render(timelineDocument: timelineDocument)
+                            return logScrollView.displayTextForTesting(sourceDocument: document)
+                        }
+                        return ""
+                    }(),
+                    isShowingEmptyState: false
+                )
+            case .workspaceSection:
+                .init(
+                    title: nil,
+                    summary: nil,
+                    log: "",
+                    isShowingEmptyState: false
+                )
+            case .workspace:
+                .init(
+                    title: nil,
+                    summary: nil,
+                    log: "",
+                    isShowingEmptyState: false
+                )
+            case .chat:
+                .init(
+                    title: nil,
+                    summary: nil,
+                    log: "",
+                    isShowingEmptyState: false
+                )
+            case nil:
+                .init(
+                    title: nil,
+                    summary: nil,
+                    log: "",
+                    isShowingEmptyState: true
+                )
+            }
+        }
 
-    private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
-        switch displayedSelection {
-        case .job(let id):
-            .job(id)
-        case .workspaceSection(let id):
-            .workspaceSection(id)
-        case .workspace(let id):
-            .workspace(id.rawValue)
-        case .chat(let id):
-            .chat(id.rawValue)
-        case nil:
-            nil
+        var expectedRenderedStateForTesting: RenderedStateForTesting {
+            .init(
+                snapshot: expectedRenderSnapshotForTesting,
+                selection: expectedDisplayedSelectionForTesting
+            )
+        }
+
+        private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
+            switch displayedSelection {
+            case .job(let id):
+                .job(id)
+            case .workspaceSection(let id):
+                .workspaceSection(id)
+            case .workspace(let id):
+                .workspace(id.rawValue)
+            case .chat(let id):
+                .chat(id.rawValue)
+            case nil:
+                nil
+            }
+        }
+
+        private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
+            switch uiState.selection {
+            case .job(let job):
+                .job(job.id)
+            case .workspaceSection(let section):
+                .workspaceSection(section.id)
+            case .workspace(let workspace):
+                .workspace(workspace.id.rawValue)
+            case .chat(let chat):
+                .chat(chat.id.rawValue)
+            case nil:
+                nil
+            }
+        }
+
+        var workspaceFindingSnapshotForTesting: WorkspaceFindingSnapshotForTesting {
+            .init(
+                text: displayedWorkspaceFindingsForTesting,
+                isShowingNoFindingsState: isShowingNoFindingsStateForTesting,
+                isShowingFindingsList: isShowingWorkspaceFindingsListForTesting
+            )
+        }
+
+        var workspaceFindingsContentWidthForTesting: CGFloat {
+            view.layoutSubtreeIfNeeded()
+            return workspaceFindingsView.contentWidthForTesting
+        }
+
+        var workspaceFindingsFrameForTesting: NSRect {
+            workspaceFindingsView.frame
+        }
+
+        var workspaceFindingsTextContainerWidthForTesting: CGFloat {
+            view.layoutSubtreeIfNeeded()
+            return workspaceFindingsView.textContainerWidthForTesting
+        }
+
+        var workspaceFindingsScrollFrameForTesting: NSRect {
+            workspaceFindingsView.scrollFrameForTesting
+        }
+
+        var workspaceFindingsDocumentFrameForTesting: NSRect {
+            workspaceFindingsView.documentFrameForTesting
+        }
+
+        var workspaceFindingsNoFindingsFrameForTesting: NSRect {
+            placeholderViewController.view.frame
+        }
+
+        var workspaceFindingsContentInsetsForTesting: NSEdgeInsets {
+            workspaceFindingsView.contentInsetsForTesting
+        }
+
+        var workspaceFindingsVerticalScrollOffsetForTesting: CGFloat {
+            workspaceFindingsView.verticalScrollOffsetForTesting
+        }
+
+        var workspaceFindingsMinimumVerticalScrollOffsetForTesting: CGFloat {
+            workspaceFindingsView.minimumVerticalScrollOffsetForTesting
+        }
+
+        var workspaceFindingsMaximumVerticalScrollOffsetForTesting: CGFloat {
+            workspaceFindingsView.maximumVerticalScrollOffsetForTesting
+        }
+
+        var workspaceFindingsAutomaticallyAdjustsContentInsetsForTesting: Bool {
+            workspaceFindingsView.automaticallyAdjustsContentInsetsForTesting
+        }
+
+        var workspaceFindingsTextIsSelectableForTesting: Bool {
+            workspaceFindingsView.isTextSelectableForTesting
+        }
+
+        var workspaceFindingsTextIsEditableForTesting: Bool {
+            workspaceFindingsView.isTextEditableForTesting
+        }
+
+        var workspaceFindingsUsesFindBarForTesting: Bool {
+            workspaceFindingsView.usesFindBarForTesting
+        }
+
+        var workspaceFindingsIsIncrementalSearchingEnabledForTesting: Bool {
+            workspaceFindingsView.isIncrementalSearchingEnabledForTesting
+        }
+
+        var workspaceFindingsFindBarVisibleForTesting: Bool {
+            workspaceFindingsView.isFindBarVisibleForTesting
+        }
+
+        var workspaceFindingsPriorityPrefixCountForTesting: Int {
+            workspaceFindingsView.priorityPrefixCountForTesting
+        }
+
+        var workspaceFindingsTextAttachmentCountForTesting: Int {
+            workspaceFindingsView.textAttachmentCountForTesting
+        }
+
+        var workspaceFindingsThreadBackgroundRangeCountForTesting: Int {
+            workspaceFindingsView.threadBackgroundRangeCountForTesting
+        }
+
+        var workspaceFindingsAccessibilityValueForTesting: String? {
+            workspaceFindingsView.accessibilityValueForTesting
+        }
+
+        var workspaceFindingsRenderedStorageStringForTesting: String {
+            workspaceFindingsView.renderedStorageStringForTesting
+        }
+
+        func scrollLogToTopForTesting() {
+            logScrollView.scrollToTopForTesting()
+        }
+
+        func scrollLogToOffsetForTesting(_ y: CGFloat) {
+            logScrollView.scrollToOffsetForTesting(y)
+        }
+
+        var logVerticalScrollOffsetForTesting: CGFloat {
+            logScrollView.verticalScrollOffsetForTesting
+        }
+
+        var logViewportHeightForTesting: CGFloat {
+            logScrollView.viewportHeightForTesting
+        }
+
+        var logMinimumVerticalScrollOffsetForTesting: CGFloat {
+            logScrollView.minimumVerticalScrollOffsetForTesting
+        }
+
+        var logMaximumVerticalScrollOffsetForTesting: CGFloat {
+            logScrollView.maximumVerticalScrollOffsetForTesting
+        }
+
+        var logTextContentFrameForTesting: NSRect {
+            logScrollView.textContentFrameForTesting
+        }
+
+        var logDocumentViewFrameForTesting: NSRect {
+            logScrollView.documentViewFrameForTesting
+        }
+
+        var logContentInsetsForTesting: NSEdgeInsets {
+            logScrollView.contentInsetsForTesting
+        }
+
+        var logAutomaticallyAdjustsContentInsetsForTesting: Bool {
+            logScrollView.automaticallyAdjustsContentInsetsForTesting
+        }
+
+        var logTextContainerSizeForTesting: NSSize {
+            logScrollView.textContainerSizeForTesting
+        }
+
+        var logTextContainerInsetForTesting: NSSize {
+            logScrollView.textContainerInsetForTesting
+        }
+
+        var logVisibleFragmentViewCountForTesting: Int {
+            logScrollView.visibleFragmentViewCountForTesting
+        }
+
+        var logVisibleFragmentViewCountWithoutForcingLayoutForTesting: Int {
+            logScrollView.visibleFragmentViewCountWithoutForcingLayoutForTesting
+        }
+
+        var logVisibleFragmentBoundsForTesting: NSRect {
+            logScrollView.visibleFragmentBoundsForTesting
+        }
+
+        var logVisibleFragmentBoundsWithoutForcingLayoutForTesting: NSRect {
+            logScrollView.visibleFragmentBoundsWithoutForcingLayoutForTesting
+        }
+
+        var logStaleFragmentViewCountForTesting: Int {
+            logScrollView.staleFragmentViewCountForTesting
+        }
+
+        var logProgrammaticScrollCountForTesting: Int {
+            logScrollView.programmaticScrollCountForTesting
+        }
+
+        var logAccessibilityValueForTesting: String? {
+            logScrollView.accessibilityValueForTesting
+        }
+
+        var logSelectedTextForTesting: String? {
+            logScrollView.selectedTextForTesting
+        }
+
+        var logSelectedRangeForTesting: NSRange {
+            logScrollView.selectedRangeForTesting
+        }
+
+        var logFindStringForTesting: String {
+            logScrollView.findStringForTesting
+        }
+
+        func selectAllLogForTesting() {
+            logScrollView.selectAllForTesting()
+        }
+
+        func setSelectedLogRangeForTesting(_ range: NSRange) {
+            logScrollView.setSelectedLogRangeForTesting(range)
+        }
+
+        var logDocumentViewExportsUserInterfaceValidationForTesting: Bool {
+            logScrollView.documentViewExportsUserInterfaceValidationForTesting
+        }
+
+        func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
+            logScrollView.validateDocumentUserInterfaceItemForTesting(item)
+        }
+
+        func clearLogFinderSelectedRangesForTesting() {
+            logScrollView.clearFinderSelectedRangesForTesting()
+        }
+
+        func setLogFinderSelectedRangeForTesting(_ range: NSRange) {
+            logScrollView.setFinderSelectedRangeForTesting(range)
+        }
+
+        func simulateLogFinderEmptySelectedRangesForTesting() {
+            logScrollView.simulateFinderEmptySelectedRangesForTesting()
+        }
+
+        func performLogKeyboardCommandForTesting(_ selector: Selector) {
+            logScrollView.performKeyboardCommandForTesting(selector)
+        }
+
+        @discardableResult
+        func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
+            logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
+        }
+
+        func copyLogSelectionForTesting() {
+            logScrollView.copySelectionForTesting()
+        }
+
+        func beginLogLiveResizeForTesting() {
+            logScrollView.beginLiveResizeForTesting()
+        }
+
+        func endLogLiveResizeForTesting() {
+            logScrollView.endLiveResizeForTesting()
+        }
+
+        func scrollLogToBottomForTesting() {
+            logScrollView.scrollToBottomForTesting()
+        }
+
+        var isLogPinnedToBottomForTesting: Bool {
+            logScrollView.isPinnedToBottomForTesting
+        }
+
+        func setLogScrollerStyleForTesting(_ style: NSScroller.Style) {
+            logScrollView.setScrollerStyleForTesting(style)
+        }
+
+        func setLogOverlayScrollersShownForTesting(_ isShown: Bool?) {
+            logScrollView.setOverlayScrollersShownForTesting(isShown)
+        }
+
+        func setLogOverlayScrollerBridgeModeForTesting(
+            _ mode: ReviewMonitorLogScrollView.OverlayScrollerBridgeModeForTesting
+        ) {
+            logScrollView.setOverlayScrollerBridgeModeForTesting(mode)
         }
     }
-
-    private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
-        switch uiState.selection {
-        case .job(let job):
-            .job(job.id)
-        case .workspaceSection(let section):
-            .workspaceSection(section.id)
-        case .workspace(let workspace):
-            .workspace(workspace.id.rawValue)
-        case .chat(let chat):
-            .chat(chat.id.rawValue)
-        case nil:
-            nil
-        }
-    }
-
-    var workspaceFindingSnapshotForTesting: WorkspaceFindingSnapshotForTesting {
-        .init(
-            text: displayedWorkspaceFindingsForTesting,
-            isShowingNoFindingsState: isShowingNoFindingsStateForTesting,
-            isShowingFindingsList: isShowingWorkspaceFindingsListForTesting
-        )
-    }
-
-    var workspaceFindingsContentWidthForTesting: CGFloat {
-        view.layoutSubtreeIfNeeded()
-        return workspaceFindingsView.contentWidthForTesting
-    }
-
-    var workspaceFindingsFrameForTesting: NSRect {
-        workspaceFindingsView.frame
-    }
-
-    var workspaceFindingsTextContainerWidthForTesting: CGFloat {
-        view.layoutSubtreeIfNeeded()
-        return workspaceFindingsView.textContainerWidthForTesting
-    }
-
-    var workspaceFindingsScrollFrameForTesting: NSRect {
-        workspaceFindingsView.scrollFrameForTesting
-    }
-
-    var workspaceFindingsDocumentFrameForTesting: NSRect {
-        workspaceFindingsView.documentFrameForTesting
-    }
-
-    var workspaceFindingsNoFindingsFrameForTesting: NSRect {
-        placeholderViewController.view.frame
-    }
-
-    var workspaceFindingsContentInsetsForTesting: NSEdgeInsets {
-        workspaceFindingsView.contentInsetsForTesting
-    }
-
-    var workspaceFindingsVerticalScrollOffsetForTesting: CGFloat {
-        workspaceFindingsView.verticalScrollOffsetForTesting
-    }
-
-    var workspaceFindingsMinimumVerticalScrollOffsetForTesting: CGFloat {
-        workspaceFindingsView.minimumVerticalScrollOffsetForTesting
-    }
-
-    var workspaceFindingsMaximumVerticalScrollOffsetForTesting: CGFloat {
-        workspaceFindingsView.maximumVerticalScrollOffsetForTesting
-    }
-
-    var workspaceFindingsAutomaticallyAdjustsContentInsetsForTesting: Bool {
-        workspaceFindingsView.automaticallyAdjustsContentInsetsForTesting
-    }
-
-    var workspaceFindingsTextIsSelectableForTesting: Bool {
-        workspaceFindingsView.isTextSelectableForTesting
-    }
-
-    var workspaceFindingsTextIsEditableForTesting: Bool {
-        workspaceFindingsView.isTextEditableForTesting
-    }
-
-    var workspaceFindingsUsesFindBarForTesting: Bool {
-        workspaceFindingsView.usesFindBarForTesting
-    }
-
-    var workspaceFindingsIsIncrementalSearchingEnabledForTesting: Bool {
-        workspaceFindingsView.isIncrementalSearchingEnabledForTesting
-    }
-
-    var workspaceFindingsFindBarVisibleForTesting: Bool {
-        workspaceFindingsView.isFindBarVisibleForTesting
-    }
-
-    var workspaceFindingsPriorityPrefixCountForTesting: Int {
-        workspaceFindingsView.priorityPrefixCountForTesting
-    }
-
-    var workspaceFindingsTextAttachmentCountForTesting: Int {
-        workspaceFindingsView.textAttachmentCountForTesting
-    }
-
-    var workspaceFindingsThreadBackgroundRangeCountForTesting: Int {
-        workspaceFindingsView.threadBackgroundRangeCountForTesting
-    }
-
-    var workspaceFindingsAccessibilityValueForTesting: String? {
-        workspaceFindingsView.accessibilityValueForTesting
-    }
-
-    var workspaceFindingsRenderedStorageStringForTesting: String {
-        workspaceFindingsView.renderedStorageStringForTesting
-    }
-
-    func scrollLogToTopForTesting() {
-        logScrollView.scrollToTopForTesting()
-    }
-
-    func scrollLogToOffsetForTesting(_ y: CGFloat) {
-        logScrollView.scrollToOffsetForTesting(y)
-    }
-
-    var logVerticalScrollOffsetForTesting: CGFloat {
-        logScrollView.verticalScrollOffsetForTesting
-    }
-
-    var logViewportHeightForTesting: CGFloat {
-        logScrollView.viewportHeightForTesting
-    }
-
-    var logMinimumVerticalScrollOffsetForTesting: CGFloat {
-        logScrollView.minimumVerticalScrollOffsetForTesting
-    }
-
-    var logMaximumVerticalScrollOffsetForTesting: CGFloat {
-        logScrollView.maximumVerticalScrollOffsetForTesting
-    }
-
-    var logTextContentFrameForTesting: NSRect {
-        logScrollView.textContentFrameForTesting
-    }
-
-    var logDocumentViewFrameForTesting: NSRect {
-        logScrollView.documentViewFrameForTesting
-    }
-
-    var logContentInsetsForTesting: NSEdgeInsets {
-        logScrollView.contentInsetsForTesting
-    }
-
-    var logAutomaticallyAdjustsContentInsetsForTesting: Bool {
-        logScrollView.automaticallyAdjustsContentInsetsForTesting
-    }
-
-    var logTextContainerSizeForTesting: NSSize {
-        logScrollView.textContainerSizeForTesting
-    }
-
-    var logTextContainerInsetForTesting: NSSize {
-        logScrollView.textContainerInsetForTesting
-    }
-
-    var logVisibleFragmentViewCountForTesting: Int {
-        logScrollView.visibleFragmentViewCountForTesting
-    }
-
-    var logVisibleFragmentViewCountWithoutForcingLayoutForTesting: Int {
-        logScrollView.visibleFragmentViewCountWithoutForcingLayoutForTesting
-    }
-
-    var logVisibleFragmentBoundsForTesting: NSRect {
-        logScrollView.visibleFragmentBoundsForTesting
-    }
-
-    var logVisibleFragmentBoundsWithoutForcingLayoutForTesting: NSRect {
-        logScrollView.visibleFragmentBoundsWithoutForcingLayoutForTesting
-    }
-
-    var logStaleFragmentViewCountForTesting: Int {
-        logScrollView.staleFragmentViewCountForTesting
-    }
-
-    var logProgrammaticScrollCountForTesting: Int {
-        logScrollView.programmaticScrollCountForTesting
-    }
-
-    var logAccessibilityValueForTesting: String? {
-        logScrollView.accessibilityValueForTesting
-    }
-
-    var logSelectedTextForTesting: String? {
-        logScrollView.selectedTextForTesting
-    }
-
-    var logSelectedRangeForTesting: NSRange {
-        logScrollView.selectedRangeForTesting
-    }
-
-    var logFindStringForTesting: String {
-        logScrollView.findStringForTesting
-    }
-
-    func selectAllLogForTesting() {
-        logScrollView.selectAllForTesting()
-    }
-
-    func setSelectedLogRangeForTesting(_ range: NSRange) {
-        logScrollView.setSelectedLogRangeForTesting(range)
-    }
-
-    var logDocumentViewExportsUserInterfaceValidationForTesting: Bool {
-        logScrollView.documentViewExportsUserInterfaceValidationForTesting
-    }
-
-    func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        logScrollView.validateDocumentUserInterfaceItemForTesting(item)
-    }
-
-    func clearLogFinderSelectedRangesForTesting() {
-        logScrollView.clearFinderSelectedRangesForTesting()
-    }
-
-    func setLogFinderSelectedRangeForTesting(_ range: NSRange) {
-        logScrollView.setFinderSelectedRangeForTesting(range)
-    }
-
-    func simulateLogFinderEmptySelectedRangesForTesting() {
-        logScrollView.simulateFinderEmptySelectedRangesForTesting()
-    }
-
-    func performLogKeyboardCommandForTesting(_ selector: Selector) {
-        logScrollView.performKeyboardCommandForTesting(selector)
-    }
-
-    @discardableResult
-    func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
-        logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
-    }
-
-    func copyLogSelectionForTesting() {
-        logScrollView.copySelectionForTesting()
-    }
-
-    func beginLogLiveResizeForTesting() {
-        logScrollView.beginLiveResizeForTesting()
-    }
-
-    func endLogLiveResizeForTesting() {
-        logScrollView.endLiveResizeForTesting()
-    }
-
-    func scrollLogToBottomForTesting() {
-        logScrollView.scrollToBottomForTesting()
-    }
-
-    var isLogPinnedToBottomForTesting: Bool {
-        logScrollView.isPinnedToBottomForTesting
-    }
-
-    func setLogScrollerStyleForTesting(_ style: NSScroller.Style) {
-        logScrollView.setScrollerStyleForTesting(style)
-    }
-
-    func setLogOverlayScrollersShownForTesting(_ isShown: Bool?) {
-        logScrollView.setOverlayScrollersShownForTesting(isShown)
-    }
-
-    func setLogOverlayScrollerBridgeModeForTesting(
-        _ mode: ReviewMonitorLogScrollView.OverlayScrollerBridgeModeForTesting
-    ) {
-        logScrollView.setOverlayScrollerBridgeModeForTesting(mode)
-    }
-}
 #endif

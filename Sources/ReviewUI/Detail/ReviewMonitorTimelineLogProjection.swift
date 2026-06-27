@@ -5,10 +5,10 @@ import ReviewMonitorRendering
 struct ReviewMonitorTimelineLogProjection: Sendable {
     private struct ProjectedBlock: Equatable, Sendable {
         var id: ReviewMonitorLog.BlockID
-        var kind: ReviewLogEntry.Kind
+        var kind: ReviewMonitorLog.Kind
         var groupID: String?
         var text: String
-        var metadata: ReviewLogEntry.Metadata?
+        var metadata: ReviewMonitorLog.Metadata?
     }
 
     private var document = ReviewMonitorLog.Document()
@@ -48,18 +48,20 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
     private static func projectedBlocks(for block: ReviewTimelineDocument.Block) -> [ProjectedBlock] {
         switch block.content {
         case .approval(let approval):
-            return [projectedBlock(
-                block,
-                kind: .event,
-                text: [approval.title, approval.detail].compactMap { $0 }.joined(separator: "\n"),
-                metadata: metadata(
-                    for: block,
-                    sourceType: block.kind.rawValue,
-                    title: approval.title,
-                    status: approval.status?.rawValue,
-                    detail: approval.detail
+            return [
+                projectedBlock(
+                    block,
+                    kind: .event,
+                    text: [approval.title, approval.detail].compactMap { $0 }.joined(separator: "\n"),
+                    metadata: metadata(
+                        for: block,
+                        sourceType: block.kind.rawValue,
+                        title: approval.title,
+                        status: approval.status?.rawValue,
+                        detail: approval.detail
+                    )
                 )
-            )]
+            ]
         case .command(let command):
             let groupID = block.id.rawValue
             let metadata = commandMetadata(for: block, command: command)
@@ -72,7 +74,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                         groupID: groupID,
                         text: command.output,
                         metadata: outputOnlyCommandMetadata(for: block, command: command)
-                    ),
+                    )
                 ]
             }
             guard let commandLine else {
@@ -85,128 +87,143 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
                     groupID: groupID,
                     text: "$ \(commandLine)",
                     metadata: metadata
-                ),
+                )
             ]
             if command.output.isEmpty == false {
-                blocks.append(ProjectedBlock(
-                    id: derivedBlockID(prefix: "commandOutput", from: block),
-                    kind: .commandOutput,
-                    groupID: groupID,
-                    text: command.output,
-                    metadata: metadata
-                ))
+                blocks.append(
+                    ProjectedBlock(
+                        id: derivedBlockID(prefix: "commandOutput", from: block),
+                        kind: .commandOutput,
+                        groupID: groupID,
+                        text: command.output,
+                        metadata: metadata
+                    ))
             }
             return blocks
         case .contextCompaction(let contextCompaction):
-            return [projectedBlock(
-                block,
-                kind: .contextCompaction,
-                text: contextCompaction.title,
-                metadata: metadata(
-                    for: block,
-                    sourceType: "contextCompaction",
-                    title: contextCompaction.title,
-                    status: contextCompaction.status?.rawValue
+            return [
+                projectedBlock(
+                    block,
+                    kind: .contextCompaction,
+                    text: contextCompaction.title,
+                    metadata: metadata(
+                        for: block,
+                        sourceType: "contextCompaction",
+                        title: contextCompaction.title,
+                        status: contextCompaction.status?.rawValue
+                    )
                 )
-            )]
+            ]
         case .diagnostic(let diagnostic):
-            return [projectedBlock(
-                block,
-                kind: logKind(for: block, fallback: .diagnostic),
-                text: diagnostic.message,
-                metadata: metadata(
-                    for: block,
-                    sourceType: block.kind.rawValue,
-                    title: diagnostic.message,
-                    status: block.phase.rawValue
+            return [
+                projectedBlock(
+                    block,
+                    kind: logKind(for: block, fallback: .diagnostic),
+                    text: diagnostic.message,
+                    metadata: metadata(
+                        for: block,
+                        sourceType: block.kind.rawValue,
+                        title: diagnostic.message,
+                        status: block.phase.rawValue
+                    )
                 )
-            )]
+            ]
         case .fileChange(let fileChange):
-            return [projectedBlock(
-                block,
-                kind: .commandOutput,
-                groupID: block.id.rawValue,
-                text: fileChange.output.isEmpty ? fileChange.title : fileChange.output,
-                metadata: fileChangeMetadata(
-                    title: fileChange.title,
-                    status: fileChangeStatus(for: block, fileChange: fileChange),
-                    path: fileChange.paths.first
+            return [
+                projectedBlock(
+                    block,
+                    kind: .commandOutput,
+                    groupID: block.id.rawValue,
+                    text: fileChange.output.isEmpty ? fileChange.title : fileChange.output,
+                    metadata: fileChangeMetadata(
+                        title: fileChange.title,
+                        status: fileChangeStatus(for: block, fileChange: fileChange),
+                        path: fileChange.paths.first
+                    )
                 )
-            )]
+            ]
         case .message(let message):
             return [projectedBlock(block, kind: .agentMessage, text: message.text)]
         case .plan(let plan):
             return [projectedBlock(block, kind: logKind(for: block, fallback: .plan), text: plan.markdown)]
         case .reasoning(let reasoning):
-            return [projectedBlock(
-                block,
-                kind: logKind(
-                    for: block,
-                    fallback: reasoning.style == .raw ? .rawReasoning : .reasoningSummary
-                ),
-                text: reasoning.text
-            )]
-        case .search(let search):
-            return [projectedBlock(
-                block,
-                kind: .toolCall,
-                text: search.result ?? "Web search: \(search.query)",
-                metadata: metadata(
-                    for: block,
-                    sourceType: "webSearch",
-                    title: "Web search",
-                    status: search.status?.rawValue,
-                    query: search.query,
-                    resultText: search.result
+            return [
+                projectedBlock(
+                    block,
+                    kind: logKind(
+                        for: block,
+                        fallback: reasoning.style == .raw ? .rawReasoning : .reasoningSummary
+                    ),
+                    text: reasoning.text
                 )
-            )]
+            ]
+        case .search(let search):
+            return [
+                projectedBlock(
+                    block,
+                    kind: .toolCall,
+                    text: search.result ?? "Web search: \(search.query)",
+                    metadata: metadata(
+                        for: block,
+                        sourceType: "webSearch",
+                        title: "Web search",
+                        status: search.status?.rawValue,
+                        query: search.query,
+                        resultText: search.result
+                    )
+                )
+            ]
         case .toolCall(let toolCall):
             let label = [toolCall.namespace, toolCall.server, toolCall.name]
                 .compactMap { $0?.nilIfEmpty }
                 .joined(separator: ".")
-            return [projectedBlock(
-                block,
-                kind: .toolCall,
-                text: toolCall.error?.nilIfEmpty
-                    ?? toolCall.result?.nilIfEmpty
-                    ?? toolCall.progress?.nilIfEmpty
-                    ?? label.nilIfEmpty
-                    ?? "Tool call",
-                metadata: metadata(
-                    for: block,
-                    sourceType: block.kind.rawValue,
-                    title: label.nilIfEmpty,
-                    status: toolCall.status?.rawValue,
-                    detail: toolCall.arguments,
-                    namespace: toolCall.namespace,
-                    server: toolCall.server,
-                    tool: toolCall.name,
-                    resultText: toolCall.result,
-                    errorText: toolCall.error
+            return [
+                projectedBlock(
+                    block,
+                    kind: .toolCall,
+                    text: toolCall.error?.nilIfEmpty
+                        ?? toolCall.result?.nilIfEmpty
+                        ?? toolCall.progress?.nilIfEmpty
+                        ?? label.nilIfEmpty
+                        ?? "Tool call",
+                    metadata: metadata(
+                        for: block,
+                        sourceType: block.kind.rawValue,
+                        title: label.nilIfEmpty,
+                        status: toolCall.status?.rawValue,
+                        detail: toolCall.arguments,
+                        namespace: toolCall.namespace,
+                        server: toolCall.server,
+                        tool: toolCall.name,
+                        resultText: toolCall.result,
+                        errorText: toolCall.error
+                    )
                 )
-            )]
+            ]
         case .unknown(let unknown):
-            return [projectedBlock(
-                block,
-                kind: logKind(for: block, fallback: .event),
-                text: [unknown.title, unknown.detail].compactMap { $0 }.joined(separator: "\n"),
-                metadata: metadata(
-                    for: block,
-                    sourceType: unknown.rawKind?.rawValue ?? block.kind.rawValue,
-                    title: unknown.title,
-                    status: unknown.rawStatus ?? block.phase.rawValue,
-                    detail: unknown.detail
+            return [
+                projectedBlock(
+                    block,
+                    kind: logKind(for: block, fallback: .event),
+                    text: [unknown.title, unknown.detail].compactMap { $0 }.joined(separator: "\n"),
+                    metadata: metadata(
+                        for: block,
+                        sourceType: unknown.rawKind?.rawValue ?? block.kind.rawValue,
+                        title: unknown.title,
+                        status: unknown.rawStatus ?? block.phase.rawValue,
+                        detail: unknown.detail
+                    )
                 )
-            )]
+            ]
         }
     }
 
     private static func projectedBlock(
         _ block: ReviewTimelineDocument.Block,
-        kind: ReviewLogEntry.Kind,
+        kind: ReviewMonitorLog.Kind,
         groupID: String? = nil,
         text: String,
-        metadata: ReviewLogEntry.Metadata? = nil
+        metadata: ReviewMonitorLog.Metadata? = nil
     ) -> ProjectedBlock {
         ProjectedBlock(
             id: derivedBlockID(prefix: kind.rawValue, from: block),
@@ -226,15 +243,15 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
 
     private static func logKind(
         for block: ReviewTimelineDocument.Block,
-        fallback: ReviewLogEntry.Kind
-    ) -> ReviewLogEntry.Kind {
-        ReviewLogEntry.Kind(rawValue: block.kind.rawValue) ?? fallback
+        fallback: ReviewMonitorLog.Kind
+    ) -> ReviewMonitorLog.Kind {
+        ReviewMonitorLog.Kind(rawValue: block.kind.rawValue) ?? fallback
     }
 
     private static func commandMetadata(
         for block: ReviewTimelineDocument.Block,
         command: ReviewTimelineDocument.Command
-    ) -> ReviewLogEntry.Metadata {
+    ) -> ReviewMonitorLog.Metadata {
         let status = commandStatus(for: block, command: command)
         return .init(
             sourceType: "commandExecution",
@@ -259,7 +276,8 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             return block.phase.rawValue
         }
         if let status = command.status?.rawValue,
-           ReviewItemPhase.normalized(status).isTerminal {
+            ReviewItemPhase.normalized(status).isTerminal
+        {
             return status
         }
         if let exitCode = command.exitCode {
@@ -279,13 +297,13 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
     private static func outputOnlyCommandMetadata(
         for block: ReviewTimelineDocument.Block,
         command: ReviewTimelineDocument.Command
-    ) -> ReviewLogEntry.Metadata {
+    ) -> ReviewMonitorLog.Metadata {
         guard hasStructuredOutputOnlyCommandMetadata(for: block, command: command) else {
             return genericCommandOutputMetadata(for: block)
         }
 
         let normalizedStatus = commandStatus(for: block, command: command)
-        return ReviewLogEntry.Metadata(
+        return ReviewMonitorLog.Metadata(
             sourceType: "commandExecution",
             status: normalizedStatus,
             itemID: block.sourceItemID.rawValue,
@@ -303,21 +321,14 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         for block: ReviewTimelineDocument.Block,
         command: ReviewTimelineDocument.Command
     ) -> Bool {
-        command.cwd != nil ||
-            command.exitCode != nil ||
-            command.status != nil ||
-            command.source != nil ||
-            command.processID != nil ||
-            command.actions.isEmpty == false ||
-            command.durationMs != nil ||
-            block.startedAt != nil ||
-            block.completedAt != nil ||
-            block.durationMs != nil
+        command.cwd != nil || command.exitCode != nil || command.status != nil || command.source != nil
+            || command.processID != nil || command.actions.isEmpty == false || command.durationMs != nil
+            || block.startedAt != nil || block.completedAt != nil || block.durationMs != nil
     }
 
     private static func genericCommandOutputMetadata(
         for block: ReviewTimelineDocument.Block
-    ) -> ReviewLogEntry.Metadata {
+    ) -> ReviewMonitorLog.Metadata {
         .init(
             sourceType: "command",
             title: "Command output",
@@ -331,7 +342,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         title: String?,
         status: String?,
         path: String?
-    ) -> ReviewLogEntry.Metadata {
+    ) -> ReviewMonitorLog.Metadata {
         .init(
             sourceType: "fileChange",
             title: title,
@@ -352,7 +363,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
 
     private static func commandAction(
         _ action: ReviewTimelineDocument.Command.Action
-    ) -> ReviewLogEntry.Metadata.CommandAction {
+    ) -> ReviewMonitorLog.Metadata.CommandAction {
         .init(
             kind: commandActionKind(action.kind),
             command: action.command,
@@ -364,7 +375,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
 
     private static func commandActionKind(
         _ kind: ReviewCommandActionKind
-    ) -> ReviewLogEntry.Metadata.CommandAction.Kind {
+    ) -> ReviewMonitorLog.Metadata.CommandAction.Kind {
         switch kind.rawValue {
         case ReviewCommandActionKind.read.rawValue:
             return .read
@@ -390,7 +401,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         tool: String? = nil,
         resultText: String? = nil,
         errorText: String? = nil
-    ) -> ReviewLogEntry.Metadata {
+    ) -> ReviewMonitorLog.Metadata {
         .init(
             sourceType: sourceType,
             title: title,
@@ -428,7 +439,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         current: ReviewMonitorLog.Document
     ) -> ReviewMonitorLog.Append? {
         guard current.textUTF16Length > previous.textUTF16Length,
-              current.text.hasPrefix(previous.text)
+            current.text.hasPrefix(previous.text)
         else {
             return nil
         }
@@ -439,11 +450,13 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         let block = current.blocks.first {
             NSIntersectionRange($0.range, suffixRange).length > 0
         }
-        guard existingPresentationUnchanged(
-            previous: previous,
-            current: current,
-            suffixBlockID: block?.id
-        ) else {
+        guard
+            existingPresentationUnchanged(
+                previous: previous,
+                current: current,
+                suffixBlockID: block?.id
+            )
+        else {
             return nil
         }
         return .init(
@@ -482,12 +495,12 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             }
             if previousBlock.id == suffixBlockID {
                 guard currentBlock.kind == previousBlock.kind,
-                      currentBlock.groupID == previousBlock.groupID,
-                      currentBlock.range.location == previousBlock.range.location,
-                      currentBlock.sourceRange.location == previousBlock.sourceRange.location,
-                      currentBlock.metadata == previousBlock.metadata,
-                      currentBlock.range.length >= previousBlock.range.length,
-                      currentBlock.sourceRange.length >= previousBlock.sourceRange.length
+                    currentBlock.groupID == previousBlock.groupID,
+                    currentBlock.range.location == previousBlock.range.location,
+                    currentBlock.sourceRange.location == previousBlock.sourceRange.location,
+                    currentBlock.metadata == previousBlock.metadata,
+                    currentBlock.range.length >= previousBlock.range.length,
+                    currentBlock.sourceRange.length >= previousBlock.sourceRange.length
                 else {
                     return false
                 }
@@ -504,8 +517,8 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
     ) -> ReviewMonitorLog.Replacement? {
         for previousBlock in previous.blocks {
             guard let currentBlock = current.blocks.first(where: { $0.id == previousBlock.id }),
-                  currentBlock.range.location == previousBlock.range.location,
-                  NSMaxRange(currentBlock.range) <= current.textUTF16Length
+                currentBlock.range.location == previousBlock.range.location,
+                NSMaxRange(currentBlock.range) <= current.textUTF16Length
             else {
                 continue
             }
@@ -548,11 +561,8 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         previous: ReviewMonitorLog.Document,
         current: ReviewMonitorLog.Document
     ) -> Bool {
-        previous.text != current.text ||
-            previous.sourceText != current.sourceText ||
-            previous.blocks != current.blocks ||
-            previous.styleRuns != current.styleRuns ||
-            previous.decorations != current.decorations
+        previous.text != current.text || previous.sourceText != current.sourceText || previous.blocks != current.blocks
+            || previous.styleRuns != current.styleRuns || previous.decorations != current.decorations
     }
 
     private static func utf16Length(_ text: String) -> Int {
@@ -624,7 +634,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
             return "\n\n" + blockText
         }
 
-        private static func isVisible(kind: ReviewLogEntry.Kind, text: String) -> Bool {
+        private static func isVisible(kind: ReviewMonitorLog.Kind, text: String) -> Bool {
             if kind == .diagnostic {
                 return true
             }

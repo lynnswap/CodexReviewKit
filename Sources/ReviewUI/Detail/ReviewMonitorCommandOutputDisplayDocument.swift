@@ -1,5 +1,4 @@
 import Foundation
-import CodexReviewKit
 
 enum ReviewMonitorCommandOutputDisplayDocument {
     static let toggleAttachmentCharacter = "\u{fffc}"
@@ -12,12 +11,13 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             let nextIndex = displayText.index(after: index)
 
             if character == "\n",
-               nextIndex < displayText.endIndex,
-               String(displayText[nextIndex]) == toggleAttachmentCharacter {
+                nextIndex < displayText.endIndex,
+                String(displayText[nextIndex]) == toggleAttachmentCharacter
+            {
                 let afterAttachmentIndex = displayText.index(after: nextIndex)
-                if afterAttachmentIndex == displayText.endIndex ||
-                    displayText[afterAttachmentIndex] == "\n" ||
-                    String(displayText[afterAttachmentIndex]) == toggleAttachmentCharacter {
+                if afterAttachmentIndex == displayText.endIndex || displayText[afterAttachmentIndex] == "\n"
+                    || String(displayText[afterAttachmentIndex]) == toggleAttachmentCharacter
+                {
                     index = afterAttachmentIndex
                     continue
                 }
@@ -124,45 +124,49 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                     title: title,
                     includesActiveTimer: isActive && metadata?.startedAt != nil
                 )
-                blocks.append(.init(
-                    id: blockID,
-                    kind: .commandOutput,
-                    groupID: panelSource.anchor.groupID,
-                    range: displayRange,
-                    sourceRange: commandPanelSourceRange(panelSource),
-                    metadata: metadata
-                ))
-                styleRuns.append(.init(
-                    range: controlRange,
-                    style: .commandOutputControl(keepsTrailingContent: isActive && metadata?.startedAt != nil)
-                ))
-                panels.append(.init(
-                    blockID: blockID,
-                    range: displayRange,
-                    commandText: commandText,
-                    outputText: outputText,
-                    outputSourceRange: panelSource.output?.sourceRange,
-                    lineCount: commandOutputLineCount(
-                        for: panelSource,
-                        sourceString: sourceString,
-                        isExpanded: isExpanded
-                    ),
-                    isExpanded: isExpanded,
-                    isActive: isActive,
-                    startedAt: metadata?.startedAt,
-                    title: title,
-                    exitText: commandOutputResultText(for: metadata)
-                ))
+                blocks.append(
+                    .init(
+                        id: blockID,
+                        kind: .commandOutput,
+                        groupID: panelSource.anchor.groupID,
+                        range: displayRange,
+                        sourceRange: commandPanelSourceRange(panelSource),
+                        metadata: metadata
+                    ))
+                styleRuns.append(
+                    .init(
+                        range: controlRange,
+                        style: .commandOutputControl(keepsTrailingContent: isActive && metadata?.startedAt != nil)
+                    ))
+                panels.append(
+                    .init(
+                        blockID: blockID,
+                        range: displayRange,
+                        commandText: commandText,
+                        outputText: outputText,
+                        outputSourceRange: panelSource.output?.sourceRange,
+                        lineCount: commandOutputLineCount(
+                            for: panelSource,
+                            sourceString: sourceString,
+                            isExpanded: isExpanded
+                        ),
+                        isExpanded: isExpanded,
+                        isActive: isActive,
+                        startedAt: metadata?.startedAt,
+                        title: title,
+                        exitText: commandOutputResultText(for: metadata)
+                    ))
             } else {
                 let displayRange = appendText(sourceString.substring(with: block.range))
-                blocks.append(.init(
-                    id: block.id,
-                    kind: block.kind,
-                    groupID: block.groupID,
-                    range: displayRange,
-                    sourceRange: block.sourceRange,
-                    metadata: block.metadata
-                ))
+                blocks.append(
+                    .init(
+                        id: block.id,
+                        kind: block.kind,
+                        groupID: block.groupID,
+                        range: displayRange,
+                        sourceRange: block.sourceRange,
+                        metadata: block.metadata
+                    ))
                 appendPresentationRuns(
                     from: source,
                     sourceRange: block.range,
@@ -206,7 +210,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         var output: ReviewMonitorLog.Block?
     }
 
-    private static func commandPanelMetadata(for source: CommandPanelSource) -> ReviewLogEntry.Metadata? {
+    private static func commandPanelMetadata(for source: CommandPanelSource) -> ReviewMonitorLog.Metadata? {
         mergeCommandMetadata(
             primary: source.output?.metadata,
             fallback: source.command?.metadata ?? source.anchor.metadata
@@ -214,9 +218,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func mergeCommandMetadata(
-        primary: ReviewLogEntry.Metadata?,
-        fallback: ReviewLogEntry.Metadata?
-    ) -> ReviewLogEntry.Metadata? {
+        primary: ReviewMonitorLog.Metadata?,
+        fallback: ReviewMonitorLog.Metadata?
+    ) -> ReviewMonitorLog.Metadata? {
         guard let primary else {
             return fallback
         }
@@ -224,10 +228,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return primary
         }
 
-        let durationMs = primary.durationMs ?? fallback.durationMs ?? commandDurationMs(
-            startedAt: primary.startedAt ?? fallback.startedAt,
-            completedAt: primary.completedAt ?? fallback.completedAt
-        )
+        let durationMs =
+            primary.durationMs ?? fallback.durationMs
+            ?? commandDurationMs(
+                startedAt: primary.startedAt ?? fallback.startedAt,
+                completedAt: primary.completedAt ?? fallback.completedAt
+            )
         let title = primary.title ?? fallback.title
         let status = primary.status ?? fallback.status
         let detail = primary.detail ?? fallback.detail
@@ -247,7 +253,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         let resultText = primary.resultText ?? fallback.resultText
         let errorText = primary.errorText ?? fallback.errorText
 
-        return ReviewLogEntry.Metadata(
+        return ReviewMonitorLog.Metadata(
             sourceType: primary.sourceType,
             title: title,
             status: status,
@@ -273,12 +279,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func firstBlocksByGroupID(
         in blocks: [ReviewMonitorLog.Block],
-        kind: ReviewLogEntry.Kind
+        kind: ReviewMonitorLog.Kind
     ) -> [String: ReviewMonitorLog.Block] {
         var result: [String: ReviewMonitorLog.Block] = [:]
         for block in blocks where block.kind == kind {
             guard let groupID = block.groupID,
-                  result[groupID] == nil
+                result[groupID] == nil
             else {
                 continue
             }
@@ -298,7 +304,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return .init(anchor: block, command: block, output: output)
         case .commandOutput:
             guard let groupID = block.groupID,
-                  let command = commandBlocksByGroupID[groupID]
+                let command = commandBlocksByGroupID[groupID]
             else {
                 return .init(anchor: block, command: nil, output: block)
             }
@@ -308,7 +314,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             }
             return .init(anchor: anchor, command: command, output: block)
         case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
-             .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+            .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
             return nil
         }
     }
@@ -319,8 +325,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         commandOutputBlocksByGroupID: [String: ReviewMonitorLog.Block]
     ) -> Bool {
         guard let groupID = block.groupID,
-              let command = commandBlocksByGroupID[groupID],
-              let output = commandOutputBlocksByGroupID[groupID]
+            let command = commandBlocksByGroupID[groupID],
+            let output = commandOutputBlocksByGroupID[groupID]
         else {
             return false
         }
@@ -384,10 +390,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             guard intersection.length > 0 else {
                 continue
             }
-            styleRuns.append(.init(
-                range: map(intersection, from: sourceRange, to: displayRange),
-                style: styleRun.style
-            ))
+            styleRuns.append(
+                .init(
+                    range: map(intersection, from: sourceRange, to: displayRange),
+                    style: styleRun.style
+                ))
         }
 
         for decoration in source.decorations {
@@ -395,11 +402,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             guard intersection.length > 0 else {
                 continue
             }
-            decorations.append(.init(
-                blockID: decoration.blockID,
-                range: map(intersection, from: sourceRange, to: displayRange),
-                style: decoration.style
-            ))
+            decorations.append(
+                .init(
+                    blockID: decoration.blockID,
+                    range: map(intersection, from: sourceRange, to: displayRange),
+                    style: decoration.style
+                ))
         }
     }
 
@@ -426,11 +434,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     ) -> NSRange {
         NSRange(
             location: displayRange.location,
-            length: (
-                toggleAttachmentCharacter
-                    + title
-                    + (includesActiveTimer ? toggleAttachmentCharacter : "")
-            ).utf16.count
+            length: (toggleAttachmentCharacter
+                + title
+                + (includesActiveTimer ? toggleAttachmentCharacter : "")).utf16.count
         )
     }
 
@@ -463,28 +469,30 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputTitle(
-        metadata: ReviewLogEntry.Metadata?,
+        metadata: ReviewMonitorLog.Metadata?,
         commandText: String,
         isActive: Bool,
         currentDate: Date
     ) -> String {
         if hasStructuredCommandMetadata(metadata) {
-            let title = commandActionTitle(
-                metadata: metadata,
-                commandText: commandText,
-                isActive: isActive
-            )
-            ?? commandRunTitle(
-                commandText: commandText,
-                metadata: metadata,
-                isActive: isActive
-            )
+            let title =
+                commandActionTitle(
+                    metadata: metadata,
+                    commandText: commandText,
+                    isActive: isActive
+                )
+                ?? commandRunTitle(
+                    commandText: commandText,
+                    metadata: metadata,
+                    isActive: isActive
+                )
             if isActive == false,
-               let durationText = commandDurationText(
-                metadata: metadata,
-                isActive: isActive,
-                currentDate: currentDate
-            ) {
+                let durationText = commandDurationText(
+                    metadata: metadata,
+                    isActive: isActive,
+                    currentDate: currentDate
+                )
+            {
                 return "\(title) for \(durationText)"
             }
             return title
@@ -492,8 +500,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
         let trimmedTitle = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedTitle,
-           trimmedTitle.isEmpty == false,
-           isGenericCommandTitle(trimmedTitle) == false {
+            trimmedTitle.isEmpty == false,
+            isGenericCommandTitle(trimmedTitle) == false
+        {
             return trimmedTitle
         }
         if commandText.isEmpty == false {
@@ -503,7 +512,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return "Command output"
     }
 
-    private static func hasStructuredCommandMetadata(_ metadata: ReviewLogEntry.Metadata?) -> Bool {
+    private static func hasStructuredCommandMetadata(_ metadata: ReviewMonitorLog.Metadata?) -> Bool {
         guard let metadata else {
             return false
         }
@@ -517,7 +526,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
 
     private static func commandRunTitle(
         commandText: String,
-        metadata: ReviewLogEntry.Metadata?,
+        metadata: ReviewMonitorLog.Metadata?,
         isActive: Bool
     ) -> String {
         let command = commandText.nilIfEmpty ?? metadata?.command?.nilIfEmpty ?? "command"
@@ -525,12 +534,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandActionTitle(
-        metadata: ReviewLogEntry.Metadata?,
+        metadata: ReviewMonitorLog.Metadata?,
         commandText: String,
         isActive: Bool
     ) -> String? {
         guard let actions = metadata?.commandActions,
-              actions.isEmpty == false
+            actions.isEmpty == false
         else {
             return nil
         }
@@ -567,7 +576,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandOutputIsActive(
-        _ metadata: ReviewLogEntry.Metadata?,
+        _ metadata: ReviewMonitorLog.Metadata?,
         hasOutput: Bool
     ) -> Bool {
         guard let metadata else {
@@ -591,7 +600,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     }
 
     private static func commandDurationText(
-        metadata: ReviewLogEntry.Metadata?,
+        metadata: ReviewMonitorLog.Metadata?,
         isActive: Bool,
         currentDate: Date
     ) -> String? {
@@ -599,10 +608,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         if isActive, let startedAt = metadata?.startedAt {
             durationMs = commandDurationMs(startedAt: startedAt, completedAt: currentDate)
         } else {
-            durationMs = metadata?.durationMs ?? commandDurationMs(
-                startedAt: metadata?.startedAt,
-                completedAt: metadata?.completedAt
-            )
+            durationMs =
+                metadata?.durationMs
+                ?? commandDurationMs(
+                    startedAt: metadata?.startedAt,
+                    completedAt: metadata?.completedAt
+                )
         }
         guard let durationMs else {
             return nil
@@ -616,7 +627,8 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         commandTextByGroupID: [String: String]
     ) -> String {
         if let groupID = panelSource.anchor.groupID,
-           let commandText = commandTextByGroupID[groupID] {
+            let commandText = commandTextByGroupID[groupID]
+        {
             return commandText
         }
 
@@ -640,7 +652,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return normalized == "command" || normalized == "command output"
     }
 
-    private static func commandOutputResultText(for metadata: ReviewLogEntry.Metadata?) -> String? {
+    private static func commandOutputResultText(for metadata: ReviewMonitorLog.Metadata?) -> String? {
         if let exitCode = metadata?.exitCode {
             return exitCode == 0 ? "Success" : "exit \(exitCode)"
         }
@@ -666,13 +678,13 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return components.prefix(2).joined(separator: " ")
     }
 
-    private static func readActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+    private static func readActionLabel(_ action: ReviewMonitorLog.Metadata.CommandAction) -> String? {
         action.name?.nilIfEmpty
             ?? action.path?.nilIfEmpty.map { URL(fileURLWithPath: $0).lastPathComponent.nilIfEmpty ?? $0 }
             ?? action.command?.nilIfEmpty
     }
 
-    private static func searchActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+    private static func searchActionLabel(_ action: ReviewMonitorLog.Metadata.CommandAction) -> String? {
         let query = action.query?.nilIfEmpty
         let path = action.path?.nilIfEmpty.map(actionPathLabel)
         switch (query, path) {
@@ -687,7 +699,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
     }
 
-    private static func listActionLabel(_ action: ReviewLogEntry.Metadata.CommandAction) -> String? {
+    private static func listActionLabel(_ action: ReviewMonitorLog.Metadata.CommandAction) -> String? {
         action.path?.nilIfEmpty.map(actionPathLabel) ?? action.command?.nilIfEmpty
     }
 
@@ -743,7 +755,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         var commandTextByGroupID: [String: String] = [:]
         for block in blocks where block.kind == .command {
             guard let groupID = block.groupID,
-                  commandTextByGroupID[groupID] == nil
+                commandTextByGroupID[groupID] == nil
             else {
                 continue
             }
@@ -773,12 +785,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
     ) -> ReviewMonitorLog.Change {
         switch change {
         case .append(let append):
-            guard let mappedRange = mappedChangeRange(
-                append.range,
-                blockID: append.blockID,
-                sourceBlocks: sourceBlocks,
-                displayBlocks: displayBlocks
-            ) else {
+            guard
+                let mappedRange = mappedChangeRange(
+                    append.range,
+                    blockID: append.blockID,
+                    sourceBlocks: sourceBlocks,
+                    displayBlocks: displayBlocks
+                )
+            else {
                 if let panelMutation = mappedCommandPanelMutation(
                     sourceRange: append.range,
                     blockID: append.blockID,
@@ -791,21 +805,24 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 }
                 return .reload
             }
-            return .append(.init(
-                kind: append.kind,
-                blockID: append.blockID,
-                range: mappedRange,
-                text: append.text,
-                textUTF16Length: append.textUTF16Length,
-                animationSpans: append.animationSpans
-            ))
+            return .append(
+                .init(
+                    kind: append.kind,
+                    blockID: append.blockID,
+                    range: mappedRange,
+                    text: append.text,
+                    textUTF16Length: append.textUTF16Length,
+                    animationSpans: append.animationSpans
+                ))
         case .replace(let replacement):
-            guard let mappedRange = mappedChangeRange(
-                replacement.range,
-                blockID: replacement.blockID,
-                sourceBlocks: sourceBlocks,
-                displayBlocks: displayBlocks
-            ) else {
+            guard
+                let mappedRange = mappedChangeRange(
+                    replacement.range,
+                    blockID: replacement.blockID,
+                    sourceBlocks: sourceBlocks,
+                    displayBlocks: displayBlocks
+                )
+            else {
                 if let panelMutation = mappedCommandPanelMutation(
                     sourceRange: replacement.range,
                     blockID: replacement.blockID,
@@ -818,13 +835,14 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 }
                 return .reload
             }
-            return .replace(.init(
-                kind: replacement.kind,
-                blockID: replacement.blockID,
-                range: mappedRange,
-                text: replacement.text,
-                textUTF16Length: replacement.textUTF16Length
-            ))
+            return .replace(
+                .init(
+                    kind: replacement.kind,
+                    blockID: replacement.blockID,
+                    range: mappedRange,
+                    text: replacement.text,
+                    textUTF16Length: replacement.textUTF16Length
+                ))
         case .reload:
             return .reload
         }
@@ -839,12 +857,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         displayText: String
     ) -> ReviewMonitorLog.Change? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
-              sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
-              NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
-              let displayBlock = commandPanelDisplayBlock(
+            sourceBlock.kind == .command || sourceBlock.kind == .commandOutput,
+            NSMaxRange(sourceRange) <= NSMaxRange(sourceBlock.range),
+            let displayBlock = commandPanelDisplayBlock(
                 for: sourceBlock,
                 displayBlocks: displayBlocks
-              )
+            )
         else {
             return nil
         }
@@ -858,20 +876,23 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             for: sourceBlock,
             displayBlocks: previousDisplay?.blocks ?? []
         )?.range {
-            return .replace(.init(
-                kind: displayBlock.kind,
-                blockID: displayBlock.id,
-                range: previousRange,
-                text: replacementText,
-                textUTF16Length: displayBlock.range.length
-            ))
+            return .replace(
+                .init(
+                    kind: displayBlock.kind,
+                    blockID: displayBlock.id,
+                    range: previousRange,
+                    text: replacementText,
+                    textUTF16Length: displayBlock.range.length
+                ))
         }
 
-        guard let append = mappedNewCommandPanelAppend(
-            displayBlock: displayBlock,
-            displayText: displayText,
-            previousDisplay: previousDisplay
-        ) else {
+        guard
+            let append = mappedNewCommandPanelAppend(
+                displayBlock: displayBlock,
+                displayText: displayText,
+                previousDisplay: previousDisplay
+            )
+        else {
             return nil
         }
         return .append(append)
@@ -900,7 +921,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             length: displayString.length - previousLength
         )
         guard suffixRange.length > 0,
-              NSIntersectionRange(displayBlock.range, suffixRange).length > 0
+            NSIntersectionRange(displayBlock.range, suffixRange).length > 0
         else {
             return nil
         }
@@ -935,10 +956,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         displayBlocks: [ReviewMonitorLog.Block]
     ) -> NSRange? {
         guard let sourceBlock = sourceBlocks.first(where: { $0.id == blockID }),
-              sourceBlock.kind != .command,
-              sourceBlock.kind != .commandOutput,
-              let displayBlock = displayBlocks.first(where: { $0.id == blockID }),
-              NSMaxRange(range) <= NSMaxRange(sourceBlock.range)
+            sourceBlock.kind != .command,
+            sourceBlock.kind != .commandOutput,
+            let displayBlock = displayBlocks.first(where: { $0.id == blockID }),
+            NSMaxRange(range) <= NSMaxRange(sourceBlock.range)
         else {
             return nil
         }

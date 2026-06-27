@@ -62,6 +62,8 @@ final class ReviewMonitorSelectedCodexChat {
     private var documentProjection = ReviewMonitorSelectedCodexChatDocumentProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
+    @ObservationIgnored
+    private var documentContinuations: [UUID: AsyncStream<ReviewTimelineDocument>.Continuation] = [:]
 
     init(modelSource: ReviewMonitorCodexModelSource?) {
         self.modelSource = modelSource
@@ -88,6 +90,21 @@ final class ReviewMonitorSelectedCodexChat {
         refreshBinding()
     }
 
+    func timelineDocumentStream() -> AsyncStream<ReviewTimelineDocument> {
+        let id = UUID()
+        let pair = AsyncStream<ReviewTimelineDocument>.makeStream(bufferingPolicy: .unbounded)
+        documentContinuations[id] = pair.continuation
+        if let timelineDocument {
+            pair.continuation.yield(timelineDocument)
+        }
+        pair.continuation.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.documentContinuations.removeValue(forKey: id)
+            }
+        }
+        return pair.stream
+    }
+
     private func bindModelSource() {
         guard let modelSource else {
             return
@@ -109,7 +126,7 @@ final class ReviewMonitorSelectedCodexChat {
         identity = nextTarget?.reviewIdentity
         chatID = nextTarget?.chatID
         chat = nil
-        timelineDocument = nil
+        publishTimelineDocument(nil)
         documentProjection.reset()
         boundModelContext = nextModelContext
 
@@ -134,17 +151,18 @@ final class ReviewMonitorSelectedCodexChat {
                 self.observation = observation
                 for await change in observation.changes {
                     guard Task.isCancelled == false,
-                          self.target == nextTarget,
-                          self.chat === nextChat
+                        self.target == nextTarget,
+                        self.chat === nextChat
                     else {
                         break
                     }
-                    self.timelineDocument = self.documentProjection.apply(
-                        change,
-                        activeTurnID: nextTarget.activeTurnID,
-                        chatCreatedAt: nextChat.createdAt,
-                        chatUpdatedAt: nextChat.updatedAt
-                    )
+                    self.publishTimelineDocument(
+                        self.documentProjection.apply(
+                            change,
+                            activeTurnID: nextTarget.activeTurnID,
+                            chatCreatedAt: nextChat.createdAt,
+                            chatUpdatedAt: nextChat.updatedAt
+                        ))
                 }
             } catch is CancellationError {
             } catch {
@@ -157,6 +175,16 @@ final class ReviewMonitorSelectedCodexChat {
         observationTask = nil
         observation?.cancel()
         observation = nil
+    }
+
+    private func publishTimelineDocument(_ document: ReviewTimelineDocument?) {
+        timelineDocument = document
+        guard let document else {
+            return
+        }
+        for continuation in documentContinuations.values {
+            continuation.yield(document)
+        }
     }
 
     private static func observe(

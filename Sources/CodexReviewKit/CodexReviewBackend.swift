@@ -2,16 +2,20 @@ import Foundation
 
 package protocol CodexReviewBackend: Sendable {
     func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot
-    func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot
+    func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws
+        -> CodexReviewBackendModel.Settings.Snapshot
 
     func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot
-    func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge
+    func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws
+        -> CodexReviewBackendModel.Login.Challenge
     func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws
     func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot
 
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt
-    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws
-    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken
+    func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason)
+        async throws
+    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws
+        -> CodexReviewBackendModel.Review.RestartToken
     func restartPreparedReview(
         _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
@@ -67,7 +71,8 @@ package actor BackendReviewEventMailbox {
             return
         }
         if let waiterID = waiters.keys.first,
-           let waiter = waiters.removeValue(forKey: waiterID) {
+            let waiter = waiters.removeValue(forKey: waiterID)
+        {
             waiter.resume(returning: .event(event))
         } else {
             bufferedEvents.append(event)
@@ -174,13 +179,13 @@ package actor BackendReviewEventMailbox {
         case .completed, .failed, .cancelled:
             return true
         case .domainEvents,
-             .suppressNextLogTimelineProjection,
-             .suppressNextTerminalFailureLogTimelineProjection,
-             .started,
-             .message,
-             .messageDelta,
-             .log,
-             .logEntry:
+            .retainNextTimelineTextFromLogEntry,
+            .retainNextTerminalFailureTimelineTextFromLogEntry,
+            .started,
+            .message,
+            .messageDelta,
+            .log,
+            .logEntry:
             return false
         }
     }

@@ -200,7 +200,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
         job.core.run.turnID = "turn-1"
-        job.appendLogEntry(.init(kind: .agentMessage, text: "Log trigger"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline trigger"))
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
@@ -251,13 +251,13 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: "review-thread",
             turnID: "turn-1"
         )
-        job.appendLogEntry(.init(kind: .agentMessage, text: "Log fallback"))
+        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline fallback"))
         uiState.selection = .job(job)
 
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Chat snapshot")
         }
-        #expect(initialSnapshot.log.contains("Log fallback") == false)
+        #expect(initialSnapshot.log.contains("Timeline fallback") == false)
 
         try await runtime.transport.emitServerNotification(
             method: "item/updated",
@@ -317,14 +317,15 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        uiState.selection = .chat(.init(
-            rowID: .chat(CodexThreadID(rawValue: "chat-thread")),
-            id: CodexThreadID(rawValue: "chat-thread"),
-            title: "Generic chat",
-            preview: nil,
-            workspaceCWD: "/tmp/project",
-            updatedAt: nil
-        ))
+        uiState.selection = .chat(
+            .init(
+                rowID: .chat(CodexThreadID(rawValue: "chat-thread")),
+                id: CodexThreadID(rawValue: "chat-thread"),
+                title: "Generic chat",
+                preview: nil,
+                workspaceCWD: "/tmp/project",
+                updatedAt: nil
+            ))
 
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Generic chat snapshot")

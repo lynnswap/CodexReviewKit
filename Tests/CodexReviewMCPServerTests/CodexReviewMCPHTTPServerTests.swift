@@ -80,26 +80,28 @@ struct CodexReviewMCPHTTPServerTests {
                 ],
             ],
         ])
-        let response = await server.handleHTTPRequest(HTTPRequest(
-            method: "POST",
-            headers: [
-                HTTPHeaderName.host: "review.local:9417",
-                HTTPHeaderName.accept: "text/event-stream, application/json",
-                HTTPHeaderName.contentType: "application/json",
-            ],
-            body: initializeBody,
-            path: "/mcp"
-        ))
-        let denied = await server.handleHTTPRequest(HTTPRequest(
-            method: "POST",
-            headers: [
-                HTTPHeaderName.host: "other.local:9417",
-                HTTPHeaderName.accept: "text/event-stream, application/json",
-                HTTPHeaderName.contentType: "application/json",
-            ],
-            body: initializeBody,
-            path: "/mcp"
-        ))
+        let response = await server.handleHTTPRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.host: "review.local:9417",
+                    HTTPHeaderName.accept: "text/event-stream, application/json",
+                    HTTPHeaderName.contentType: "application/json",
+                ],
+                body: initializeBody,
+                path: "/mcp"
+            ))
+        let denied = await server.handleHTTPRequest(
+            HTTPRequest(
+                method: "POST",
+                headers: [
+                    HTTPHeaderName.host: "other.local:9417",
+                    HTTPHeaderName.accept: "text/event-stream, application/json",
+                    HTTPHeaderName.contentType: "application/json",
+                ],
+                body: initializeBody,
+                path: "/mcp"
+            ))
 
         #expect(response.statusCode == 200)
         #expect(response.headers[HTTPHeaderName.sessionID]?.isEmpty == false)
@@ -119,10 +121,12 @@ struct CodexReviewMCPHTTPServerTests {
             configuration: configuration
         )
 
-        #expect((classified as? CodexReviewMCPHTTPServer.Error) == .addressInUse(
-            host: "127.0.0.1",
-            port: 54321
-        ))
+        #expect(
+            (classified as? CodexReviewMCPHTTPServer.Error)
+                == .addressInUse(
+                    host: "127.0.0.1",
+                    port: 54321
+                ))
     }
 
     @Test func streamableHTTPCallsReviewStartWithCustomTarget() async throws {
@@ -163,14 +167,20 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(resolved.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-1")
             #expect(resolved.value(for: ["result", "structuredContent", "jobID"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
-            #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
-            #expect(resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.startReview(.init(
-                jobID: "job-1",
-                sessionID: sessionID,
-                request: .init(cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
-            ))))
+            #expect(
+                commands.contains(
+                    .startReview(
+                        .init(
+                            jobID: "job-1",
+                            sessionID: sessionID,
+                            request: .init(
+                                cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
+                        ))))
         }
     }
 
@@ -213,7 +223,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
             #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
-            #expect(running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
+            #expect(
+                running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let awaited = try await postJSONRPC(
@@ -226,17 +237,22 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_await",
                         "arguments": [
-                            "jobId": "job-1",
+                            "jobId": "job-1"
                         ],
                     ],
                 ]
             )
 
             #expect(awaited.value(for: ["result", "isError"]) as? Bool == false)
-            #expect(awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
-            #expect(awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
-            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String == "Done")
-            #expect(awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String == "review text")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String == "Done")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String
+                    == "review text")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -276,11 +292,15 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(resolved.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-1")
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.startReview(.init(
-                jobID: "job-1",
-                sessionID: sessionID,
-                request: .init(cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
-            ))))
+            #expect(
+                commands.contains(
+                    .startReview(
+                        .init(
+                            jobID: "job-1",
+                            sessionID: sessionID,
+                            request: .init(
+                                cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
+                        ))))
         }
     }
 
@@ -448,13 +468,13 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(allowed.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-in-session")
             #expect(allowed.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage"]) == nil)
-            let timelineIDs = allowed.value(for: ["result", "structuredContent", "timeline", "orderedItemIds"]) as? [String]
-            #expect(timelineIDs?.contains("cmd-1") == true)
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
             #expect(readText == "Done")
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
-            #expect((denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String == "Job job-other-session was not found.")
+            #expect(
+                (denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
+                    == "Job job-other-session was not found.")
         }
     }
 
@@ -481,33 +501,50 @@ struct CodexReviewMCPHTTPServerTests {
                 durationMs: 3000,
                 commandStatus: "completed"
             )
+            let job = CodexReviewJob.makeForTesting(
+                id: "job-semantic",
+                sessionID: sessionID,
+                cwd: "/tmp/project",
+                targetSummary: "Included",
+                status: .succeeded,
+                summary: "Done",
+                logEntries: [
+                    .init(
+                        kind: .command,
+                        groupID: "cmd-1",
+                        text: "$ swift test",
+                        metadata: commandMetadata
+                    ),
+                    .init(
+                        kind: .commandOutput,
+                        groupID: "cmd-1",
+                        text: longOutput,
+                        metadata: commandMetadata
+                    ),
+                ]
+            )
+            job.timeline.apply(
+                .itemCompleted(
+                    .init(
+                        id: "cmd-1",
+                        kind: .commandExecution,
+                        family: .command,
+                        phase: .completed,
+                        content: .command(
+                            .init(
+                                command: "swift test",
+                                cwd: "/tmp/project",
+                                output: longOutput,
+                                exitCode: 0
+                            )),
+                        startedAt: startedAt,
+                        completedAt: completedAt,
+                        durationMs: 3000
+                    )))
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
-                    CodexReviewJob.makeForTesting(
-                        id: "job-semantic",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Included",
-                        status: .succeeded,
-                        summary: "Done",
-                        logEntries: [
-                            .init(
-                                kind: .command,
-                                groupID: "cmd-1",
-                                text: "$ swift test",
-                                metadata: commandMetadata
-                            ),
-                            .init(
-                                kind: .commandOutput,
-                                groupID: "cmd-1",
-                                text: longOutput,
-                                metadata: commandMetadata
-                            ),
-                        ]
-                    ),
-                ]
+                jobs: [job]
             )
 
             let defaultResponse = try await postJSONRPC(
@@ -520,7 +557,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_read",
                         "arguments": [
-                            "jobId": "job-semantic",
+                            "jobId": "job-semantic"
                         ],
                     ],
                 ]
@@ -528,13 +565,17 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(defaultResponse.value(for: ["result", "structuredContent", "jobId"]) as? String == "job-semantic")
             #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
+            #expect(
+                defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String
+                    == "succeeded")
+            #expect(
+                defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
             #expect(defaultResponse.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
 
-            let timeline = try #require(defaultResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let timeline = try #require(
+                defaultResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
             #expect(timeline["orderedItemIds"] as? [String] == ["cmd-1"])
             #expect(timeline["activeItemIds"] as? [String] == [])
             #expect(timeline["activeItemCount"] as? Int == 0)
@@ -580,18 +621,21 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .running,
                 summary: "Running"
             )
-            job.timeline.apply(.itemUpdated(.init(
-                id: "tool-1:progress",
-                kind: .mcpToolCall,
-                family: .tool,
-                phase: .running,
-                content: .toolCall(.init(
-                    namespace: "mcp",
-                    server: "codex_review",
-                    tool: "review_read",
-                    progress: "Reading review job"
-                ))
-            )))
+            job.timeline.apply(
+                .itemUpdated(
+                    .init(
+                        id: "tool-1:progress",
+                        kind: .mcpToolCall,
+                        family: .tool,
+                        phase: .running,
+                        content: .toolCall(
+                            .init(
+                                namespace: "mcp",
+                                server: "codex_review",
+                                tool: "review_read",
+                                progress: "Reading review job"
+                            ))
+                    )))
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
@@ -605,16 +649,17 @@ struct CodexReviewMCPHTTPServerTests {
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
-                        "params": [
-                            "name": "review_read",
-                            "arguments": [
-                                "jobId": "job-tool-progress",
-                            ],
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "jobId": "job-tool-progress"
                         ],
-                    ]
-                )
+                    ],
+                ]
+            )
 
-            let timeline = try #require(response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
+            let timeline = try #require(
+                response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
             #expect(timeline["activeItemIds"] as? [String] == ["tool-1:progress"])
             #expect(timeline["activeItemCount"] as? Int == 1)
             let items = try #require(timeline["items"] as? [[String: Any]])
@@ -688,10 +733,12 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
             #expect(otherSession.cancellationRequested == false)
             let commands = await backend.recordedCommands()
-            #expect(commands.contains(.interruptReview(
-                .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"),
-                .init(message: "Stop from MCP")
-            )))
+            #expect(
+                commands.contains(
+                    .interruptReview(
+                        .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"),
+                        .init(message: "Stop from MCP")
+                    )))
         }
     }
 
@@ -1094,7 +1141,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "id": 3,
                     "method": "resources/read",
                     "params": [
-                        "uri": "codex-review://help/targets/custom",
+                        "uri": "codex-review://help/targets/custom"
                     ],
                 ]
             )
@@ -1121,10 +1168,11 @@ struct CodexReviewMCPHTTPServerTests {
                 ]
             )
             let templates = try #require(response.value(for: ["result", "resourceTemplates"]) as? [[String: Any]])
-            #expect(templates.compactMap { $0["uriTemplate"] as? String } == [
-                "codex-review://help/tools/{tool}",
-                "codex-review://help/targets/{target}",
-            ])
+            #expect(
+                templates.compactMap { $0["uriTemplate"] as? String } == [
+                    "codex-review://help/tools/{tool}",
+                    "codex-review://help/targets/{target}",
+                ])
         }
     }
 
@@ -1240,14 +1288,14 @@ struct CodexReviewMCPHTTPServerTests {
             }
 
             let request = """
-            GET \(endpoint.path) HTTP/1.1\r
-            Host: \(host):\(port)\r
-            Accept: text/event-stream, application/json\r
-            MCP-Session-Id: \(sessionID)\r
-            Connection: close\r
-            \r
+                GET \(endpoint.path) HTTP/1.1\r
+                Host: \(host):\(port)\r
+                Accept: text/event-stream, application/json\r
+                MCP-Session-Id: \(sessionID)\r
+                Connection: close\r
+                \r
 
-            """
+                """
             let bytes = Array(request.utf8)
             try bytes.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.baseAddress else {
@@ -1318,16 +1366,17 @@ struct CodexReviewMCPHTTPServerTests {
 
     private func decodeSSEJSON(from data: Data) throws -> [String: Any] {
         let text = String(decoding: data, as: UTF8.self)
-        let payload = try #require(text
-            .split(separator: "\n")
-            .compactMap { line -> String? in
-                guard line.hasPrefix("data: ") else {
-                    return nil
+        let payload = try #require(
+            text
+                .split(separator: "\n")
+                .compactMap { line -> String? in
+                    guard line.hasPrefix("data: ") else {
+                        return nil
+                    }
+                    let value = line.dropFirst("data: ".count)
+                    return value.isEmpty ? nil : String(value)
                 }
-                let value = line.dropFirst("data: ".count)
-                return value.isEmpty ? nil : String(value)
-            }
-            .last)
+                .last)
         let jsonData = Data(payload.utf8)
         return try #require(JSONSerialization.jsonObject(with: jsonData) as? [String: Any])
     }

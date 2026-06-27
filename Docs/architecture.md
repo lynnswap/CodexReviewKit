@@ -75,18 +75,16 @@ the store backend.
 
 `ReviewTimeline` and `CodexDataKit` model state are the observable sources of
 truth after conversion. ReviewMonitor UI should render selected chats through
-`CodexChat` observation and `ReviewTimelineDocument` projection; release UI
-does not fall back to raw review log entries when a selected Codex chat is not
-available. Rendering helpers and MCP server projections project from semantic
-state; they do not parse raw app-server events and do not make string logs
-authoritative again.
+the `CodexChat` snapshot/change stream and `ReviewTimelineDocument` projection.
+`ReviewLogEntry` is not a ReviewMonitor rendering contract and must not rebuild
+or author semantic timeline state. Rendering helpers and MCP server projections
+project from semantic state; they do not parse raw app-server events and do not
+make string logs authoritative again.
 
-- `ReviewLogEntryTimelineProjection` rebuilds semantic timeline state from
-  existing log entries for persisted or test-created job state that predates
-  direct timeline events.
-
-This projection is not a ReviewMonitor UI owner. New behavior should prefer
-domain events, `CodexDataKit` models, and timeline documents as the owner.
+Collection/list style UI observes source-of-truth models through
+ObservationBridge. Large transcript/log surfaces consume stream APIs that emit
+an initial snapshot followed by changes so the UI can apply append/replacement
+updates without re-reading the entire model.
 
 ## Target Graph
 

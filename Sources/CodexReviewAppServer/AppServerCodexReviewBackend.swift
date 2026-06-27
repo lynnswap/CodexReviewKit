@@ -41,7 +41,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
+    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws
+        -> CodexReviewBackendModel.Settings.Snapshot
+    {
         var patch = CodexConfigurationPatch()
         if change.updatesModel {
             patch.setReviewModel(change.model?.nilIfEmpty)
@@ -68,7 +70,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws
+        -> CodexReviewBackendModel.Login.Challenge
+    {
         let handle = try await appServer.loginChatGPT()
         return try handle.backendChallenge(
             nativeWebAuthenticationCallbackScheme: nil
@@ -119,7 +123,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         )
     }
 
-    package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
+    package func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
         guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
             return
         }
@@ -286,7 +292,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     ) {
         reviewEventSessionsByAttemptID[run.attemptID] = session
         let activeThreadIDs = Set(run.appServerAssociatedThreadIDs)
-        for threadID in activeThreadIDsByAttemptID[run.attemptID] ?? [] where activeThreadIDs.contains(threadID) == false {
+        for threadID in activeThreadIDsByAttemptID[run.attemptID] ?? []
+        where activeThreadIDs.contains(threadID) == false {
             if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
                 activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
             }
@@ -297,7 +304,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         }
         reviewEventSessionCanonicalThreadIDByThreadID[run.threadID] = run.threadID
         if let reviewThreadID = run.reviewThreadID,
-           reviewThreadID != run.threadID {
+            reviewThreadID != run.threadID
+        {
             reviewEventSessionCanonicalThreadIDByThreadID[reviewThreadID] = run.threadID
         }
     }
@@ -316,8 +324,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         return reviewEventSessionsByAttemptID[attemptID]
     }
 
-    private func unregisterReviewEventSession(for run: CodexReviewBackendModel.Review.Run) -> AppServerReviewEventSession? {
-        let threadIDs = activeThreadIDsByAttemptID.removeValue(forKey: run.attemptID)
+    private func unregisterReviewEventSession(for run: CodexReviewBackendModel.Review.Run)
+        -> AppServerReviewEventSession?
+    {
+        let threadIDs =
+            activeThreadIDsByAttemptID.removeValue(forKey: run.attemptID)
             ?? Set(run.appServerAssociatedThreadIDs)
         for threadID in threadIDs {
             if activeReviewAttemptIDByThreadID[threadID] == run.attemptID {
@@ -375,9 +386,10 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
             throw CodexReviewAPI.Error.io("Review run has no cancellable app-server turn.")
         }
         if let session = reviewEventSessionsByAttemptID[run.attemptID],
-           let cancellation = try await session.cancelReview(
+            let cancellation = try await session.cancelReview(
                 expectedTurnID: identity.turnID.rawValue
-           ) {
+            )
+        {
             return cancellation
         }
         let review = try await appServer.resumeReview(
@@ -448,11 +460,13 @@ private enum AppServerTypedReviewEventAdapter {
         run: CodexReviewBackendModel.Review.Run
     ) -> AppServerTypedReviewEvent {
         .init(
-            events: [.started(
-                turnID: review.turnID.rawValue,
-                reviewThreadID: review.reviewThreadID.rawValue,
-                model: run.model
-            )],
+            events: [
+                .started(
+                    turnID: review.turnID.rawValue,
+                    reviewThreadID: review.reviewThreadID.rawValue,
+                    model: run.model
+                )
+            ],
             controlThreadID: review.reviewThreadID.rawValue
         )
     }
@@ -488,12 +502,15 @@ private enum AppServerTypedReviewEventAdapter {
         case .statusChanged(.closed):
             .init(events: [.failed("Review thread is no longer loaded.")], controlThreadID: controlThreadID)
         case .statusChanged(.unknown(let status)):
-            .init(events: [.logEntry(
-                kind: .diagnostic,
-                text: "Review thread status changed: \(status).",
-                groupID: review.turnID.rawValue,
-                replacesGroup: false
-            )], controlThreadID: controlThreadID)
+            .init(
+                events: [
+                    .logEntry(
+                        kind: .diagnostic,
+                        text: "Review thread status changed: \(status).",
+                        groupID: review.turnID.rawValue,
+                        replacesGroup: false
+                    )
+                ], controlThreadID: controlThreadID)
         case .closed:
             .init(events: [.failed("Review thread closed.")], controlThreadID: controlThreadID)
         case .unknown(let raw):
@@ -513,12 +530,14 @@ private enum AppServerTypedReviewEventAdapter {
                 message: response.status?.rawValue ?? "Failed."
             )
         }
-        return [.completed(
-            summary: "Succeeded.",
-            result: response.finalAnswer?.nilIfEmpty
-                ?? response.transcript.finalAnswer?.nilIfEmpty
-                ?? response.transcript.responseText?.nilIfEmpty
-        )]
+        return [
+            .completed(
+                summary: "Succeeded.",
+                result: response.finalAnswer?.nilIfEmpty
+                    ?? response.transcript.finalAnswer?.nilIfEmpty
+                    ?? response.transcript.responseText?.nilIfEmpty
+            )
+        ]
     }
 
     private static func terminalFailureEvents(
@@ -541,36 +560,41 @@ private enum AppServerTypedReviewEventAdapter {
             return []
         }
         if phase == .completed, item.kind.rawValue == "exitedReviewMode" {
-            return [.completed(
-                summary: "Succeeded.",
-                result: item.text?.nilIfEmpty
-            )]
+            return [
+                .completed(
+                    summary: "Succeeded.",
+                    result: item.text?.nilIfEmpty
+                )
+            ]
         }
         guard item.kind != .userMessage,
-              let seed = timelineSeed(for: item, phase: phase)
+            let seed = timelineSeed(for: item, phase: phase)
         else {
             return []
         }
-        let domainEvent: ReviewDomainEvent = switch phase {
-        case .started:
-            .itemStarted(seed)
-        case .updated:
-            .itemUpdated(seed)
-        case .completed:
-            .itemCompleted(seed)
-        }
-        let logEvents = logProjectionEvents(for: item, phase: phase)
-        return [.domainEvents(
-            [domainEvent],
-            logProjectionSuppressionCount: logEvents.immediateLogTimelineProjectionCount
-        )] + logEvents.addingTerminalFailureLogProjectionSuppressionIfNeeded
+        let domainEvent: ReviewDomainEvent =
+            switch phase {
+            case .started:
+                .itemStarted(seed)
+            case .updated:
+                .itemUpdated(seed)
+            case .completed:
+                .itemCompleted(seed)
+            }
+        let logEvents = logEntryEvents(for: item, phase: phase)
+        return [
+            .domainEvents(
+                [domainEvent],
+                retainedLogEntryCount: logEvents.immediateTimelineTextRetentionCount
+            )
+        ] + logEvents.addingTerminalFailureTimelineTextRetentionIfNeeded
     }
 
     private static func messageEvents(
         _ message: CodexMessage
     ) -> [CodexReviewBackendModel.Review.Event] {
         guard message.role != .user,
-              message.text.isEmpty == false
+            message.text.isEmpty == false
         else {
             return []
         }
@@ -597,7 +621,7 @@ private enum AppServerTypedReviewEventAdapter {
             delta: delta.text
         )
         return [
-            .domainEvents([domainEvent], logProjectionSuppressionCount: 1),
+            .domainEvents([domainEvent], retainedLogEntryCount: 1),
             .messageDelta(delta.text, itemID: itemID),
         ]
     }
@@ -605,12 +629,13 @@ private enum AppServerTypedReviewEventAdapter {
     private static func reasoningPartEvents(
         _ part: CodexReasoningPart
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let style: ReviewTimelineItem.Reasoning.Style = switch part.kind {
-        case .summary:
-            .summary
-        case .text:
-            .raw
-        }
+        let style: ReviewTimelineItem.Reasoning.Style =
+            switch part.kind {
+            case .summary:
+                .summary
+            case .text:
+                .raw
+            }
         let seed = ReviewTimelineItemSeed(
             id: .init(rawValue: part.id),
             kind: .reasoning,
@@ -618,7 +643,7 @@ private enum AppServerTypedReviewEventAdapter {
             phase: .running,
             content: .reasoning(.init(text: "", style: style))
         )
-        return [.domainEvents([.itemStarted(seed)], logProjectionSuppressionCount: 0)]
+        return [.domainEvents([.itemStarted(seed)], retainedLogEntryCount: 0)]
     }
 
     private static func reasoningDeltaEvents(
@@ -645,7 +670,7 @@ private enum AppServerTypedReviewEventAdapter {
             delta: delta.delta
         )
         return [
-            .domainEvents([domainEvent], logProjectionSuppressionCount: 1),
+            .domainEvents([domainEvent], retainedLogEntryCount: 1),
             .logEntry(kind: kind, text: delta.delta, groupID: delta.id, replacesGroup: false),
         ]
     }
@@ -653,7 +678,8 @@ private enum AppServerTypedReviewEventAdapter {
     private static func unknownEvents(
         _ raw: CodexRawNotification
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let itemID = raw.turnID?.rawValue
+        let itemID =
+            raw.turnID?.rawValue
             ?? raw.threadID?.rawValue
             ?? raw.method
         let detail = String(data: raw.params, encoding: .utf8)
@@ -662,13 +688,14 @@ private enum AppServerTypedReviewEventAdapter {
             kind: .init(rawValue: raw.method),
             family: .unknown,
             phase: .running,
-            content: .unknown(.init(
-                title: raw.method,
-                detail: detail,
-                rawKind: .init(rawValue: raw.method)
-            ))
+            content: .unknown(
+                .init(
+                    title: raw.method,
+                    detail: detail,
+                    rawKind: .init(rawValue: raw.method)
+                ))
         )
-        return [.domainEvents([.itemUpdated(seed)], logProjectionSuppressionCount: 0)]
+        return [.domainEvents([.itemUpdated(seed)], retainedLogEntryCount: 0)]
     }
 
     private static func timelineSeed(
@@ -684,23 +711,25 @@ private enum AppServerTypedReviewEventAdapter {
         )
     }
 
-    private static func logProjectionEvents(
+    private static func logEntryEvents(
         for item: CodexThreadItem,
         phase: AppServerTypedItemPhase
     ) -> [CodexReviewBackendModel.Review.Event] {
         switch item.content {
         case .message(let message):
             guard message.role != .user,
-                  message.text.isEmpty == false
+                message.text.isEmpty == false
             else {
                 return []
             }
-            return [item.logEntry(
-                kind: .agentMessage,
-                text: message.text,
-                phase: phase,
-                title: nil
-            )]
+            return [
+                item.logEntry(
+                    kind: .agentMessage,
+                    text: message.text,
+                    phase: phase,
+                    title: nil
+                )
+            ]
         case .plan(let text):
             return text.nilIfEmpty.map {
                 [item.logEntry(kind: .plan, text: $0, phase: phase, title: nil)]
@@ -730,34 +759,42 @@ private enum AppServerTypedReviewEventAdapter {
         case .command(let command):
             return commandLogEvents(item: item, command: command, phase: phase)
         case .fileChange(let fileChange):
-            let text = fileChange.output?.nilIfEmpty
+            let text =
+                fileChange.output?.nilIfEmpty
                 ?? fileChange.path?.nilIfEmpty
                 ?? "File changes \(item.logStatus(phase: phase) ?? "updated")."
             let kind: ReviewLogEntry.Kind = fileChange.output?.nilIfEmpty == nil ? .toolCall : .commandOutput
-            return [item.logEntry(
-                kind: kind,
-                text: text,
-                phase: phase,
-                title: "File changes"
-            )]
+            return [
+                item.logEntry(
+                    kind: kind,
+                    text: text,
+                    phase: phase,
+                    title: "File changes"
+                )
+            ]
         case .toolCall(let toolCall):
             let label = item.toolLabel
-            let text = toolCall.error?.nilIfEmpty
+            let text =
+                toolCall.error?.nilIfEmpty
                 ?? toolCall.result?.nilIfEmpty
                 ?? "\(label) \(item.logStatus(phase: phase) ?? "updated")."
-            return [item.logEntry(
-                kind: .toolCall,
-                text: text,
-                phase: phase,
-                title: label
-            )]
+            return [
+                item.logEntry(
+                    kind: .toolCall,
+                    text: text,
+                    phase: phase,
+                    title: label
+                )
+            ]
         case .contextCompaction(let text):
-            return [item.logEntry(
-                kind: .contextCompaction,
-                text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.logStatus(phase: phase)),
-                phase: phase,
-                title: nil
-            )]
+            return [
+                item.logEntry(
+                    kind: .contextCompaction,
+                    text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.logStatus(phase: phase)),
+                    phase: phase,
+                    title: nil
+                )
+            ]
         case .diagnostic(let text):
             return text.nilIfEmpty.map {
                 [item.logEntry(kind: .diagnostic, text: $0, phase: phase, title: nil)]
@@ -780,24 +817,26 @@ private enum AppServerTypedReviewEventAdapter {
     ) -> [CodexReviewBackendModel.Review.Event] {
         var events: [CodexReviewBackendModel.Review.Event] = []
         if command.command.isEmpty == false {
-            events.append(item.logEntry(
-                kind: .command,
-                text: "$ \(command.command)",
-                phase: phase,
-                title: nil
-            ))
+            events.append(
+                item.logEntry(
+                    kind: .command,
+                    text: "$ \(command.command)",
+                    phase: phase,
+                    title: nil
+                ))
         }
         let output = command.output?.nilIfEmpty
         if let output {
             if command.command.isEmpty {
                 events.append(item.commandOutputDeltaLogEntry(text: output))
             } else {
-                events.append(item.logEntry(
-                    kind: .commandOutput,
-                    text: output,
-                    phase: phase,
-                    title: nil
-                ))
+                events.append(
+                    item.logEntry(
+                        kind: .commandOutput,
+                        text: output,
+                        phase: phase,
+                        title: nil
+                    ))
             }
         }
         return events
@@ -860,53 +899,60 @@ private extension CodexThreadItem {
         case .plan(let text):
             .plan(.init(markdown: text))
         case .reasoning(let reasoning):
-            .reasoning(.init(
-                text: reasoning.text,
-                style: reasoning.summary.isEmpty ? .raw : .summary
-            ))
+            .reasoning(
+                .init(
+                    text: reasoning.text,
+                    style: reasoning.summary.isEmpty ? .raw : .summary
+                ))
         case .command(let command):
-            .command(.init(
-                command: command.command,
-                cwd: command.cwd,
-                output: command.output ?? "",
-                exitCode: command.exitCode,
-                status: command.status.map { .init(rawValue: $0.rawValue) }
-            ))
+            .command(
+                .init(
+                    command: command.command,
+                    cwd: command.cwd,
+                    output: command.output ?? "",
+                    exitCode: command.exitCode,
+                    status: command.status.map { .init(rawValue: $0.rawValue) }
+                ))
         case .fileChange(let fileChange):
-            .fileChange(.init(
-                title: "File changes",
-                output: fileChange.output ?? "",
-                paths: fileChange.path.map { [$0] } ?? [],
-                status: fileChange.status.map { .init(rawValue: $0.rawValue) }
-            ))
+            .fileChange(
+                .init(
+                    title: "File changes",
+                    output: fileChange.output ?? "",
+                    paths: fileChange.path.map { [$0] } ?? [],
+                    status: fileChange.status.map { .init(rawValue: $0.rawValue) }
+                ))
         case .toolCall(let toolCall):
-            .toolCall(.init(
-                namespace: toolCall.namespace,
-                server: toolCall.server,
-                tool: toolCall.name,
-                arguments: toolCall.arguments,
-                result: toolCall.result,
-                error: toolCall.error,
-                status: toolCall.status.map { .init(rawValue: $0.rawValue) }
-            ))
+            .toolCall(
+                .init(
+                    namespace: toolCall.namespace,
+                    server: toolCall.server,
+                    tool: toolCall.name,
+                    arguments: toolCall.arguments,
+                    result: toolCall.result,
+                    error: toolCall.error,
+                    status: toolCall.status.map { .init(rawValue: $0.rawValue) }
+                ))
         case .contextCompaction(let text):
-            .contextCompaction(.init(
-                title: text?.nilIfEmpty ?? appServerContextCompactionStartedText,
-                status: logStatus(phase: .updated).map { .init(rawValue: $0) }
-            ))
+            .contextCompaction(
+                .init(
+                    title: text?.nilIfEmpty ?? appServerContextCompactionStartedText,
+                    status: logStatus(phase: .updated).map { .init(rawValue: $0) }
+                ))
         case .diagnostic(let text):
-            .diagnostic(.init(
-                message: text,
-                severity: kind == .error ? .error : nil
-            ))
+            .diagnostic(
+                .init(
+                    message: text,
+                    severity: kind == .error ? .error : nil
+                ))
         case .log(let text):
             .unknown(.init(title: kind.rawValue, detail: text, rawKind: .init(rawValue: kind.rawValue)))
         case .unknown(let raw):
-            .unknown(.init(
-                title: raw.rawType,
-                detail: raw.text,
-                rawKind: .init(rawValue: raw.rawType)
-            ))
+            .unknown(
+                .init(
+                    title: raw.rawType,
+                    detail: raw.text,
+                    rawKind: .init(rawValue: raw.rawType)
+                ))
         }
     }
 
@@ -1210,7 +1256,8 @@ private extension CodexModel {
                 CodexReviewSettings.ReasoningOption(reasoningEffort: $0, description: option.description)
             }
         }
-        let defaultReasoningEffort = defaultReasoningEffort
+        let defaultReasoningEffort =
+            defaultReasoningEffort
             .flatMap { CodexReviewSettings.ReasoningEffort(rawValue: $0.rawValue) }
             ?? reasoningOptions.first?.reasoningEffort
             ?? .medium

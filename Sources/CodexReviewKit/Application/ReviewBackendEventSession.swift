@@ -15,17 +15,19 @@ package struct ReviewBackendEventSessionMetrics: Equatable, Sendable {
 
 package struct ReviewBackendEventSessionCallbacks: Sendable {
     package var recordTurnStarted: @Sendable (_ turnID: String) async -> Void
-    package var recordFinished: @Sendable (
-        _ run: CodexReviewBackendModel.Review.Run,
-        _ metrics: ReviewBackendEventSessionMetrics
-    ) async -> Void
+    package var recordFinished:
+        @Sendable (
+            _ run: CodexReviewBackendModel.Review.Run,
+            _ metrics: ReviewBackendEventSessionMetrics
+        ) async -> Void
 
     package init(
         recordTurnStarted: @escaping @Sendable (_ turnID: String) async -> Void = { _ in },
-        recordFinished: @escaping @Sendable (
-            _ run: CodexReviewBackendModel.Review.Run,
-            _ metrics: ReviewBackendEventSessionMetrics
-        ) async -> Void = { _, _ in }
+        recordFinished:
+            @escaping @Sendable (
+                _ run: CodexReviewBackendModel.Review.Run,
+                _ metrics: ReviewBackendEventSessionMetrics
+            ) async -> Void = { _, _ in }
     ) {
         self.recordTurnStarted = recordTurnStarted
         self.recordFinished = recordFinished
@@ -61,7 +63,8 @@ package actor ReviewBackendEventSession {
         self.mailbox = mailbox
         self.callbacks = callbacks
         if let reviewThreadID = run.reviewThreadID?.nilIfEmpty,
-           reviewThreadID != run.threadID {
+            reviewThreadID != run.threadID
+        {
             self.reviewThreadIDsForCleanup.append(reviewThreadID)
         }
     }
@@ -161,9 +164,10 @@ package actor ReviewBackendEventSession {
                 let followingEvents = events[events.index(after: index)...]
                 if shouldFlushPendingStreamedLogBeforeDomainEvent(
                     followingEvents: followingEvents,
-                    suppressTimelineProjection: false
+                    retainTimelineText: false
                 ),
-                   await flushPendingStreamedLog(controlThreadID: controlThreadID) {
+                    await flushPendingStreamedLog(controlThreadID: controlThreadID)
+                {
                     return
                 }
                 if await emit(event, controlThreadID: controlThreadID) {
@@ -212,14 +216,14 @@ package actor ReviewBackendEventSession {
             case .completed(let summary, nil):
                 return .completed(summary: summary, result: typedReviewResultText)
             case .domainEvents,
-                 .suppressNextLogTimelineProjection,
-                 .suppressNextTerminalFailureLogTimelineProjection,
-                 .started,
-                 .log,
-                 .logEntry,
-                 .completed,
-                 .failed,
-                 .cancelled:
+                .retainNextTimelineTextFromLogEntry,
+                .retainNextTerminalFailureTimelineTextFromLogEntry,
+                .started,
+                .log,
+                .logEntry,
+                .completed,
+                .failed,
+                .cancelled:
                 return event
             }
         }
@@ -245,8 +249,8 @@ package actor ReviewBackendEventSession {
 
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
         guard let reviewThreadID = reviewThreadID?.nilIfEmpty,
-              reviewThreadID != run.threadID,
-              reviewThreadIDsForCleanup.contains(reviewThreadID) == false
+            reviewThreadID != run.threadID,
+            reviewThreadIDsForCleanup.contains(reviewThreadID) == false
         else {
             return
         }
@@ -266,7 +270,7 @@ package actor ReviewBackendEventSession {
 
     private func shouldFlushPendingStreamedLogBeforeDomainEvent(
         followingEvents: ArraySlice<CodexReviewBackendModel.Review.Event>,
-        suppressTimelineProjection: Bool
+        retainTimelineText: Bool
     ) -> Bool {
         guard pendingStreamedLogEntries.isEmpty == false else {
             return false
@@ -274,19 +278,21 @@ package actor ReviewBackendEventSession {
         return followingEvents.contains {
             canCoalescePendingStreamedLog(
                 with: $0,
-                suppressTimelineProjection: suppressTimelineProjection
+                retainTimelineText: retainTimelineText
             )
         } == false
     }
 
     private func canCoalescePendingStreamedLog(
         with event: CodexReviewBackendModel.Review.Event,
-        suppressTimelineProjection: Bool
+        retainTimelineText: Bool
     ) -> Bool {
-        guard let entry = PendingStreamedLogEntry(
-            event,
-            suppressesTimelineProjection: suppressTimelineProjection
-        ) else {
+        guard
+            let entry = PendingStreamedLogEntry(
+                event,
+                retainsTimelineText: retainTimelineText
+            )
+        else {
             return false
         }
         return pendingStreamedLogIndexByKey[entry.key] != nil
@@ -294,18 +300,20 @@ package actor ReviewBackendEventSession {
 
     private func bufferStreamedLog(
         _ event: CodexReviewBackendModel.Review.Event,
-        suppressTimelineProjection: Bool = false
+        retainTimelineText: Bool = false
     ) -> Bool {
-        guard let entry = PendingStreamedLogEntry(
-            event,
-            suppressesTimelineProjection: suppressTimelineProjection
-        ) else {
+        guard
+            let entry = PendingStreamedLogEntry(
+                event,
+                retainsTimelineText: retainTimelineText
+            )
+        else {
             return false
         }
         if let index = pendingStreamedLogIndexByKey[entry.key] {
             pendingStreamedLogEntries[index].append(entry.text)
-            if suppressTimelineProjection {
-                pendingStreamedLogEntries[index].suppressTimelineProjection()
+            if retainTimelineText {
+                pendingStreamedLogEntries[index].retainTimelineText()
             }
         } else {
             pendingStreamedLogIndexByKey[entry.key] = pendingStreamedLogEntries.count
@@ -388,12 +396,12 @@ package actor ReviewBackendEventSession {
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
         case .domainEvents,
-             .suppressNextLogTimelineProjection,
-             .suppressNextTerminalFailureLogTimelineProjection,
-             .message,
-             .messageDelta,
-             .log,
-             .logEntry:
+            .retainNextTimelineTextFromLogEntry,
+            .retainNextTerminalFailureTimelineTextFromLogEntry,
+            .message,
+            .messageDelta,
+            .log,
+            .logEntry:
             break
         }
     }
@@ -427,7 +435,7 @@ package actor ReviewBackendEventSession {
 
     private static func isCommandTimeoutWarning(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         guard case .logEntry(_, _, _, _, let metadata) = event,
-              metadata?.sourceType == "commandExecution"
+            metadata?.sourceType == "commandExecution"
         else {
             return false
         }
@@ -458,7 +466,7 @@ private struct PendingStreamedLogEntry: Sendable {
     var text: String
     var groupID: String
     var metadata: ReviewLogEntry.Metadata?
-    var suppressesTimelineProjection: Bool
+    var retainsTimelineText: Bool
 
     var key: Key {
         .init(
@@ -477,58 +485,59 @@ private struct PendingStreamedLogEntry: Sendable {
             replacesGroup: false,
             metadata: metadata
         )
-        return suppressesTimelineProjection
-            ? [.suppressNextLogTimelineProjection, logEntry]
+        return retainsTimelineText
+            ? [.retainNextTimelineTextFromLogEntry, logEntry]
             : [logEntry]
     }
 
-    init?(_ event: CodexReviewBackendModel.Review.Event, suppressesTimelineProjection: Bool = false) {
+    init?(_ event: CodexReviewBackendModel.Review.Event, retainsTimelineText: Bool = false) {
         guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
-              text.isEmpty == false,
-              replacesGroup == false,
-              let groupID
+            text.isEmpty == false,
+            replacesGroup == false,
+            let groupID
         else {
             return nil
         }
         switch kind {
         case .commandOutput:
             guard metadata?.sourceType == "commandExecution",
-                  metadata?.title == "Command output"
+                metadata?.title == "Command output"
             else {
                 return nil
             }
         case .reasoningSummary, .rawReasoning:
             break
-        case .agentMessage, .command, .plan, .reasoning, .todoList, .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
+        case .agentMessage, .command, .plan, .reasoning, .todoList, .toolCall, .diagnostic, .error, .progress, .event,
+            .contextCompaction:
             return nil
         }
         self.kind = kind
         self.text = text
         self.groupID = groupID
         self.metadata = metadata
-        self.suppressesTimelineProjection = suppressesTimelineProjection
+        self.retainsTimelineText = retainsTimelineText
     }
 
     mutating func append(_ suffix: String) {
         text += suffix
     }
 
-    mutating func suppressTimelineProjection() {
-        suppressesTimelineProjection = true
+    mutating func retainTimelineText() {
+        retainsTimelineText = true
     }
 }
 
 package extension Array where Element == CodexReviewBackendModel.Review.Event {
-    var immediateLogTimelineProjectionCount: Int {
+    var immediateTimelineTextRetentionCount: Int {
         reduce(0) { count, event in
-            count + (event.createsImmediateLogTimelineProjection ? 1 : 0)
+            count + (event.needsImmediateTimelineTextRetention ? 1 : 0)
         }
     }
 
-    var addingTerminalFailureLogProjectionSuppressionIfNeeded: [Element] {
+    var addingTerminalFailureTimelineTextRetentionIfNeeded: [Element] {
         flatMap { event -> [Element] in
             if case .failed = event {
-                return [.suppressNextTerminalFailureLogTimelineProjection, event]
+                return [.retainNextTerminalFailureTimelineTextFromLogEntry, event]
             }
             return [event]
         }
@@ -541,13 +550,13 @@ private extension CodexReviewBackendModel.Review.Event {
         case .completed, .failed, .cancelled:
             true
         case .domainEvents,
-             .suppressNextLogTimelineProjection,
-             .suppressNextTerminalFailureLogTimelineProjection,
-             .started,
-             .message,
-             .messageDelta,
-             .log,
-             .logEntry:
+            .retainNextTimelineTextFromLogEntry,
+            .retainNextTerminalFailureTimelineTextFromLogEntry,
+            .started,
+            .message,
+            .messageDelta,
+            .log,
+            .logEntry:
             false
         }
     }
@@ -559,7 +568,7 @@ private extension CodexReviewBackendModel.Review.Event {
         return result?.nilIfEmpty == nil
     }
 
-    var createsImmediateLogTimelineProjection: Bool {
+    var needsImmediateTimelineTextRetention: Bool {
         guard PendingStreamedLogEntry(self) == nil else {
             return false
         }
@@ -567,12 +576,12 @@ private extension CodexReviewBackendModel.Review.Event {
         case .message, .messageDelta, .log, .logEntry:
             true
         case .domainEvents,
-             .suppressNextLogTimelineProjection,
-             .suppressNextTerminalFailureLogTimelineProjection,
-             .started,
-             .completed,
-             .failed,
-             .cancelled:
+            .retainNextTimelineTextFromLogEntry,
+            .retainNextTerminalFailureTimelineTextFromLogEntry,
+            .started,
+            .completed,
+            .failed,
+            .cancelled:
             false
         }
     }
@@ -603,7 +612,7 @@ private final class ReviewCompletionCoordinator {
 
     func flushPendingCompletion() -> CodexReviewBackendModel.Review.Event? {
         guard finished == false,
-              let event = pendingCompletion
+            let event = pendingCompletion
         else {
             return nil
         }
