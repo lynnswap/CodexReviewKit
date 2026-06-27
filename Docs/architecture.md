@@ -37,6 +37,16 @@ This table describes intended ownership.
 | `CodexReviewTesting` | Deterministic fake backend, fake JSON-RPC transport, gates, manual clock |
 | `TextTransitions` | UI text transition view support |
 
+`CodexDataKit` lives in the separate CodexKit repository and owns reusable
+Codex-facing observable model state for generic app-server concepts.
+ReviewMonitor should depend on those owners for basic Codex data concerns such
+as workspace groups, workspaces, chats, account/login state, rate-limit
+presentation, and model configuration once the corresponding `CodexDataKit`
+public models exist. Review-specific jobs, review timelines, findings,
+cancellation/restart state, and MCP result projections remain
+`CodexReviewKit` responsibilities because they are product semantics rather
+than generic Codex data state.
+
 ReviewMonitor is the product entry point. The host target wires the concrete
 runtime together; lower targets do not import the host.
 
@@ -104,6 +114,10 @@ flowchart TB
         Process["codex app-server"]
     end
 
+    subgraph GenericData["CodexDataKit"]
+        GenericOwners["Generic Codex model owners"]
+    end
+
     subgraph AppServer["CodexReviewAppServer"]
         Runtime["Review runtime"]
     end
@@ -131,7 +145,9 @@ flowchart TB
     Timeline --> Renderer
     PublicStore --> UI
     Renderer --> UI
+    GenericOwners --> UI
     DomainAPI --> Client
+    DomainAPI --> GenericOwners
     ReviewSession --> Client
     Client --> Process
     Runtime --> PublicStore
@@ -245,11 +261,47 @@ The public tool surface is:
 - Views and view controllers render observable state.
 - User actions call store methods.
 - UI rendering may use `ReviewMonitorRendering` helpers over `ReviewTimeline`.
+- Generic Codex model state should come from `CodexDataKit` owners instead of
+  ReviewMonitor-local models when a reusable CodexDataKit model exists. Today
+  CodexDataKit provides `CodexModelContainer`, `CodexModelContext`,
+  `CodexFetchRequest`, `CodexFetchedResults`, `CodexWorkspaceGroup`,
+  `CodexWorkspace`, and `CodexChat`; account/login/rate-limit and
+  model-configuration owners still need to be added before ReviewMonitor can
+  migrate those basic surfaces.
 - UI code must not import app-server runtime, app-server wire, or
   MCP server targets.
 - UI tests cover layout, selection, rendering, accessibility-facing text, and
   user-intent forwarding.
 - Review/auth/settings semantics are tested in lower target tests.
+
+The current ReviewMonitor UI model boundary is therefore:
+
+- `CodexDataKit`: generic observable app-server models and fetch/query owners.
+- `CodexReviewKit`: review-job, review-timeline, review-auth compatibility,
+  settings compatibility, and product command state until the matching generic
+  CodexDataKit owners are available.
+- `ReviewUI`: native AppKit/SwiftUI rendering state such as sidebar selection,
+  filters, installed controllers, row views, and transient presentation.
+
+CodexDataKit migration candidates should be split by owner:
+
+- `CodexModelContext` and `CodexFetchedResults<CodexChat>` should own generic
+  chat/workspace sidebar inputs. ReviewMonitor adapts those models through
+  `ReviewMonitorCodexSidebarLibrary` for generic Codex sidebar surfaces, while
+  keeping review jobs and review timelines in `CodexReviewKit`.
+- `CodexChat` should be used for generic chat presentation and thread-level
+  send/refresh/archive/delete actions, not as a replacement for
+  `CodexReviewJob`.
+- A future CodexDataKit account owner should own active-account loading, login
+  progress, login cancellation/completion, logout, account events, and
+  rate-limit windows over `CodexAppServer`.
+- A future CodexDataKit model-configuration owner should own model catalog
+  loading, current configuration, normalized review-model/reasoning/service
+  tier selection, and configuration persistence over `CodexAppServer`.
+- ReviewMonitor-specific account-switch confirmation, running-review warning
+  policy, review cancellation/restart, persisted ReviewMonitor sidebar state,
+  and MCP-facing review result state remain in CodexReviewKit/ReviewUI unless
+  they become generic Codex product behavior.
 
 `ReviewMonitorRendering` is intentionally lower than UI. It can render domain
 timeline values, but it must not import AppKit/SwiftUI UI, app-server, wire, or

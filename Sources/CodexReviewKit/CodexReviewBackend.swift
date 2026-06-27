@@ -7,7 +7,6 @@ package protocol CodexReviewBackend: Sendable {
     func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot
     func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge
     func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws
-    func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot
     func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot
 
     func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt

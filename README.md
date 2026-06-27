@@ -63,7 +63,7 @@ await appServer.close()
 only ReviewMonitor-specific `review/start` orchestration and review event
 conversion.
 
-See [CodexAppServerKit README](Sources/CodexAppServerKit/README.md) for the
+See [CodexAppServerKit README][codex-app-server-kit-readme] for the
 standalone SDK surface, including thread-level streams for messages,
 transcripts, log entries, and in-flight response controls such as steer, queue,
 and interrupt.
@@ -111,3 +111,5 @@ Create the `notarytool` profile in the local Keychain before publishing:
 ```bash
 xcrun notarytool store-credentials codex-reviewkit
 ```
+
+[codex-app-server-kit-readme]: https://github.com/lynnswap/CodexKit/blob/main/Sources/CodexAppServerKit/README.md

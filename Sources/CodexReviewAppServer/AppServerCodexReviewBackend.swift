@@ -68,30 +68,15 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
-        let handle = try await appServer.loginChatGPT(
-            callbackURLScheme: request.nativeWebAuthenticationCallbackScheme
-        )
+    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+        let handle = try await appServer.loginChatGPT()
         return try handle.backendChallenge(
-            nativeWebAuthenticationCallbackScheme: request.nativeWebAuthenticationCallbackScheme
+            nativeWebAuthenticationCallbackScheme: nil
         )
     }
 
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
         try await appServer.cancelLogin(id: .init(rawValue: challenge.id))
-    }
-
-    package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
-        if let callbackURL = response.callbackURL {
-            guard let url = URL(string: callbackURL) else {
-                throw CodexReviewAPI.Error.io("Invalid ChatGPT authentication callback URL.")
-            }
-            try await appServer.completeLogin(
-                id: .init(rawValue: response.challengeID),
-                callbackURL: url
-            )
-        }
-        return try await readAuth()
     }
 
     package func logout(_: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {

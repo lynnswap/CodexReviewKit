@@ -117,7 +117,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case readAuth
         case startLogin(CodexReviewBackendModel.Login.Request)
         case cancelLogin(CodexReviewBackendModel.Login.Challenge)
-        case completeLogin(CodexReviewBackendModel.Login.Response)
         case logout(CodexReviewBackendModel.Account.ID)
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
@@ -377,13 +376,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
 
     package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
         commands.append(.cancelLogin(challenge))
-    }
-
-    package func completeLogin(_ response: CodexReviewBackendModel.Login.Response) async throws -> CodexReviewBackendModel.Auth.Snapshot {
-        commands.append(.completeLogin(response))
-        let account = CodexReviewBackendModel.Account.Snapshot(id: .init("account-1"), label: "Codex", isActive: true)
-        auth = .init(accounts: [account], activeAccountID: account.id)
-        return auth
     }
 
     package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {

@@ -194,18 +194,6 @@ package extension CodexReviewBackendModel.Login {
     }
 }
 
-package extension CodexReviewBackendModel.Login {
-    struct Response: Codable, Equatable, Sendable {
-        package var challengeID: String
-        package var callbackURL: String?
-
-        package init(challengeID: String, callbackURL: String? = nil) {
-            self.challengeID = challengeID
-            self.callbackURL = callbackURL
-        }
-    }
-}
-
 package extension CodexReviewBackendModel.Review {
     struct Start: Equatable, Sendable {
         package var jobID: String

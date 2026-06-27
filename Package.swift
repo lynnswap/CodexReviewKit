@@ -29,11 +29,9 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        // Until CodexKit is released, use the pinned integration revision; replace
-        // this with the final pinned remote CodexKit release dependency before release.
         .package(
             url: "https://github.com/lynnswap/CodexKit.git",
-            revision: "cfaa2f5763014eacc01b728b79791527a17fe07c"
+            revision: "77340166f494e16077a156b4a2a832d2cd88527d"
         ),
     ],
     targets: [
@@ -98,6 +96,7 @@ let package = Package(
                 "CodexReviewKit",
                 "ReviewMonitorRendering",
                 "TextTransitions",
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
             swiftSettings: [
@@ -166,6 +165,9 @@ let package = Package(
         .testTarget(
             name: "ReviewUITests",
             dependencies: [
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewTesting",
                 "ReviewUI",
