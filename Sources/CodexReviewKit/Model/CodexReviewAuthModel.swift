@@ -78,10 +78,10 @@ public final class CodexReviewAuthModel {
     }
 
     public package(set) var phase: Phase = .signedOut
-    public package(set) var persistedAccounts: [CodexAccount] = []
+    public package(set) var persistedAccounts: [CodexReviewAccount] = []
     public package(set) var persistedActiveAccountKey: String?
-    package private(set) var detachedAccount: CodexAccount?
-    public private(set) var selectedAccount: CodexAccount?
+    package private(set) var detachedAccount: CodexReviewAccount?
+    public private(set) var selectedAccount: CodexReviewAccount?
 
     public package(set) var authenticationFailureCount = 0
     public package(set) var warningMessage: String?
@@ -103,7 +103,7 @@ public final class CodexReviewAuthModel {
         selectedAccount != nil
     }
 
-    public var accounts: [CodexAccount] {
+    public var accounts: [CodexReviewAccount] {
         guard let detachedAccount else {
             return persistedAccounts
         }
@@ -127,13 +127,13 @@ public final class CodexReviewAuthModel {
 
     package init() {}
 
-    package func canRequestSwitchAccount(_ account: CodexAccount) -> Bool {
+    package func canRequestSwitchAccount(_ account: CodexReviewAccount) -> Bool {
         persistedAccounts.contains { $0.accountKey == account.accountKey }
             && selectedAccount?.accountKey != account.accountKey
     }
 
     package func requestSwitchAccount(
-        _ account: CodexAccount,
+        _ account: CodexReviewAccount,
         requiresConfirmation: Bool
     ) {
         guard canRequestSwitchAccount(account) else {
@@ -156,7 +156,7 @@ public final class CodexReviewAuthModel {
     }
 
     package func requestRemoveAccount(
-        _ account: CodexAccount,
+        _ account: CodexReviewAccount,
         requiresConfirmation: Bool
     ) {
         requestAccountAction(
@@ -205,7 +205,7 @@ public final class CodexReviewAuthModel {
         warningMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
-    package func selectPersistedAccount(_ persistedAccountID: CodexAccount.ID?) {
+    package func selectPersistedAccount(_ persistedAccountID: CodexReviewAccount.ID?) {
         guard let persistedAccountID else {
             selectedAccount = nil
             detachedAccount = nil
@@ -215,7 +215,7 @@ public final class CodexReviewAuthModel {
         detachedAccount = nil
     }
 
-    package func updateCurrentAccount(_ account: CodexAccount?) {
+    package func updateCurrentAccount(_ account: CodexReviewAccount?) {
         guard let account else {
             selectedAccount = nil
             detachedAccount = nil
@@ -247,7 +247,7 @@ public final class CodexReviewAuthModel {
     ) {
         let resolvedPersistedAccounts = incomingPersistedAccounts.map { incomingAccount in
             let reconciledAccount = reusableAccount(for: incomingAccount.accountKey)
-                ?? CodexAccount(
+                ?? CodexReviewAccount(
                     accountKey: incomingAccount.accountKey,
                     email: incomingAccount.email,
                     planType: incomingAccount.planType
@@ -268,7 +268,7 @@ public final class CodexReviewAuthModel {
         persistedActiveAccountKey == accountKey
     }
 
-    private func reusableAccount(for accountKey: String) -> CodexAccount? {
+    private func reusableAccount(for accountKey: String) -> CodexReviewAccount? {
         if let persistedAccount = persistedAccounts.first(where: { $0.accountKey == accountKey }) {
             return persistedAccount
         }

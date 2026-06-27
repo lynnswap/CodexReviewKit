@@ -2,8 +2,6 @@ import Foundation
 import CodexReviewKit
 import CodexReviewMCPServer
 
-private typealias ReviewCodexAccount = CodexReviewKit.CodexAccount
-
 @MainActor
 package final class CodexReviewHost {
     package let store: CodexReviewStore
@@ -261,13 +259,13 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel
     ) {
-        let accounts = snapshot.accounts.compactMap { account -> ReviewCodexAccount? in
+        let accounts = snapshot.accounts.compactMap { account -> CodexReviewAccount? in
             let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-            let accountKey = ReviewCodexAccount.normalizedEmail(account.id.rawValue)
+            let accountKey = CodexReviewAccount.normalizedEmail(account.id.rawValue)
             guard label.isEmpty == false, accountKey.isEmpty == false else {
                 return nil
             }
-            return ReviewCodexAccount(
+            return CodexReviewAccount(
                 accountKey: accountKey,
                 email: label,
                 planType: account.planType,
@@ -276,7 +274,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         let activeAccountKey = snapshot.activeAccountID
-            .map { ReviewCodexAccount.normalizedEmail($0.rawValue) }
+            .map { CodexReviewAccount.normalizedEmail($0.rawValue) }
         auth.applyPersistedAccountStates(
             accounts.map(savedAccountPayload(from:)),
             activeAccountKey: activeAccountKey

@@ -80,7 +80,7 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
 }
 
 struct AccountRateLimitsSectionView: View {
-    let account: CodexAccount?
+    let account: CodexReviewAccount?
 
     var body: some View {
         ForEach(rateLimits) { window in
@@ -94,7 +94,7 @@ struct AccountRateLimitsSectionView: View {
 
     @ViewBuilder
     private func rateLimitsRow(
-        _ window: CodexAccount.RateLimitWindow
+        _ window: CodexReviewAccount.RateLimitWindow
     ) -> some View {
         if let details = Self.rateLimitDetailsText(for: window) {
             Button {
@@ -104,12 +104,12 @@ struct AccountRateLimitsSectionView: View {
         }
     }
 
-    private var rateLimits: [CodexAccount.RateLimitWindow] {
+    private var rateLimits: [CodexReviewAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
     static func rateLimitDetailsText(
-        for window: CodexAccount.RateLimitWindow
+        for window: CodexReviewAccount.RateLimitWindow
     ) -> AttributedString? {
         guard let resetsAt = window.resetsAt else {
             return nil
@@ -288,7 +288,7 @@ struct StatusView: View {
 @MainActor
 func makeStatusPreviewStore(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
-    account: CodexAccount? = nil,
+    account: CodexReviewAccount? = nil,
     serverState: CodexReviewServerState = .running
 ) -> CodexReviewStore {
     let store = ReviewMonitorPreviewContent.makeStore()
@@ -303,7 +303,7 @@ func makeStatusPreviewStore(
     return store
 }
 @MainActor
-func makeStatusPreviewAccount() -> CodexAccount {
+func makeStatusPreviewAccount() -> CodexReviewAccount {
     ReviewMonitorPreviewContent.makePreviewAccount()
 }
 #endif

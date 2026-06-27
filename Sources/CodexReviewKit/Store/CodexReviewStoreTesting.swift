@@ -16,8 +16,8 @@ extension CodexReviewStore {
     package func loadForTesting(
         serverState: CodexReviewServerState,
         authPhase: CodexReviewAuthModel.Phase = .signedOut,
-        account: CodexAccount? = nil,
-        persistedAccounts: [CodexAccount]? = nil,
+        account: CodexReviewAccount? = nil,
+        persistedAccounts: [CodexReviewAccount]? = nil,
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
         jobs: [CodexReviewJob] = [],

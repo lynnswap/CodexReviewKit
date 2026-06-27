@@ -283,7 +283,7 @@ func makeReviewMonitorPreviewContentViewController() -> NSViewController {
 @MainActor
 func makeReviewMonitorPreviewContentViewControllerForPreview(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
-    account: CodexAccount? = nil,
+    account: CodexReviewAccount? = nil,
     serverState: CodexReviewServerState = .running,
     previewStore: CodexReviewStore? = nil
 ) -> ReviewMonitorRootViewController {

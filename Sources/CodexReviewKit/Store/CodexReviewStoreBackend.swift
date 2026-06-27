@@ -3,15 +3,15 @@ import Foundation
 @MainActor
 package struct CodexReviewStoreSeed {
     package var shouldAutoStartEmbeddedServer: Bool
-    package var initialAccount: CodexAccount?
-    package var initialAccounts: [CodexAccount]
+    package var initialAccount: CodexReviewAccount?
+    package var initialAccounts: [CodexReviewAccount]
     package var initialActiveAccountKey: String?
     package var initialSettingsSnapshot: CodexReviewSettings.Snapshot
 
     package init(
         shouldAutoStartEmbeddedServer: Bool = false,
-        initialAccount: CodexAccount? = nil,
-        initialAccounts: [CodexAccount] = [],
+        initialAccount: CodexReviewAccount? = nil,
+        initialAccounts: [CodexReviewAccount] = [],
         initialActiveAccountKey: String? = nil,
         initialSettingsSnapshot: CodexReviewSettings.Snapshot = .init()
     ) {

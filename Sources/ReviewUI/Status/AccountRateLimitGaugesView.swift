@@ -2,24 +2,24 @@ import SwiftUI
 import CodexReviewKit
 
 struct AccountRateLimitGaugesView: View {
-    var account: CodexAccount?
+    var account: CodexReviewAccount?
 
-    private static let placeholderRateLimits: [CodexAccount.RateLimitWindow] = [
-        CodexAccount.RateLimitWindow(
+    private static let placeholderRateLimits: [CodexReviewAccount.RateLimitWindow] = [
+        CodexReviewAccount.RateLimitWindow(
             windowDurationMinutes: 1,
             usedPercent: 0
         ),
-        CodexAccount.RateLimitWindow(
+        CodexReviewAccount.RateLimitWindow(
             windowDurationMinutes: 2,
             usedPercent: 0
         ),
     ]
 
-    private var rateLimits: [CodexAccount.RateLimitWindow] {
+    private var rateLimits: [CodexReviewAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
-    private var displayedRateLimits: [CodexAccount.RateLimitWindow] {
+    private var displayedRateLimits: [CodexReviewAccount.RateLimitWindow] {
         rateLimits.isEmpty ? Self.placeholderRateLimits : rateLimits
     }
 
@@ -44,7 +44,7 @@ struct AccountRateLimitGaugesView: View {
 }
 
 private struct RateLimitWindowGaugeView: View {
-    var window: CodexAccount.RateLimitWindow
+    var window: CodexReviewAccount.RateLimitWindow
 
     var body: some View {
         let remainingPercent = window.remainingPercent
@@ -70,7 +70,7 @@ private struct RateLimitWindowGaugeView: View {
     }
 }
 
-extension CodexAccount.RateLimitWindow {
+extension CodexReviewAccount.RateLimitWindow {
     var limitResetDate: Date? {
         guard usedPercent >= 100 else {
             return nil
@@ -101,8 +101,8 @@ extension CodexAccount.RateLimitWindow {
 }
 
 @MainActor
-private func makeAccountRateLimitGaugesPreviewAccount() -> CodexAccount {
-    let account = CodexAccount(email: "review@example.com", planType: "pro")
+private func makeAccountRateLimitGaugesPreviewAccount() -> CodexReviewAccount {
+    let account = CodexReviewAccount(email: "review@example.com", planType: "pro")
     account.updateRateLimits(
         [
             (

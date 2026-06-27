@@ -4106,8 +4106,8 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func initialActiveAccountKeySelectsPersistedAccount() {
-        let active = CodexAccount(email: "active@example.com")
-        let inactive = CodexAccount(email: "inactive@example.com")
+        let active = CodexReviewAccount(email: "active@example.com")
+        let inactive = CodexReviewAccount(email: "inactive@example.com")
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(
@@ -4128,8 +4128,8 @@ struct CodexReviewStoreCommandTests {
     }
 
     @Test func switchActionsAreUnavailableForSelectedAccount() async throws {
-        let selectedAccount = CodexAccount(email: "selected@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let selectedAccount = CodexReviewAccount(email: "selected@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let backend = SwitchRecordingBackend()
         let store = CodexReviewStore.makeTestingStore(backend: backend)
         store.loadForTesting(

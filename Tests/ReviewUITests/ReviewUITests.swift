@@ -11,11 +11,11 @@ import CodexReviewTesting
 
 @MainActor
 private extension CodexReviewAuthModel {
-    func updatePersistedAccounts(_ accounts: [CodexAccount]) {
+    func updatePersistedAccounts(_ accounts: [CodexReviewAccount]) {
         applyPersistedAccountStates(accounts.map(savedAccountPayload(from:)))
     }
 
-    func updateAccount(_ account: CodexAccount?) {
+    func updateAccount(_ account: CodexReviewAccount?) {
         updateCurrentAccount(account)
     }
 }
@@ -1034,7 +1034,7 @@ struct ReviewUITests {
 
     @Test func addAccountToolbarItemShowsProgressPresentation() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signingIn(
@@ -1066,7 +1066,7 @@ struct ReviewUITests {
 
     @Test func addAccountToolbarItemDoesNotStickInProgressModeWhenAuthenticationEndsImmediately() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
@@ -1106,7 +1106,7 @@ struct ReviewUITests {
 
     @Test func addAccountToolbarItemProvidesOverflowMenuFallback() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
@@ -1146,7 +1146,7 @@ struct ReviewUITests {
 
     @Test func addAccountToolbarItemStaysVisibleDuringAuthenticationOutsideAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signingIn(
@@ -1178,7 +1178,7 @@ struct ReviewUITests {
 
     @Test func addAccountToolbarItemRehidesAfterAuthenticationEndsOutsideAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
-        let activeAccount = CodexAccount(email: "first@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signingIn(
@@ -1215,8 +1215,8 @@ struct ReviewUITests {
     }
 
     @Test func accountSidebarUsesOutlineViewRows() throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -1246,9 +1246,9 @@ struct ReviewUITests {
     }
 
     @Test func accountDropReordersToDisplayedGapForDownwardMove() async throws {
-        let firstAccount = CodexAccount(email: "first@example.com", planType: "pro")
-        let secondAccount = CodexAccount(email: "second@example.com", planType: "plus")
-        let thirdAccount = CodexAccount(email: "third@example.com", planType: "team")
+        let firstAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
+        let secondAccount = CodexReviewAccount(email: "second@example.com", planType: "plus")
+        let thirdAccount = CodexReviewAccount(email: "third@example.com", planType: "team")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -1300,9 +1300,9 @@ struct ReviewUITests {
     }
 
     @Test func accountDropBeforeDetachedCurrentSessionMovesToLastSavedPosition() async throws {
-        let firstAccount = CodexAccount(email: "first@example.com", planType: "pro")
-        let secondAccount = CodexAccount(email: "second@example.com", planType: "plus")
-        let detachedAccount = CodexAccount(email: "detached@example.com", planType: "team")
+        let firstAccount = CodexReviewAccount(email: "first@example.com", planType: "pro")
+        let secondAccount = CodexReviewAccount(email: "second@example.com", planType: "plus")
+        let detachedAccount = CodexReviewAccount(email: "detached@example.com", planType: "team")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -1870,8 +1870,8 @@ struct ReviewUITests {
     }
 
     @Test func accountContextMenuPresentationRestoresResponderStateAfterClosing() throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -1924,8 +1924,8 @@ struct ReviewUITests {
     }
 
     @Test func accountOutlineRowsRejectUserSelection() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let backend = AuthActionBackend()
         let store = makeStore(backend: backend)
         store.loadForTesting(
@@ -1968,8 +1968,8 @@ struct ReviewUITests {
     }
 
     @Test func accountDragUsesClickedRowWithoutChangingAuthSelection() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2001,8 +2001,8 @@ struct ReviewUITests {
     }
 
     @Test func accountBlankClickKeepsAuthenticatedSelection() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2039,8 +2039,8 @@ struct ReviewUITests {
     }
 
     @Test func accountSelectionChangeKeepsDisplayedAccounts() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2093,7 +2093,7 @@ struct ReviewUITests {
     }
 
     @Test func accountContentUpdateDoesNotReloadOutlineTopology() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2115,7 +2115,7 @@ struct ReviewUITests {
             .accountIncrementalMembershipChangeCountForTesting
         let incrementalMoveCountBeforeUpdate = accountsViewController.accountIncrementalMoveCountForTesting
 
-        let updatedAccount = CodexAccount(email: "active@example.com", planType: "team")
+        let updatedAccount = CodexReviewAccount(email: "active@example.com", planType: "team")
         store.auth.applyPersistedAccountStates([savedAccountPayload(from: updatedAccount)])
         for _ in 0..<10 {
             await Task.yield()
@@ -2133,7 +2133,7 @@ struct ReviewUITests {
     }
 
     @Test func accountListTracksDetachedCurrentSessionMembership() async throws {
-        let savedAccount = CodexAccount(email: "saved@example.com", planType: "pro")
+        let savedAccount = CodexReviewAccount(email: "saved@example.com", planType: "pro")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2158,7 +2158,7 @@ struct ReviewUITests {
             .accountIncrementalMembershipChangeCountForTesting
         let incrementalMoveCountBeforeMembershipChanges = accountsViewController.accountIncrementalMoveCountForTesting
 
-        store.auth.updateCurrentAccount(CodexAccount(email: "detached@example.com", planType: "pro"))
+        store.auth.updateCurrentAccount(CodexReviewAccount(email: "detached@example.com", planType: "pro"))
         try await waitForObservedValue(
             from: accountsViewController.accountListObservationForTesting,
             [
@@ -2200,8 +2200,8 @@ struct ReviewUITests {
     }
 
     @Test func accountActionAlertRestoresSelectionToAuthenticatedAccount() async throws {
-        let activeAccount = CodexAccount(email: "active@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
+        let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -7274,15 +7274,15 @@ func applyTestAuthState(
 ) {
     auth.updatePhase(state.phase)
     if let accountEmail = state.accountEmail {
-        let account = CodexAccount(
+        let account = CodexReviewAccount(
             email: accountEmail,
             planType: state.accountPlanType ?? "pro"
         )
         auth.updatePersistedAccounts([account])
         auth.updateAccount(account)
     } else {
-        auth.updatePersistedAccounts([CodexAccount]())
-        auth.updateAccount(nil as CodexAccount?)
+        auth.updatePersistedAccounts([CodexReviewAccount]())
+        auth.updateAccount(nil as CodexReviewAccount?)
     }
 }
 
@@ -7310,14 +7310,14 @@ extension CodexReviewStore {
             serverState: serverState,
             authPhase: authState.phase,
             account: authState.accountEmail.map {
-                CodexAccount(
+                CodexReviewAccount(
                     email: $0,
                     planType: authState.accountPlanType ?? "pro"
                 )
             },
             persistedAccounts: authState.accountEmail.map {
                 [
-                    CodexAccount(
+                    CodexReviewAccount(
                         email: $0,
                         planType: authState.accountPlanType ?? "pro"
                     )
@@ -7404,7 +7404,7 @@ final class AuthActionBackend: PreviewCodexReviewStoreBackend {
 
     init(initialAuthState: TestAuthState = .signedOut) {
         let initialAccount = initialAuthState.accountEmail.map {
-            CodexAccount(email: $0, planType: initialAuthState.accountPlanType ?? "pro")
+            CodexReviewAccount(email: $0, planType: initialAuthState.accountPlanType ?? "pro")
         }
         super.init(
             seed: .init(

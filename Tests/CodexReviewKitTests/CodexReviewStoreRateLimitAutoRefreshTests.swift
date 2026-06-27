@@ -274,8 +274,8 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         lastFetchAt: Date?,
         capabilities: CodexReviewBackendModel.Account.Capabilities = .supportsCodexRateLimits,
         rateLimits: [(windowDurationMinutes: Int, usedPercent: Int, resetsAt: Date?)] = []
-    ) -> CodexAccount {
-        let account = CodexAccount(
+    ) -> CodexReviewAccount {
+        let account = CodexReviewAccount(
             accountKey: accountKey,
             email: email,
             planType: "pro",
@@ -287,8 +287,8 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     }
 
     private func targets(
-        accounts: [CodexAccount],
-        selectedAccount: CodexAccount?,
+        accounts: [CodexReviewAccount],
+        selectedAccount: CodexReviewAccount?,
         hasRunningJobs: Bool,
         serverState: CodexReviewServerState = .running
     ) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
@@ -303,7 +303,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
 
     private func loadStore(
         _ store: CodexReviewStore,
-        account: CodexAccount,
+        account: CodexReviewAccount,
         jobs: [CodexReviewJob]
     ) {
         store.loadForTesting(
@@ -359,7 +359,7 @@ private final class MutableTestClock: @unchecked Sendable {
 private final class NoProgressRateLimitRefreshBackend: PreviewCodexReviewStoreBackend {
     private(set) var refreshedAccountKeys: [String] = []
 
-    init(account: CodexAccount) {
+    init(account: CodexReviewAccount) {
         super.init(seed: .init(
             initialAccount: account,
             initialAccounts: [account]
@@ -380,7 +380,7 @@ private final class BlockingRateLimitRefreshBackend: PreviewCodexReviewStoreBack
     private let releaseGate = AsyncGate()
     private(set) var refreshedAccountKeys: [String] = []
 
-    init(account: CodexAccount) {
+    init(account: CodexReviewAccount) {
         super.init(seed: .init(
             initialAccount: account,
             initialAccounts: [account]

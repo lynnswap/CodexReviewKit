@@ -50,7 +50,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
     var noProgressRefreshRetryDelay: TimeInterval = 60
 
     func targets(
-        accounts: [CodexAccount],
+        accounts: [CodexReviewAccount],
         context: CodexReviewStoreRateLimitAutoRefreshContext
     ) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
         guard case .running = context.serverState else {
@@ -68,7 +68,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
     }
 
     private func target(
-        for account: CodexAccount,
+        for account: CodexReviewAccount,
         context: CodexReviewStoreRateLimitAutoRefreshContext
     ) -> CodexReviewStoreRateLimitAutoRefreshTarget? {
         guard account.capabilities.supportsRateLimitRefresh else {
@@ -85,7 +85,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
     }
 
     private func intervalTarget(
-        for account: CodexAccount,
+        for account: CodexReviewAccount,
         context: CodexReviewStoreRateLimitAutoRefreshContext
     ) -> CodexReviewStoreRateLimitAutoRefreshTarget {
         let kind: CodexReviewStoreRateLimitAutoRefreshTarget.Kind
@@ -111,7 +111,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
         )
     }
 
-    private func resetTarget(for account: CodexAccount) -> CodexReviewStoreRateLimitAutoRefreshTarget? {
+    private func resetTarget(for account: CodexReviewAccount) -> CodexReviewStoreRateLimitAutoRefreshTarget? {
         nextUnconsumedResetRefreshDate(for: account).map {
             .init(
                 accountKey: account.accountKey,
@@ -122,13 +122,13 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
     }
 
     private func role(
-        for account: CodexAccount,
+        for account: CodexReviewAccount,
         context: CodexReviewStoreRateLimitAutoRefreshContext
     ) -> CodexReviewStoreRateLimitAutoRefreshRole {
         account.accountKey == context.selectedAccountKey ? .selected : .background
     }
 
-    private func nextUnconsumedResetRefreshDate(for account: CodexAccount) -> Date? {
+    private func nextUnconsumedResetRefreshDate(for account: CodexReviewAccount) -> Date? {
         account.rateLimits
             .compactMap { window -> Date? in
                 guard let resetsAt = window.resetsAt else {
@@ -163,7 +163,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshAccountState {
 
     mutating func scheduledTarget(
         from target: CodexReviewStoreRateLimitAutoRefreshTarget,
-        account: CodexAccount,
+        account: CodexReviewAccount,
         now: Date
     ) -> CodexReviewStoreRateLimitAutoRefreshTarget {
         if let suppressedUntil, suppressedUntil <= now {
@@ -273,7 +273,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     }
 
     package static func targets(
-        accounts: [CodexAccount],
+        accounts: [CodexReviewAccount],
         selectedAccountKey: String?,
         hasRunningJobs: Bool,
         serverState: CodexReviewServerState,

@@ -26,7 +26,7 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
 
     var previewScenario: PreviewScenario = .normal
     var authPhase: CodexReviewAuthModel.Phase = .signedOut
-    var account: CodexAccount?
+    var account: CodexReviewAccount?
     var serverState: CodexReviewServerState = .running
 
     func makeNSViewController(context: Context) -> ReviewMonitorRootViewController {

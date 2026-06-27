@@ -519,7 +519,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     @_spi(PreviewSupport)
-    public static func makePreviewAccounts() -> [CodexAccount] {
+    public static func makePreviewAccounts() -> [CodexReviewAccount] {
         [
             makePreviewAccount(
                 email: "workspace@example.com",
@@ -540,8 +540,8 @@ public enum ReviewMonitorPreviewContent {
     public static func makePreviewAccount(
         email: String = "review@example.com",
         usedPercents: (short: Int, long: Int) = (short: 34, long: 61)
-    ) -> CodexAccount {
-        let account = CodexAccount(email: email, planType: "pro")
+    ) -> CodexReviewAccount {
+        let account = CodexReviewAccount(email: email, planType: "pro")
         account.updateRateLimits(
             [
                 (

@@ -755,7 +755,7 @@ extension ReviewUITests {
 
     @Test func windowControllerKeepsSplitViewForUnsavedCurrentSession() {
         let store = CodexReviewStore.makePreviewStore()
-        let currentAccount = CodexAccount(email: "current@example.com", planType: "pro")
+        let currentAccount = CodexReviewAccount(email: "current@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
@@ -784,7 +784,7 @@ extension ReviewUITests {
 
     @Test func accountSidebarDisplaysUnsavedCurrentSession() {
         let store = CodexReviewStore.makePreviewStore()
-        let currentAccount = CodexAccount(email: "current@example.com", planType: "pro")
+        let currentAccount = CodexReviewAccount(email: "current@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
@@ -829,7 +829,7 @@ extension ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: nil,
-            persistedAccounts: [CodexAccount(email: "saved@example.com", planType: "pro")],
+            persistedAccounts: [CodexReviewAccount(email: "saved@example.com", planType: "pro")],
             workspaces: []
         )
         let windowController = ReviewMonitorWindowController(

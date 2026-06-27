@@ -198,7 +198,7 @@ public final class CodexReviewStore {
         try await backend.signOutActiveAccount(auth: auth)
     }
 
-    package func switchAccount(_ account: CodexAccount) async throws {
+    package func switchAccount(_ account: CodexReviewAccount) async throws {
         guard canSwitchAccount(account) else {
             return
         }
@@ -213,7 +213,7 @@ public final class CodexReviewStore {
         try await backend.switchAccount(auth: auth, accountKey: account.accountKey)
     }
 
-    package func requestSwitchAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+    package func requestSwitchAccount(_ account: CodexReviewAccount, requiresConfirmation: Bool) {
         auth.requestSwitchAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -221,7 +221,7 @@ public final class CodexReviewStore {
         confirmPendingAccountAction()
     }
 
-    package func requestSwitchAccountFromUserAction(_ account: CodexAccount) {
+    package func requestSwitchAccountFromUserAction(_ account: CodexReviewAccount) {
         requestSwitchAccount(
             account,
             requiresConfirmation: hasRunningJobs
@@ -237,7 +237,7 @@ public final class CodexReviewStore {
         confirmPendingAccountAction()
     }
 
-    package func requestRemoveAccount(_ account: CodexAccount, requiresConfirmation: Bool) {
+    package func requestRemoveAccount(_ account: CodexReviewAccount, requiresConfirmation: Bool) {
         auth.requestRemoveAccount(account, requiresConfirmation: requiresConfirmation)
         guard requiresConfirmation == false else {
             return
@@ -300,11 +300,11 @@ public final class CodexReviewStore {
 
     package func reconcileAuthenticatedSession(serverIsRunning _: Bool, runtimeGeneration _: Int) async {}
 
-    package func switchActionIsDisabled(for account: CodexAccount) -> Bool {
+    package func switchActionIsDisabled(for account: CodexReviewAccount) -> Bool {
         canSwitchAccount(account) == false
     }
 
-    package func switchActionRequiresRunningJobsConfirmation(for account: CodexAccount) -> Bool {
+    package func switchActionRequiresRunningJobsConfirmation(for account: CodexReviewAccount) -> Bool {
         guard canSwitchAccount(account) else {
             return false
         }
@@ -436,7 +436,7 @@ public final class CodexReviewStore {
         }
     }
 
-    private func canSwitchAccount(_ account: CodexAccount) -> Bool {
+    private func canSwitchAccount(_ account: CodexReviewAccount) -> Bool {
         auth.canRequestSwitchAccount(account)
     }
 

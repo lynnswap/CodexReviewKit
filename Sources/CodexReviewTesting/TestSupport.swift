@@ -657,12 +657,12 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func refreshAuth(auth: CodexReviewAuthModel) async {
         do {
             let snapshot = try await reviewBackend.readAuth()
-            let accounts = snapshot.accounts.compactMap { account -> CodexReviewKit.CodexAccount? in
+            let accounts = snapshot.accounts.compactMap { account -> CodexReviewKit.CodexReviewAccount? in
                 let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard label.isEmpty == false else {
                     return nil
                 }
-                return CodexReviewKit.CodexAccount(email: label)
+                return CodexReviewKit.CodexReviewAccount(email: label)
             }
             auth.applyPersistedAccountStates(
                 accounts.map(savedAccountPayload(from:)),

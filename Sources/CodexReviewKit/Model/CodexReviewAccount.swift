@@ -3,7 +3,7 @@ import Observation
 
 @MainActor
 @Observable
-public final class CodexAccount: Identifiable, Hashable {
+public final class CodexReviewAccount: Identifiable, Hashable {
     @MainActor
     @Observable
     public final class RateLimitWindow: Identifiable, Hashable {
@@ -19,7 +19,7 @@ public final class CodexAccount: Identifiable, Hashable {
             usedPercent: Int,
             resetsAt: Date? = nil
         ) {
-            precondition(windowDurationMinutes > 0, "CodexAccount.RateLimitWindow duration must be positive.")
+            precondition(windowDurationMinutes > 0, "CodexReviewAccount.RateLimitWindow duration must be positive.")
             self.accountKey = accountKey
             self.windowDurationMinutes = windowDurationMinutes
             self.id = "\(accountKey):\(windowDurationMinutes)"
@@ -97,12 +97,12 @@ public final class CodexAccount: Identifiable, Hashable {
         capabilities: CodexReviewBackendModel.Account.Capabilities? = nil
     ) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        precondition(trimmedEmail.isEmpty == false, "CodexAccount email must not be empty.")
-        let normalizedEmail = CodexAccount.normalizedEmail(trimmedEmail)
+        precondition(trimmedEmail.isEmpty == false, "CodexReviewAccount email must not be empty.")
+        let normalizedEmail = CodexReviewAccount.normalizedEmail(trimmedEmail)
         let resolvedAccountKey = accountKey.map {
-            CodexAccount.normalizedEmail($0)
+            CodexReviewAccount.normalizedEmail($0)
         } ?? normalizedEmail
-        precondition(resolvedAccountKey.isEmpty == false, "CodexAccount accountKey must not be empty.")
+        precondition(resolvedAccountKey.isEmpty == false, "CodexReviewAccount accountKey must not be empty.")
         self.id = resolvedAccountKey
         self.email = trimmedEmail
         self.maskedEmail = maskedReviewAccountEmail(trimmedEmail)
@@ -124,7 +124,7 @@ public final class CodexAccount: Identifiable, Hashable {
 
     package func updateEmail(_ email: String) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        precondition(trimmedEmail.isEmpty == false, "CodexAccount email must not be empty.")
+        precondition(trimmedEmail.isEmpty == false, "CodexReviewAccount email must not be empty.")
         self.email = trimmedEmail
         self.maskedEmail = maskedReviewAccountEmail(trimmedEmail)
     }
@@ -169,7 +169,7 @@ public final class CodexAccount: Identifiable, Hashable {
             }
             result[rateLimit.windowDurationMinutes] = rateLimit
         }
-        let existingRateLimitsByDuration = self.rateLimits.reduce(into: [Int: CodexAccount.RateLimitWindow]()) { result, window in
+        let existingRateLimitsByDuration = self.rateLimits.reduce(into: [Int: CodexReviewAccount.RateLimitWindow]()) { result, window in
             result[window.windowDurationMinutes] = window
         }
 
@@ -184,7 +184,7 @@ public final class CodexAccount: Identifiable, Hashable {
                     return existingRateLimit
                 }
 
-                return CodexAccount.RateLimitWindow(
+                return CodexReviewAccount.RateLimitWindow(
                     accountKey: accountKey,
                     windowDurationMinutes: rateLimit.windowDurationMinutes,
                     usedPercent: rateLimit.usedPercent,
@@ -243,7 +243,7 @@ public final class CodexAccount: Identifiable, Hashable {
     }
 }
 
-private extension CodexAccount {
+private extension CodexReviewAccount {
     static func reauthenticationRequiredMessage(from error: String) -> String {
         let trimmedError = error.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedError.isEmpty == false else {
@@ -285,8 +285,8 @@ package struct CodexSavedAccountPayload: Sendable {
 }
 
 @MainActor
-package func makeCodexAccount(from payload: CodexSavedAccountPayload) -> CodexAccount {
-    let account = CodexAccount(
+package func makeCodexReviewAccount(from payload: CodexSavedAccountPayload) -> CodexReviewAccount {
+    let account = CodexReviewAccount(
         accountKey: payload.accountKey,
         email: payload.email,
         planType: payload.planType,
@@ -298,7 +298,7 @@ package func makeCodexAccount(from payload: CodexSavedAccountPayload) -> CodexAc
 }
 
 @MainActor
-package func savedAccountPayload(from account: CodexAccount) -> CodexSavedAccountPayload {
+package func savedAccountPayload(from account: CodexReviewAccount) -> CodexSavedAccountPayload {
     .init(
         accountKey: account.accountKey,
         email: account.email,
@@ -342,8 +342,8 @@ private func maskedReviewAccountEmailSegment(_ segment: String) -> String {
     }
 }
 
-extension CodexAccount {
-    public static nonisolated func == (lhs: CodexAccount, rhs: CodexAccount) -> Bool {
+extension CodexReviewAccount {
+    public static nonisolated func == (lhs: CodexReviewAccount, rhs: CodexReviewAccount) -> Bool {
         lhs.id == rhs.id
     }
 

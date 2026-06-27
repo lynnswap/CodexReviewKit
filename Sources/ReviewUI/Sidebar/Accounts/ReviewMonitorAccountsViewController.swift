@@ -68,7 +68,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         store.auth
     }
 
-    private var accounts: [CodexAccount] {
+    private var accounts: [CodexReviewAccount] {
         auth.accounts
     }
 
@@ -153,20 +153,20 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
     }
 
     private func applyAccountTopology(
-        accounts: [CodexAccount],
-        selectedAccount: CodexAccount?
+        accounts: [CodexReviewAccount],
+        selectedAccount: CodexReviewAccount?
     ) {
         applyAccountMembershipChange(accounts)
         reconcileSelection(selectedAccount: selectedAccount, accounts: accounts)
     }
 
-    private func displayedAccounts() -> [CodexAccount] {
+    private func displayedAccounts() -> [CodexReviewAccount] {
         (0..<outlineView.numberOfRows).compactMap { row in
             account(atRow: row)
         }
     }
 
-    private func applyAccountMembershipChange(_ targetAccounts: [CodexAccount]) {
+    private func applyAccountMembershipChange(_ targetAccounts: [CodexReviewAccount]) {
         let currentAccounts = displayedAccounts()
         guard hasSameIdentityOrder(currentAccounts, targetAccounts) == false else {
             return
@@ -235,7 +235,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         }
     }
 
-    private func hasSameIdentityOrder(_ lhs: [CodexAccount], _ rhs: [CodexAccount]) -> Bool {
+    private func hasSameIdentityOrder(_ lhs: [CodexReviewAccount], _ rhs: [CodexReviewAccount]) -> Bool {
         lhs.count == rhs.count &&
             zip(lhs, rhs).allSatisfy { left, right in
                 left === right
@@ -246,13 +246,13 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         reconcileSelection(selectedAccount: auth.selectedAccount)
     }
 
-    private func reconcileSelection(selectedAccount: CodexAccount?) {
+    private func reconcileSelection(selectedAccount: CodexReviewAccount?) {
         reconcileSelection(selectedAccount: selectedAccount, accounts: accounts)
     }
 
     private func reconcileSelection(
-        selectedAccount: CodexAccount?,
-        accounts: [CodexAccount]
+        selectedAccount: CodexReviewAccount?,
+        accounts: [CodexReviewAccount]
     ) {
         guard let selectedAccount,
               let row = row(forAccountKey: selectedAccount.accountKey, accounts: accounts)
@@ -403,11 +403,11 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         )
     }
 
-    private func account(from item: Any?) -> CodexAccount? {
-        item as? CodexAccount
+    private func account(from item: Any?) -> CodexReviewAccount? {
+        item as? CodexReviewAccount
     }
 
-    private func account(atRow row: Int) -> CodexAccount? {
+    private func account(atRow row: Int) -> CodexReviewAccount? {
         guard row >= 0,
               let item = outlineView.item(atRow: row)
         else {
@@ -416,7 +416,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         return account(from: item)
     }
 
-    private func row(for account: CodexAccount) -> Int? {
+    private func row(for account: CodexReviewAccount) -> Int? {
         row(forAccountKey: account.accountKey)
     }
 
@@ -426,7 +426,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
 
     private func row(
         forAccountKey accountKey: String,
-        accounts: [CodexAccount]
+        accounts: [CodexReviewAccount]
     ) -> Int? {
         guard let account = accounts.first(where: { $0.accountKey == accountKey }) else {
             return nil
@@ -487,7 +487,7 @@ final class ReviewMonitorAccountsViewController: NSViewController, NSOutlineView
         return max(0, min(adjustedDropIndex, persistedCount - 1))
     }
 
-    private func pasteboardWriter(for account: CodexAccount) -> (any NSPasteboardWriting)? {
+    private func pasteboardWriter(for account: CodexReviewAccount) -> (any NSPasteboardWriting)? {
         guard auth.persistedAccounts.count > 1,
               persistedAccountIndex(accountKey: account.accountKey) != nil
         else {
@@ -633,7 +633,7 @@ extension ReviewMonitorAccountsViewController {
         return account(atRow: outlineView.selectedRow)?.email
     }
 
-    func selectAccountRowForTesting(_ account: CodexAccount) {
+    func selectAccountRowForTesting(_ account: CodexReviewAccount) {
         guard let row = row(for: account) else {
             preconditionFailure("Account row is not visible.")
         }
@@ -653,7 +653,7 @@ extension ReviewMonitorAccountsViewController {
     }
 
     func presentContextMenuForTesting(
-        for account: CodexAccount,
+        for account: CodexReviewAccount,
         presenter: @escaping (NSMenu) -> Void
     ) {
         view.layoutSubtreeIfNeeded()
@@ -665,7 +665,7 @@ extension ReviewMonitorAccountsViewController {
         outlineView.presentContextMenuForTesting(at: point, presenter: presenter)
     }
 
-    func accountRowUsesReviewMonitorAccountCellViewForTesting(_ account: CodexAccount) -> Bool {
+    func accountRowUsesReviewMonitorAccountCellViewForTesting(_ account: CodexReviewAccount) -> Bool {
         guard let row = row(for: account),
               outlineView.view(
                 atColumn: 0,
@@ -678,7 +678,7 @@ extension ReviewMonitorAccountsViewController {
         return true
     }
 
-    func accountRowUsesSwiftUIRowViewForTesting(_ account: CodexAccount) -> Bool {
+    func accountRowUsesSwiftUIRowViewForTesting(_ account: CodexReviewAccount) -> Bool {
         guard let row = row(for: account),
               let cellView = outlineView.view(
                 atColumn: 0,
@@ -691,7 +691,7 @@ extension ReviewMonitorAccountsViewController {
         return cellView.isHostingReviewMonitorAccountRowViewForTesting
     }
 
-    func dragPasteboardAccountKeyForTesting(_ account: CodexAccount) -> String? {
+    func dragPasteboardAccountKeyForTesting(_ account: CodexReviewAccount) -> String? {
         guard let row = row(for: account) else {
             preconditionFailure("Account row is not visible.")
         }
@@ -711,7 +711,7 @@ extension ReviewMonitorAccountsViewController {
         outlineView.mouseDown(with: mouseEventForTesting(at: point))
     }
 
-    func allowsUserSelectionForTesting(_ account: CodexAccount) -> Bool {
+    func allowsUserSelectionForTesting(_ account: CodexReviewAccount) -> Bool {
         guard let row = row(for: account) else {
             preconditionFailure("Account row is not visible.")
         }
@@ -756,7 +756,7 @@ extension ReviewMonitorAccountsViewController {
 
     @discardableResult
     func performAccountDropForTesting(
-        _ account: CodexAccount,
+        _ account: CodexReviewAccount,
         proposedChildIndex index: Int
     ) async -> Bool {
         await performAccountDropForTesting(
@@ -768,7 +768,7 @@ extension ReviewMonitorAccountsViewController {
 
     @discardableResult
     func performAccountDropForTesting(
-        _ account: CodexAccount,
+        _ account: CodexReviewAccount,
         proposedItem item: Any?,
         proposedChildIndex index: Int
     ) async -> Bool {
@@ -1006,7 +1006,7 @@ private final class ReviewMonitorAccountCellView: NSTableCellView {
         nil
     }
 
-    func configure(account: CodexAccount) {
+    func configure(account: CodexReviewAccount) {
         objectValue = account
         toolTip = account.email
         hostingView.rootView.account = account

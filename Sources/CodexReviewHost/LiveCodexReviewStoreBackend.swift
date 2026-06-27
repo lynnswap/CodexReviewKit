@@ -6,8 +6,6 @@ import CodexReviewKit
 import CodexReviewAppServer
 import CodexReviewMCPServer
 
-private typealias ReviewCodexAccount = CodexReviewKit.CodexAccount
-
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
 private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void
 public typealias CodexReviewAppServerLifecycleHandler = @MainActor @Sendable (CodexAppServer?) -> Void
@@ -1068,7 +1066,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
         authSourceCodexHomeURL: URL? = nil
-    ) -> ReviewCodexAccount? {
+    ) -> CodexReviewAccount? {
         guard let activeAccountID = snapshot.activeAccountID?.rawValue,
               let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
               let account = Self.monitorAccount(from: backendAccount)
@@ -1082,7 +1080,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return nil
         }
         var persistedAccounts = auth.persistedAccounts
-        let persistedAccount: ReviewCodexAccount
+        let persistedAccount: CodexReviewAccount
         if let index = persistedAccounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
             persistedAccounts[index].updateEmail(account.email)
             persistedAccounts[index].updateKind(account.kind, capabilities: account.capabilities)
@@ -1373,7 +1371,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         await refreshRateLimits(for: selectedAccount, auth: auth)
     }
 
-    private func refreshRateLimits(for account: ReviewCodexAccount, auth: CodexReviewAuthModel) async {
+    private func refreshRateLimits(for account: CodexReviewAccount, auth: CodexReviewAuthModel) async {
         guard account.capabilities.supportsRateLimitRefresh else {
             return
         }
@@ -1390,7 +1388,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
-    private func refreshSavedAccountRateLimits(for account: ReviewCodexAccount) async {
+    private func refreshSavedAccountRateLimits(for account: CodexReviewAccount) async {
         let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-review-rate-limits-\(UUID().uuidString)", isDirectory: true)
         do {
@@ -1435,7 +1433,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func refreshRateLimits(
-        for account: ReviewCodexAccount,
+        for account: CodexReviewAccount,
         using backend: AppServerCodexReviewBackend?,
         source: String
     ) async -> Bool {
@@ -1467,14 +1465,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func validateRateLimitBackendAccount(
-        _ account: ReviewCodexAccount,
+        _ account: CodexReviewAccount,
         using backend: AppServerCodexReviewBackend
     ) async throws {
         let snapshot = try await backend.readAuth()
         guard let activeAccountID = snapshot.activeAccountID?.rawValue.nilIfEmpty else {
             throw CodexReviewAPI.Error.io("Saved authentication is missing for \(account.maskedEmail). Sign in again.")
         }
-        let actualAccountKey = ReviewCodexAccount.normalizedEmail(activeAccountID)
+        let actualAccountKey = CodexReviewAccount.normalizedEmail(activeAccountID)
         guard actualAccountKey == account.accountKey else {
             let actualEmail = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID })?.label
                 ?? activeAccountID
@@ -1485,10 +1483,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func recordRateLimitRefreshFailure(
         _ error: any Error,
-        account: ReviewCodexAccount
+        account: CodexReviewAccount
     ) {
         let message = error.localizedDescription
-        if ReviewCodexAccount.requiresReauthentication(errorMessage: message) {
+        if CodexReviewAccount.requiresReauthentication(errorMessage: message) {
             account.markRateLimitReauthenticationRequired(
                 fetchedAt: Date(),
                 error: message
@@ -1538,7 +1536,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func applyRateLimits(
         _ rateLimits: CodexRateLimits,
-        to account: ReviewCodexAccount
+        to account: CodexReviewAccount
     ) {
         account.updateRateLimits(rateLimits.windows.map {
             (
@@ -1555,7 +1553,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func persistRefreshedSharedAuth(
         from sourceCodexHomeURL: URL?,
-        for account: ReviewCodexAccount
+        for account: CodexReviewAccount
     ) {
         guard let sourceCodexHomeURL else {
             return
@@ -1604,13 +1602,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         )
     }
 
-    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> ReviewCodexAccount? {
+    private static func monitorAccount(from snapshot: CodexReviewBackendModel.Account.Snapshot) -> CodexReviewAccount? {
         let label = snapshot.label.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accountKey = ReviewCodexAccount.normalizedEmail(snapshot.id.rawValue)
+        let accountKey = CodexReviewAccount.normalizedEmail(snapshot.id.rawValue)
         guard label.isEmpty == false, accountKey.isEmpty == false else {
             return nil
         }
-        return ReviewCodexAccount(
+        return CodexReviewAccount(
             accountKey: accountKey,
             email: label,
             planType: snapshot.planType,
@@ -1647,7 +1645,7 @@ private enum LoginActivation: Equatable, Sendable {
 
     func resolvedActiveAccountKey(
         authenticatedAccountKey: String,
-        persistedAccounts: [ReviewCodexAccount]
+        persistedAccounts: [CodexReviewAccount]
     ) -> String? {
         switch self {
         case .activateAuthenticatedAccount:
@@ -1758,9 +1756,9 @@ private enum CodexReviewAccountRegistry {
 
         static func legacyDefault(accountKey: String?, email: String) -> Self {
             let normalizedAccountKey = accountKey
-                .map(ReviewCodexAccount.normalizedEmail)
+                .map(CodexReviewAccount.normalizedEmail)
                 .flatMap { $0.isEmpty ? nil : $0 }
-            switch normalizedAccountKey ?? ReviewCodexAccount.normalizedEmail(email) {
+            switch normalizedAccountKey ?? CodexReviewAccount.normalizedEmail(email) {
             case "api-key":
                 return .apiKey
             case "amazon-bedrock":
@@ -1781,11 +1779,11 @@ private enum CodexReviewAccountRegistry {
         }
     }
 
-    static func load(codexHomeURL: URL) -> (accounts: [ReviewCodexAccount], activeAccountKey: String?) {
+    static func load(codexHomeURL: URL) -> (accounts: [CodexReviewAccount], activeAccountKey: String?) {
         let registry = loadRegistry(codexHomeURL: codexHomeURL)
         let accounts = registry.accounts.compactMap(makeAccount(from:))
         let activeAccountKey = registry.activeAccountKey
-            .map(ReviewCodexAccount.normalizedEmail)
+            .map(CodexReviewAccount.normalizedEmail)
             .flatMap { activeAccountKey in
                 accounts.contains(where: { $0.accountKey == activeAccountKey }) ? activeAccountKey : nil
             }
@@ -1794,7 +1792,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     static func saveAccounts(
-        _ accounts: [ReviewCodexAccount],
+        _ accounts: [CodexReviewAccount],
         activeAccountKey: String?,
         codexHomeURL: URL
     ) throws {
@@ -1803,7 +1801,7 @@ private enum CodexReviewAccountRegistry {
             normalizedAccountKey(from: entry).map { ($0, entry) }
         })
         let normalizedActiveAccountKey = activeAccountKey
-            .map(ReviewCodexAccount.normalizedEmail)
+            .map(CodexReviewAccount.normalizedEmail)
             .flatMap { accountKey in
                 accounts.contains(where: { $0.accountKey == accountKey }) ? accountKey : nil
             }
@@ -1844,10 +1842,10 @@ private enum CodexReviewAccountRegistry {
 
     static func activateAccount(
         _ accountKey: String,
-        accounts: [ReviewCodexAccount],
+        accounts: [CodexReviewAccount],
         codexHomeURL: URL
     ) throws {
-        let normalizedAccountKey = ReviewCodexAccount.normalizedEmail(accountKey)
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
         let savedAuthURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
             codexHomeURL: codexHomeURL
@@ -1864,7 +1862,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     static func updateCachedRateLimits(
-        from account: ReviewCodexAccount,
+        from account: CodexReviewAccount,
         codexHomeURL: URL
     ) throws {
         var registry = loadRegistry(codexHomeURL: codexHomeURL)
@@ -1887,7 +1885,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     static func saveSharedAuth(
-        for account: ReviewCodexAccount,
+        for account: CodexReviewAccount,
         codexHomeURL: URL
     ) throws {
         try saveSharedAuth(
@@ -1899,7 +1897,7 @@ private enum CodexReviewAccountRegistry {
 
     static func saveSharedAuth(
         from sourceCodexHomeURL: URL,
-        for account: ReviewCodexAccount,
+        for account: CodexReviewAccount,
         codexHomeURL: URL
     ) throws {
         let sourceURL = sharedAuthURL(codexHomeURL: sourceCodexHomeURL)
@@ -1936,7 +1934,7 @@ private enum CodexReviewAccountRegistry {
         from sourceCodexHomeURL: URL,
         to destinationCodexHomeURL: URL
     ) throws -> Bool {
-        let normalizedAccountKey = ReviewCodexAccount.normalizedEmail(accountKey)
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
         let sourceURL = savedAccountAuthURL(
             accountKey: normalizedAccountKey,
             codexHomeURL: sourceCodexHomeURL
@@ -1951,17 +1949,17 @@ private enum CodexReviewAccountRegistry {
         return true
     }
 
-    private static func makeAccount(from entry: Entry) -> ReviewCodexAccount? {
+    private static func makeAccount(from entry: Entry) -> CodexReviewAccount? {
         let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard email.isEmpty == false else {
             return nil
         }
-        let normalizedEmail = ReviewCodexAccount.normalizedEmail(email)
+        let normalizedEmail = CodexReviewAccount.normalizedEmail(email)
         let accountKey = entry.accountKey
-            .map(ReviewCodexAccount.normalizedEmail)
+            .map(CodexReviewAccount.normalizedEmail)
             .flatMap { $0.isEmpty ? nil : $0 }
             ?? normalizedEmail
-        let account = ReviewCodexAccount(
+        let account = CodexReviewAccount(
             accountKey: accountKey,
             email: email,
             planType: entry.planType,
@@ -2027,9 +2025,9 @@ private enum CodexReviewAccountRegistry {
 
     private static func normalizedAccountKey(from entry: Entry) -> String? {
         let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedEmail = ReviewCodexAccount.normalizedEmail(email)
+        let normalizedEmail = CodexReviewAccount.normalizedEmail(email)
         return entry.accountKey
-            .map(ReviewCodexAccount.normalizedEmail)
+            .map(CodexReviewAccount.normalizedEmail)
             .flatMap { $0.isEmpty ? nil : $0 }
             ?? (normalizedEmail.isEmpty ? nil : normalizedEmail)
     }
@@ -2058,7 +2056,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     private static func pathComponent(forAccountKey accountKey: String) -> String {
-        let normalizedAccountKey = ReviewCodexAccount.normalizedEmail(accountKey)
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
         switch normalizedAccountKey {
         case ".":
             return "%2E"

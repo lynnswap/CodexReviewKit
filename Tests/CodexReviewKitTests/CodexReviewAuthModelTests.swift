@@ -6,10 +6,10 @@ import Testing
 struct CodexReviewAuthModelTests {
     @Test func persistedSnapshotReusesDetachedSelectedAccountWithSameKey() {
         let auth = CodexReviewAuthModel()
-        let detachedAccount = CodexAccount(email: "new@example.com", planType: "pro")
+        let detachedAccount = CodexReviewAccount(email: "new@example.com", planType: "pro")
         auth.updateCurrentAccount(detachedAccount)
 
-        let persistedPayload = savedAccountPayload(from: CodexAccount(email: "new@example.com", planType: "team"))
+        let persistedPayload = savedAccountPayload(from: CodexReviewAccount(email: "new@example.com", planType: "team"))
         auth.applyPersistedAccountStates([persistedPayload])
 
         #expect(auth.persistedAccounts.count == 1)
@@ -20,9 +20,9 @@ struct CodexReviewAuthModelTests {
 
     @Test func switchRequestRequiresDifferentPersistedAccount() {
         let auth = CodexReviewAuthModel()
-        let selectedAccount = CodexAccount(email: "selected@example.com", planType: "pro")
-        let otherAccount = CodexAccount(email: "other@example.com", planType: "plus")
-        let detachedAccount = CodexAccount(email: "detached@example.com", planType: "team")
+        let selectedAccount = CodexReviewAccount(email: "selected@example.com", planType: "pro")
+        let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")
+        let detachedAccount = CodexReviewAccount(email: "detached@example.com", planType: "team")
         auth.applyPersistedAccountStates([
             savedAccountPayload(from: selectedAccount),
             savedAccountPayload(from: otherAccount),
