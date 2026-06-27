@@ -56,6 +56,20 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(snapshotAppChat.title == "App chat")
         #expect(snapshotAppChat.workspaceCWD == resolvedAppPath)
         #expect(library.snapshot.chat(id: CodexThreadID(rawValue: "thread-app")) == snapshotAppChat)
+        let outlineSection = try #require(library.snapshot.outlineItems.first)
+        let outlineAppWorkspace = try #require(outlineSection.children.first)
+        #expect(outlineSection.rowID == snapshotSection.rowID)
+        #expect(outlineSection.title == section.title)
+        #expect(outlineSection.isExpandable)
+        #expect(outlineSection.children.map(\.rowID.rawValue) == [
+            "workspace:\(resolvedAppPath)",
+            "workspace:\(resolvedToolsPath)",
+        ])
+        #expect(outlineAppWorkspace.rowID == snapshotAppWorkspace.rowID)
+        #expect(outlineAppWorkspace.title == "App")
+        #expect(outlineAppWorkspace.isExpandable)
+        #expect(outlineAppWorkspace.children.map(\.rowID.rawValue) == ["chat:thread-app"])
+        #expect(library.snapshot.outlineItem(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == .chat(snapshotAppChat))
         #expect(library.snapshot.rowIDs.map(\.rawValue) == [
             "section:\(section.id)",
             "workspace:\(resolvedAppPath)",
@@ -106,6 +120,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(chat.title == "Floating review")
         #expect(chat.preview == "Uncategorized preview")
         #expect(chat.workspaceCWD == nil)
+        let outlineSection = try #require(library.snapshot.outlineItems.first)
+        let outlineChat = try #require(outlineSection.children.first)
+        #expect(outlineSection.children.map(\.rowID.rawValue) == ["chat:thread-uncategorized"])
+        #expect(outlineChat == .chat(chat))
+        #expect(outlineChat.isExpandable == false)
+        #expect(library.snapshot.outlineItem(rowID: chat.rowID) == .chat(chat))
         #expect(section.rowIDs.map(\.rawValue) == [
             section.rowID.rawValue,
             "chat:thread-uncategorized",

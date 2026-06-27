@@ -73,6 +73,10 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         sections.flatMap(\.rowIDs)
     }
 
+    package var outlineItems: [ReviewMonitorCodexSidebarOutlineItem] {
+        sections.map(ReviewMonitorCodexSidebarOutlineItem.section)
+    }
+
     package func chat(id: CodexThreadID) -> Chat? {
         for section in sections {
             for workspace in section.workspaces {
@@ -85,6 +89,70 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    package func outlineItem(rowID: ReviewMonitorCodexSidebarRowID) -> ReviewMonitorCodexSidebarOutlineItem? {
+        for section in sections {
+            if section.rowID == rowID {
+                return .section(section)
+            }
+            for workspace in section.workspaces {
+                if workspace.rowID == rowID {
+                    return .workspace(workspace)
+                }
+                if let chat = workspace.chats.first(where: { $0.rowID == rowID }) {
+                    return .chat(chat)
+                }
+            }
+            if let chat = section.uncategorizedChats.first(where: { $0.rowID == rowID }) {
+                return .chat(chat)
+            }
+        }
+        return nil
+    }
+}
+
+package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
+    case section(ReviewMonitorCodexSidebarSnapshot.Section)
+    case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)
+    case chat(ReviewMonitorCodexSidebarSnapshot.Chat)
+
+    package var rowID: ReviewMonitorCodexSidebarRowID {
+        switch self {
+        case .section(let section):
+            section.rowID
+        case .workspace(let workspace):
+            workspace.rowID
+        case .chat(let chat):
+            chat.rowID
+        }
+    }
+
+    package var title: String {
+        switch self {
+        case .section(let section):
+            section.title
+        case .workspace(let workspace):
+            workspace.title
+        case .chat(let chat):
+            chat.title
+        }
+    }
+
+    package var children: [ReviewMonitorCodexSidebarOutlineItem] {
+        switch self {
+        case .section(let section):
+            section.workspaces.map(ReviewMonitorCodexSidebarOutlineItem.workspace)
+                + section.uncategorizedChats.map(ReviewMonitorCodexSidebarOutlineItem.chat)
+        case .workspace(let workspace):
+            workspace.chats.map(ReviewMonitorCodexSidebarOutlineItem.chat)
+        case .chat:
+            []
+        }
+    }
+
+    package var isExpandable: Bool {
+        children.isEmpty == false
     }
 }
 
