@@ -1043,7 +1043,7 @@ extension CodexReviewStore {
             return
         }
         _ = await ReviewObservationAwaiter.waitUntilTerminal(
-            timeline: job.timeline,
+            job: job,
             timeout: timeout
         )
     }

@@ -4,10 +4,10 @@ import ObservationBridge
 @MainActor
 public enum ReviewObservationAwaiter {
     public static func waitUntilTerminal(
-        timeline: ReviewTimeline,
+        job: CodexReviewJob,
         timeout: Duration? = nil
     ) async -> Bool {
-        if timeline.activeItemIDs.isEmpty, timeline.isTerminal {
+        if job.isTerminal {
             return true
         }
 
@@ -15,7 +15,7 @@ public enum ReviewObservationAwaiter {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 waiter.begin(
-                    timeline: timeline,
+                    job: job,
                     timeout: timeout,
                     continuation: continuation
                 )
@@ -36,14 +36,14 @@ private final class ReviewTerminalObservationWaiter {
     private var isResolved = false
 
     func begin(
-        timeline: ReviewTimeline,
+        job: CodexReviewJob,
         timeout: Duration?,
         continuation: CheckedContinuation<Bool, Never>
     ) {
         self.continuation = continuation
-        token = withPortableContinuousObservation { [weak self, timeline] event in
-            _ = timeline.revision
-            guard timeline.activeItemIDs.isEmpty, timeline.isTerminal else {
+        token = withPortableContinuousObservation { [weak self, job] event in
+            _ = job.core.lifecycle.status
+            guard job.isTerminal else {
                 return
             }
             event.cancel()

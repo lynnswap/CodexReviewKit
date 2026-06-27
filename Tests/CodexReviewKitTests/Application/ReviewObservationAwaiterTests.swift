@@ -5,69 +5,57 @@ import Testing
 @MainActor
 @Suite("review observation awaiter")
 struct ReviewObservationAwaiterTests {
-    @Test func resumesWhenTimelineReachesTerminalState() async throws {
-        let timeline = ReviewTimeline()
-        timeline.apply(.itemStarted(.init(
-            id: "cmd-1",
-            kind: .commandExecution,
-            family: .command,
-            phase: .running,
-            content: .command(.init(command: "swift test"))
-        )))
+    @Test func resumesWhenJobReachesTerminalState() async throws {
+        let job = makeRunningJob()
 
         let task = Task { @MainActor in
             await ReviewObservationAwaiter.waitUntilTerminal(
-                timeline: timeline,
+                job: job,
                 timeout: .seconds(1)
             )
         }
         await Task.yield()
 
-        timeline.apply(.reviewCompleted(summary: "Done", result: nil))
+        job.updateStateForTesting(status: .succeeded, summary: "Done")
 
         let result = await task.value
         #expect(result)
     }
 
-    @Test func resumesWhenTimelineCancellationReachesTerminalState() async throws {
-        let timeline = ReviewTimeline()
-        timeline.apply(.itemStarted(.init(
-            id: "cmd-1",
-            kind: .commandExecution,
-            family: .command,
-            phase: .running,
-            content: .command(.init(command: "swift test"))
-        )))
+    @Test func resumesWhenJobCancellationReachesTerminalState() async throws {
+        let job = makeRunningJob()
 
         let task = Task { @MainActor in
             await ReviewObservationAwaiter.waitUntilTerminal(
-                timeline: timeline,
+                job: job,
                 timeout: .seconds(1)
             )
         }
         await Task.yield()
 
-        timeline.apply(.reviewCancelled("Stop"))
+        job.updateStateForTesting(status: .cancelled, summary: "Stop")
 
         let result = await task.value
         #expect(result)
     }
 
     @Test func returnsFalseOnTimeout() async throws {
-        let timeline = ReviewTimeline()
-        timeline.apply(.itemStarted(.init(
-            id: "cmd-1",
-            kind: .commandExecution,
-            family: .command,
-            phase: .running,
-            content: .command(.init(command: "swift test"))
-        )))
+        let job = makeRunningJob()
 
         let result = await ReviewObservationAwaiter.waitUntilTerminal(
-            timeline: timeline,
+            job: job,
             timeout: .milliseconds(10)
         )
 
         #expect(result == false)
+    }
+
+    private func makeRunningJob() -> CodexReviewJob {
+        CodexReviewJob.makeForTesting(
+            id: "job-awaiter",
+            targetSummary: "Uncommitted changes",
+            status: .running,
+            summary: "Running review."
+        )
     }
 }
