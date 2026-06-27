@@ -257,12 +257,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 subtitle: workspace.cwd
             )
         case .chat(let chat):
-            if let job = reviewJob(for: chat.id) {
-                return WindowTitlePresentation(
-                    title: job.targetSummary,
-                    subtitle: job.cwd
-                )
-            }
             return WindowTitlePresentation(
                 title: chat.title,
                 subtitle: chat.workspaceCWD ?? ""
@@ -270,10 +264,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         case nil:
             return WindowTitlePresentation(title: "", subtitle: "")
         }
-    }
-
-    private func reviewJob(for chatID: CodexThreadID) -> CodexReviewJob? {
-        store.reviewJob(forChatID: chatID)
     }
 
     private func applyWindowTitle(_ presentation: WindowTitlePresentation) {

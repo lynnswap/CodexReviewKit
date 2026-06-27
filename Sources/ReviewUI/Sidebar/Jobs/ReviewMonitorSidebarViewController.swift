@@ -203,6 +203,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarTopologyObservation: PortableObservationTracking.Token?
     private var sidebarFilterObservation: PortableObservationTracking.Token?
     private var codexSidebarObservation: PortableObservationTracking.Token?
+    private var selectedChatSnapshotObservation: PortableObservationTracking.Token?
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
@@ -243,6 +244,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarTopologyObservation?.cancel()
         sidebarFilterObservation?.cancel()
         codexSidebarObservation?.cancel()
+        selectedChatSnapshotObservation?.cancel()
         codexSidebarFetchTask?.cancel()
     }
 
@@ -348,6 +350,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarKindObservation?.cancel()
         sidebarTopologyObservation?.cancel()
         sidebarFilterObservation?.cancel()
+        selectedChatSnapshotObservation?.cancel()
 
         sidebarKindObservation = withPortableContinuousObservation { [weak self, uiState, store] _ in
             let sidebarSelection = uiState.sidebarSelection
@@ -384,6 +387,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             filter: initialFilter,
             animatedInitialDelivery: false
         )
+
+        selectedChatSnapshotObservation = withPortableContinuousObservation { [weak self, uiState] _ in
+            guard let self,
+                  case .chat(let selectedChat) = uiState.selection,
+                  let currentChat = self.currentChatSelection(id: selectedChat.id),
+                  currentChat != selectedChat
+            else {
+                return
+            }
+            uiState.selection = .chat(currentChat)
+        }
     }
 
     private func bindCodexSidebarLibrary() {
@@ -1392,6 +1406,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         in workspaces: [CodexReviewWorkspace]
     ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
         store.reviewJob(forChatID: id, in: workspaces)?.reviewChatSelection
+    }
+
+    private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+        codexChatSelection(id: id) ?? reviewChatSelection(id: id)
     }
 
     private func codexWorkspaceSelection(
