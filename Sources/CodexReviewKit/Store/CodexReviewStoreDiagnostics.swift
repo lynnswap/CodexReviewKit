@@ -17,8 +17,8 @@ struct CodexReviewStoreDiagnosticsSnapshot: Encodable {
     struct Job: Encodable {
         var status: String
         var summary: String
-        var logText: String
-        var rawLogText: String
+        var timelineText: String
+        var rawTimelineText: String
     }
 
     var serverState: String

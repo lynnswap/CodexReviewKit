@@ -363,12 +363,13 @@ public final class CodexReviewStore {
         guard let diagnosticsURL else {
             return
         }
-        let jobs = orderedJobs.map { job in
-            CodexReviewStoreDiagnosticsSnapshot.Job(
+        let jobs: [CodexReviewStoreDiagnosticsSnapshot.Job] = orderedJobs.map { job in
+            let timelineTextSnapshot = job.timeline.textSnapshot
+            return CodexReviewStoreDiagnosticsSnapshot.Job(
                 status: job.core.lifecycle.status.rawValue,
                 summary: job.core.output.summary,
-                logText: job.logText,
-                rawLogText: job.rawLogText
+                timelineText: timelineTextSnapshot.timelineText,
+                rawTimelineText: timelineTextSnapshot.rawTimelineText
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(
@@ -386,7 +387,7 @@ public final class CodexReviewStore {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(snapshot)
-            try data.write(to: diagnosticsURL, options: .atomic)
+            try data.write(to: diagnosticsURL, options: Data.WritingOptions.atomic)
         } catch {}
     }
 
