@@ -5159,20 +5159,27 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let viewController = ReviewMonitorSplitViewController(
-            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
-        viewController.loadViewIfNeeded()
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
-        _ = try await awaitTimelineRenderForTesting(
-            job,
-            in: transport,
-            allowIncrementalUpdate: false
+        let previewChatLogSource = ReviewMonitorPreviewChatLogSource(
+            fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: [job])
         )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            previewChatLogSource: previewChatLogSource
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 360))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+        let transport = viewController.transportViewControllerForTesting
+        let chatID = try #require(job.reviewChatID)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
+        _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
         appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitTransportRender(transport) { $0.log.hasSuffix("stream.tick 001") }
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
