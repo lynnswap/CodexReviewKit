@@ -569,8 +569,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @discardableResult
     func performDisplayedTextFinderAction(_ sender: Any?) -> Bool {
         switch displayedSelection {
-        case .job:
-            return logScrollView.performDisplayedTextFinderAction(sender)
         case .workspaceSection:
             return workspaceFindingsView.performDisplayedTextFinderAction(sender)
         case .chat:
@@ -582,8 +580,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     func validateDisplayedTextFinderAction(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch displayedSelection {
-        case .job:
-            return logScrollView.validateDisplayedTextFinderAction(item)
         case .workspaceSection:
             return workspaceFindingsView.validateDisplayedTextFinderAction(item)
         case .chat:
@@ -1064,7 +1060,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 .workspace(id.rawValue)
             case .chat(let id):
                 .chat(id.rawValue)
-            case .job, nil:
+            case nil:
                 nil
             }
         }

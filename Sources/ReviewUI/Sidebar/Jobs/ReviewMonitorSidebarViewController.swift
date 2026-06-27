@@ -1329,8 +1329,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             rowID = .chat(id)
         case .workspaceSection(let id):
             rowID = .section(id)
-        case .job:
-            return nil
         }
         guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
             return nil
