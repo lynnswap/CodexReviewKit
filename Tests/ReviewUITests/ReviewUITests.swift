@@ -1423,7 +1423,7 @@ struct ReviewUITests {
         #expect(initialHostedJobID == placeholderJob.id)
         #expect(updatedHostedJobID == loadedJob.id)
         #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
-        #expect(cellView.objectValue as? CodexReviewJob === loadedJob)
+        #expect((cellView.objectValue as? ReviewMonitorSidebarReviewChatRow)?.jobID == loadedJob.id)
         #expect(cellView.toolTip == loadedJob.cwd)
     }
 

@@ -1,6 +1,19 @@
 import Foundation
 import SwiftUI
-import CodexReviewKit
+
+struct ReviewMonitorSidebarReviewChatRuntime: Equatable {
+    var jobID: String
+    var sessionID: String
+    var cwd: String
+    var fallbackTitle: String
+    var fallbackSubtitle: String?
+    var model: String?
+    var startedAt: Date?
+    var endedAt: Date?
+    var isRunning: Bool
+    var isTerminal: Bool
+    var cancellationRequested: Bool
+}
 
 struct ReviewMonitorSidebarChatRow: Equatable {
     var id: String
@@ -11,41 +24,37 @@ struct ReviewMonitorSidebarChatRow: Equatable {
     var endedAt: Date?
     var isRunning: Bool
 
-    @MainActor
-    init(job: CodexReviewJob) {
-        self.id = job.id
-        self.title = job.displayTitle
-        self.model = job.core.run.model
-        self.subtitle = Self.subtitleText(for: job)
-        self.startedAt = job.core.lifecycle.startedAt
-        self.endedAt = job.core.lifecycle.endedAt
-        self.isRunning = job.core.lifecycle.status == .running
+    init(
+        id: String,
+        title: String,
+        model: String?,
+        subtitle: String?,
+        startedAt: Date?,
+        endedAt: Date?,
+        isRunning: Bool
+    ) {
+        self.id = id
+        self.title = title
+        self.model = model
+        self.subtitle = subtitle
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.isRunning = isRunning
     }
 
-    @MainActor
-    private static func subtitleText(for job: CodexReviewJob) -> String? {
-        if job.core.output.hasFinalReview,
-           let finalReview = job.core.output.lastAgentMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-           finalReview.isEmpty == false
-        {
-            return finalReview
-        }
-        if job.core.lifecycle.status == .cancelled {
-            let reviewText = job.reviewText.trimmingCharacters(in: .whitespacesAndNewlines)
-            return reviewText.isEmpty ? nil : reviewText
-        }
-        if let errorMessage = job.core.lifecycle.errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-           errorMessage.isEmpty == false
-        {
-            let summary = job.core.output.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-            return summary.isEmpty ? errorMessage : summary
-        }
-        guard let lastAgentMessage = job.core.output.lastAgentMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-              lastAgentMessage.isEmpty == false
-        else {
-            return nil
-        }
-        return lastAgentMessage
+    init(
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
+        runtime: ReviewMonitorSidebarReviewChatRuntime
+    ) {
+        self.init(
+            id: runtime.jobID,
+            title: chat?.title.trimmedNonEmpty ?? runtime.fallbackTitle,
+            model: runtime.model,
+            subtitle: chat?.preview?.trimmedNonEmpty ?? runtime.fallbackSubtitle,
+            startedAt: runtime.startedAt,
+            endedAt: runtime.endedAt,
+            isRunning: runtime.isRunning
+        )
     }
 }
 
@@ -59,23 +68,29 @@ final class ReviewMonitorSidebarReviewChatRow {
     private(set) var isTerminal: Bool
     private(set) var cancellationRequested: Bool
 
-    init(job: CodexReviewJob) {
-        self.jobID = job.id
-        self.sessionID = job.sessionID
-        self.cwd = job.cwd
-        self.chat = job.reviewChatSelection
-        self.presentation = ReviewMonitorSidebarChatRow(job: job)
-        self.isTerminal = job.isTerminal
-        self.cancellationRequested = job.cancellationRequested
+    init(
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
+        runtime: ReviewMonitorSidebarReviewChatRuntime
+    ) {
+        self.jobID = runtime.jobID
+        self.sessionID = runtime.sessionID
+        self.cwd = runtime.cwd
+        self.chat = chat
+        self.presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
+        self.isTerminal = runtime.isTerminal
+        self.cancellationRequested = runtime.cancellationRequested
     }
 
-    func update(from job: CodexReviewJob) {
-        sessionID = job.sessionID
-        cwd = job.cwd
-        chat = job.reviewChatSelection
-        presentation = ReviewMonitorSidebarChatRow(job: job)
-        isTerminal = job.isTerminal
-        cancellationRequested = job.cancellationRequested
+    func update(
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
+        runtime: ReviewMonitorSidebarReviewChatRuntime
+    ) {
+        sessionID = runtime.sessionID
+        cwd = runtime.cwd
+        self.chat = chat
+        presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
+        isTerminal = runtime.isTerminal
+        cancellationRequested = runtime.cancellationRequested
     }
 }
 
@@ -143,19 +158,31 @@ struct ReviewMonitorChatRowTimerLabel: View {
 
 #if DEBUG
 #Preview {
-    @Previewable @State var store = ReviewMonitorPreviewContent.makeStore()
     NavigationSplitView {
         List {
-            ForEach(store.orderedWorkspaces, id: \.cwd) { workspace in
-                Section(workspace.displayTitle) {
-                    ForEach(store.orderedJobs(in: workspace)) { job in
-                        NavigationLink{
-                            
-                        }label:{
-                            ReviewMonitorChatRowView(row: ReviewMonitorSidebarChatRow(job: job))
-                        }
-                    }
-                }
+            Section("workspace-alpha") {
+                ReviewMonitorChatRowView(
+                    row: ReviewMonitorSidebarChatRow(
+                        id: "preview-running",
+                        title: "Uncommitted changes",
+                        model: "gpt-5.5",
+                        subtitle: "Inspecting recent changes",
+                        startedAt: Date(timeIntervalSinceNow: -640),
+                        endedAt: nil,
+                        isRunning: true
+                    )
+                )
+                ReviewMonitorChatRowView(
+                    row: ReviewMonitorSidebarChatRow(
+                        id: "preview-completed",
+                        title: "Base branch: main",
+                        model: "gpt-5.5-codex",
+                        subtitle: "No findings",
+                        startedAt: Date(timeIntervalSinceNow: -3_600),
+                        endedAt: Date(timeIntervalSinceNow: -2_900),
+                        isRunning: false
+                    )
+                )
             }
         }
         .frame(minWidth: 320)
@@ -166,3 +193,10 @@ struct ReviewMonitorChatRowTimerLabel: View {
     }
 }
 #endif
+
+private extension String {
+    var trimmedNonEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}

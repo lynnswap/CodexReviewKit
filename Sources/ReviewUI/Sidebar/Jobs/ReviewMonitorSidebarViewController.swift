@@ -3037,9 +3037,10 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     }
 
     func configure(with job: CodexReviewJob) {
-        objectValue = job
-        toolTip = job.cwd
-        configureRow(ReviewMonitorSidebarChatRow(job: job))
+        configure(with: ReviewMonitorSidebarReviewChatRow(
+            chat: job.reviewChatSelection,
+            runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
+        ))
     }
 
     func configure(with row: ReviewMonitorSidebarReviewChatRow) {
