@@ -48,11 +48,11 @@ final class ReviewMonitorPreviewChatLogSource {
         self.jobsByChatID = jobsByChatID
     }
 
-    func logSourceChangeStream(for chatID: CodexThreadID) -> AsyncStream<ReviewMonitorLogSourceChange>? {
+    func chatChangeStream(for chatID: CodexThreadID) -> AsyncStream<CodexChatChange>? {
         guard let job = jobsByChatID[chatID] else {
             return nil
         }
-        let pair = AsyncStream<ReviewMonitorLogSourceChange>.makeStream(bufferingPolicy: .unbounded)
+        let pair = AsyncStream<CodexChatChange>.makeStream(bufferingPolicy: .unbounded)
         let subscription = PreviewChatLogSubscription(job: job, continuation: pair.continuation)
         subscription.start()
         pair.continuation.onTermination = { _ in
@@ -67,14 +67,13 @@ final class ReviewMonitorPreviewChatLogSource {
 @MainActor
 private final class PreviewChatLogSubscription {
     private let job: CodexReviewJob
-    private let continuation: AsyncStream<ReviewMonitorLogSourceChange>.Continuation
+    private let continuation: AsyncStream<CodexChatChange>.Continuation
     private var observation: PortableObservationTracking.Token?
     private var previousSnapshot: CodexChatSnapshot?
-    private var logProjection = ReviewMonitorSelectedCodexChatLogProjection()
 
     init(
         job: CodexReviewJob,
-        continuation: AsyncStream<ReviewMonitorLogSourceChange>.Continuation
+        continuation: AsyncStream<CodexChatChange>.Continuation
     ) {
         self.job = job
         self.continuation = continuation
@@ -101,17 +100,7 @@ private final class PreviewChatLogSubscription {
         let changes = CodexChatChange.previewChanges(from: previousSnapshot, to: snapshot)
         previousSnapshot = snapshot
         for change in changes {
-            guard
-                let logChange = logProjection.apply(
-                    change,
-                    activeTurnID: job.previewTurnID,
-                    chatCreatedAt: job.core.lifecycle.startedAt,
-                    chatUpdatedAt: job.core.lifecycle.endedAt ?? job.timeline.latestUpdatedAt
-                )
-            else {
-                continue
-            }
-            continuation.yield(logChange)
+            continuation.yield(change)
         }
     }
 }
@@ -358,12 +347,6 @@ private extension CodexReviewJob {
 
     var previewTurnID: CodexTurnID {
         core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
-    }
-}
-
-private extension ReviewTimeline {
-    var latestUpdatedAt: Date? {
-        items.map(\.updatedAt).max()
     }
 }
 

@@ -207,9 +207,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
             selectedCodexChat.bind(toChatID: selectedChat.id)
         }
         #if DEBUG
-            if let previewStream = previewChatLogSource?.logSourceChangeStream(for: selectedChat.id) {
-                startLogSourceChangeStream(
+            if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChat.id) {
+                startPreviewChatChangeStream(
                     previewStream,
+                    activeTurnID: selectedChat.reviewIdentity?.turnID,
+                    chatUpdatedAt: selectedChat.updatedAt,
                     target: .chat(selectedChat.id),
                     initialRestorationTarget: restorationTarget
                 )
@@ -442,6 +444,48 @@ final class ReviewMonitorTransportViewController: NSViewController {
             target: target,
             initialRestorationTarget: initialRestorationTarget
         )
+    }
+
+    private func startPreviewChatChangeStream(
+        _ stream: AsyncStream<CodexChatChange>,
+        activeTurnID: CodexTurnID?,
+        chatUpdatedAt: Date?,
+        target: LogRenderTarget,
+        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
+    ) {
+        selectedChatLogTask?.cancel()
+        selectedChatLogTask = Task { @MainActor [weak self] in
+            var didRenderInitialDocument = false
+            var projection = ReviewMonitorSelectedCodexChatLogProjection()
+            for await change in stream {
+                guard let self,
+                    self.isCurrentLogRenderTarget(target)
+                else {
+                    return
+                }
+                guard
+                    let logChange = projection.apply(
+                        change,
+                        activeTurnID: activeTurnID,
+                        chatCreatedAt: nil,
+                        chatUpdatedAt: chatUpdatedAt
+                    )
+                else {
+                    continue
+                }
+                self.applySelectedCodexChatLogChange(
+                    logChange,
+                    target: target,
+                    restorationTarget: didRenderInitialDocument
+                        ? self.logScrollView.currentScrollRestorationTarget
+                        : initialRestorationTarget,
+                    allowIncrementalUpdate: didRenderInitialDocument && logChange.allowsIncrementalRender
+                )
+                if logChange.sourceDocument != nil {
+                    didRenderInitialDocument = true
+                }
+            }
+        }
     }
 
     private func startLogSourceChangeStream(
