@@ -1452,7 +1452,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         in workspaces: [CodexReviewWorkspace]
     ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
         reviewChatIndex.chat(id: id, in: workspaces)
-            ?? store.reviewJob(forChatID: id, in: workspaces)?.reviewChatSelection
     }
 
     private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
