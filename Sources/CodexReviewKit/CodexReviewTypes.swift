@@ -277,20 +277,11 @@ package extension CodexReviewBackendModel.Review {
 
 package extension CodexReviewBackendModel.Review {
     enum Event: Equatable, Sendable {
-        case domainEvents([ReviewDomainEvent], retainedLogEntryCount: Int)
-        case retainNextTimelineTextFromLogEntry
-        case retainNextTerminalFailureTimelineTextFromLogEntry
+        case domainEvents([ReviewDomainEvent])
         case started(turnID: String, reviewThreadID: String?, model: String?)
         case message(String)
         case messageDelta(String, itemID: String)
         case log(String)
-        case logEntry(
-            kind: ReviewLogEntry.Kind,
-            text: String,
-            groupID: String?,
-            replacesGroup: Bool,
-            metadata: ReviewLogEntry.Metadata? = nil
-        )
         case completed(summary: String, result: String?)
         case failed(String)
         case cancelled(String)

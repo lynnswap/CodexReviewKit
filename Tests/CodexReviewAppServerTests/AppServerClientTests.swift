@@ -14,23 +14,17 @@ private struct BackendReviewEventSequence: AsyncSequence {
             while let event = try await mailbox.next() {
                 if includesDomainEvents == false {
                     switch event {
-                    case .domainEvents,
-                        .retainNextTimelineTextFromLogEntry,
-                        .retainNextTerminalFailureTimelineTextFromLogEntry:
+                    case .domainEvents:
                         continue
                     case .started,
                         .message,
                         .messageDelta,
                         .log,
-                        .logEntry,
                         .completed,
                         .failed,
                         .cancelled:
                         break
                     }
-                }
-                if case .retainNextTerminalFailureTimelineTextFromLogEntry = event {
-                    continue
                 }
                 return event
             }
@@ -124,12 +118,11 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        guard case .domainEvents(let commandDomainEvents, let commandSuppressionCount) = try await iterator.next()
+        guard case .domainEvents(let commandDomainEvents) = try await iterator.next()
         else {
             Issue.record("expected typed command domain event")
             return
         }
-        #expect(commandSuppressionCount == 2)
         guard case .itemCompleted(let commandSeed) = try #require(commandDomainEvents.first) else {
             Issue.record("expected completed command seed")
             return
@@ -141,50 +134,21 @@ struct AppServerClientTests {
         }
         #expect(command.command == "swift test")
         #expect(command.output == "passed")
-        #expect(
-            try await iterator.next()
-                == .logEntry(
-                    kind: .command,
-                    text: "$ swift test",
-                    groupID: "cmd-1",
-                    replacesGroup: true,
-                    metadata: .init(
-                        sourceType: "commandExecution",
-                        status: "completed",
-                        itemID: "cmd-1",
-                        command: "swift test",
-                        commandStatus: "completed"
-                    )
-                ))
-        #expect(
-            try await iterator.next()
-                == .logEntry(
-                    kind: .commandOutput,
-                    text: "passed",
-                    groupID: "cmd-1",
-                    replacesGroup: true,
-                    metadata: .init(
-                        sourceType: "commandExecution",
-                        status: "completed",
-                        itemID: "cmd-1",
-                        command: "swift test",
-                        commandStatus: "completed"
-                    )
-                ))
-        guard case .domainEvents(let messageDomainEvents, let messageSuppressionCount) = try await iterator.next()
+        guard case .domainEvents(let messageDomainEvents) = try await iterator.next()
         else {
             Issue.record("expected typed message delta domain event")
             return
         }
-        #expect(messageSuppressionCount == 1)
-        guard case .textDelta(let itemID, _, let family, _, let delta) = try #require(messageDomainEvents.first) else {
+        guard
+            case .textDelta(let itemID, kind: _, family: let family, content: _, delta: let delta) =
+                try #require(messageDomainEvents.first)
+        else {
             Issue.record("expected message text delta")
             return
         }
         #expect(itemID.rawValue == "msg-1")
         #expect(family == .message)
         #expect(delta == "Looks good.")
-        #expect(try await iterator.next() == .messageDelta("Looks good.", itemID: "msg-1"))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
     }
 
@@ -223,7 +187,7 @@ struct AppServerClientTests {
         #expect(
             try await firstIterator.next()
                 == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        guard case .domainEvents(let firstDomainEvents, _) = try await firstIterator.next(),
+        guard case .domainEvents(let firstDomainEvents) = try await firstIterator.next(),
             case .itemUpdated(let firstSeed) = try #require(firstDomainEvents.first),
             case .command(let firstCommand) = firstSeed.content
         else {
@@ -236,7 +200,7 @@ struct AppServerClientTests {
         #expect(
             try await secondIterator.next()
                 == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        guard case .domainEvents(let secondDomainEvents, _) = try await secondIterator.next(),
+        guard case .domainEvents(let secondDomainEvents) = try await secondIterator.next(),
             case .itemUpdated(let secondSeed) = try #require(secondDomainEvents.first),
             case .command(let secondCommand) = secondSeed.content
         else {
@@ -246,7 +210,7 @@ struct AppServerClientTests {
         #expect(secondCommand.output == "second")
     }
 
-    @Test func backendCoalescesTypedCommandOutputDeltas() async throws {
+    @Test func backendEmitsTypedCommandOutputDeltasAsDomainEvents() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
@@ -284,22 +248,9 @@ struct AppServerClientTests {
         guard case .domainEvents = try await nextEvent(from: attempt.events),
             case .domainEvents = try await nextEvent(from: attempt.events)
         else {
-            Issue.record("expected direct timeline updates before coalesced log")
+            Issue.record("expected direct timeline updates")
             return
         }
-        guard
-            case .logEntry(.commandOutput, let text, let groupID, let replacesGroup, let metadata) =
-                try await nextEvent(from: attempt.events)
-        else {
-            Issue.record("expected coalesced command output log")
-            return
-        }
-        #expect(text == "firstsecond")
-        #expect(groupID == "cmd-1")
-        #expect(replacesGroup == false)
-        #expect(metadata?.sourceType == "commandExecution")
-        #expect(metadata?.title == "Command output")
-        #expect(metadata?.itemID == "cmd-1")
     }
 
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {

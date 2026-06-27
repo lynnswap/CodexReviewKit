@@ -46,17 +46,17 @@ extension CodexReviewStore {
         }
 
         let endedAt = clock.now()
-        job.closeActiveCommandLogEntries(status: "canceled", completedAt: endedAt)
+        job.timeline.closeActiveItems(family: .command, phase: .cancelled, timestamp: endedAt)
         job.cancellationRequested = false
         job.core.lifecycle.cancellation = cancellation
         job.core.lifecycle.status = .cancelled
         job.core.output.summary = cancellation.message
         job.core.output.hasFinalReview = false
-        job.core.lifecycle.errorMessage = cancellation.message.nilIfEmpty
+        job.core.lifecycle.errorMessage =
+            cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
         job.timeline.apply(.reviewCancelled(cancellation.message), at: endedAt)
-        job.applyReviewLogLimit()
         noteJobMutation()
     }
 
@@ -124,7 +124,8 @@ extension CodexReviewStore {
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) async -> [String] {
-        let activeJobIDs = orderedJobs
+        let activeJobIDs =
+            orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
         for jobID in activeJobIDs {
@@ -136,9 +137,10 @@ extension CodexReviewStore {
     package func cleanupActiveReviewsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
         workerDrainTimeout: Duration,
-        cleanupBackendReviews: @escaping @Sendable (
-            CodexReviewRuntimeStopReviewCleanupRequest
-        ) async -> Bool
+        cleanupBackendReviews:
+            @escaping @Sendable (
+                CodexReviewRuntimeStopReviewCleanupRequest
+            ) async -> Bool
     ) async -> CodexReviewRuntimeStopReviewCleanupResult {
         let request = runtimeStopReviewCleanupRequest(reason: reason)
         let didCompleteBackendCleanup = await cleanupBackendReviews(request)
@@ -170,7 +172,8 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
         cancelWorkers: Bool = true
     ) -> [String] {
-        let activeJobIDs = orderedJobs
+        let activeJobIDs =
+            orderedJobs
             .filter { $0.isTerminal == false }
             .map(\.id)
         guard activeJobIDs.isEmpty == false else {
@@ -257,12 +260,12 @@ extension CodexReviewStore {
                 job.core.output.summary = "Failed to cancel review."
             }
             job.core.output.hasFinalReview = false
-            job.core.lifecycle.errorMessage = resolvedError
+            job.core.lifecycle.errorMessage =
+                resolvedError
                 ?? reason.nilIfEmpty
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
             job.timeline.apply(.reviewFailed(job.core.output.summary), at: job.core.lifecycle.endedAt ?? clock.now())
-            job.applyReviewLogLimit()
         }
         noteJobMutation()
     }

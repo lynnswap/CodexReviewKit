@@ -64,14 +64,16 @@ public final class ReviewTimeline {
         case .itemCompleted(let seed):
             applySeed(seed, timestamp: timestamp, activity: .inactive)
         case .textDelta(let itemID, let kind, let family, let content, let delta):
-            let item = item(for: itemID) ?? insert(
-                id: itemID,
-                kind: kind,
-                family: family,
-                phase: .running,
-                content: content,
-                timestamp: timestamp
-            )
+            let item =
+                item(for: itemID)
+                ?? insert(
+                    id: itemID,
+                    kind: kind,
+                    family: family,
+                    phase: .running,
+                    content: content,
+                    timestamp: timestamp
+                )
             item.appendText(delta, updatedAt: timestamp)
             synchronizeActiveMembership(for: item, activity: .phaseDriven)
             latestActivity = item.id
@@ -102,13 +104,44 @@ public final class ReviewTimeline {
     }
 
     @discardableResult
+    package func closeActiveItems(
+        family: ReviewItemFamily? = nil,
+        phase: ReviewItemPhase,
+        timestamp: Date
+    ) -> Bool {
+        let ids = activeItemIDs.filter { id in
+            guard let family else {
+                return true
+            }
+            return itemsByID[id]?.family == family
+        }
+        guard ids.isEmpty == false else {
+            return false
+        }
+        for id in ids {
+            guard let item = itemsByID[id] else {
+                continue
+            }
+            item.update(
+                phase: phase,
+                content: item.content.closingActiveContent(phase: phase),
+                updatedAt: timestamp,
+                completedAt: timestamp
+            )
+            activeItemIDs.remove(id)
+        }
+        bumpRevision()
+        return true
+    }
+
+    @discardableResult
     package func updateItemContent(
         _ content: ReviewTimelineItem.Content,
         for id: ReviewTimelineItem.ID,
         updatedAt: Date? = nil
     ) -> Bool {
         guard let item = itemsByID[id],
-              item.content != content
+            item.content != content
         else {
             return false
         }

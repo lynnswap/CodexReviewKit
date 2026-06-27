@@ -125,7 +125,6 @@ extension CodexReviewJob {
             hasFinalReview: hasFinalReview,
             reviewResult: reviewResult,
             lastAgentMessage: lastAgentMessage,
-            logEntries: [],
             errorMessage: errorMessage,
             exitCode: exitCode
         )
@@ -142,23 +141,27 @@ func seedTimelineForTesting(
 ) {
     let trimmedLogText = logText.trimmingCharacters(in: .newlines)
     if trimmedLogText.isEmpty == false {
-        job.timeline.apply(.itemCompleted(.init(
-            id: .init(rawValue: "fixture-log-\(job.id)"),
-            kind: .agentMessage,
-            family: .message,
-            phase: .completed,
-            content: .message(.init(text: trimmedLogText))
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: .init(rawValue: "fixture-log-\(job.id)"),
+                    kind: .agentMessage,
+                    family: .message,
+                    phase: .completed,
+                    content: .message(.init(text: trimmedLogText))
+                )))
     }
 
     for (index, line) in rawLogText.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-        job.timeline.apply(.itemCompleted(.init(
-            id: .init(rawValue: "fixture-diagnostic-\(job.id)-\(index)"),
-            kind: .dynamicToolCall,
-            family: .diagnostic,
-            phase: .completed,
-            content: .diagnostic(.init(message: String(line)))
-        )))
+        job.timeline.apply(
+            .itemCompleted(
+                .init(
+                    id: .init(rawValue: "fixture-diagnostic-\(job.id)-\(index)"),
+                    kind: .dynamicToolCall,
+                    family: .diagnostic,
+                    phase: .completed,
+                    content: .diagnostic(.init(message: String(line)))
+                )))
     }
 }
 
@@ -177,27 +180,31 @@ func appendTimelineEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewTimelin
     let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
     let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
     let phase = timelinePhase(for: entry)
-    job.timeline.apply(.itemUpdated(.init(
-        id: itemID,
-        kind: timelineKind(for: entry),
-        family: timelineFamily(for: entry),
-        phase: phase,
-        content: timelineContent(for: entry, existing: existingContent),
-        startedAt: entry.metadata?.startedAt,
-        completedAt: entry.metadata?.completedAt,
-        durationMs: entry.metadata?.durationMs
-    )))
+    job.timeline.apply(
+        .itemUpdated(
+            .init(
+                id: itemID,
+                kind: timelineKind(for: entry),
+                family: timelineFamily(for: entry),
+                phase: phase,
+                content: timelineContent(for: entry, existing: existingContent),
+                startedAt: entry.metadata?.startedAt,
+                completedAt: entry.metadata?.completedAt,
+                durationMs: entry.metadata?.durationMs
+            )))
 }
 
 @MainActor
 func replaceTimelineLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
-    job.timeline.apply(.itemUpdated(.init(
-        id: .init(rawValue: "fixture-log-\(job.id)"),
-        kind: .agentMessage,
-        family: .message,
-        phase: .completed,
-        content: .message(.init(text: text.trimmingCharacters(in: .newlines)))
-    )))
+    job.timeline.apply(
+        .itemUpdated(
+            .init(
+                id: .init(rawValue: "fixture-log-\(job.id)"),
+                kind: .agentMessage,
+                family: .message,
+                phase: .completed,
+                content: .message(.init(text: text.trimmingCharacters(in: .newlines)))
+            )))
 }
 
 @MainActor
@@ -251,14 +258,15 @@ private func timelineContent(
 ) -> ReviewTimelineItem.Content {
     switch entry.kind {
     case .command:
-        return .command(.init(
-            command: commandText(for: entry),
-            cwd: entry.metadata?.cwd,
-            output: "",
-            exitCode: entry.metadata?.exitCode,
-            status: commandStatus(for: entry),
-            durationMs: entry.metadata?.durationMs
-        ))
+        return .command(
+            .init(
+                command: commandText(for: entry),
+                cwd: entry.metadata?.cwd,
+                output: "",
+                exitCode: entry.metadata?.exitCode,
+                status: commandStatus(for: entry),
+                durationMs: entry.metadata?.durationMs
+            ))
     case .commandOutput:
         let existingOutput: String
         let existingCommand: String?
@@ -269,14 +277,15 @@ private func timelineContent(
             existingOutput = ""
             existingCommand = nil
         }
-        return .command(.init(
-            command: entry.metadata?.command ?? existingCommand ?? "Command",
-            cwd: entry.metadata?.cwd,
-            output: existingOutput + entry.text,
-            exitCode: entry.metadata?.exitCode,
-            status: commandStatus(for: entry),
-            durationMs: entry.metadata?.durationMs
-        ))
+        return .command(
+            .init(
+                command: entry.metadata?.command ?? existingCommand ?? "Command",
+                cwd: entry.metadata?.cwd,
+                output: existingOutput + entry.text,
+                exitCode: entry.metadata?.exitCode,
+                status: commandStatus(for: entry),
+                durationMs: entry.metadata?.durationMs
+            ))
     case .agentMessage:
         return .message(.init(text: existingText(existing, message: "") + entry.text))
     case .plan, .todoList:
@@ -288,15 +297,17 @@ private func timelineContent(
     case .rawReasoning:
         return .reasoning(.init(text: existingText(existing, reasoning: "") + entry.text, style: .raw))
     case .contextCompaction:
-        return .contextCompaction(.init(
-            title: entry.text,
-            status: contextCompactionStatus(for: entry)
-        ))
+        return .contextCompaction(
+            .init(
+                title: entry.text,
+                status: contextCompactionStatus(for: entry)
+            ))
     case .toolCall:
-        return .toolCall(.init(
-            result: entry.text,
-            status: toolCallStatus(for: entry)
-        ))
+        return .toolCall(
+            .init(
+                result: entry.text,
+                status: toolCallStatus(for: entry)
+            ))
     case .diagnostic, .error, .progress, .event:
         return .diagnostic(.init(message: existingText(existing, diagnostic: "") + entry.text))
     }

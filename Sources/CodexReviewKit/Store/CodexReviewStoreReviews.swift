@@ -235,17 +235,148 @@ extension CodexReviewStore {
     }
 
     private func appendRecoveryProgress(_ message: String, to job: CodexReviewJob) {
+        let now = clock.now()
         job.core.output.summary = message
-        job.appendLogEntry(.init(kind: .progress, text: message, timestamp: clock.now()))
-        job.applyReviewLogLimit()
+        appendDiagnostic(message, to: job, at: now)
         writeDiagnosticsIfNeeded()
     }
 
     private func markReviewWaitingForNetworkRecovery(_ job: CodexReviewJob) {
-        let now = clock.now()
-        job.closeActiveCommandLogEntries(status: "canceled", completedAt: now)
         job.resetReviewAttemptOutputForRecovery()
         appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
+    }
+
+    private func applyDomainEvents(
+        _ events: [ReviewDomainEvent],
+        to job: CodexReviewJob,
+        at timestamp: Date
+    ) {
+        for event in events {
+            guard shouldApplyDomainEvent(event, to: job) else {
+                continue
+            }
+            updateCoreOutput(from: event, for: job)
+            job.timeline.apply(event, at: timestamp)
+        }
+    }
+
+    private func shouldApplyDomainEvent(_ event: ReviewDomainEvent, to job: CodexReviewJob) -> Bool {
+        switch event {
+        case .textDelta(let itemID, _, let family, _, _)
+        where family == .message && job.completedAgentMessageItemIDs.contains(itemID.rawValue):
+            false
+        default:
+            true
+        }
+    }
+
+    private func updateCoreOutput(from event: ReviewDomainEvent, for job: CodexReviewJob) {
+        switch event {
+        case .itemStarted(let seed),
+            .itemUpdated(let seed):
+            updateCoreOutput(from: seed, isCompleted: false, for: job)
+        case .itemCompleted(let seed):
+            updateCoreOutput(from: seed, isCompleted: true, for: job)
+        case .textDelta(let itemID, _, let family, _, let delta) where family == .message:
+            guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID.rawValue, delta: delta) else {
+                return
+            }
+            job.core.output.lastAgentMessage = updatedMessage
+            job.core.output.summary = updatedMessage
+        case .runStarted,
+            .textDelta,
+            .reviewCompleted,
+            .reviewFailed,
+            .reviewCancelled:
+            break
+        }
+    }
+
+    private func updateCoreOutput(
+        from seed: ReviewTimelineItemSeed,
+        isCompleted: Bool,
+        for job: CodexReviewJob
+    ) {
+        guard seed.family == .message,
+            case .message(let message) = seed.content
+        else {
+            return
+        }
+        job.noteAgentMessageSnapshot(
+            itemID: seed.id.rawValue,
+            text: message.text,
+            isCompleted: isCompleted
+        )
+        guard let text = message.text.nilIfEmpty else {
+            return
+        }
+        job.core.output.lastAgentMessage = text
+        job.core.output.summary = text
+    }
+
+    private func applyMessageSnapshot(
+        _ text: String,
+        itemID: String?,
+        isCompleted: Bool,
+        to job: CodexReviewJob,
+        at timestamp: Date
+    ) {
+        let resolvedItemID =
+            itemID?.nilIfEmpty.map(ReviewTimelineItem.ID.init(rawValue:))
+            ?? job.nextSyntheticTimelineItemID(prefix: "message")
+        let seed = ReviewTimelineItemSeed(
+            id: resolvedItemID,
+            kind: .agentMessage,
+            family: .message,
+            phase: isCompleted ? .completed : .running,
+            content: .message(.init(text: text))
+        )
+        job.noteAgentMessageSnapshot(
+            itemID: resolvedItemID.rawValue,
+            text: text,
+            isCompleted: isCompleted
+        )
+        job.timeline.apply(isCompleted ? .itemCompleted(seed) : .itemUpdated(seed), at: timestamp)
+    }
+
+    private func applyMessageDelta(
+        _ text: String,
+        itemID: String,
+        to job: CodexReviewJob,
+        at timestamp: Date
+    ) {
+        guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
+            return
+        }
+        job.core.output.lastAgentMessage = updatedMessage
+        job.core.output.summary = updatedMessage
+        job.timeline.apply(
+            .textDelta(
+                itemID: .init(rawValue: itemID),
+                kind: .agentMessage,
+                family: .message,
+                content: .message(.init(text: "")),
+                delta: text
+            ), at: timestamp)
+    }
+
+    private func appendDiagnostic(
+        _ message: String,
+        to job: CodexReviewJob,
+        at timestamp: Date,
+        severity: ReviewDiagnosticSeverity? = nil
+    ) {
+        guard let message = message.nilIfEmpty else {
+            return
+        }
+        let seed = ReviewTimelineItemSeed(
+            id: job.nextSyntheticTimelineItemID(prefix: "diagnostic"),
+            kind: .init(rawValue: "reviewDiagnostic"),
+            family: .diagnostic,
+            phase: .completed,
+            content: .diagnostic(.init(message: message, severity: severity))
+        )
+        job.timeline.apply(.itemCompleted(seed), at: timestamp)
     }
 
     private func reviewWorkerInputs(for attempt: BackendReviewAttempt) async -> ReviewWorkerInputs {
@@ -551,18 +682,12 @@ extension CodexReviewStore {
             return
         }
         let endedAt = clock.now()
-        job.closeActiveCommandLogEntries(status: "failed", completedAt: endedAt)
+        job.timeline.closeActiveItems(family: .command, phase: .failed, timestamp: endedAt)
         job.core.lifecycle.status = .failed
         job.core.lifecycle.endedAt = endedAt
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
-        let retainErrorTimelineText = job.consumeTerminalFailureTimelineTextRetention()
-        job.appendLogEntry(
-            .init(kind: .error, text: message, timestamp: endedAt),
-            retainTimelineText: retainErrorTimelineText
-        )
         job.timeline.apply(.reviewFailed(message), at: endedAt)
-        job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
     }
 
@@ -827,16 +952,8 @@ extension CodexReviewStore {
         }
         var updatedRun = currentRun
         switch event {
-        case .domainEvents(let events, let retainedLogEntryCount):
-            job.applyDirectTimelineEvents(
-                events,
-                retainedLogEntryCount: retainedLogEntryCount,
-                at: clock.now()
-            )
-        case .retainNextTimelineTextFromLogEntry:
-            job.retainNextTimelineTextFromLogEntry()
-        case .retainNextTerminalFailureTimelineTextFromLogEntry:
-            job.retainNextTerminalFailureTimelineTextFromLogEntry()
+        case .domainEvents(let events):
+            applyDomainEvents(events, to: job, at: clock.now())
         case .started(let turnID, let reviewThreadID, let model):
             job.core.run.turnID = turnID
             job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
@@ -854,46 +971,14 @@ extension CodexReviewStore {
                     model: model ?? job.core.run.model
                 ), at: clock.now())
         case .message(let text):
+            let now = clock.now()
             job.core.output.lastAgentMessage = text
             job.core.output.summary = text
-            job.appendLogEntry(.init(kind: .agentMessage, text: text, timestamp: clock.now()))
+            applyMessageSnapshot(text, itemID: nil, isCompleted: true, to: job, at: now)
         case .messageDelta(let text, let itemID):
-            guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
-                job.discardPendingTimelineTextRetention()
-                return updatedRun
-            }
-            job.core.output.lastAgentMessage = updatedMessage
-            job.core.output.summary = updatedMessage
-            job.appendLogEntry(
-                .init(
-                    kind: .agentMessage,
-                    groupID: itemID,
-                    text: text,
-                    timestamp: clock.now()
-                ))
+            applyMessageDelta(text, itemID: itemID, to: job, at: clock.now())
         case .log(let text):
-            job.appendLogEntry(.init(kind: .progress, text: text, timestamp: clock.now()))
-        case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata):
-            if kind == .agentMessage {
-                if let groupID, replacesGroup {
-                    job.noteAgentMessageSnapshot(
-                        itemID: groupID,
-                        text: text,
-                        isCompleted: shouldCompleteAgentMessageReplacement(metadata: metadata)
-                    )
-                }
-                job.core.output.lastAgentMessage = text
-                job.core.output.summary = text
-            }
-            job.appendLogEntry(
-                .init(
-                    kind: kind,
-                    groupID: groupID,
-                    replacesGroup: replacesGroup,
-                    text: text,
-                    metadata: metadata,
-                    timestamp: clock.now()
-                ))
+            appendDiagnostic(text, to: job, at: clock.now())
         case .completed(let summary, let result):
             completeReview(job, summary: summary, result: result)
         case .failed(let message):
@@ -935,7 +1020,7 @@ extension CodexReviewStore {
         let previousAgentMessage = job.core.output.lastAgentMessage?.nilIfEmpty
         let resultText = result?.nilIfEmpty
         let finalReviewText = resultText ?? previousAgentMessage
-        job.closeActiveCommandLogEntries(status: "completed", completedAt: endedAt)
+        job.timeline.closeActiveItems(family: .command, phase: .completed, timestamp: endedAt)
         job.core.lifecycle.status = .succeeded
         job.core.lifecycle.endedAt = endedAt
         job.core.output.summary = summary
@@ -945,10 +1030,9 @@ extension CodexReviewStore {
         if let result = resultText,
             result != previousAgentMessage
         {
-            job.appendLogEntry(.init(kind: .agentMessage, text: result, timestamp: endedAt))
+            applyMessageSnapshot(result, itemID: nil, isCompleted: true, to: job, at: endedAt)
         }
         job.timeline.apply(.reviewCompleted(summary: summary, result: finalReviewText), at: endedAt)
-        job.applyReviewLogLimit()
         writeDiagnosticsIfNeeded()
     }
 
@@ -973,26 +1057,16 @@ extension CodexReviewStore {
     }
 }
 
-private func shouldCompleteAgentMessageReplacement(metadata: ReviewLogEntry.Metadata?) -> Bool {
-    guard let status = metadata?.status?.nilIfEmpty else {
-        return true
-    }
-    return ReviewItemPhase.normalized(status).isTerminal
-}
-
 private extension CodexReviewBackendModel.Review.Event {
     var completesReviewRun: Bool {
         switch self {
         case .completed, .failed, .cancelled:
             true
         case .domainEvents,
-            .retainNextTimelineTextFromLogEntry,
-            .retainNextTerminalFailureTimelineTextFromLogEntry,
             .started,
             .message,
             .messageDelta,
-            .log,
-            .logEntry:
+            .log:
             false
         }
     }
@@ -1036,7 +1110,8 @@ private extension CodexReviewJob {
         core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
-        replaceLogEntries(logEntries.filter { $0.kind != .agentMessage }, resetDirectTimeline: true)
+        timeline.reset(keepingTerminal: core.lifecycle.status.isTerminal)
+        syncTimelineTerminalStateFromCore()
     }
 }
 

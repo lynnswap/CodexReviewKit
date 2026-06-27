@@ -410,23 +410,32 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
+            let includedJob = CodexReviewJob.makeForTesting(
+                id: "job-in-session",
+                sessionID: sessionID,
+                cwd: "/tmp/project",
+                targetSummary: "Included",
+                status: .succeeded,
+                summary: "Done",
+                hasFinalReview: true,
+                lastAgentMessage: "No correctness issues found."
+            )
+            includedJob.timeline.apply(
+                .itemCompleted(
+                    .init(
+                        id: "cmd-1",
+                        kind: .commandExecution,
+                        family: .command,
+                        phase: .completed,
+                        content: .command(.init(command: "swift test", output: "Tests passed", status: .completed))
+                    )),
+                at: Date()
+            )
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [
-                    CodexReviewJob.makeForTesting(
-                        id: "job-in-session",
-                        sessionID: sessionID,
-                        cwd: "/tmp/project",
-                        targetSummary: "Included",
-                        status: .succeeded,
-                        summary: "Done",
-                        logEntries: [
-                            .init(kind: .command, groupID: "cmd-1", text: "$ swift test"),
-                            .init(kind: .commandOutput, groupID: "cmd-1", text: "Tests passed"),
-                            .init(kind: .agentMessage, text: "No correctness issues found."),
-                        ]
-                    ),
+                    includedJob,
                     CodexReviewJob.makeForTesting(
                         id: "job-other-session",
                         sessionID: "other-session",
@@ -469,7 +478,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(allowed.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-            #expect(readText == "Done")
+            #expect(readText == "No correctness issues found.")
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect(

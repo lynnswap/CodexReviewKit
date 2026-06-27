@@ -35,17 +35,10 @@ package struct ReviewBackendEventSessionCallbacks: Sendable {
 }
 
 package actor ReviewBackendEventSession {
-    private static let commandTimeoutExitCode = 124
-    private static let longCommandDurationWarningMs = 100_000
-    private static let streamedLogFlushIntervalNanoseconds: UInt64 = 20_000_000
-
     private var run: CodexReviewBackendModel.Review.Run
     private let mailbox: BackendReviewEventMailbox
     private let callbacks: ReviewBackendEventSessionCallbacks
     private var reviewThreadIDsForCleanup: [String] = []
-    private var pendingStreamedLogEntries: [PendingStreamedLogEntry] = []
-    private var pendingStreamedLogIndexByKey: [PendingStreamedLogEntry.Key: Int] = [:]
-    private var streamedLogFlushTask: Task<Void, Never>?
     private var cancellationRequestedMessage: String?
     private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
@@ -97,22 +90,14 @@ package actor ReviewBackendEventSession {
     }
 
     package func finish(cancellationMessage: String?) async {
-        let precedingEvents = drainPendingStreamedLogEvents()
-        if cancellationMessage == nil {
-            cancelPendingStreamedLogFlush()
-        } else {
-            cancellationRequestedMessage = cancellationMessage
-        }
-        await finish(precedingEvents: precedingEvents, cancellationMessage: cancellationMessage)
+        cancellationRequestedMessage = cancellationMessage
+        await finishSession(cancellationMessage: cancellationMessage)
     }
 
     package func finish(throwing error: (any Error)?) async {
         guard finished == false else {
             return
         }
-        let precedingEvents = drainPendingStreamedLogEvents()
-        cancelPendingStreamedLogFlush()
-        await emitPrecedingEvents(precedingEvents)
         if let error {
             finished = true
             completionCoordinator.cancelPendingCompletion()
@@ -133,9 +118,6 @@ package actor ReviewBackendEventSession {
         }
         finished = true
         completionCoordinator.cancelPendingCompletion()
-        cancelPendingStreamedLogFlush()
-        pendingStreamedLogEntries.removeAll(keepingCapacity: true)
-        pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
         await mailbox.abandon()
     }
 
@@ -157,30 +139,7 @@ package actor ReviewBackendEventSession {
             return
         }
         metrics.decoded += 1
-        let events = eventsWithTypedResultFallback(events)
-        for index in events.indices {
-            let event = events[index]
-            if case .domainEvents = event {
-                let followingEvents = events[events.index(after: index)...]
-                if shouldFlushPendingStreamedLogBeforeDomainEvent(
-                    followingEvents: followingEvents,
-                    retainTimelineText: false
-                ),
-                    await flushPendingStreamedLog(controlThreadID: controlThreadID)
-                {
-                    return
-                }
-                if await emit(event, controlThreadID: controlThreadID) {
-                    return
-                }
-                continue
-            }
-            if bufferStreamedLog(event) {
-                continue
-            }
-            if await flushPendingStreamedLog(controlThreadID: controlThreadID) {
-                return
-            }
+        for event in eventsWithTypedResultFallback(events) {
             if event.shouldDeferReviewBackendCompletion {
                 completionCoordinator.deferCompletion(event)
                 continue
@@ -208,19 +167,13 @@ package actor ReviewBackendEventSession {
                     typedReviewResultText = text
                 }
                 return event
-            case .logEntry(.agentMessage, let text, _, _, _):
-                if let text = text.nilIfEmpty {
-                    typedReviewResultText = text
-                }
+            case .domainEvents(let events):
+                recordTypedMessageText(from: events)
                 return event
             case .completed(let summary, nil):
                 return .completed(summary: summary, result: typedReviewResultText)
-            case .domainEvents,
-                .retainNextTimelineTextFromLogEntry,
-                .retainNextTerminalFailureTimelineTextFromLogEntry,
-                .started,
+            case .started,
                 .log,
-                .logEntry,
                 .completed,
                 .failed,
                 .cancelled:
@@ -229,16 +182,46 @@ package actor ReviewBackendEventSession {
         }
     }
 
-    private func finish(
-        precedingEvents: [CodexReviewBackendModel.Review.Event],
-        cancellationMessage: String?
-    ) async {
+    private func recordTypedMessageText(from events: [ReviewDomainEvent]) {
+        for event in events {
+            switch event {
+            case .itemStarted(let seed),
+                .itemUpdated(let seed),
+                .itemCompleted(let seed):
+                recordTypedMessageText(from: seed)
+            case .textDelta(let itemID, _, let family, _, let delta) where family == .message:
+                let text = (typedMessageTextByItemID[itemID.rawValue] ?? "") + delta
+                typedMessageTextByItemID[itemID.rawValue] = text
+                if let text = text.nilIfEmpty {
+                    typedReviewResultText = text
+                }
+            case .runStarted,
+                .textDelta,
+                .reviewCompleted,
+                .reviewFailed,
+                .reviewCancelled:
+                break
+            }
+        }
+    }
+
+    private func recordTypedMessageText(from seed: ReviewTimelineItemSeed) {
+        guard seed.family == .message,
+            case .message(let message) = seed.content
+        else {
+            return
+        }
+        typedMessageTextByItemID[seed.id.rawValue] = message.text
+        if let text = message.text.nilIfEmpty {
+            typedReviewResultText = text
+        }
+    }
+
+    private func finishSession(cancellationMessage: String?) async {
         guard finished == false else {
             return
         }
         completionCoordinator.cancelPendingCompletion()
-        cancelPendingStreamedLogFlush()
-        await emitPrecedingEvents(precedingEvents)
         if let cancellationMessage {
             _ = await emit(.cancelled(cancellationMessage))
         } else {
@@ -268,108 +251,6 @@ package actor ReviewBackendEventSession {
         return didFinish
     }
 
-    private func shouldFlushPendingStreamedLogBeforeDomainEvent(
-        followingEvents: ArraySlice<CodexReviewBackendModel.Review.Event>,
-        retainTimelineText: Bool
-    ) -> Bool {
-        guard pendingStreamedLogEntries.isEmpty == false else {
-            return false
-        }
-        return followingEvents.contains {
-            canCoalescePendingStreamedLog(
-                with: $0,
-                retainTimelineText: retainTimelineText
-            )
-        } == false
-    }
-
-    private func canCoalescePendingStreamedLog(
-        with event: CodexReviewBackendModel.Review.Event,
-        retainTimelineText: Bool
-    ) -> Bool {
-        guard
-            let entry = PendingStreamedLogEntry(
-                event,
-                retainsTimelineText: retainTimelineText
-            )
-        else {
-            return false
-        }
-        return pendingStreamedLogIndexByKey[entry.key] != nil
-    }
-
-    private func bufferStreamedLog(
-        _ event: CodexReviewBackendModel.Review.Event,
-        retainTimelineText: Bool = false
-    ) -> Bool {
-        guard
-            let entry = PendingStreamedLogEntry(
-                event,
-                retainsTimelineText: retainTimelineText
-            )
-        else {
-            return false
-        }
-        if let index = pendingStreamedLogIndexByKey[entry.key] {
-            pendingStreamedLogEntries[index].append(entry.text)
-            if retainTimelineText {
-                pendingStreamedLogEntries[index].retainTimelineText()
-            }
-        } else {
-            pendingStreamedLogIndexByKey[entry.key] = pendingStreamedLogEntries.count
-            pendingStreamedLogEntries.append(entry)
-        }
-        schedulePendingStreamedLogFlush()
-        return true
-    }
-
-    private func schedulePendingStreamedLogFlush() {
-        guard streamedLogFlushTask == nil else {
-            return
-        }
-        streamedLogFlushTask = Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: Self.streamedLogFlushIntervalNanoseconds)
-            } catch {
-                return
-            }
-            await self?.flushPendingStreamedLogFromTimer()
-        }
-    }
-
-    private func flushPendingStreamedLogFromTimer() async {
-        streamedLogFlushTask = nil
-        _ = await flushPendingStreamedLog()
-    }
-
-    private func flushPendingStreamedLog(
-        controlThreadID: String? = nil
-    ) async -> Bool {
-        let events = drainPendingStreamedLogEvents()
-        guard events.isEmpty == false else {
-            return false
-        }
-        cancelPendingStreamedLogFlush()
-        for event in events {
-            if await emit(event, controlThreadID: controlThreadID) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private func drainPendingStreamedLogEvents() -> [CodexReviewBackendModel.Review.Event] {
-        let events = pendingStreamedLogEntries.flatMap(\.events)
-        pendingStreamedLogEntries.removeAll(keepingCapacity: true)
-        pendingStreamedLogIndexByKey.removeAll(keepingCapacity: true)
-        return events
-    }
-
-    private func cancelPendingStreamedLogFlush() {
-        streamedLogFlushTask?.cancel()
-        streamedLogFlushTask = nil
-    }
-
     private func flushPendingCompletion(
         controlThreadID: String? = nil
     ) async -> Bool {
@@ -396,27 +277,10 @@ package actor ReviewBackendEventSession {
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
         case .domainEvents,
-            .retainNextTimelineTextFromLogEntry,
-            .retainNextTerminalFailureTimelineTextFromLogEntry,
             .message,
             .messageDelta,
-            .log,
-            .logEntry:
+            .log:
             break
-        }
-    }
-
-    private func noteEmissions(_ events: [CodexReviewBackendModel.Review.Event]) {
-        for event in events {
-            noteEmission(event)
-        }
-    }
-
-    private func emitPrecedingEvents(_ events: [CodexReviewBackendModel.Review.Event]) async {
-        noteEmissions(events)
-        for event in events {
-            await mailbox.append(event)
-            await recordReviewEvent(event)
         }
     }
 
@@ -428,21 +292,6 @@ package actor ReviewBackendEventSession {
         if event.isReviewBackendTerminal {
             metrics.terminalLatencyMs = Self.durationMs(from: createdAt, to: Date())
         }
-        if Self.isCommandTimeoutWarning(event) {
-            metrics.commandTimeoutWarnings += 1
-        }
-    }
-
-    private static func isCommandTimeoutWarning(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        guard case .logEntry(_, _, _, _, let metadata) = event,
-            metadata?.sourceType == "commandExecution"
-        else {
-            return false
-        }
-        if metadata?.exitCode == commandTimeoutExitCode {
-            return true
-        }
-        return (metadata?.durationMs ?? 0) >= longCommandDurationWarningMs
     }
 
     private static func durationMs(from start: Date, to end: Date) -> Int {
@@ -454,109 +303,16 @@ package actor ReviewBackendEventSession {
     }
 }
 
-private struct PendingStreamedLogEntry: Sendable {
-    struct Key: Hashable, Sendable {
-        var kind: ReviewLogEntry.Kind
-        var groupID: String
-        var sourceType: String?
-        var itemID: String?
-    }
-
-    var kind: ReviewLogEntry.Kind
-    var text: String
-    var groupID: String
-    var metadata: ReviewLogEntry.Metadata?
-    var retainsTimelineText: Bool
-
-    var key: Key {
-        .init(
-            kind: kind,
-            groupID: groupID,
-            sourceType: metadata?.sourceType,
-            itemID: metadata?.itemID
-        )
-    }
-
-    var events: [CodexReviewBackendModel.Review.Event] {
-        let logEntry = CodexReviewBackendModel.Review.Event.logEntry(
-            kind: kind,
-            text: text,
-            groupID: groupID,
-            replacesGroup: false,
-            metadata: metadata
-        )
-        return retainsTimelineText
-            ? [.retainNextTimelineTextFromLogEntry, logEntry]
-            : [logEntry]
-    }
-
-    init?(_ event: CodexReviewBackendModel.Review.Event, retainsTimelineText: Bool = false) {
-        guard case .logEntry(let kind, let text, let groupID, let replacesGroup, let metadata) = event,
-            text.isEmpty == false,
-            replacesGroup == false,
-            let groupID
-        else {
-            return nil
-        }
-        switch kind {
-        case .commandOutput:
-            guard metadata?.sourceType == "commandExecution",
-                metadata?.title == "Command output"
-            else {
-                return nil
-            }
-        case .reasoningSummary, .rawReasoning:
-            break
-        case .agentMessage, .command, .plan, .reasoning, .todoList, .toolCall, .diagnostic, .error, .progress, .event,
-            .contextCompaction:
-            return nil
-        }
-        self.kind = kind
-        self.text = text
-        self.groupID = groupID
-        self.metadata = metadata
-        self.retainsTimelineText = retainsTimelineText
-    }
-
-    mutating func append(_ suffix: String) {
-        text += suffix
-    }
-
-    mutating func retainTimelineText() {
-        retainsTimelineText = true
-    }
-}
-
-package extension Array where Element == CodexReviewBackendModel.Review.Event {
-    var immediateTimelineTextRetentionCount: Int {
-        reduce(0) { count, event in
-            count + (event.needsImmediateTimelineTextRetention ? 1 : 0)
-        }
-    }
-
-    var addingTerminalFailureTimelineTextRetentionIfNeeded: [Element] {
-        flatMap { event -> [Element] in
-            if case .failed = event {
-                return [.retainNextTerminalFailureTimelineTextFromLogEntry, event]
-            }
-            return [event]
-        }
-    }
-}
-
 private extension CodexReviewBackendModel.Review.Event {
     var isReviewBackendTerminal: Bool {
-        return switch self {
+        switch self {
         case .completed, .failed, .cancelled:
             true
         case .domainEvents,
-            .retainNextTimelineTextFromLogEntry,
-            .retainNextTerminalFailureTimelineTextFromLogEntry,
             .started,
             .message,
             .messageDelta,
-            .log,
-            .logEntry:
+            .log:
             false
         }
     }
@@ -566,24 +322,6 @@ private extension CodexReviewBackendModel.Review.Event {
             return false
         }
         return result?.nilIfEmpty == nil
-    }
-
-    var needsImmediateTimelineTextRetention: Bool {
-        guard PendingStreamedLogEntry(self) == nil else {
-            return false
-        }
-        return switch self {
-        case .message, .messageDelta, .log, .logEntry:
-            true
-        case .domainEvents,
-            .retainNextTimelineTextFromLogEntry,
-            .retainNextTerminalFailureTimelineTextFromLogEntry,
-            .started,
-            .completed,
-            .failed,
-            .cancelled:
-            false
-        }
     }
 }
 

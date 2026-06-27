@@ -503,14 +503,9 @@ private enum AppServerTypedReviewEventAdapter {
             .init(events: [.failed("Review thread is no longer loaded.")], controlThreadID: controlThreadID)
         case .statusChanged(.unknown(let status)):
             .init(
-                events: [
-                    .logEntry(
-                        kind: .diagnostic,
-                        text: "Review thread status changed: \(status).",
-                        groupID: review.turnID.rawValue,
-                        replacesGroup: false
-                    )
-                ], controlThreadID: controlThreadID)
+                events: unknownStatusEvents(status, turnID: review.turnID.rawValue),
+                controlThreadID: controlThreadID
+            )
         case .closed:
             .init(events: [.failed("Review thread closed.")], controlThreadID: controlThreadID)
         case .unknown(let raw):
@@ -538,6 +533,20 @@ private enum AppServerTypedReviewEventAdapter {
                     ?? response.transcript.responseText?.nilIfEmpty
             )
         ]
+    }
+
+    private static func unknownStatusEvents(
+        _ status: String,
+        turnID: String
+    ) -> [CodexReviewBackendModel.Review.Event] {
+        let seed = ReviewTimelineItemSeed(
+            id: .init(rawValue: "\(turnID):status"),
+            kind: .init(rawValue: "reviewThreadStatus"),
+            family: .diagnostic,
+            phase: .completed,
+            content: .diagnostic(.init(message: "Review thread status changed: \(status)."))
+        )
+        return [.domainEvents([.itemCompleted(seed)])]
     }
 
     private static func terminalFailureEvents(
@@ -581,13 +590,9 @@ private enum AppServerTypedReviewEventAdapter {
             case .completed:
                 .itemCompleted(seed)
             }
-        let logEvents = logEntryEvents(for: item, phase: phase)
         return [
-            .domainEvents(
-                [domainEvent],
-                retainedLogEntryCount: logEvents.immediateTimelineTextRetentionCount
-            )
-        ] + logEvents.addingTerminalFailureTimelineTextRetentionIfNeeded
+            .domainEvents([domainEvent])
+        ]
     }
 
     private static func messageEvents(
@@ -621,8 +626,7 @@ private enum AppServerTypedReviewEventAdapter {
             delta: delta.text
         )
         return [
-            .domainEvents([domainEvent], retainedLogEntryCount: 1),
-            .messageDelta(delta.text, itemID: itemID),
+            .domainEvents([domainEvent])
         ]
     }
 
@@ -643,7 +647,7 @@ private enum AppServerTypedReviewEventAdapter {
             phase: .running,
             content: .reasoning(.init(text: "", style: style))
         )
-        return [.domainEvents([.itemStarted(seed)], retainedLogEntryCount: 0)]
+        return [.domainEvents([.itemStarted(seed)])]
     }
 
     private static func reasoningDeltaEvents(
@@ -652,16 +656,13 @@ private enum AppServerTypedReviewEventAdapter {
         guard delta.delta.isEmpty == false else {
             return []
         }
-        let style: ReviewTimelineItem.Reasoning.Style
-        let kind: ReviewLogEntry.Kind
-        switch delta.part.kind {
-        case .summary:
-            style = .summary
-            kind = .reasoningSummary
-        case .text:
-            style = .raw
-            kind = .rawReasoning
-        }
+        let style: ReviewTimelineItem.Reasoning.Style =
+            switch delta.part.kind {
+            case .summary:
+                .summary
+            case .text:
+                .raw
+            }
         let domainEvent = ReviewDomainEvent.textDelta(
             itemID: .init(rawValue: delta.id),
             kind: .reasoning,
@@ -669,10 +670,7 @@ private enum AppServerTypedReviewEventAdapter {
             content: .reasoning(.init(text: "", style: style)),
             delta: delta.delta
         )
-        return [
-            .domainEvents([domainEvent], retainedLogEntryCount: 1),
-            .logEntry(kind: kind, text: delta.delta, groupID: delta.id, replacesGroup: false),
-        ]
+        return [.domainEvents([domainEvent])]
     }
 
     private static func unknownEvents(
@@ -695,7 +693,7 @@ private enum AppServerTypedReviewEventAdapter {
                     rawKind: .init(rawValue: raw.method)
                 ))
         )
-        return [.domainEvents([.itemUpdated(seed)], retainedLogEntryCount: 0)]
+        return [.domainEvents([.itemUpdated(seed)])]
     }
 
     private static func timelineSeed(
@@ -709,137 +707,6 @@ private enum AppServerTypedReviewEventAdapter {
             phase: item.reviewItemPhase(defaultingTo: phase),
             content: item.reviewTimelineContent
         )
-    }
-
-    private static func logEntryEvents(
-        for item: CodexThreadItem,
-        phase: AppServerTypedItemPhase
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        switch item.content {
-        case .message(let message):
-            guard message.role != .user,
-                message.text.isEmpty == false
-            else {
-                return []
-            }
-            return [
-                item.logEntry(
-                    kind: .agentMessage,
-                    text: message.text,
-                    phase: phase,
-                    title: nil
-                )
-            ]
-        case .plan(let text):
-            return text.nilIfEmpty.map {
-                [item.logEntry(kind: .plan, text: $0, phase: phase, title: nil)]
-            } ?? []
-        case .reasoning(let reasoning):
-            let summaryEvents = reasoning.summary.enumerated().compactMap { index, text in
-                text.nilIfEmpty.map {
-                    CodexReviewBackendModel.Review.Event.logEntry(
-                        kind: .reasoningSummary,
-                        text: $0,
-                        groupID: reasoningSummaryGroupID(itemID: item.id, summaryIndex: index),
-                        replacesGroup: phase != .started
-                    )
-                }
-            }
-            let rawEvents = reasoning.content.enumerated().compactMap { index, text in
-                text.nilIfEmpty.map {
-                    CodexReviewBackendModel.Review.Event.logEntry(
-                        kind: .rawReasoning,
-                        text: $0,
-                        groupID: rawReasoningGroupID(itemID: item.id, contentIndex: index),
-                        replacesGroup: phase != .started
-                    )
-                }
-            }
-            return summaryEvents + rawEvents
-        case .command(let command):
-            return commandLogEvents(item: item, command: command, phase: phase)
-        case .fileChange(let fileChange):
-            let text =
-                fileChange.output?.nilIfEmpty
-                ?? fileChange.path?.nilIfEmpty
-                ?? "File changes \(item.logStatus(phase: phase) ?? "updated")."
-            let kind: ReviewLogEntry.Kind = fileChange.output?.nilIfEmpty == nil ? .toolCall : .commandOutput
-            return [
-                item.logEntry(
-                    kind: kind,
-                    text: text,
-                    phase: phase,
-                    title: "File changes"
-                )
-            ]
-        case .toolCall(let toolCall):
-            let label = item.toolLabel
-            let text =
-                toolCall.error?.nilIfEmpty
-                ?? toolCall.result?.nilIfEmpty
-                ?? "\(label) \(item.logStatus(phase: phase) ?? "updated")."
-            return [
-                item.logEntry(
-                    kind: .toolCall,
-                    text: text,
-                    phase: phase,
-                    title: label
-                )
-            ]
-        case .contextCompaction(let text):
-            return [
-                item.logEntry(
-                    kind: .contextCompaction,
-                    text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.logStatus(phase: phase)),
-                    phase: phase,
-                    title: nil
-                )
-            ]
-        case .diagnostic(let text):
-            return text.nilIfEmpty.map {
-                [item.logEntry(kind: .diagnostic, text: $0, phase: phase, title: nil)]
-            } ?? []
-        case .log(let text):
-            return text.nilIfEmpty.map {
-                [item.logEntry(kind: .event, text: $0, phase: phase, title: item.kind.rawValue)]
-            } ?? []
-        case .unknown(let raw):
-            return raw.text?.nilIfEmpty.map {
-                [item.logEntry(kind: .event, text: $0, phase: phase, title: raw.rawType)]
-            } ?? []
-        }
-    }
-
-    private static func commandLogEvents(
-        item: CodexThreadItem,
-        command: CodexCommand,
-        phase: AppServerTypedItemPhase
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        var events: [CodexReviewBackendModel.Review.Event] = []
-        if command.command.isEmpty == false {
-            events.append(
-                item.logEntry(
-                    kind: .command,
-                    text: "$ \(command.command)",
-                    phase: phase,
-                    title: nil
-                ))
-        }
-        let output = command.output?.nilIfEmpty
-        if let output {
-            if command.command.isEmpty {
-                events.append(item.commandOutputDeltaLogEntry(text: output))
-            } else {
-                events.append(
-                    item.logEntry(
-                        kind: .commandOutput,
-                        text: output,
-                        phase: phase,
-                        title: nil
-                    ))
-            }
-        }
-        return events
     }
 
     private static func contextCompactionText(
@@ -985,16 +852,6 @@ private extension CodexThreadItem {
         }
     }
 
-    var toolLabel: String {
-        guard case .toolCall(let toolCall) = content else {
-            return kind.rawValue
-        }
-        return [toolCall.namespace, toolCall.server, toolCall.name]
-            .compactMap { $0?.nilIfEmpty }
-            .joined(separator: ".")
-            .nilIfEmpty ?? kind.rawValue
-    }
-
     func logStatus(phase: AppServerTypedItemPhase) -> String? {
         if let status = statusRaw?.nilIfEmpty {
             return status
@@ -1007,75 +864,6 @@ private extension CodexThreadItem {
         case .completed:
             "completed"
         }
-    }
-
-    func logEntry(
-        kind logKind: ReviewLogEntry.Kind,
-        text: String,
-        phase: AppServerTypedItemPhase,
-        title: String?
-    ) -> CodexReviewBackendModel.Review.Event {
-        .logEntry(
-            kind: logKind,
-            text: text,
-            groupID: id,
-            replacesGroup: phase != .started,
-            metadata: reviewLogMetadata(title: title, phase: phase)
-        )
-    }
-
-    func commandOutputDeltaLogEntry(text: String) -> CodexReviewBackendModel.Review.Event {
-        .logEntry(
-            kind: .commandOutput,
-            text: text,
-            groupID: id,
-            replacesGroup: false,
-            metadata: reviewLogMetadata(title: "Command output", phase: .updated)
-        )
-    }
-
-    private func reviewLogMetadata(
-        title: String?,
-        phase: AppServerTypedItemPhase
-    ) -> ReviewLogEntry.Metadata {
-        let status = logStatus(phase: phase)
-        let command: CodexCommand?
-        let fileChange: CodexFileChange?
-        let toolCall: CodexToolCall?
-        switch content {
-        case .command(let value):
-            command = value
-            fileChange = nil
-            toolCall = nil
-        case .fileChange(let value):
-            command = nil
-            fileChange = value
-            toolCall = nil
-        case .toolCall(let value):
-            command = nil
-            fileChange = nil
-            toolCall = value
-        case .contextCompaction, .diagnostic, .log, .message, .plan, .reasoning, .unknown:
-            command = nil
-            fileChange = nil
-            toolCall = nil
-        }
-        return .init(
-            sourceType: kind.rawValue,
-            title: title?.nilIfEmpty,
-            status: status,
-            itemID: kind == .commandExecution || kind == .contextCompaction ? id : nil,
-            command: command?.command,
-            cwd: command?.cwd,
-            exitCode: command?.exitCode,
-            commandStatus: kind == .commandExecution ? status : nil,
-            namespace: toolCall?.namespace,
-            server: toolCall?.server,
-            tool: toolCall?.name,
-            path: fileChange?.path,
-            resultText: toolCall?.result?.nilIfEmpty,
-            errorText: toolCall?.error?.nilIfEmpty
-        )
     }
 }
 

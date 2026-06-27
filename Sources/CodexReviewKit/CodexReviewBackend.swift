@@ -179,13 +179,10 @@ package actor BackendReviewEventMailbox {
         case .completed, .failed, .cancelled:
             return true
         case .domainEvents,
-            .retainNextTimelineTextFromLogEntry,
-            .retainNextTerminalFailureTimelineTextFromLogEntry,
             .started,
             .message,
             .messageDelta,
-            .log,
-            .logEntry:
+            .log:
             return false
         }
     }

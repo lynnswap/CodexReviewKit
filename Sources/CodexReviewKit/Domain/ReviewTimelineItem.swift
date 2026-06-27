@@ -446,6 +446,87 @@ extension ReviewTimelineItem.Content {
             return incoming
         }
     }
+
+    func closingActiveContent(phase: ReviewItemPhase) -> Self {
+        switch self {
+        case .command(var command):
+            command.status = phase.commandStatus
+            return .command(command)
+        case .fileChange(var fileChange):
+            fileChange.status = phase.fileChangeStatus
+            return .fileChange(fileChange)
+        case .toolCall(var toolCall):
+            toolCall.status = phase.toolCallStatus
+            return .toolCall(toolCall)
+        case .approval(var approval):
+            approval.status = phase == .cancelled ? .cancelled : approval.status
+            return .approval(approval)
+        case .contextCompaction(var contextCompaction):
+            contextCompaction.status = phase.contextCompactionStatus
+            return .contextCompaction(contextCompaction)
+        case .diagnostic,
+            .message,
+            .plan,
+            .reasoning,
+            .search,
+            .unknown:
+            return self
+        }
+    }
+}
+
+private extension ReviewItemPhase {
+    var commandStatus: ReviewCommandStatus? {
+        switch self {
+        case .completed:
+            .completed
+        case .failed, .incomplete:
+            .failed
+        case .cancelled, .skipped:
+            .cancelled
+        case .awaitingApproval, .queued, .running, .waitingForInput:
+            nil
+        }
+    }
+
+    var fileChangeStatus: ReviewFileChangeStatus? {
+        switch self {
+        case .completed:
+            .completed
+        case .failed, .incomplete:
+            .failed
+        case .cancelled, .skipped:
+            nil
+        case .awaitingApproval, .queued, .running, .waitingForInput:
+            nil
+        }
+    }
+
+    var toolCallStatus: ReviewToolCallStatus? {
+        switch self {
+        case .completed:
+            .completed
+        case .failed, .incomplete:
+            .failed
+        case .cancelled, .skipped:
+            .cancelled
+        case .awaitingApproval, .queued, .running, .waitingForInput:
+            nil
+        }
+    }
+
+    var contextCompactionStatus: ReviewContextCompactionStatus? {
+        switch self {
+        case .completed:
+            .completed
+        case .failed, .incomplete:
+            .failed
+        case .cancelled, .skipped:
+            nil
+        case .awaitingApproval, .queued, .running, .waitingForInput:
+            nil
+        }
+    }
 }
 
 private extension ReviewTimelineItem.Approval {

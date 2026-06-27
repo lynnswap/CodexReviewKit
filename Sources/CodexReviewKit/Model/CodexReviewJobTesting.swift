@@ -18,7 +18,6 @@ extension CodexReviewJob {
         hasFinalReview: Bool = false,
         reviewResult: ParsedReviewResult? = nil,
         lastAgentMessage: String? = "",
-        logEntries: [ReviewLogEntry] = [],
         errorMessage: String? = nil,
         exitCode: Int? = nil
     ) -> CodexReviewJob {
@@ -49,8 +48,7 @@ extension CodexReviewJob {
                     reviewResult: reviewResult
                 )
             ),
-            cancellationRequested: cancellationRequested,
-            logEntries: logEntries
+            cancellationRequested: cancellationRequested
         )
     }
 

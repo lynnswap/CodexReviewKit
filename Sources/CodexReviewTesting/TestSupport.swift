@@ -160,7 +160,8 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package init(
         settings: CodexReviewBackendModel.Settings.Snapshot = .init(),
         auth: CodexReviewBackendModel.Auth.Snapshot = .init(),
-        nextRun: CodexReviewBackendModel.Review.Run = .init(threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1")
+        nextRun: CodexReviewBackendModel.Review.Run = .init(
+            threadID: "thread-1", turnID: "turn-1", reviewThreadID: "review-thread-1")
     ) {
         self.settings = settings
         self.auth = auth
@@ -352,7 +353,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return settings
     }
 
-    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws -> CodexReviewBackendModel.Settings.Snapshot {
+    package func applySettings(_ change: CodexReviewBackendModel.Settings.Change) async throws
+        -> CodexReviewBackendModel.Settings.Snapshot
+    {
         commands.append(.applySettings(change))
         settings = .init(
             model: change.updatesModel ? change.model : settings.model,
@@ -369,7 +372,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return auth
     }
 
-    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws -> CodexReviewBackendModel.Login.Challenge {
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws
+        -> CodexReviewBackendModel.Login.Challenge
+    {
         commands.append(.startLogin(request))
         return .init(id: "challenge-1")
     }
@@ -378,7 +383,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         commands.append(.cancelLogin(challenge))
     }
 
-    package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
+    package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws
+        -> CodexReviewBackendModel.Auth.Snapshot
+    {
         commands.append(.logout(account))
         auth = .init()
         return auth
@@ -397,7 +404,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         return .init(run: nextRun, events: eventMailbox(for: nextRun))
     }
 
-    package func interruptReview(_ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason) async throws {
+    package func interruptReview(
+        _ run: CodexReviewBackendModel.Review.Run, reason: CodexReviewBackendModel.CancellationReason
+    ) async throws {
         commands.append(.interruptReview(run, reason))
         let waiters = Array(interruptReviewWaiters.values)
         interruptReviewWaiters.removeAll(keepingCapacity: false)
@@ -447,13 +456,15 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
             throw FakeCodexReviewBackendError(message: recoveryFailureMessage)
         }
         let run = token.interruptedRun
-        let recoveredRun = nextRecoveredRun ?? .init(
-            attemptID: "attempt-recovered",
-            threadID: run.threadID,
-            turnID: "turn-recovered",
-            reviewThreadID: run.reviewThreadID,
-            model: run.model ?? request.model
-        )
+        let recoveredRun =
+            nextRecoveredRun
+            ?? .init(
+                attemptID: "attempt-recovered",
+                threadID: run.threadID,
+                turnID: "turn-recovered",
+                reviewThreadID: run.reviewThreadID,
+                model: run.model ?? request.model
+            )
         return .init(run: recoveredRun, events: eventMailbox(for: recoveredRun))
     }
 
@@ -461,7 +472,9 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         commands.append(.cleanupReview(run))
     }
 
-    package func yield(_ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil) async {
+    package func yield(
+        _ event: CodexReviewBackendModel.Review.Event, for run: CodexReviewBackendModel.Review.Run? = nil
+    ) async {
         await eventMailbox(for: run ?? nextRun).append(event)
     }
 
@@ -536,7 +549,6 @@ package final class StoreSnapshotProbe {
                     status: job.core.lifecycle.status,
                     summary: job.core.output.summary,
                     lastAgentMessage: job.core.output.lastAgentMessage,
-                    logs: job.logEntries,
                     run: job.core.run,
                     activeRun: runtimeState.activeRun,
                     cancellationRequested: job.cancellationRequested
@@ -552,19 +564,6 @@ package final class StoreSnapshotProbe {
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
             snapshot.job(jobID)?.status == status
-        }
-    }
-
-    package func waitUntilLogs(
-        jobID: String? = nil,
-        timeout: Duration = .seconds(2),
-        matching predicate: @escaping @MainActor (Array<ReviewLogEntry>) -> Bool
-    ) async -> StoreSnapshot? {
-        await waitUntil(timeout: timeout) { snapshot in
-            guard let job = snapshot.job(jobID) else {
-                return false
-            }
-            return predicate(job.logs)
         }
     }
 
@@ -613,7 +612,6 @@ package struct StoreJobSnapshot: Sendable {
     package var status: ReviewJobState
     package var summary: String
     package var lastAgentMessage: String?
-    package var logs: [ReviewLogEntry]
     package var run: ReviewJobCore.Run
     package var activeRun: CodexReviewBackendModel.Review.Run?
     package var cancellationRequested: Bool
@@ -678,12 +676,14 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
     package func signIn(auth: CodexReviewAuthModel) async {
         do {
             let challenge = try await reviewBackend.startLogin(.init())
-            auth.updatePhase(.signingIn(.init(
-                title: "Sign in to Codex",
-                detail: "Complete sign in in your browser, then return to ReviewMonitor.",
-                browserURL: challenge.verificationURL?.absoluteString,
-                userCode: challenge.userCode
-            )))
+            auth.updatePhase(
+                .signingIn(
+                    .init(
+                        title: "Sign in to Codex",
+                        detail: "Complete sign in in your browser, then return to ReviewMonitor.",
+                        browserURL: challenge.verificationURL?.absoluteString,
+                        userCode: challenge.userCode
+                    )))
         } catch {
             auth.updatePhase(.failed(message: error.localizedDescription))
         }
