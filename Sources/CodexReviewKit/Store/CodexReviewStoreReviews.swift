@@ -73,8 +73,7 @@ extension CodexReviewStore {
             core: .init(
                 lifecycle: .init(status: .queued),
                 output: .init(summary: "Queued.")
-            ),
-            logEntries: []
+            )
         )
         insertReviewJob(job)
         markReviewRunning(job, startedAt: createdAt)

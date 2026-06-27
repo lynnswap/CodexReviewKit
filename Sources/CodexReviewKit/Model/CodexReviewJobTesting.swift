@@ -1,8 +1,7 @@
 import Foundation
 
 extension CodexReviewJob {
-    @_spi(Testing)
-    public static func makeForTesting(
+    package static func makeForTesting(
         id: String = UUID().uuidString,
         sessionID: String = "session-1",
         cwd: String = "/tmp/repo",
@@ -55,8 +54,7 @@ extension CodexReviewJob {
         )
     }
 
-    @_spi(Testing)
-    public func updateStateForTesting(
+    package func updateStateForTesting(
         targetSummary: String? = nil,
         status: ReviewJobState? = nil,
         endedAt: Date? = nil,

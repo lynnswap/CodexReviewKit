@@ -76,10 +76,11 @@ the store backend.
 `ReviewTimeline` and `CodexDataKit` model state are the observable sources of
 truth after conversion. ReviewMonitor UI should render selected chats through
 the `CodexChat` snapshot/change stream and `ReviewTimelineDocument` projection.
-`ReviewLogEntry` is not a ReviewMonitor rendering contract and must not rebuild
-or author semantic timeline state. Rendering helpers and MCP server projections
-project from semantic state; they do not parse raw app-server events and do not
-make string logs authoritative again.
+Legacy log buffering is package-internal compatibility plumbing only. It is not
+a ReviewMonitor rendering contract and must not rebuild or author semantic
+timeline state. Rendering helpers and MCP server projections project from
+semantic state; they do not parse raw app-server events and do not make string
+logs authoritative again.
 
 Collection/list style UI observes source-of-truth models through
 ObservationBridge. Large transcript/log surfaces consume stream APIs that emit

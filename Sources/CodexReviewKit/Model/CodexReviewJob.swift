@@ -43,12 +43,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
     private var pendingDirectTimelineTextItemIDsForLogRetention: [ReviewTimelineItem.ID]
     @ObservationIgnored
     private var latestDirectTimelineTextItemIDs: [ReviewTimelineItem.ID]
-    public private(set) var logEntries: [ReviewLogEntry]
-    public private(set) var logText: String
-    public private(set) var rawLogText: String
-    public private(set) var reviewOutputText: String
-    public private(set) var activityLogText: String
-    public private(set) var diagnosticText: String
+    package private(set) var logEntries: [ReviewLogEntry]
+    package private(set) var logText: String
+    package private(set) var rawLogText: String
+    package private(set) var reviewOutputText: String
+    package private(set) var activityLogText: String
+    package private(set) var diagnosticText: String
     package private(set) var cappedLogBytes: Int
     package private(set) var logRevision: UInt64
     @ObservationIgnored

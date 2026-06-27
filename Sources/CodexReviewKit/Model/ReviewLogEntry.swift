@@ -1,22 +1,22 @@
 import Foundation
 
-public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
-    public struct Metadata: Codable, Sendable, Hashable {
-        public struct CommandAction: Codable, Sendable, Hashable {
-            public enum Kind: String, Codable, Sendable, Hashable {
+package struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
+    package struct Metadata: Codable, Sendable, Hashable {
+        package struct CommandAction: Codable, Sendable, Hashable {
+            package enum Kind: String, Codable, Sendable, Hashable {
                 case read
                 case listFiles
                 case search
                 case unknown
             }
 
-            public let kind: Kind
-            public let command: String?
-            public let name: String?
-            public let path: String?
-            public let query: String?
+            package let kind: Kind
+            package let command: String?
+            package let name: String?
+            package let path: String?
+            package let query: String?
 
-            public init(
+            package init(
                 kind: Kind,
                 command: String? = nil,
                 name: String? = nil,
@@ -31,28 +31,28 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
             }
         }
 
-        public let sourceType: String
-        public let title: String?
-        public let status: String?
-        public let detail: String?
-        public let itemID: String?
-        public let command: String?
-        public let cwd: String?
-        public let exitCode: Int?
-        public let startedAt: Date?
-        public let completedAt: Date?
-        public let durationMs: Int?
-        public let commandActions: [CommandAction]?
-        public let commandStatus: String?
-        public let namespace: String?
-        public let server: String?
-        public let tool: String?
-        public let query: String?
-        public let path: String?
-        public let resultText: String?
-        public let errorText: String?
+        package let sourceType: String
+        package let title: String?
+        package let status: String?
+        package let detail: String?
+        package let itemID: String?
+        package let command: String?
+        package let cwd: String?
+        package let exitCode: Int?
+        package let startedAt: Date?
+        package let completedAt: Date?
+        package let durationMs: Int?
+        package let commandActions: [CommandAction]?
+        package let commandStatus: String?
+        package let namespace: String?
+        package let server: String?
+        package let tool: String?
+        package let query: String?
+        package let path: String?
+        package let resultText: String?
+        package let errorText: String?
 
-        public init(
+        package init(
             sourceType: String,
             title: String? = nil,
             status: String? = nil,
@@ -97,7 +97,7 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         }
     }
 
-    public enum Kind: String, Codable, Sendable, Hashable {
+    package enum Kind: String, Codable, Sendable, Hashable {
         case agentMessage
         case command
         case commandOutput
@@ -114,15 +114,15 @@ public struct ReviewLogEntry: Codable, Identifiable, Sendable, Hashable {
         case contextCompaction
     }
 
-    public let id: UUID
-    public let kind: Kind
-    public let groupID: String?
-    public let replacesGroup: Bool
-    public let text: String
-    public let metadata: Metadata?
-    public let timestamp: Date
+    package let id: UUID
+    package let kind: Kind
+    package let groupID: String?
+    package let replacesGroup: Bool
+    package let text: String
+    package let metadata: Metadata?
+    package let timestamp: Date
 
-    public init(
+    package init(
         id: UUID = UUID(),
         kind: Kind,
         groupID: String? = nil,
