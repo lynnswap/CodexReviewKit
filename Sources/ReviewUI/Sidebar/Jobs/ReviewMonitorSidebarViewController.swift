@@ -777,6 +777,42 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
+        case .workspace(let selectedWorkspace):
+            guard let currentWorkspace = codexWorkspaceSelection(id: selectedWorkspace.id),
+                  let row = row(forCodexSidebarSelectionID: .workspace(selectedWorkspace.id))
+            else {
+                uiState.selection = nil
+                outlineView.deselectAll(nil)
+                return
+            }
+
+            if currentWorkspace != selectedWorkspace {
+                uiState.selection = .workspace(currentWorkspace)
+            }
+
+            guard outlineView.selectedRow != row else {
+                return
+            }
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+
+        case .chat(let selectedChat):
+            guard let currentChat = codexChatSelection(id: selectedChat.id),
+                  let row = row(forCodexSidebarSelectionID: .chat(selectedChat.id))
+            else {
+                uiState.selection = nil
+                outlineView.deselectAll(nil)
+                return
+            }
+
+            if currentChat != selectedChat {
+                uiState.selection = .chat(currentChat)
+            }
+
+            guard outlineView.selectedRow != row else {
+                return
+            }
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+
         case .job(let selectedJob):
             guard let currentJob = job(withID: selectedJob.id) else {
                 uiState.selection = nil
@@ -811,7 +847,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return
         }
         let item = outlineView.item(atRow: outlineView.selectedRow)
-        if let section = workspaceSection(from: item) {
+        if let node = codexSidebarNode(from: item) {
+            switch node.item {
+            case .section(let section):
+                uiState.selection = .workspaceSection(section.selection)
+            case .workspace(let workspace):
+                uiState.selection = .workspace(workspace)
+            case .chat(let chat):
+                uiState.selection = .chat(chat)
+            }
+        } else if let section = workspaceSection(from: item) {
             uiState.selection = .workspaceSection(section.selection)
         } else if let job = job(from: item) {
             uiState.selection = .job(job)
@@ -1172,8 +1217,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func shouldAllowSelection(of item: Any?) -> Bool {
-        guard codexSidebarNode(from: item) == nil else {
-            return false
+        if codexSidebarNode(from: item) != nil {
+            return true
         }
         return workspaceSection(from: item) != nil || job(from: item) != nil
     }
@@ -1259,6 +1304,25 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return row == -1 ? nil : row
     }
 
+    private func row(forCodexSidebarSelectionID selectionID: ReviewMonitorSelectionID) -> Int? {
+        let rowID: ReviewMonitorCodexSidebarRowID
+        switch selectionID {
+        case .workspace(let id):
+            rowID = .workspace(id)
+        case .chat(let id):
+            rowID = .chat(id)
+        case .workspaceSection(let id):
+            rowID = .section(id)
+        case .job:
+            return nil
+        }
+        guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
+            return nil
+        }
+        let row = outlineView.row(forItem: node)
+        return row == -1 ? nil : row
+    }
+
     private func containsJob(id: String) -> Bool {
         job(withID: id) != nil
     }
@@ -1284,6 +1348,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 || section.workspaceCWDs.contains { cwd in
                     workspaces.contains(where: { $0.cwd == cwd })
                 }
+        case .workspace(let workspace):
+            return codexWorkspaceSelection(id: workspace.id) != nil
+        case .chat(let chat):
+            return codexChatSelection(id: chat.id) != nil
         case .job:
             guard case .job(let id) = selection.id else {
                 return false
@@ -1303,6 +1371,26 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
         return job
+    }
+
+    private func codexWorkspaceSelection(
+        id: CodexWorkspaceID
+    ) -> ReviewMonitorCodexSidebarSnapshot.Workspace? {
+        guard let node = codexSidebarOutlineTree.node(rowID: .workspace(id)),
+              case .workspace(let workspace) = node.item
+        else {
+            return nil
+        }
+        return workspace
+    }
+
+    private func codexChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+        guard let node = codexSidebarOutlineTree.node(rowID: .chat(id)),
+              case .chat(let chat) = node.item
+        else {
+            return nil
+        }
+        return chat
     }
 
     private func workspace(containing job: CodexReviewJob) -> CodexReviewWorkspace? {
@@ -2111,6 +2199,17 @@ extension ReviewMonitorSidebarViewController {
 
     func codexSidebarNodeTitleForTesting(rowID: ReviewMonitorCodexSidebarRowID) -> String? {
         codexSidebarOutlineTree.node(rowID: rowID)?.title
+    }
+
+    func selectCodexSidebarRowForTesting(rowID: ReviewMonitorCodexSidebarRowID) {
+        guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
+            return
+        }
+        let row = outlineView.row(forItem: node)
+        guard row != -1 else {
+            return
+        }
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
     }
 
     var sidebarFullReloadCountForTesting: Int {

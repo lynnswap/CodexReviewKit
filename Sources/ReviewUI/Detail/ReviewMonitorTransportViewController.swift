@@ -131,6 +131,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return boundJob !== selectedJob || displayedSelection != selection?.id
         case .workspaceSection(let selectedSection):
             return boundWorkspaceSection != selectedSection || displayedSelection != selection?.id
+        case .workspace, .chat:
+            return displayedSelection != selection?.id
         case nil:
             return displayedSelection != nil
         }
@@ -150,6 +152,23 @@ final class ReviewMonitorTransportViewController: NSViewController {
             clearDisplayedJob()
             displayWorkspaceSection(selectedSection)
             logScrollView.isHidden = true
+            displayedSelection = selection?.id
+
+        case .workspace:
+            clearDisplayedJob()
+            clearDisplayedWorkspace()
+            displayPlaceholder(.noFindings)
+            logScrollView.isHidden = true
+            workspaceFindingsView.isHidden = true
+            displayedSelection = selection?.id
+
+        case .chat:
+            clearDisplayedJob()
+            clearDisplayedWorkspace()
+            hidePlaceholder()
+            logScrollView.clear()
+            logScrollView.isHidden = false
+            workspaceFindingsView.isHidden = true
             displayedSelection = selection?.id
 
         case nil:
@@ -446,7 +465,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return logScrollView.performDisplayedTextFinderAction(sender)
         case .workspaceSection:
             return workspaceFindingsView.performDisplayedTextFinderAction(sender)
-        case .workspace, .chat, nil:
+        case .chat:
+            return logScrollView.performDisplayedTextFinderAction(sender)
+        case .workspace, nil:
             return false
         }
     }
@@ -457,7 +478,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return logScrollView.validateDisplayedTextFinderAction(item)
         case .workspaceSection:
             return workspaceFindingsView.validateDisplayedTextFinderAction(item)
-        case .workspace, .chat, nil:
+        case .chat:
+            return logScrollView.validateDisplayedTextFinderAction(item)
+        case .workspace, nil:
             return false
         }
     }
@@ -483,6 +506,8 @@ extension ReviewMonitorTransportViewController {
     enum DisplayedSelectionForTesting: Sendable, Equatable {
         case job(String)
         case workspaceSection(String)
+        case workspace(String)
+        case chat(String)
     }
 
     struct RenderedStateForTesting: Sendable, Equatable {
@@ -528,6 +553,8 @@ extension ReviewMonitorTransportViewController {
             return selectedJobObservation ?? selectionObservation
         case .workspaceSection:
             return selectedWorkspaceFindingsObservation ?? selectionObservation
+        case .workspace, .chat:
+            return selectionObservation
         case nil:
             return selectionObservation
         }
@@ -907,6 +934,20 @@ extension ReviewMonitorTransportViewController {
                 log: "",
                 isShowingEmptyState: false
             )
+        case .workspace:
+            .init(
+                title: nil,
+                summary: nil,
+                log: "",
+                isShowingEmptyState: false
+            )
+        case .chat:
+            .init(
+                title: nil,
+                summary: nil,
+                log: "",
+                isShowingEmptyState: false
+            )
         case nil:
             .init(
                 title: nil,
@@ -930,7 +971,11 @@ extension ReviewMonitorTransportViewController {
             .job(id)
         case .workspaceSection(let id):
             .workspaceSection(id)
-        case .workspace, .chat, nil:
+        case .workspace(let id):
+            .workspace(id.rawValue)
+        case .chat(let id):
+            .chat(id.rawValue)
+        case nil:
             nil
         }
     }
@@ -941,6 +986,10 @@ extension ReviewMonitorTransportViewController {
             .job(job.id)
         case .workspaceSection(let section):
             .workspaceSection(section.id)
+        case .workspace(let workspace):
+            .workspace(workspace.id.rawValue)
+        case .chat(let chat):
+            .chat(chat.id.rawValue)
         case nil:
             nil
         }

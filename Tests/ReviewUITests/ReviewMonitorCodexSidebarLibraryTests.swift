@@ -202,9 +202,10 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             serverState: .running,
             workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-job-store")]
         )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth),
+            uiState: uiState,
             modelContext: context
         )
         viewController.loadViewIfNeeded()
@@ -224,6 +225,13 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             repo.lastPathComponent,
             "App review",
         ])
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(CodexThreadID(rawValue: "thread-app")))
+        guard case .chat(let selectedChat) = uiState.selection else {
+            Issue.record("Expected selecting a Codex sidebar chat row to select the chat.")
+            return
+        }
+        #expect(selectedChat.id == CodexThreadID(rawValue: "thread-app"))
+        #expect(selectedChat.title == "App review")
     }
 }
 
