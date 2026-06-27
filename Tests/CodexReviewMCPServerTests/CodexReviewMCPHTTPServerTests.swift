@@ -489,39 +489,13 @@ struct CodexReviewMCPHTTPServerTests {
             let startedAt = Date(timeIntervalSince1970: 20)
             let completedAt = Date(timeIntervalSince1970: 23)
             let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
-            let commandMetadata = ReviewLogEntry.Metadata(
-                sourceType: "commandExecution",
-                status: "completed",
-                itemID: "cmd-1",
-                command: "swift test",
-                cwd: "/tmp/project",
-                exitCode: 0,
-                startedAt: startedAt,
-                completedAt: completedAt,
-                durationMs: 3000,
-                commandStatus: "completed"
-            )
             let job = CodexReviewJob.makeForTesting(
                 id: "job-semantic",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
                 status: .succeeded,
-                summary: "Done",
-                logEntries: [
-                    .init(
-                        kind: .command,
-                        groupID: "cmd-1",
-                        text: "$ swift test",
-                        metadata: commandMetadata
-                    ),
-                    .init(
-                        kind: .commandOutput,
-                        groupID: "cmd-1",
-                        text: longOutput,
-                        metadata: commandMetadata
-                    ),
-                ]
+                summary: "Done"
             )
             job.timeline.apply(
                 .itemCompleted(

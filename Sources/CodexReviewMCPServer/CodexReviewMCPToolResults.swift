@@ -8,7 +8,7 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
     let isError: Bool
     switch response {
     case .reviewStart(let snapshot),
-         .reviewAwait(let snapshot):
+        .reviewAwait(let snapshot):
         value = snapshot.result.structuredContentForStartOrAwait(timeline: snapshot.timeline)
         text = snapshot.result.textContentForStartOrAwait()
         isError = snapshot.result.core.lifecycle.status == .failed
@@ -91,7 +91,8 @@ private extension CodexReviewAPI.Read.Result {
             ),
             "output": core.output.structuredContent(review: core.reviewText),
         ]
-        object["timeline"] = includeDetails
+        object["timeline"] =
+            includeDetails
             ? timeline.structuredContentWithItems()
             : timeline.structuredContent()
         if includeNextAction {
@@ -479,7 +480,6 @@ private extension UInt64 {
     }
 }
 
-
 private extension CodexReviewAPI.Job.ListItem {
     func structuredContent() -> Value {
         .object([
@@ -499,7 +499,7 @@ private extension CodexReviewAPI.Job.ListItem {
 private extension CodexReviewAPI.List.Result {
     func structuredContent() -> Value {
         .object([
-            "items": .array(items.map { $0.structuredContent() }),
+            "items": .array(items.map { $0.structuredContent() })
         ])
     }
 }
@@ -524,20 +524,6 @@ private extension CodexReviewAPI.Cancel.Outcome {
             ),
             "output": core.output.structuredContent(review: core.reviewText),
         ])
-    }
-}
-
-private extension ReviewLogEntry {
-    func structuredContent() -> Value {
-        var object: [String: Value] = [
-            "id": .string(id.uuidString),
-            "kind": .string(kind.rawValue),
-            "replacesGroup": .bool(replacesGroup),
-            "text": .string(text),
-            "timestamp": .string(timestamp.ISO8601Format()),
-        ]
-        object["groupId"] = groupID.map(Value.string) ?? .null
-        return .object(object)
     }
 }
 
