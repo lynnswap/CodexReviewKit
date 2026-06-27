@@ -13,11 +13,12 @@ raw app-server wire
   -> high-level app-server review stream
   -> domain review event
   -> observable review timeline
-  -> UI / MCP / rendering / legacy log projections
+  -> UI / MCP / rendering projections
+  -> legacy log projection only at old log API edges
 ```
 
 Raw JSON-RPC notifications are an input boundary only. They must not become the
-source of truth for ReviewMonitor UI, MCP responses, or legacy logs after they
+source of truth for ReviewMonitor UI or MCP responses after they
 have been normalized into high-level app-server review streams and converted
 into domain events.
 
@@ -28,7 +29,7 @@ This table describes intended ownership.
 | Target | Responsibility |
 | --- | --- |
 | `CodexAppServerKit` | App-server SDK: local `codex app-server` process transport, JSON-RPC client, typed request DTOs, app-server review notification schema, high-level review stream/session API, and Swift domain API for threads, turns, prompts, review sessions, models, accounts, and login. Raw review DTOs are not its public boundary. It has no Review, UI, or MCP dependencies |
-| `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and legacy log compatibility projections. It has no app-server wire, UI, or MCP dependencies |
+| `CodexReviewKit` | Review semantic core, identifiers, kinds, runs, jobs, timeline, parsing, application store/use-case primitives, `CodexReviewStore`, `CodexReviewStoreBackend`, auth/settings/runtime product state, and old log API edge projections. It has no app-server wire, UI, or MCP dependencies |
 | `CodexReviewAppServer` | Adapter from `CodexAppServerKit` high-level `CodexReviewSession` review streams into `CodexReviewKit` backend events |
 | `CodexReviewMCPServer` | MCP server and projection over the review core/store contract, internal MCP protocol request/response conversion, and Streamable HTTP endpoint. It has no UI or app-server backend dependency |
 | `CodexReviewHost` | Runtime composition for ReviewMonitor |
@@ -73,20 +74,24 @@ sessions into `CodexReviewKit` backend events. It consumes `CodexReviewSession`
 values from `CodexAppServerKit` and hands application-facing review events to
 the store backend.
 
-`ReviewTimeline` and application/store state are the observable source of truth
-after conversion. UI views, rendering helpers, MCP server projections, and
-legacy log support project from the timeline; they do not parse raw app-server
-events and do not make string logs authoritative again.
+`ReviewTimeline` and `CodexDataKit` model state are the observable sources of
+truth after conversion. ReviewMonitor UI should render selected chats through
+`CodexChat` observation and `ReviewTimelineDocument` projection; release UI
+does not fall back to raw review log entries when a selected Codex chat is not
+available. Rendering helpers and MCP server projections project from semantic
+state; they do not parse raw app-server events and do not make string logs
+authoritative again.
 
-Legacy log support exists for compatibility with older ReviewMonitor surfaces:
+Old log API support remains only at explicit API edges:
 
 - `ReviewLogEntryTimelineProjection` rebuilds semantic timeline state from
-  existing log entries during migration or compatibility paths.
+  existing log entries for persisted or test-created job state that predates
+  direct timeline events.
 - `ReviewTimelineLegacyLogProjection` derives legacy log entries from timeline
-  items when old APIs need them.
+  items when `review_read.logs` needs the old log shape.
 
-Those projections are compatibility edges. New behavior should prefer domain
-events and timeline state as the owner.
+Those projections are not ReviewMonitor UI owners. New behavior should prefer
+domain events, `CodexDataKit` models, and timeline documents as the owner.
 
 ## Target Graph
 
@@ -104,7 +109,7 @@ flowchart TB
 
     subgraph Product["CodexReviewKit product API"]
         PublicStore["CodexReviewStore"]
-        LegacyProjection["Legacy log projections"]
+        LegacyProjection["Old log API projections"]
     end
 
     subgraph Kit["CodexAppServerKit"]
@@ -277,9 +282,9 @@ The public tool surface is:
 The current ReviewMonitor UI model boundary is therefore:
 
 - `CodexDataKit`: generic observable app-server models and fetch/query owners.
-- `CodexReviewKit`: review-job, review-timeline, review-auth compatibility,
-  settings compatibility, and product command state until the matching generic
-  CodexDataKit owners are available.
+- `CodexReviewKit`: review-job, review-timeline, review-auth/settings product
+  state, old log API edge projections, and product command state until the
+  matching generic CodexDataKit owners are available.
 - `ReviewUI`: native AppKit/SwiftUI rendering state such as sidebar selection,
   filters, installed controllers, row views, and transient presentation.
 
