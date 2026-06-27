@@ -1,6 +1,8 @@
 import CodexKit
 import CodexReviewKit
 import Foundation
+import ObservationBridge
+import ReviewMonitorRendering
 
 @MainActor
 final class ReviewMonitorPreviewChatLogSource {
@@ -47,7 +49,62 @@ final class ReviewMonitorPreviewChatLogSource {
         self.jobsByChatID = jobsByChatID
     }
 
-    func job(for chatID: CodexThreadID) -> CodexReviewJob? {
-        jobsByChatID[chatID]
+    func logSourceChangeStream(for chatID: CodexThreadID) -> AsyncStream<ReviewMonitorLogSourceChange>? {
+        guard let job = jobsByChatID[chatID] else {
+            return nil
+        }
+        let pair = AsyncStream<ReviewMonitorLogSourceChange>.makeStream(bufferingPolicy: .unbounded)
+        let subscription = PreviewChatLogSubscription(job: job, continuation: pair.continuation)
+        subscription.start()
+        pair.continuation.onTermination = { _ in
+            Task { @MainActor in
+                subscription.cancel()
+            }
+        }
+        return pair.stream
+    }
+}
+
+@MainActor
+private final class PreviewChatLogSubscription {
+    private let job: CodexReviewJob
+    private let continuation: AsyncStream<ReviewMonitorLogSourceChange>.Continuation
+    private var observation: PortableObservationTracking.Token?
+    private var projection = ReviewMonitorTimelineLogProjection()
+    private var hasRenderedDocument = false
+
+    init(
+        job: CodexReviewJob,
+        continuation: AsyncStream<ReviewMonitorLogSourceChange>.Continuation
+    ) {
+        self.job = job
+        self.continuation = continuation
+    }
+
+    func start() {
+        publish(allowIncrementalUpdate: false)
+        observation = withPortableContinuousObservation { [weak self] _ in
+            guard let self else {
+                return
+            }
+            _ = job.timeline.revision
+            publish(allowIncrementalUpdate: hasRenderedDocument)
+        }
+    }
+
+    func cancel() {
+        observation?.cancel()
+        observation = nil
+    }
+
+    private func publish(allowIncrementalUpdate: Bool) {
+        let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
+        let sourceDocument = projection.render(timelineDocument: timelineDocument)
+        continuation.yield(
+            allowIncrementalUpdate
+                ? .update(sourceDocument)
+                : .replaceAll(sourceDocument)
+        )
+        hasRenderedDocument = true
     }
 }

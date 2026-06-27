@@ -5056,7 +5056,7 @@ struct ReviewUITests {
         job.updateStateForTesting(summary: "Deselected summary")
         replaceTimelineLogTextForTesting(job, "Deselected log")
 
-        #expect(contentPane.previewChatJobObservationForTesting == nil)
+        #expect(contentPane.selectedChatLogTaskForTesting == nil)
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
     }
 

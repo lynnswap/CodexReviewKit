@@ -17,16 +17,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
-    #if DEBUG
-        private var previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
-    #endif
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
-    private var previewChatJobObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
-    private var selectedCodexChatLogTask: Task<Void, Never>?
+    private var selectedChatLogTask: Task<Void, Never>?
     private var boundChatID: CodexThreadID?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
     private var displayedSelection: ReviewMonitorSelectionID?
@@ -35,6 +31,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var hasAppliedBoundLog = false
+    #if DEBUG
+        private var timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
+    #endif
 
     convenience init(
         store: CodexReviewStore,
@@ -71,9 +70,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     isolated deinit {
         selectionObservation?.cancel()
-        previewChatJobObservation?.cancel()
         selectedWorkspaceFindingsObservation?.cancel()
-        selectedCodexChatLogTask?.cancel()
+        selectedChatLogTask?.cancel()
         logRenderTask?.cancel()
     }
 
@@ -192,35 +190,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    #if DEBUG
-        @discardableResult
-        private func renderPreviewJobTimeline(
-            _ selectedJob: CodexReviewJob,
-            target: LogRenderTarget,
-            restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-            allowIncrementalUpdate: Bool
-        ) -> Bool {
-            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: selectedJob.timeline)
-            let sourceDocument = previewTimelineLogProjection.render(timelineDocument: timelineDocument)
-            return renderBoundLog(
-                sourceDocument: sourceDocument,
-                target: target,
-                restorationTarget: restorationTarget,
-                allowIncrementalUpdate: allowIncrementalUpdate && hasAppliedBoundLog
-            )
-        }
-    #endif
-
     private func displayChat(_ selectedChat: ReviewMonitorCodexSidebarSnapshot.Chat) {
         let isSwitchingRenderedChat = boundChatID != nil && boundChatID != selectedChat.id
         cacheBoundLogScrollTarget()
         if isSwitchingRenderedChat {
             logScrollView.resetFindStateForContentReuse()
         }
-        selectedCodexChatLogTask?.cancel()
-        selectedCodexChatLogTask = nil
-        previewChatJobObservation?.cancel()
-        previewChatJobObservation = nil
+        selectedChatLogTask?.cancel()
+        selectedChatLogTask = nil
         resetLogRenderer()
         boundChatID = selectedChat.id
         let restorationTarget = restorationTarget(chatID: selectedChat.id)
@@ -230,29 +207,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
             selectedCodexChat.bind(toChatID: selectedChat.id)
         }
         #if DEBUG
-            if codexModelSource?.modelContext == nil,
-               let previewJob = previewJob(for: selectedChat.id)
-            {
-                renderPreviewJobTimeline(
-                    previewJob,
+            if let previewStream = previewChatLogSource?.logSourceChangeStream(for: selectedChat.id) {
+                startLogSourceChangeStream(
+                    previewStream,
                     target: .chat(selectedChat.id),
-                    restoring: restorationTarget,
-                    allowIncrementalUpdate: false
+                    initialRestorationTarget: restorationTarget
                 )
-                previewChatJobObservation = withPortableContinuousObservation { [weak self] _ in
-                    guard let self,
-                          self.boundChatID == selectedChat.id
-                    else {
-                        return
-                    }
-                    _ = previewJob.timeline.revision
-                    self.renderPreviewJobTimeline(
-                        previewJob,
-                        target: .chat(selectedChat.id),
-                        restoring: self.logScrollView.currentScrollRestorationTarget,
-                        allowIncrementalUpdate: true
-                    )
-                }
                 return
             }
         #endif
@@ -262,21 +222,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
         )
     }
 
-    #if DEBUG
-        private func previewJob(for chatID: CodexThreadID) -> CodexReviewJob? {
-            if let previewJob = previewChatLogSource?.job(for: chatID) {
-                return previewJob
-            }
-            return store.reviewJob(forChatID: chatID)
-        }
-    #endif
-
     private func clearDisplayedLogSelection() {
         cacheBoundLogScrollTarget()
-        previewChatJobObservation?.cancel()
-        previewChatJobObservation = nil
-        selectedCodexChatLogTask?.cancel()
-        selectedCodexChatLogTask = nil
+        selectedChatLogTask?.cancel()
+        selectedChatLogTask = nil
         boundChatID = nil
         selectedCodexChat.unbind()
         resetLogRenderer()
@@ -488,9 +437,20 @@ final class ReviewMonitorTransportViewController: NSViewController {
         target: LogRenderTarget,
         initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
     ) {
-        selectedCodexChatLogTask?.cancel()
-        let stream = selectedCodexChat.logSourceChangeStream()
-        selectedCodexChatLogTask = Task { @MainActor [weak self] in
+        startLogSourceChangeStream(
+            selectedCodexChat.logSourceChangeStream(),
+            target: target,
+            initialRestorationTarget: initialRestorationTarget
+        )
+    }
+
+    private func startLogSourceChangeStream(
+        _ stream: AsyncStream<ReviewMonitorLogSourceChange>,
+        target: LogRenderTarget,
+        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
+    ) {
+        selectedChatLogTask?.cancel()
+        selectedChatLogTask = Task { @MainActor [weak self] in
             var didRenderInitialDocument = false
             for await change in stream {
                 guard let self,
@@ -554,7 +514,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
         #if DEBUG
-            previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
+            timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
         #endif
     }
 
@@ -620,8 +580,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             selectionObservation
         }
 
-        var previewChatJobObservationForTesting: PortableObservationTracking.Token? {
-            previewChatJobObservation
+        var selectedChatLogTaskForTesting: Task<Void, Never>? {
+            selectedChatLogTask
         }
 
         var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
@@ -1332,7 +1292,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         private func logDocumentForTesting(
             from timelineDocument: ReviewTimelineDocument
         ) -> ReviewMonitorLog.Document {
-            previewTimelineLogProjection.render(timelineDocument: timelineDocument)
+            timelineLogProjectionForTesting.render(timelineDocument: timelineDocument)
         }
 
         func copyLogSelectionForTesting() {
