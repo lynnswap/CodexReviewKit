@@ -394,10 +394,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         selectedChatSnapshotObservation = withPortableContinuousObservation { [weak self, uiState] _ in
             guard let self,
-                  case .chat(let selectedChat) = uiState.selection,
-                  let currentChat = self.currentChatSelection(id: selectedChat.id),
-                  currentChat != selectedChat
+                  case .chat(let selectedChat) = uiState.selection
             else {
+                return
+            }
+            guard let currentChat = self.currentChatSelection(id: selectedChat.id) else {
+                uiState.selection = nil
+                return
+            }
+            guard currentChat != selectedChat else {
                 return
             }
             uiState.selection = .chat(currentChat)
@@ -854,8 +859,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
         case .chat(let selectedChat):
-            guard let currentChat = codexChatSelection(id: selectedChat.id)
-                    ?? reviewChatSelection(id: selectedChat.id)
+            guard let currentChat = currentChatSelection(id: selectedChat.id)
             else {
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
@@ -866,8 +870,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 uiState.selection = .chat(currentChat)
             }
 
-            guard let row = row(forCodexSidebarSelectionID: .chat(selectedChat.id))
-                    ?? row(forReviewChatID: selectedChat.id)
+            guard let row = row(forCurrentChatSelectionID: selectedChat.id)
             else {
                 return
             }
@@ -1371,6 +1374,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return row == -1 ? nil : row
     }
 
+    private func row(forCurrentChatSelectionID chatID: CodexThreadID) -> Int? {
+        if isUsingCodexSidebarOutline {
+            return row(forCodexSidebarSelectionID: .chat(chatID))
+        }
+        return row(forReviewChatID: chatID)
+    }
+
     private func row(forCodexSidebarSelectionID selectionID: ReviewMonitorSelectionID) -> Int? {
         let rowID: ReviewMonitorCodexSidebarRowID
         switch selectionID {
@@ -1416,8 +1426,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .workspace(let workspace):
             return codexWorkspaceSelection(id: workspace.id) != nil
         case .chat(let chat):
-            return codexChatSelection(id: chat.id) != nil
-                || reviewChatSelection(id: chat.id, in: workspaces) != nil
+            return currentChatSelection(id: chat.id, in: workspaces) != nil
         }
     }
 
@@ -1447,7 +1456,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
-        codexChatSelection(id: id) ?? reviewChatSelection(id: id)
+        currentChatSelection(id: id, in: workspaces())
+    }
+
+    private func currentChatSelection(
+        id: CodexThreadID,
+        in workspaces: [CodexReviewWorkspace]
+    ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+        if isUsingCodexSidebarOutline {
+            return codexChatSelection(id: id)
+        }
+        return reviewChatSelection(id: id, in: workspaces)
     }
 
     private func codexWorkspaceSelection(

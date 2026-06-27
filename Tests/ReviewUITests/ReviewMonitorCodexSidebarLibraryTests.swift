@@ -234,6 +234,61 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(selectedChat.title == "App review")
     }
 
+    @Test func codexSidebarSelectionDoesNotFallBackToReviewJobRows() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let visibleThreadID = CodexThreadID(rawValue: "thread-app")
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: visibleThreadID,
+                    workspace: repo,
+                    name: "App review",
+                    updatedAt: Date(timeIntervalSince1970: 5_000)
+                ),
+            ]
+        ))
+
+        let legacyJob = CodexReviewJob.makeForTesting(
+            id: "legacy-job",
+            cwd: repo.path,
+            targetSummary: "Legacy review row",
+            threadID: "legacy-review-thread",
+            turnID: "legacy-turn",
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 4_000),
+            summary: "Running legacy review."
+        )
+        let legacyChat = try #require(legacyJob.reviewChatSelection)
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [CodexReviewWorkspace(cwd: repo.path)],
+            jobs: [legacyJob]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(visibleThreadID)) == "App review"
+        }
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(legacyChat.id)) == nil)
+
+        uiState.selection = .chat(legacyChat)
+
+        try await waitForCondition {
+            uiState.selection == nil && sidebar.selectedReviewChatIDForTesting == nil
+        }
+    }
+
     @Test func sidebarViewControllerTracksCodexSidebarFetchResultChanges() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
