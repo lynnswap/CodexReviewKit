@@ -206,18 +206,16 @@ final class ReviewMonitorTransportViewController: NSViewController {
         } else {
             selectedCodexChat.bind(toChatID: selectedChat.id)
         }
-        #if DEBUG
-            if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChat.id) {
-                startPreviewChatChangeStream(
-                    previewStream,
-                    activeTurnID: selectedChat.reviewIdentity?.turnID,
-                    chatUpdatedAt: selectedChat.updatedAt,
-                    target: .chat(selectedChat.id),
-                    initialRestorationTarget: restorationTarget
-                )
-                return
-            }
-        #endif
+        if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChat.id) {
+            startPreviewChatChangeStream(
+                previewStream,
+                activeTurnID: selectedChat.reviewIdentity?.turnID,
+                chatUpdatedAt: selectedChat.updatedAt,
+                target: .chat(selectedChat.id),
+                initialRestorationTarget: restorationTarget
+            )
+            return
+        }
         startSelectedCodexChatLogStream(
             target: .chat(selectedChat.id),
             initialRestorationTarget: restorationTarget
