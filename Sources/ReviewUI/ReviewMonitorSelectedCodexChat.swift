@@ -6,7 +6,7 @@ import ReviewMonitorRendering
 
 @MainActor
 @Observable
-final class ReviewMonitorSelectedReviewChat {
+final class ReviewMonitorSelectedCodexChat {
     private enum BindingTarget: Equatable {
         case review(CodexReviewIdentity)
         case chat(CodexThreadID)
@@ -59,7 +59,7 @@ final class ReviewMonitorSelectedReviewChat {
     @ObservationIgnored
     private var observationTask: Task<Void, Never>?
     @ObservationIgnored
-    private var documentProjection = ReviewMonitorSelectedReviewChatDocumentProjection()
+    private var documentProjection = ReviewMonitorSelectedCodexChatDocumentProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
 

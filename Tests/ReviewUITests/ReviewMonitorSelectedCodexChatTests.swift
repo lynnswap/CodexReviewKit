@@ -4,9 +4,9 @@ import Testing
 @_spi(Testing) @testable import CodexReviewKit
 @testable import ReviewUI
 
-@Suite("ReviewMonitor selected review chat", .serialized)
+@Suite("ReviewMonitor selected Codex chat", .serialized)
 @MainActor
-struct ReviewMonitorSelectedReviewChatTests {
+struct ReviewMonitorSelectedCodexChatTests {
     @Test func selectedReviewJobObservesActiveCodexChat() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
@@ -52,17 +52,17 @@ struct ReviewMonitorSelectedReviewChatTests {
         uiState.selection = .job(job)
 
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loading
-                && transport.selectedReviewChatItemTextsForTesting == ["Review snapshot"]
+            transport.selectedCodexChatIDForTesting == "review-thread"
+                && transport.selectedCodexChatPhaseForTesting == .loading
+                && transport.selectedCodexChatItemTextsForTesting == ["Review snapshot"]
         }
         #expect(
-            transport.selectedReviewChatIdentityForTesting?.activeTurnThreadID == "review-thread"
+            transport.selectedCodexChatReviewIdentityForTesting?.activeTurnThreadID == "review-thread"
         )
         #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
     }
 
-    @Test func clearingSelectionDetachesSelectedReviewChat() async throws {
+    @Test func clearingSelectionDetachesSelectedCodexChat() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -84,14 +84,14 @@ struct ReviewMonitorSelectedReviewChatTests {
                 turnID: "turn-1"
             ))
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loaded
+            transport.selectedCodexChatIDForTesting == "review-thread"
+                && transport.selectedCodexChatPhaseForTesting == .loaded
         }
 
         uiState.selection = nil
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == nil && transport.selectedReviewChatIdentityForTesting == nil
-                && transport.selectedReviewChatPhaseForTesting == .idle
+            transport.selectedCodexChatIDForTesting == nil && transport.selectedCodexChatReviewIdentityForTesting == nil
+                && transport.selectedCodexChatPhaseForTesting == .idle
         }
     }
 
@@ -139,16 +139,16 @@ struct ReviewMonitorSelectedReviewChatTests {
             ))
 
         try await waitForCondition {
-            transport.selectedReviewChatIdentityForTesting?.activeTurnThreadID == "review-thread"
+            transport.selectedCodexChatReviewIdentityForTesting?.activeTurnThreadID == "review-thread"
         }
-        #expect(transport.selectedReviewChatIDForTesting == nil)
+        #expect(transport.selectedCodexChatIDForTesting == nil)
 
         modelSource.install(container: CodexModelContainer(appServer: runtime.server))
 
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loading
-                && transport.selectedReviewChatItemTextsForTesting == ["Late source"]
+            transport.selectedCodexChatIDForTesting == "review-thread"
+                && transport.selectedCodexChatPhaseForTesting == .loading
+                && transport.selectedCodexChatItemTextsForTesting == ["Late source"]
         }
     }
 
@@ -195,7 +195,7 @@ struct ReviewMonitorSelectedReviewChatTests {
         )
         uiState.selection = .job(job)
 
-        #expect(transport.selectedReviewChatIdentityForTesting == nil)
+        #expect(transport.selectedCodexChatReviewIdentityForTesting == nil)
 
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
@@ -203,9 +203,9 @@ struct ReviewMonitorSelectedReviewChatTests {
         job.appendLogEntry(.init(kind: .agentMessage, text: "Legacy trigger"))
 
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loading
-                && transport.selectedReviewChatItemTextsForTesting == ["Arrived after selection"]
+            transport.selectedCodexChatIDForTesting == "review-thread"
+                && transport.selectedCodexChatPhaseForTesting == .loading
+                && transport.selectedCodexChatItemTextsForTesting == ["Arrived after selection"]
         }
     }
 
@@ -330,8 +330,8 @@ struct ReviewMonitorSelectedReviewChatTests {
             snapshot.log.contains("Generic chat snapshot")
         }
         #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
-        #expect(transport.selectedReviewChatIdentityForTesting == nil)
-        #expect(transport.selectedReviewChatIDForTesting == "chat-thread")
+        #expect(transport.selectedCodexChatReviewIdentityForTesting == nil)
+        #expect(transport.selectedCodexChatIDForTesting == "chat-thread")
 
         try await runtime.transport.emitServerNotification(
             method: "item/updated",

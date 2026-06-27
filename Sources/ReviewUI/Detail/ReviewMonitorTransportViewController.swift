@@ -8,7 +8,7 @@ import ReviewMonitorRendering
 final class ReviewMonitorTransportViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
-    private let selectedReviewChat: ReviewMonitorSelectedReviewChat
+    private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
@@ -26,7 +26,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderTask: Task<Void, Never>?
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
-    private var hasAppliedBoundJobLog = false
+    private var hasAppliedBoundLog = false
 
     convenience init(
         store: CodexReviewStore,
@@ -47,7 +47,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) {
         self.store = store
         self.uiState = uiState
-        self.selectedReviewChat = ReviewMonitorSelectedReviewChat(modelSource: codexModelSource)
+        self.selectedCodexChat = ReviewMonitorSelectedCodexChat(modelSource: codexModelSource)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -152,13 +152,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
             displayedSelection = selection?.id
 
         case .workspaceSection(let selectedSection):
-            clearDisplayedJob()
+            clearDisplayedLogSelection()
             displayWorkspaceSection(selectedSection)
             logScrollView.isHidden = true
             displayedSelection = selection?.id
 
         case .workspace:
-            clearDisplayedJob()
+            clearDisplayedLogSelection()
             clearDisplayedWorkspace()
             displayPlaceholder(.noFindings)
             logScrollView.isHidden = true
@@ -166,7 +166,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             displayedSelection = selection?.id
 
         case .chat:
-            clearDisplayedJob()
+            clearDisplayedLogSelection()
             clearDisplayedWorkspace()
             if case .chat(let selectedChat) = selection {
                 displayChat(selectedChat)
@@ -177,7 +177,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             displayedSelection = selection?.id
 
         case nil:
-            clearDisplayedJob()
+            clearDisplayedLogSelection()
             clearDisplayedWorkspace()
             displayPlaceholder(.noSelection)
             logScrollView.isHidden = true
@@ -199,7 +199,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundChatID = nil
         resetLogRenderer()
         boundJob = selectedJob
-        selectedReviewChat.bind(to: selectedJob.reviewChatIdentity)
+        selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             let eventKind = event.kind
@@ -208,7 +208,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             else {
                 return
             }
-            self.selectedReviewChat.bind(to: selectedJob.reviewChatIdentity)
+            self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
             let timeline = selectedJob.timeline
             _ = timeline.revision
             let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline)
@@ -230,7 +230,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedChatObservation = nil
         resetLogRenderer()
         boundChatID = selectedChat.id
-        selectedReviewChat.bind(toChatID: selectedChat.id)
+        selectedCodexChat.bind(toChatID: selectedChat.id)
 
         selectedChatObservation = withPortableContinuousObservation { [weak self] event in
             let eventKind = event.kind
@@ -239,8 +239,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             else {
                 return
             }
-            self.selectedReviewChat.bind(toChatID: selectedChat.id)
-            guard let timelineDocument = self.selectedReviewChat.timelineDocument else {
+            self.selectedCodexChat.bind(toChatID: selectedChat.id)
+            guard let timelineDocument = self.selectedCodexChat.timelineDocument else {
                 return
             }
             self.renderSelectedChatLog(
@@ -254,7 +254,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    private func clearDisplayedJob() {
+    private func clearDisplayedLogSelection() {
         cacheBoundJobScrollTarget()
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
@@ -262,7 +262,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedChatObservation = nil
         boundJob = nil
         boundChatID = nil
-        selectedReviewChat.unbind()
+        selectedCodexChat.unbind()
         resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
         logScrollView.clear()
@@ -463,10 +463,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 sourceDocument: renderedDocument.source,
                 displayDocument: renderedDocument.display,
                 restoring: restorationTarget,
-                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundJobLog
+                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundLog
             )
             self.appliedLogRenderGeneration = generation
-            self.hasAppliedBoundJobLog = true
+            self.hasAppliedBoundLog = true
         }
         return true
     }
@@ -495,16 +495,16 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 sourceDocument: renderedDocument.source,
                 displayDocument: renderedDocument.display,
                 restoring: restorationTarget,
-                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundJobLog
+                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundLog
             )
             self.appliedLogRenderGeneration = generation
-            self.hasAppliedBoundJobLog = true
+            self.hasAppliedBoundLog = true
         }
         return true
     }
 
     private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
-        if let document = selectedReviewChat.timelineDocument {
+        if let document = selectedCodexChat.timelineDocument {
             return document
         }
 
@@ -523,7 +523,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         logRenderTask = nil
         logRenderGeneration &+= 1
         appliedLogRenderGeneration = logRenderGeneration
-        hasAppliedBoundJobLog = false
+        hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
     }
 
@@ -606,20 +606,20 @@ extension ReviewMonitorTransportViewController {
         selectedWorkspaceFindingsObservation
     }
 
-    var selectedReviewChatIdentityForTesting: CodexReviewIdentity? {
-        selectedReviewChat.identity
+    var selectedCodexChatReviewIdentityForTesting: CodexReviewIdentity? {
+        selectedCodexChat.identity
     }
 
-    var selectedReviewChatIDForTesting: String? {
-        selectedReviewChat.chat?.id.rawValue
+    var selectedCodexChatIDForTesting: String? {
+        selectedCodexChat.chat?.id.rawValue
     }
 
-    var selectedReviewChatPhaseForTesting: CodexDataPhase {
-        selectedReviewChat.phase
+    var selectedCodexChatPhaseForTesting: CodexDataPhase {
+        selectedCodexChat.phase
     }
 
-    var selectedReviewChatItemTextsForTesting: [String] {
-        selectedReviewChat.chat?.items.compactMap(\.text) ?? []
+    var selectedCodexChatItemTextsForTesting: [String] {
+        selectedCodexChat.chat?.items.compactMap(\.text) ?? []
     }
 
     var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {

@@ -3,7 +3,7 @@ import Foundation
 import ReviewMonitorRendering
 
 @MainActor
-struct ReviewMonitorSelectedReviewChatDocumentProjection {
+struct ReviewMonitorSelectedCodexChatDocumentProjection {
     private struct ItemKey: Hashable {
         var id: String
         var turnID: CodexTurnID?
