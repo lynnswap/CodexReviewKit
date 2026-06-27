@@ -205,6 +205,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarObservation: PortableObservationTracking.Token?
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
+    private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
     private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
@@ -397,6 +398,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         codexSidebarFetchTask = nil
         guard let modelContext else {
             codexSidebarLibrary = nil
+            applyCodexSidebarSnapshot(ReviewMonitorCodexSidebarSnapshot(sections: []))
             return
         }
 
@@ -411,8 +413,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard self?.codexSidebarLibrary === library else {
                 return
             }
+            self?.applyCodexSidebarSnapshot(library.snapshot)
             self?.codexSidebarFetchTask = nil
         }
+    }
+
+    private func applyCodexSidebarSnapshot(_ snapshot: ReviewMonitorCodexSidebarSnapshot) {
+        codexSidebarOutlineTree.apply(snapshot: snapshot)
     }
 
     private func bindSidebarStoreTopologyObservation(
@@ -1994,6 +2001,14 @@ extension ReviewMonitorSidebarViewController {
 
     var codexSidebarSnapshotForTesting: ReviewMonitorCodexSidebarSnapshot? {
         codexSidebarLibrary?.snapshot
+    }
+
+    var codexSidebarRootTitlesForTesting: [String] {
+        codexSidebarOutlineTree.roots.map(\.title)
+    }
+
+    func codexSidebarNodeTitleForTesting(rowID: ReviewMonitorCodexSidebarRowID) -> String? {
+        codexSidebarOutlineTree.node(rowID: rowID)?.title
     }
 
     var sidebarFullReloadCountForTesting: Int {

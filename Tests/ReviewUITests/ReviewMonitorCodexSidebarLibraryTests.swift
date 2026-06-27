@@ -184,12 +184,13 @@ struct ReviewMonitorCodexSidebarLibraryTests {
     @Test func sidebarViewControllerInstallsCodexSidebarLibraryFromModelContext() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
 
         try await runtime.transport.enqueueThreadList(.init(
             threads: [
                 .init(
                     id: "thread-app",
-                    workspace: try makeGitRepository(),
+                    workspace: repo,
                     name: "App review",
                     updatedAt: Date(timeIntervalSince1970: 5_000)
                 ),
@@ -210,6 +211,10 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             sidebar.codexSidebarSnapshotForTesting?
                 .chat(id: CodexThreadID(rawValue: "thread-app"))?
                 .title == "App review"
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarRootTitlesForTesting == [repo.lastPathComponent]
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == "App review"
         }
     }
 }
