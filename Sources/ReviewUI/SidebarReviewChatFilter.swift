@@ -1,12 +1,12 @@
 import Foundation
 
-struct SidebarJobFilter: OptionSet, Hashable, Sendable {
+struct SidebarReviewChatFilter: OptionSet, Hashable, Sendable {
     let rawValue: Int
 
-    static let all: SidebarJobFilter = []
-    static let running = SidebarJobFilter(rawValue: 1 << 0)
-    static let latestFinished = SidebarJobFilter(rawValue: 1 << 1)
-    static let menuFilters: [SidebarJobFilter] = [.running, .latestFinished]
+    static let all: SidebarReviewChatFilter = []
+    static let running = SidebarReviewChatFilter(rawValue: 1 << 0)
+    static let latestFinished = SidebarReviewChatFilter(rawValue: 1 << 1)
+    static let menuFilters: [SidebarReviewChatFilter] = [.running, .latestFinished]
 
     init(rawValue: Int) {
         self.rawValue = rawValue
@@ -28,7 +28,7 @@ struct SidebarJobFilter: OptionSet, Hashable, Sendable {
         isEmpty == false
     }
 
-    var allowsJobReordering: Bool {
+    var allowsReviewChatReordering: Bool {
         self == .all || contains(.running)
     }
 
@@ -47,7 +47,7 @@ struct SidebarJobFilter: OptionSet, Hashable, Sendable {
             return
         }
 
-        var filters = SidebarJobFilter(rawValue: 0)
+        var filters = SidebarReviewChatFilter(rawValue: 0)
         for component in persistedValue.split(separator: ",") {
             switch component.trimmingCharacters(in: .whitespacesAndNewlines) {
             case "running":

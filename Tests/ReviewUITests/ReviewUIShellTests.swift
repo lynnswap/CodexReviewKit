@@ -276,7 +276,7 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false
         }
 
         #expect(window.toolbar != nil)
@@ -286,7 +286,7 @@ extension ReviewUITests {
                 viewController.sidebarPickerToolbarItemIdentifierForTesting))
         #expect(
             viewController.toolbarIdentifiersForTesting.contains(
-                viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
+                viewController.sidebarReviewChatFilterToolbarItemIdentifierForTesting))
         #expect(viewController.toolbarIdentifiersForTesting.contains(.toggleSidebar) == false)
         #expect(viewController.toolbarIdentifiersForTesting.contains(.sidebarTrackingSeparator))
         #expect(
@@ -303,7 +303,7 @@ extension ReviewUITests {
         #expect(viewController.contentAutomaticallyAdjustsSafeAreaInsetsForTesting)
     }
 
-    @Test func sidebarJobFilterToolbarItemProvidesMenuAndSelectedState() async throws {
+    @Test func sidebarReviewChatFilterToolbarItemProvidesMenuAndSelectedState() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -312,83 +312,83 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
+        #expect(viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false)
         #expect(
-            viewController.sidebarJobFilterToolbarMenuItemTitlesForTesting == [
+            viewController.sidebarReviewChatFilterToolbarMenuItemTitlesForTesting == [
                 "All Items",
                 "-",
                 "Running",
                 "Latest Finished",
             ])
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting == false)
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.setSidebarJobFilterForTesting(.running)
+        viewController.setSidebarReviewChatFilterForTesting(.running)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting
+            viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting
         }
-        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .running)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.selectSidebarJobFilterForTesting(.latestFinished)
-        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
+        viewController.selectSidebarReviewChatFilterForTesting(.latestFinished)
+        let combinedFilter: SidebarReviewChatFilter = [.running, .latestFinished]
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
         }
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting)
         #expect(
-            viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
+            viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.selectSidebarJobFilterForTesting(.running)
+        viewController.selectSidebarReviewChatFilterForTesting(.running)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .latestFinished
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .latestFinished
         }
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.setSidebarJobFilterForTesting(.all)
+        viewController.setSidebarReviewChatFilterForTesting(.all)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false
+            viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting == false
         }
-        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
     }
 
-    @Test func sidebarJobFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
-        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+    @Test func sidebarReviewChatFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
+        let defaultsContext = try makeSidebarReviewChatFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
-        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
+        let combinedFilter: SidebarReviewChatFilter = [.running, .latestFinished]
 
         do {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
             sidebarItem.isCollapsed = false
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
-            viewController.selectSidebarJobFilterForTesting(.running)
+            viewController.selectSidebarReviewChatFilterForTesting(.running)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .running
             }
-            viewController.selectSidebarJobFilterForTesting(.latestFinished)
+            viewController.selectSidebarReviewChatFilterForTesting(.latestFinished)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
+                defaults.string(forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
                     == combinedFilter.persistedValue
             )
             harness.window.close()
@@ -398,22 +398,22 @@ extension ReviewUITests {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
             sidebarItem.isCollapsed = false
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
             }
-            viewController.selectSidebarJobFilterForTesting(.all)
+            viewController.selectSidebarReviewChatFilterForTesting(.all)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
-                    == SidebarJobFilter.all.persistedValue
+                defaults.string(forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
+                    == SidebarReviewChatFilter.all.persistedValue
             )
             harness.window.close()
         }
@@ -422,7 +422,7 @@ extension ReviewUITests {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
@@ -430,23 +430,23 @@ extension ReviewUITests {
             defer { harness.window.close() }
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
         }
     }
 
-    @Test func sidebarJobFilterDefaultsToAllForInvalidPersistedValue() async throws {
-        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+    @Test func sidebarReviewChatFilterDefaultsToAllForInvalidPersistedValue() async throws {
+        let defaultsContext = try makeSidebarReviewChatFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
-        defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
+        defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
 
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(
             store: store,
-            sidebarJobFilterDefaults: defaults
+            sidebarReviewChatFilterDefaults: defaults
         )
         let viewController = harness.viewController
         let sidebarItem = try #require(viewController.splitViewItems.first)
@@ -454,11 +454,11 @@ extension ReviewUITests {
         defer { harness.window.close() }
 
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
         }
     }
 
-    @Test func sidebarJobFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
+    @Test func sidebarReviewChatFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -467,16 +467,16 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
+        #expect(viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false)
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting
         }
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.workspace)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false
         }
     }
 
@@ -785,7 +785,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -810,7 +810,7 @@ extension ReviewUITests {
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             frameAutosaveName: autosaveName,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -839,7 +839,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -908,7 +908,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -934,7 +934,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         defer { windowController.window?.close() }
         await Task.yield()
@@ -1718,8 +1718,8 @@ private func renderDetailLogForShellLayoutTesting(
     transport.view.layoutSubtreeIfNeeded()
 }
 
-private func makeSidebarJobFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {
-    let suiteName = "ReviewMonitorSidebarJobFilterDefaultsTests-\(UUID().uuidString)"
+private func makeSidebarReviewChatFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {
+    let suiteName = "ReviewMonitorSidebarReviewChatFilterDefaultsTests-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defaults.removePersistentDomain(forName: suiteName)
     return (defaults, suiteName)

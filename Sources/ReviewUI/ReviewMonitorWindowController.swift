@@ -71,7 +71,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
-        sidebarJobFilterDefaults: UserDefaults? = .standard,
+        sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
@@ -79,7 +79,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
             codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
             frameAutosaveName: Self.frameAutosaveName,
-            sidebarJobFilterDefaults: sidebarJobFilterDefaults,
+            sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults,
             showSettings: showSettings
         )
     }
@@ -89,12 +89,12 @@ public final class ReviewMonitorWindowController: NSWindowController {
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         frameAutosaveName: NSWindow.FrameAutosaveName,
-        sidebarJobFilterDefaults: UserDefaults? = .standard,
+        sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
-            sidebarJobFilterDefaults: sidebarJobFilterDefaults
+            sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
         )
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
@@ -127,16 +127,16 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
     private static func makeUIState(
         auth: CodexReviewAuthModel,
-        sidebarJobFilterDefaults: UserDefaults?
+        sidebarReviewChatFilterDefaults: UserDefaults?
     ) -> ReviewMonitorUIState {
-        guard let sidebarJobFilterDefaults else {
+        guard let sidebarReviewChatFilterDefaults else {
             return ReviewMonitorUIState(auth: auth)
         }
         return ReviewMonitorUIState(
             auth: auth,
-            sidebarJobFilter: ReviewMonitorSidebar.JobFilterPersistence.load(from: sidebarJobFilterDefaults),
-            persistSidebarJobFilter: { filter in
-                ReviewMonitorSidebar.JobFilterPersistence.save(filter, to: sidebarJobFilterDefaults)
+            sidebarReviewChatFilter: ReviewMonitorSidebar.ReviewChatFilterPersistence.load(from: sidebarReviewChatFilterDefaults),
+            persistSidebarReviewChatFilter: { filter in
+                ReviewMonitorSidebar.ReviewChatFilterPersistence.save(filter, to: sidebarReviewChatFilterDefaults)
             }
         )
     }
@@ -145,19 +145,19 @@ public final class ReviewMonitorWindowController: NSWindowController {
 enum ReviewMonitorSidebar {}
 
 extension ReviewMonitorSidebar {
-    enum JobFilterPersistence {
-        static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
+    enum ReviewChatFilterPersistence {
+        static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarReviewChatFilter"
 
-        static func load(from defaults: UserDefaults) -> SidebarJobFilter {
+        static func load(from defaults: UserDefaults) -> SidebarReviewChatFilter {
             guard let rawValue = defaults.string(forKey: defaultsKey),
-                  let filter = SidebarJobFilter(persistedValue: rawValue)
+                  let filter = SidebarReviewChatFilter(persistedValue: rawValue)
             else {
                 return .all
             }
             return filter
         }
 
-        static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
+        static func save(_ filter: SidebarReviewChatFilter, to defaults: UserDefaults) {
             defaults.set(filter.persistedValue, forKey: defaultsKey)
         }
     }

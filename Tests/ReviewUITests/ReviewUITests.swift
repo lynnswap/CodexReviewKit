@@ -473,7 +473,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        uiState.sidebarJobFilter = .running
+        uiState.sidebarReviewChatFilter = .running
 
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
@@ -505,7 +505,7 @@ struct ReviewUITests {
             jobs: [runningJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = .running
+        uiState.sidebarReviewChatFilter = .running
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -560,7 +560,7 @@ struct ReviewUITests {
         sidebar.selectJobForTesting(completedJob)
         #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
 
-        uiState.sidebarJobFilter = .running
+        uiState.sidebarReviewChatFilter = .running
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-filter-running"]
@@ -646,7 +646,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.selectJobForTesting(alphaRunningJob)
-        uiState.sidebarJobFilter = .latestFinished
+        uiState.sidebarReviewChatFilter = .latestFinished
 
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
@@ -696,7 +696,7 @@ struct ReviewUITests {
             jobs: [firstJob, secondJob, runningJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = .latestFinished
+        uiState.sidebarReviewChatFilter = .latestFinished
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -760,7 +760,7 @@ struct ReviewUITests {
             jobs: [runningJob, olderFinishedJob, queuedJob, latestFinishedJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = [.running, .latestFinished]
+        uiState.sidebarReviewChatFilter = [.running, .latestFinished]
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -812,7 +812,7 @@ struct ReviewUITests {
             jobs: [hiddenPrefix, runningA, hiddenMiddle, runningB, hiddenSuffix]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = .running
+        uiState.sidebarReviewChatFilter = .running
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -899,7 +899,7 @@ struct ReviewUITests {
             jobs: [runningJob, olderJob, latestJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = .latestFinished
+        uiState.sidebarReviewChatFilter = .latestFinished
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -938,7 +938,7 @@ struct ReviewUITests {
             jobs: [runningJob, olderJob, latestJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = [.running, .latestFinished]
+        uiState.sidebarReviewChatFilter = [.running, .latestFinished]
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -2602,7 +2602,7 @@ struct ReviewUITests {
             jobs: [firstJob, secondJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = .latestFinished
+        uiState.sidebarReviewChatFilter = .latestFinished
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -2678,7 +2678,7 @@ struct ReviewUITests {
             ]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        uiState.sidebarJobFilter = [.running, .latestFinished]
+        uiState.sidebarReviewChatFilter = [.running, .latestFinished]
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
@@ -7206,7 +7206,7 @@ func makeWindowHarness(
     store: CodexReviewStore,
     authState: TestAuthState = .signedIn(accountID: "review@example.com"),
     contentSize: NSSize? = nil,
-    sidebarJobFilterDefaults: UserDefaults? = nil,
+    sidebarReviewChatFilterDefaults: UserDefaults? = nil,
     contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController
         .defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
@@ -7214,7 +7214,7 @@ func makeWindowHarness(
     let windowController = ReviewMonitorWindowController(
         store: store,
         contentTransitionAnimator: contentTransitionAnimator,
-        sidebarJobFilterDefaults: sidebarJobFilterDefaults
+        sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
     )
     guard let window = windowController.window else {
         fatalError("ReviewMonitorWindowController did not create a window.")

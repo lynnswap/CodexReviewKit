@@ -5,26 +5,26 @@ import CodexReviewKit
 @Observable
 final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
-    private let persistSidebarJobFilter: (SidebarJobFilter) -> Void
+    private let persistSidebarReviewChatFilter: (SidebarReviewChatFilter) -> Void
     var selection: ReviewMonitorSelection?
     var sidebarSelection = SidebarPickerSelection.workspace
-    var sidebarJobFilter: SidebarJobFilter {
+    var sidebarReviewChatFilter: SidebarReviewChatFilter {
         didSet {
-            guard sidebarJobFilter != oldValue else {
+            guard sidebarReviewChatFilter != oldValue else {
                 return
             }
-            persistSidebarJobFilter(sidebarJobFilter)
+            persistSidebarReviewChatFilter(sidebarReviewChatFilter)
         }
     }
 
     init(
         auth: CodexReviewAuthModel,
-        sidebarJobFilter: SidebarJobFilter = .all,
-        persistSidebarJobFilter: @escaping (SidebarJobFilter) -> Void = { _ in }
+        sidebarReviewChatFilter: SidebarReviewChatFilter = .all,
+        persistSidebarReviewChatFilter: @escaping (SidebarReviewChatFilter) -> Void = { _ in }
     ) {
         self.auth = auth
-        self.sidebarJobFilter = sidebarJobFilter
-        self.persistSidebarJobFilter = persistSidebarJobFilter
+        self.sidebarReviewChatFilter = sidebarReviewChatFilter
+        self.persistSidebarReviewChatFilter = persistSidebarReviewChatFilter
     }
 
     var selectedWorkspaceSectionEntry: ReviewMonitorWorkspaceSectionSelection? {

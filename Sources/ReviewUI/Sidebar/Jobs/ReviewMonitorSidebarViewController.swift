@@ -370,9 +370,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             ))
         }
 
-        let initialFilter = uiState.sidebarJobFilter
+        let initialFilter = uiState.sidebarReviewChatFilter
         sidebarFilterObservation = withPortableContinuousObservation { [weak self, uiState] event in
-            let filter = uiState.sidebarJobFilter
+            let filter = uiState.sidebarReviewChatFilter
             guard event.kind != .initial else {
                 return
             }
@@ -474,7 +474,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func bindSidebarStoreTopologyObservation(
-        filter: SidebarJobFilter,
+        filter: SidebarReviewChatFilter,
         animatedInitialDelivery: Bool
     ) {
         sidebarTopologyObservation?.cancel()
@@ -562,7 +562,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func sidebarRootTopologies(
         from workspaceTopologies: [SidebarWorkspaceTopology],
-        filter: SidebarJobFilter
+        filter: SidebarReviewChatFilter
     ) -> [SidebarRootTopology] {
         var topologiesBySectionID: [String: [SidebarWorkspaceTopology]] = [:]
         var sectionIdentityByID: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
@@ -1208,7 +1208,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private static func visibleReviewRows(
         in rows: [ReviewMonitorSidebarReviewChatRow],
-        filter: SidebarJobFilter
+        filter: SidebarReviewChatFilter
     ) -> [ReviewMonitorSidebarReviewChatRow] {
         guard filter.isActive else {
             return rows
@@ -1728,7 +1728,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
-        guard uiState.sidebarJobFilter.allowsJobReordering else {
+        guard uiState.sidebarReviewChatFilter.allowsReviewChatReordering else {
             return nil
         }
         guard let destination = resolvedJobDropDestination(

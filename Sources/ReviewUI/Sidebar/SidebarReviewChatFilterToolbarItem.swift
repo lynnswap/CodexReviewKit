@@ -2,12 +2,12 @@ import AppKit
 import ObservationBridge
 
 @MainActor
-final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
+final class ReviewMonitorSidebarReviewChatFilterToolbarItem: NSToolbarItem {
     private let uiState: ReviewMonitorUIState
     private let filterMenu: NSMenu
     private let menuFormItem: NSMenuItem
     private let toolbarButton: NSButton
-    private var filterMenuItems: [SidebarJobFilter: NSMenuItem] = [:]
+    private var filterMenuItems: [SidebarReviewChatFilter: NSMenuItem] = [:]
     private var observation: PortableObservationTracking.Token?
 
     init(
@@ -64,7 +64,7 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         addMenuItem(for: .latestFinished)
     }
 
-    private func addMenuItem(for filter: SidebarJobFilter) {
+    private func addMenuItem(for filter: SidebarReviewChatFilter) {
         let item = NSMenuItem(
             title: String(localized: filter.localized),
             action: #selector(handleFilterSelection(_:)),
@@ -79,11 +79,11 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
     private func bindObservation() {
         observation?.cancel()
         observation = withPortableContinuousObservation { [weak self, uiState] _ in
-            self?.applySelection(uiState.sidebarJobFilter)
+            self?.applySelection(uiState.sidebarReviewChatFilter)
         }
     }
 
-    private func applySelection(_ filter: SidebarJobFilter) {
+    private func applySelection(_ filter: SidebarReviewChatFilter) {
         toolbarButton.state = filter.isActive ? .on : .off
         menuFormItem.state = filter.isActive ? .on : .off
         for (candidate, item) in filterMenuItems {
@@ -97,31 +97,31 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
 
     @objc
     private func handleToolbarButton(_ sender: NSButton) {
-        applySelection(uiState.sidebarJobFilter)
+        applySelection(uiState.sidebarReviewChatFilter)
         sender.state = .on
         filterMenu.popUp(
-            positioning: positioningMenuItem(for: uiState.sidebarJobFilter),
+            positioning: positioningMenuItem(for: uiState.sidebarReviewChatFilter),
             at: NSPoint(x: 0, y: sender.bounds.maxY),
             in: sender
         )
-        applySelection(uiState.sidebarJobFilter)
+        applySelection(uiState.sidebarReviewChatFilter)
     }
 
     @objc
     private func handleFilterSelection(_ sender: NSMenuItem) {
-        guard let filter = sender.representedObject as? SidebarJobFilter else {
+        guard let filter = sender.representedObject as? SidebarReviewChatFilter else {
             return
         }
         let updatedFilter = toggledFilter(filter)
-        uiState.sidebarJobFilter = updatedFilter
+        uiState.sidebarReviewChatFilter = updatedFilter
         applySelection(updatedFilter)
     }
 
-    private func toggledFilter(_ filter: SidebarJobFilter) -> SidebarJobFilter {
+    private func toggledFilter(_ filter: SidebarReviewChatFilter) -> SidebarReviewChatFilter {
         guard filter != .all else {
             return .all
         }
-        var currentFilter = uiState.sidebarJobFilter
+        var currentFilter = uiState.sidebarReviewChatFilter
         if currentFilter.contains(filter) {
             currentFilter.remove(filter)
         } else {
@@ -130,11 +130,11 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
         return currentFilter
     }
 
-    private func positioningMenuItem(for filter: SidebarJobFilter) -> NSMenuItem? {
+    private func positioningMenuItem(for filter: SidebarReviewChatFilter) -> NSMenuItem? {
         if filter.isActive == false {
             return filterMenuItems[.all]
         }
-        for candidate in SidebarJobFilter.menuFilters where filter.contains(candidate) {
+        for candidate in SidebarReviewChatFilter.menuFilters where filter.contains(candidate) {
             return filterMenuItems[candidate]
         }
         return filterMenuItems[.all]
@@ -143,15 +143,15 @@ final class ReviewMonitorSidebarJobFilterToolbarItem: NSToolbarItem {
 
 #if DEBUG
 @MainActor
-extension ReviewMonitorSidebarJobFilterToolbarItem {
+extension ReviewMonitorSidebarReviewChatFilterToolbarItem {
     var menuItemTitlesForTesting: [String] {
         filterMenu.items.map { item in
             item.isSeparatorItem ? "-" : item.title
         }
     }
 
-    var selectedFilterForTesting: SidebarJobFilter {
-        uiState.sidebarJobFilter
+    var selectedFilterForTesting: SidebarReviewChatFilter {
+        uiState.sidebarReviewChatFilter
     }
 
     var selectedMenuItemTitlesForTesting: [String] {
@@ -164,9 +164,9 @@ extension ReviewMonitorSidebarJobFilterToolbarItem {
         toolbarButton.state == .on
     }
 
-    func selectFilterForTesting(_ filter: SidebarJobFilter) {
+    func selectFilterForTesting(_ filter: SidebarReviewChatFilter) {
         guard let item = filterMenuItems[filter] else {
-            fatalError("Sidebar job filter menu item is not configured.")
+            fatalError("Sidebar review chat filter menu item is not configured.")
         }
         handleFilterSelection(item)
     }
