@@ -306,7 +306,7 @@ struct ReviewUITests {
         #expect(sidebar.blankAreaWorkspaceInsertionIndexForTesting(atEnd: true) == store.workspaces.count)
     }
 
-    @Test func workspaceDropOnJobRowReordersSection() async {
+    @Test func workspaceDropOnReviewChatRowReordersSection() async {
         let workspaceAlphaJob = makeJob(
             id: "job-workspace-alpha-reject",
             cwd: "/tmp/workspace-alpha",
@@ -375,7 +375,7 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.performJobBlankAreaDropForTesting(firstJob))
         await Task.yield()
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-blank-area-peer", "job-blank-area-reject"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-blank-area-peer", "job-blank-area-reject"])
         #expect(store.orderedJobs(in: workspace).map(\.id) == ["job-blank-area-peer", "job-blank-area-reject"])
     }
 
@@ -404,20 +404,20 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.selectJobForTesting(firstJob)
+        sidebar.selectReviewChatForTesting(firstJob)
         let fullReloadCountBeforeDrop = sidebar.sidebarFullReloadCountForTesting
         let workspaceReloadCountBeforeDrop = sidebar.sidebarWorkspaceReloadCountForTesting
         let incrementalMoveCountBeforeDrop = sidebar.sidebarIncrementalMoveCountForTesting
-        let firstJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(firstJob))
-        let secondJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(secondJob))
-        #expect(firstJobRowHeightBeforeDrop == secondJobRowHeightBeforeDrop)
+        let firstReviewChatRowHeightBeforeDrop = try #require(sidebar.reviewChatRowHeightForTesting(firstJob))
+        let secondReviewChatRowHeightBeforeDrop = try #require(sidebar.reviewChatRowHeightForTesting(secondJob))
+        #expect(firstReviewChatRowHeightBeforeDrop == secondReviewChatRowHeightBeforeDrop)
         #expect(
             sidebar.performReviewChatDropForTesting(
                 firstJob,
                 proposedJob: secondJob,
                 hoveringBelowMidpoint: false
             ) == false)
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-1", "job-2"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-1", "job-2"])
 
         #expect(
             sidebar.performReviewChatDropForTesting(
@@ -426,13 +426,13 @@ struct ReviewUITests {
                 hoveringBelowMidpoint: true
             ))
         await Task.yield()
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
-        #expect(sidebar.selectedJobForTesting?.id == "job-1")
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
+        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-1")
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeDrop)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeDrop)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
-        #expect(sidebar.jobRowHeightForTesting(firstJob) == firstJobRowHeightBeforeDrop)
-        #expect(sidebar.jobRowHeightForTesting(secondJob) == secondJobRowHeightBeforeDrop)
+        #expect(sidebar.reviewChatRowHeightForTesting(firstJob) == firstReviewChatRowHeightBeforeDrop)
+        #expect(sidebar.reviewChatRowHeightForTesting(secondJob) == secondReviewChatRowHeightBeforeDrop)
     }
 
     @Test func sidebarRunningFilterKeepsWorkspacesAndShowsActiveJobs() async throws {
@@ -479,15 +479,15 @@ struct ReviewUITests {
             from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-alpha-running", "job-alpha-queued"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace)
         }
         #expect(
             sidebar.displayedSectionTitlesForTesting == [
                 "workspace-alpha",
                 "workspace-beta",
             ])
-        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running", "job-alpha-queued"])
-        #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == [])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-running", "job-alpha-queued"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: betaWorkspace) == [])
     }
 
     @Test func sidebarRunningFilterFollowsJobTerminalStateChanges() async throws {
@@ -510,7 +510,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-filter-state"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-filter-state"])
 
         runningJob.updateStateForTesting(
             status: .succeeded,
@@ -520,7 +520,7 @@ struct ReviewUITests {
             from: sidebar.sidebarTopologyObservationForTesting,
             [String]()
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
 
         runningJob.updateStateForTesting(status: .running, clearEndedAt: true)
@@ -528,11 +528,11 @@ struct ReviewUITests {
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-filter-state"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
     }
 
-    @Test func sidebarRunningFilterDoesNotClearHiddenSelectedJob() async throws {
+    @Test func sidebarRunningFilterDoesNotClearHiddenSelectedReviewChat() async throws {
         let runningJob = makeJob(
             id: "job-filter-running",
             cwd: "/tmp/workspace-alpha",
@@ -557,19 +557,19 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.selectJobForTesting(completedJob)
-        #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
+        sidebar.selectReviewChatForTesting(completedJob)
+        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-filter-completed")
 
         uiState.sidebarReviewChatFilter = .running
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-filter-running"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
 
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-filter-running"])
-        #expect(sidebar.selectedJobForTesting?.id == "job-filter-completed")
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-filter-running"])
+        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-filter-completed")
     }
 
     @Test func sidebarLatestFinishedFilterKeepsWorkspacesAndShowsLatestTerminalJob() async throws {
@@ -645,14 +645,14 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.selectJobForTesting(alphaRunningJob)
+        sidebar.selectReviewChatForTesting(alphaRunningJob)
         uiState.sidebarReviewChatFilter = .latestFinished
 
         try await waitForObservedValueFromCurrentObservation(
             from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-alpha-failed"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: alphaWorkspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace)
         }
         #expect(
             sidebar.displayedSectionTitlesForTesting == [
@@ -660,10 +660,10 @@ struct ReviewUITests {
                 "workspace-beta",
                 "workspace-gamma",
             ])
-        #expect(sidebar.displayedJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
-        #expect(sidebar.displayedJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
-        #expect(sidebar.displayedJobIDsForTesting(in: gammaWorkspace) == [])
-        #expect(sidebar.selectedJobForTesting?.id == "job-alpha-running")
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: gammaWorkspace) == [])
+        #expect(sidebar.selectedReviewChatJobForTesting?.id == "job-alpha-running")
     }
 
     @Test func sidebarLatestFinishedFilterFollowsTerminalDateChanges() async throws {
@@ -701,14 +701,14 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-second"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-finished-second"])
 
         firstJob.updateStateForTesting(endedAt: Date(timeIntervalSince1970: 400))
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-finished-first"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
 
         runningJob.updateStateForTesting(
@@ -719,7 +719,7 @@ struct ReviewUITests {
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-running"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
     }
 
@@ -766,7 +766,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(
-            sidebar.displayedJobIDsForTesting(in: workspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == [
                 "job-running",
                 "job-queued",
                 "job-finished-latest",
@@ -817,7 +817,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
 
         #expect(
             sidebar.performReviewChatDropForTesting(
@@ -827,7 +827,7 @@ struct ReviewUITests {
             ) == false)
         await Task.yield()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
         #expect(
             store.orderedJobs(in: workspace).map(\.id) == [
                 "job-hidden-prefix",
@@ -845,7 +845,7 @@ struct ReviewUITests {
             ))
         await Task.yield()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
         #expect(
             store.orderedJobs(in: workspace).map(\.id) == [
                 "job-hidden-prefix",
@@ -858,7 +858,7 @@ struct ReviewUITests {
         #expect(sidebar.performJobBlankAreaDropForTesting(runningA))
         await Task.yield()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-running-b", "job-running-a"])
         #expect(
             store.orderedJobs(in: workspace).map(\.id) == [
                 "job-hidden-prefix",
@@ -904,7 +904,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-latest"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-finished-latest"])
         #expect(sidebar.performReviewChatDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
     }
 
@@ -943,7 +943,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running", "job-finished-latest"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-running", "job-finished-latest"])
         #expect(sidebar.performReviewChatDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 2))
         await Task.yield()
 
@@ -951,7 +951,7 @@ struct ReviewUITests {
             from: { sidebar.sidebarTopologyObservationForTesting },
             ["job-finished-latest", "job-running"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
         #expect(
             store.orderedJobs(in: workspace).map(\.id) == [
@@ -1003,7 +1003,7 @@ struct ReviewUITests {
                 "job-sort-order-1",
             ]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
 
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
@@ -1055,10 +1055,10 @@ struct ReviewUITests {
                 "job-membership-2",
             ]
         ) {
-            sidebar.displayedJobIDsForTesting(in: workspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: workspace)
         }
 
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-membership-1", "job-membership-2"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-membership-1", "job-membership-2"])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeChange)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeChange)
         #expect(
@@ -1395,7 +1395,7 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func jobCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() throws {
+    @Test func reviewChatCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() throws {
         let placeholderJob = makeJob(
             id: "job-placeholder",
             status: .queued,
@@ -1407,18 +1407,18 @@ struct ReviewUITests {
             targetSummary: "Uncommitted changes"
         )
 
-        let cellView = makeReviewMonitorJobCellViewForTesting(job: placeholderJob)
+        let cellView = makeReviewMonitorReviewChatCellViewForTesting(job: placeholderJob)
         let initialHostingViewIdentity = try #require(
-            reviewMonitorJobCellHostingViewIdentityForTesting(cellView)
+            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
-        let initialHostedJobID = reviewMonitorJobCellHostedJobIDForTesting(cellView)
+        let initialHostedJobID = reviewMonitorReviewChatCellHostedJobIDForTesting(cellView)
 
-        configureReviewMonitorJobCellViewForTesting(cellView, job: loadedJob)
+        configureReviewMonitorReviewChatCellViewForTesting(cellView, job: loadedJob)
 
         let updatedHostingViewIdentity = try #require(
-            reviewMonitorJobCellHostingViewIdentityForTesting(cellView)
+            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
-        let updatedHostedJobID = reviewMonitorJobCellHostedJobIDForTesting(cellView)
+        let updatedHostedJobID = reviewMonitorReviewChatCellHostedJobIDForTesting(cellView)
 
         #expect(initialHostedJobID == placeholderJob.id)
         #expect(updatedHostedJobID == loadedJob.id)
@@ -1514,10 +1514,10 @@ struct ReviewUITests {
         #expect(sidebar.floatsGroupRowsEnabledForTesting == false)
         #expect(sidebar.draggingDestinationFeedbackStyleForTesting == .sourceList)
         #expect(sidebar.sidebarUsesAutomaticRowHeightsForTesting == false)
-        #expect(sidebar.jobRowUsesReviewMonitorJobRowViewForTesting(job))
+        #expect(sidebar.reviewChatRowUsesReviewMonitorChatRowViewForTesting(job))
     }
 
-    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceAndJobRows() throws {
+    @Test func sidebarUsesMeasuredRowHeightsForWorkspaceAndReviewChatRows() throws {
         let job = makeJob(
             cwd: "/tmp/workspace-alpha",
             status: .running,
@@ -1540,13 +1540,13 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         let workspaceRowHeight = try #require(sidebar.workspaceRowHeightForTesting(workspace))
-        let jobRowHeight = try #require(sidebar.jobRowHeightForTesting(job))
+        let reviewChatRowHeight = try #require(sidebar.reviewChatRowHeightForTesting(job))
         #expect(workspaceRowHeight == sidebar.expectedWorkspaceRowRectHeightForTesting)
-        #expect(jobRowHeight == sidebar.expectedJobRowRectHeightForTesting)
-        #expect(workspaceRowHeight < jobRowHeight)
+        #expect(reviewChatRowHeight == sidebar.expectedReviewChatRowRectHeightForTesting)
+        #expect(workspaceRowHeight < reviewChatRowHeight)
     }
 
-    @Test func jobRowsUseLabelIconSlotInsteadOfOutlineChildIndent() throws {
+    @Test func reviewChatRowsUseLabelIconSlotInsteadOfOutlineChildIndent() throws {
         let job = makeJob(
             cwd: "/tmp/workspace-alpha",
             status: .running,
@@ -1569,8 +1569,8 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         let workspaceCellMinX = try #require(sidebar.workspaceCellMinXForTesting(workspace))
-        let jobCellMinX = try #require(sidebar.jobCellMinXForTesting(job))
-        #expect(jobCellMinX < workspaceCellMinX)
+        let reviewChatCellMinX = try #require(sidebar.reviewChatCellMinXForTesting(job))
+        #expect(reviewChatCellMinX < workspaceCellMinX)
     }
 
     @Test func workspaceContentStartsAfterNativeDisclosureGutter() throws {
@@ -1618,7 +1618,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["workspace-alpha"])
-        #expect(sidebar.displayedJobIDsForTesting(in: workspace) == [])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == [])
         #expect(sidebar.isShowingEmptyStateForTesting == false)
         let workspaceCellMinX = try #require(sidebar.workspaceCellMinXForTesting(workspace))
         let disclosureMaxX = try #require(sidebar.workspaceDisclosureMaxXForTesting(workspace))
@@ -1776,7 +1776,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         let sidebar = viewController.sidebarViewControllerForTesting
-        sidebar.selectJobForTesting(job)
+        sidebar.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -1852,7 +1852,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
+        await viewController.sidebarViewControllerForTesting.cancelReviewChatForTesting(job)
 
         #expect(job.core.lifecycle.status == .cancelled)
         #expect(job.core.output.summary == "Cancelled by user from Review Monitor.")
@@ -1880,7 +1880,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        await viewController.sidebarViewControllerForTesting.cancelJobForTesting(job)
+        await viewController.sidebarViewControllerForTesting.cancelReviewChatForTesting(job)
 
         #expect(job.core.lifecycle.status == .running)
         #expect(job.core.output.summary == "Failed to cancel review: Cancellation failed.")
@@ -2310,7 +2310,7 @@ struct ReviewUITests {
         #expect(accountsViewController.selectedAccountEmailForTesting == "active@example.com")
     }
 
-    @Test func jobsPresentOnInitialLoadStayUnselected() {
+    @Test func reviewChatsPresentOnInitialLoadStayUnselected() {
         let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes")
         let recentJob = makeJob(status: .succeeded, targetSummary: "Commit: abc123")
         let store = CodexReviewStore.makePreviewStore()
@@ -2322,12 +2322,12 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
         #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
 
-    @Test func selectingJobUpdatesDetailPane() async throws {
+    @Test func selectingReviewChatUpdatesDetailPane() async throws {
         let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes", logText: "Running review\n")
         let recentJob = makeJob(
             status: .succeeded,
@@ -2345,7 +2345,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             recentJob,
@@ -2462,7 +2462,7 @@ struct ReviewUITests {
             viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
                 workspaceCWD
             ])
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
         #expect(transport.workspaceFindingsTextIsSelectableForTesting)
         #expect(transport.workspaceFindingsTextIsEditableForTesting == false)
         #expect(transport.workspaceFindingsUsesFindBarForTesting)
@@ -2555,8 +2555,8 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
 
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-worktree"])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace) == ["job-first-worktree"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree"])
 
         sidebar.clickWorkspaceHeaderForTesting(firstWorkspace)
         _ = try await awaitTransportRender(transport)
@@ -2608,18 +2608,18 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [])
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree-newer-finished"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace) == [])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == ["job-second-worktree-newer-finished"])
 
         firstJob.updateStateForTesting(endedAt: Date(timeIntervalSince1970: 400))
         try await waitForObservedValue(
             from: sidebar.sidebarTopologyObservationForTesting,
             ["job-first-worktree-older-finished"]
         ) {
-            sidebar.displayedJobIDsForTesting(in: firstWorkspace)
+            sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace)
         }
 
-        #expect(sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == [])
     }
 
     @Test func sidebarRunningAndLatestFinishedFilterUsesLinkedWorktreeGroupLatestJob() async throws {
@@ -2685,12 +2685,12 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
         #expect(
-            sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace) == [
                 "job-first-worktree-running-a",
                 "job-first-worktree-queued-b",
             ])
         #expect(
-            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == [
                 "job-second-worktree-queued",
                 "job-second-worktree-latest-finished",
             ])
@@ -2711,12 +2711,12 @@ struct ReviewUITests {
         await Task.yield()
 
         #expect(
-            sidebar.displayedJobIDsForTesting(in: firstWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace) == [
                 "job-first-worktree-queued-b",
                 "job-first-worktree-running-a",
             ])
         #expect(
-            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == [
                 "job-second-worktree-queued",
                 "job-second-worktree-latest-finished",
             ])
@@ -3037,7 +3037,7 @@ struct ReviewUITests {
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedSectionTitlesForTesting == ["CodexReviewKit"])
         #expect(
-            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == [
                 "job-second-workspace-first",
                 "job-second-workspace-second",
             ])
@@ -3064,9 +3064,9 @@ struct ReviewUITests {
             ))
         await Task.yield()
 
-        #expect(sidebar.displayedJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
+        #expect(sidebar.displayedReviewChatJobIDsForTesting(in: firstWorkspace) == ["job-first-workspace"])
         #expect(
-            sidebar.displayedJobIDsForTesting(in: secondWorkspace) == [
+            sidebar.displayedReviewChatJobIDsForTesting(in: secondWorkspace) == [
                 "job-second-workspace-second",
                 "job-second-workspace-first",
             ])
@@ -3270,16 +3270,16 @@ struct ReviewUITests {
 
         store.loadForTesting(serverState: .running, workspaces: [])
         try await waitForCondition {
-            sidebar.selectedWorkspaceSectionForTesting == nil && sidebar.selectedJobForTesting == nil
+            sidebar.selectedWorkspaceSectionForTesting == nil && sidebar.selectedReviewChatJobForTesting == nil
                 && transport.isShowingEmptyStateForTesting
         }
 
         #expect(sidebar.selectedWorkspaceSectionForTesting == nil)
-        #expect(sidebar.selectedJobForTesting == nil)
+        #expect(sidebar.selectedReviewChatJobForTesting == nil)
         #expect(transport.isShowingEmptyStateForTesting)
     }
 
-    @Test func detailPaneRendersSelectedJobMonitorLogProjection() async throws {
+    @Test func detailPaneRendersSelectedReviewChatLogProjection() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-monitor-log",
             cwd: "/tmp/workspace-alpha",
@@ -3330,7 +3330,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -3380,7 +3380,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -3466,7 +3466,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -3531,7 +3531,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -3595,7 +3595,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -3941,7 +3941,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -4019,7 +4019,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         _ = try await awaitTimelineRenderForTesting(
             job,
@@ -4096,7 +4096,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         _ = try await awaitTimelineRenderForTesting(
             job,
@@ -4258,7 +4258,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         _ = try await awaitTimelineRenderForTesting(
             job,
@@ -4313,7 +4313,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         _ = try await awaitTimelineRenderForTesting(
             job,
@@ -4377,7 +4377,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -4415,7 +4415,7 @@ struct ReviewUITests {
         }
     }
 
-    @Test func switchingSelectedJobRebindsDetailPane() async throws {
+    @Test func switchingSelectedReviewChatRebindsDetailPane() async throws {
         let activeJob = makeJob(
             id: "job-active",
             status: .running,
@@ -4440,7 +4440,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
 
         let activeSnapshot = try await awaitTimelineRenderForTesting(
             activeJob,
@@ -4451,7 +4451,7 @@ struct ReviewUITests {
         #expect(activeSnapshot.summary == nil)
         #expect(window.title == activeJob.targetSummary)
         #expect(window.subtitle == activeJob.cwd)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
 
         let recentSnapshot = try await awaitTimelineRenderForTesting(
             recentJob,
@@ -4471,7 +4471,7 @@ struct ReviewUITests {
         #expect(window.subtitle == recentJob.cwd)
     }
 
-    @Test func firstSelectionFromEmptyStatePinsUnvisitedJobToBottom() async throws {
+    @Test func firstSelectionFromEmptyStatePinsUnvisitedReviewChatToBottom() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let job = makeJob(
             id: "job-first-bottom",
@@ -4489,7 +4489,7 @@ struct ReviewUITests {
         window.setContentSize(NSSize(width: 900, height: 600))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -4500,7 +4500,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
     }
 
-    @Test func switchingSelectedJobStartsUnvisitedJobAtBottomAndRestoresPreviousOffset() async throws {
+    @Test func switchingSelectedReviewChatStartsUnvisitedReviewChatAtBottomAndRestoresPreviousOffset() async throws {
         let longActiveLog = (0..<400).map { "active line \($0)" }.joined(separator: "\n")
         let longRecentLog = (0..<400).map { "recent line \($0)" }.joined(separator: "\n")
         let activeJob = makeJob(
@@ -4530,7 +4530,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
         _ = try await awaitTimelineRenderForTesting(
             activeJob,
             in: transport,
@@ -4541,7 +4541,7 @@ struct ReviewUITests {
         let activeOffset = transport.logVerticalScrollOffsetForTesting
         #expect(activeOffset > 0)
         #expect(transport.isLogPinnedToBottomForTesting == false)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
         _ = try await awaitTimelineRenderForTesting(
             recentJob,
             in: transport,
@@ -4549,7 +4549,7 @@ struct ReviewUITests {
         )
 
         #expect(transport.isLogPinnedToBottomForTesting)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
         _ = try await awaitTimelineRenderForTesting(
             activeJob,
             in: transport,
@@ -4560,7 +4560,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting == false)
     }
 
-    @Test func switchingSelectedJobRestoresPinnedBottomPosition() async throws {
+    @Test func switchingSelectedReviewChatRestoresPinnedBottomPosition() async throws {
         let longActiveLog = (0..<400).map { "active line \($0)" }.joined(separator: "\n")
         let longRecentLog = (0..<400).map { "recent line \($0)" }.joined(separator: "\n")
         let activeJob = makeJob(
@@ -4590,7 +4590,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
         _ = try await awaitTimelineRenderForTesting(
             activeJob,
             in: transport,
@@ -4599,7 +4599,7 @@ struct ReviewUITests {
 
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
         _ = try await awaitTimelineRenderForTesting(
             recentJob,
             in: transport,
@@ -4609,7 +4609,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
 
         appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
         let snapshot = try await awaitTimelineRenderForTesting(
             activeJob,
             in: transport,
@@ -4620,7 +4620,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
     }
 
-    @Test func rehydratingSameSelectedJobPreservesLogScrollPosition() async throws {
+    @Test func rehydratingSameSelectedReviewChatPreservesLogScrollPosition() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let job = makeJob(
             id: "job-rehydrated",
@@ -4639,7 +4639,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -4663,7 +4663,7 @@ struct ReviewUITests {
         #expect(transport.logVerticalScrollOffsetForTesting == preservedOffset)
     }
 
-    @Test func switchingJobWithIdenticalLogTextStartsUnvisitedJobAtBottom() async throws {
+    @Test func switchingReviewChatWithIdenticalLogTextStartsUnvisitedReviewChatAtBottom() async throws {
         let sharedLog = (0..<400).map { "shared line \($0)" }.joined(separator: "\n")
         let firstJob = makeJob(
             id: "job-identical-1",
@@ -4689,7 +4689,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -4698,7 +4698,7 @@ struct ReviewUITests {
 
         transport.scrollLogToOffsetForTesting(120)
         #expect(transport.logVerticalScrollOffsetForTesting > 0)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -4734,14 +4734,14 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(shortJob)
         _ = try await awaitTimelineRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(longJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(longJob)
         let longSnapshot = try await awaitTimelineRenderForTesting(
             longJob,
             in: transport,
@@ -4780,13 +4780,13 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(shortJob)
         _ = try await awaitTimelineRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
         _ = try await awaitTimelineRenderForTesting(
             recentJob,
             in: transport,
@@ -4795,7 +4795,7 @@ struct ReviewUITests {
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
         replaceTimelineLogTextForTesting(shortJob, longLog)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(shortJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(shortJob)
         _ = try await awaitTimelineRenderForTesting(
             shortJob,
             in: transport,
@@ -4811,7 +4811,7 @@ struct ReviewUITests {
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
 
-    @Test func previouslySelectedJobUpdatesDoNotRepaintCurrentDetailPane() async throws {
+    @Test func previouslySelectedReviewChatUpdatesDoNotRepaintCurrentDetailPane() async throws {
         let activeJob = makeJob(
             id: "job-old-selection",
             status: .running,
@@ -4836,13 +4836,13 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
         _ = try await awaitTimelineRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(recentJob)
         _ = try await awaitTimelineRenderForTesting(
             recentJob,
             in: transport,
@@ -4879,7 +4879,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -4888,7 +4888,7 @@ struct ReviewUITests {
         )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting?.id == job.id)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting?.id == job.id)
         #expect(transport.renderSnapshotForTesting == selectedSnapshot)
     }
 
@@ -4916,7 +4916,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         _ = try await awaitTimelineRenderForTesting(
             job,
@@ -4930,7 +4930,7 @@ struct ReviewUITests {
             viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
                 workspace.cwd
             ])
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
         #expect(
             transport.workspaceFindingSnapshotForTesting
                 == .init(
@@ -4949,7 +4949,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
 
         store.loadForTesting(
@@ -4957,12 +4957,12 @@ struct ReviewUITests {
             content: makeSidebarContent(from: [activeJob])
         )
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting == nil)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
         #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
 
-    @Test func removingSelectedJobClearsSelectionWithoutAutoSelectingReplacement() async throws {
+    @Test func removingSelectedReviewChatClearsSelectionWithoutAutoSelectingReplacement() async throws {
         let activeJob = makeJob(
             id: "job-active",
             status: .running,
@@ -4988,7 +4988,7 @@ struct ReviewUITests {
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
         let sidebar = viewController.sidebarViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(activeJob)
 
         let activeSnapshot = try await awaitTimelineRenderForTesting(
             activeJob,
@@ -5005,11 +5005,11 @@ struct ReviewUITests {
             from: sidebar.sidebarTopologyObservationForTesting,
             true
         ) {
-            sidebar.selectedJobForTesting == nil
+            sidebar.selectedReviewChatJobForTesting == nil
         }
 
         let emptySnapshot = try await awaitContentPaneRender(contentPane)
-        #expect(sidebar.selectedJobForTesting == nil)
+        #expect(sidebar.selectedReviewChatJobForTesting == nil)
         #expect(emptySnapshot.isShowingEmptyState)
         #expect(emptySnapshot.title == nil)
         #expect(emptySnapshot.summary == nil)
@@ -5034,7 +5034,7 @@ struct ReviewUITests {
         defer { window.close() }
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -5060,7 +5060,7 @@ struct ReviewUITests {
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
     }
 
-    @Test func inPlaceJobUpdateKeepsSelectionAndRefreshesDetailPane() async throws {
+    @Test func inPlaceReviewChatUpdateKeepsSelectionAndRefreshesDetailPane() async throws {
         let job = makeJob(
             id: "job-1",
             status: .running,
@@ -5077,7 +5077,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -5093,12 +5093,12 @@ struct ReviewUITests {
         replaceTimelineLogTextForTesting(job, "Updated log")
 
         let updatedSnapshot = try await awaitTimelineRenderForTesting(job, in: transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedJobForTesting?.id == "job-1")
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatJobForTesting?.id == "job-1")
         #expect(updatedSnapshot.summary == nil)
         #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
     }
 
-    @Test func selectedJobLogAppendUsesAppendPath() async throws {
+    @Test func selectedReviewChatLogAppendUsesAppendPath() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-append",
             cwd: "/tmp/workspace-alpha",
@@ -5122,7 +5122,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5160,7 +5160,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5196,7 +5196,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5232,7 +5232,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5265,7 +5265,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5298,7 +5298,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5336,7 +5336,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5366,7 +5366,7 @@ struct ReviewUITests {
                 < 0.5)
     }
 
-    @Test func selectedJobGroupedReplacementUsesReplacementPath() async throws {
+    @Test func selectedReviewChatGroupedReplacementUsesReplacementPath() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-reload",
             cwd: "/tmp/workspace-alpha",
@@ -5386,7 +5386,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5431,7 +5431,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5471,7 +5471,7 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
-    @Test func selectedJobMarkdownAppendReplacesTailBlockWithoutReload() async throws {
+    @Test func selectedReviewChatMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let job = CodexReviewJob.makeForTesting(
             id: "job-markdown-append-fallback",
             cwd: "/tmp/workspace-alpha",
@@ -5491,7 +5491,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5529,7 +5529,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5575,7 +5575,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5610,7 +5610,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5674,13 +5674,13 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         transport.setLogReduceMotionForTesting(false)
 
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -5689,7 +5689,7 @@ struct ReviewUITests {
         appendTimelineEntryForTesting(
             firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -5723,7 +5723,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5769,7 +5769,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5804,7 +5804,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5848,7 +5848,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5891,7 +5891,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5937,7 +5937,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -5974,7 +5974,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6009,7 +6009,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6025,7 +6025,7 @@ struct ReviewUITests {
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
 
-    @Test func selectingJobRequestsOverlayScrollerHideWhenRestoringScrollPosition() async throws {
+    @Test func selectingReviewChatRequestsOverlayScrollerHideWhenRestoringScrollPosition() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let firstJob = makeJob(
             id: "job-restore-1",
@@ -6051,7 +6051,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -6061,7 +6061,7 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToOffsetForTesting(120)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -6069,7 +6069,7 @@ struct ReviewUITests {
         )
 
         let hideCountBeforeRestore = transport.logOverlayScrollerHideRequestCountForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -6099,7 +6099,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6135,7 +6135,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6166,7 +6166,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6198,7 +6198,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6241,7 +6241,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6270,7 +6270,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6355,7 +6355,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6404,7 +6404,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6554,7 +6554,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -6574,7 +6574,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -6614,7 +6614,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -6635,7 +6635,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -6673,7 +6673,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(firstJob)
         _ = try await awaitTimelineRenderForTesting(
             firstJob,
             in: transport,
@@ -6690,7 +6690,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
 
         let finderIdentifierBeforeSwitch = transport.logTextFinderIdentifierForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(secondJob)
         _ = try await awaitTimelineRenderForTesting(
             secondJob,
             in: transport,
@@ -6721,7 +6721,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6762,7 +6762,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6810,7 +6810,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6860,7 +6860,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6900,7 +6900,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6943,7 +6943,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -6988,7 +6988,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -7033,7 +7033,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -7100,7 +7100,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
         _ = try await awaitTimelineRenderForTesting(
             job,
             in: transport,
@@ -7137,7 +7137,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let snapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -7166,7 +7166,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
 
         let snapshot = try await awaitTimelineRenderForTesting(
             job,

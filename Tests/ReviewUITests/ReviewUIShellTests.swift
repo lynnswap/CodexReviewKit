@@ -94,7 +94,7 @@ extension ReviewUITests {
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
     }
 
-    @Test func splitViewShowsJobSidebarWhenServerRunningOnLoad() {
+    @Test func splitViewShowsReviewChatSidebarWhenServerRunningOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -718,12 +718,12 @@ extension ReviewUITests {
 
     @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
         let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
-        let selectedJob = try #require(
+        let selectedReviewChatJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
         )
-        let selectedChatID = try #require(selectedJob.core.run.reviewThreadID)
-        let selectedTargetSummary = selectedJob.targetSummary
+        let selectedChatID = try #require(selectedReviewChatJob.core.run.reviewThreadID)
+        let selectedTargetSummary = selectedReviewChatJob.targetSummary
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -744,11 +744,11 @@ extension ReviewUITests {
 
     @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
         let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
-        let selectedJob = try #require(
+        let selectedReviewChatJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
         )
-        let existingItemIDs = Set(selectedJob.timeline.items.map(\.id))
+        let existingItemIDs = Set(selectedReviewChatJob.timeline.items.map(\.id))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -765,7 +765,7 @@ extension ReviewUITests {
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
         let appendedItem = try #require(
-            selectedJob.timeline.items.first { existingItemIDs.contains($0.id) == false }
+            selectedReviewChatJob.timeline.items.first { existingItemIDs.contains($0.id) == false }
         )
         let appendedText = try #require(diagnosticMessage(appendedItem).nilIfEmpty)
         let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
@@ -1702,7 +1702,7 @@ private func renderDetailLogForShellLayoutTesting(
     viewController: ReviewMonitorSplitViewController,
     job: CodexReviewJob
 ) async throws {
-    viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
+    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(job)
     let chatID = try #require(job.reviewChatID)
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {

@@ -18,9 +18,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private enum Identifier {
-        static let tableColumn = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.Column")
-        static let jobCell = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.JobCell")
-        static let workspaceCell = NSUserInterfaceItemIdentifier("ReviewMonitorJobs.WorkspaceCell")
+        static let tableColumn = NSUserInterfaceItemIdentifier("ReviewMonitorReviewChats.Column")
+        static let reviewChatCell = NSUserInterfaceItemIdentifier("ReviewMonitorReviewChats.ReviewChatCell")
+        static let workspaceCell = NSUserInterfaceItemIdentifier("ReviewMonitorReviewChats.WorkspaceCell")
     }
 
     private enum DragType {
@@ -29,13 +29,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private struct SidebarRowHeights {
         let workspace: CGFloat
-        let job: CGFloat
+        let reviewChat: CGFloat
 
         @MainActor
         static func measure() -> SidebarRowHeights {
             SidebarRowHeights(
                 workspace: measuredWorkspaceRowHeight(),
-                job: measuredJobRowHeight()
+                reviewChat: measuredReviewChatRowHeight()
             )
         }
 
@@ -47,7 +47,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         @MainActor
-        private static func measuredJobRowHeight() -> CGFloat {
+        private static func measuredReviewChatRowHeight() -> CGFloat {
             let job = CodexReviewJob(
                 id: "row-height-measurement",
                 sessionID: "row-height-measurement",
@@ -65,7 +65,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                     )
                 )
             )
-            let cellView = ReviewMonitorJobCellView()
+            let cellView = ReviewMonitorReviewChatCellView()
             cellView.configure(with: job)
             return ceil(cellView.fittingSize.height)
         }
@@ -322,7 +322,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         outlineView.indentationPerLevel = SidebarLayout.disclosureGutterWidth
         outlineView.indentationMarkerFollowsCell = false
         outlineView.rowSizeStyle = .custom
-        outlineView.rowHeight = rowHeights.job
+        outlineView.rowHeight = rowHeights.reviewChat
         outlineView.usesAutomaticRowHeights = false
         outlineView.floatsGroupRows = false
         outlineView.backgroundColor = .clear
@@ -912,7 +912,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         setRootItem(rootItem, expanded: outlineView.isItemExpanded(rootItem) == false)
     }
 
-    private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
+    private func restoreSelectedReviewChatRowAfterExpansion(of section: SidebarWorkspaceSection) {
         guard let selectedReviewJob = reviewJobForCurrentChatSelection(),
               section.workspaces.contains(where: { $0.cwd == selectedReviewJob.cwd })
         else {
@@ -1712,12 +1712,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let isExpanded = workspaceSection(from: rootItem)?.isExpanded ?? false
         guard isExpanded,
               let lastRow = displayedReviewRows(inRootItem: rootItem).last,
-              let lastJobRow = row(forJobID: lastRow.jobID)
+              let lastReviewChatRow = row(forJobID: lastRow.jobID)
         else {
             return sectionRect
         }
 
-        sectionRect = sectionRect.union(outlineView.rect(ofRow: lastJobRow))
+        sectionRect = sectionRect.union(outlineView.rect(ofRow: lastReviewChatRow))
         return sectionRect
     }
 
@@ -2050,9 +2050,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return rowHeights.workspace
         }
         if reviewRow(from: item) != nil {
-            return rowHeights.job
+            return rowHeights.reviewChat
         }
-        return rowHeights.job
+        return rowHeights.reviewChat
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldCollapseItem item: Any) -> Bool {
@@ -2134,7 +2134,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             if section.isExpanded == false {
                 section.isExpanded = true
             }
-            restoreSelectedJobRowAfterExpansion(of: section)
+            restoreSelectedReviewChatRowAfterExpansion(of: section)
         }
     }
 
@@ -2155,7 +2155,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return ReviewMonitorWorkspaceRowView()
         }
         if reviewRow(from: item) != nil {
-            return ReviewMonitorJobTableRowView()
+            return ReviewMonitorReviewChatTableRowView()
         }
         return nil
     }
@@ -2184,9 +2184,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         if let row = reviewRow(from: item) {
-            let view = (outlineView.makeView(withIdentifier: Identifier.jobCell, owner: self) as? ReviewMonitorJobCellView)
-                ?? ReviewMonitorJobCellView()
-            view.identifier = Identifier.jobCell
+            let view = (outlineView.makeView(withIdentifier: Identifier.reviewChatCell, owner: self) as? ReviewMonitorReviewChatCellView)
+                ?? ReviewMonitorReviewChatCellView()
+            view.identifier = Identifier.reviewChatCell
             view.configure(with: row)
             return view
         }
@@ -2231,7 +2231,7 @@ extension ReviewMonitorSidebarViewController {
         return titles
     }
 
-    var selectedJobForTesting: CodexReviewJob? {
+    var selectedReviewChatJobForTesting: CodexReviewJob? {
         reviewJobForCurrentChatSelection()
     }
 
@@ -2288,7 +2288,7 @@ extension ReviewMonitorSidebarViewController {
         emptyStateViewController.view.isHidden == false
     }
 
-    func selectJobForTesting(_ job: CodexReviewJob) {
+    func selectReviewChatForTesting(_ job: CodexReviewJob) {
         guard let row = row(forJobID: job.id) else {
             return
         }
@@ -2320,7 +2320,7 @@ extension ReviewMonitorSidebarViewController {
         workspaceSection(containing: workspace).map(shouldAllowSelection(of:)) ?? false
     }
 
-    func displayedJobIDsForTesting(in workspace: CodexReviewWorkspace) -> [String] {
+    func displayedReviewChatJobIDsForTesting(in workspace: CodexReviewWorkspace) -> [String] {
         var jobIDs: [String] = []
         for row in 0..<outlineView.numberOfRows {
             guard let reviewRow = reviewRow(from: outlineView.item(atRow: row)),
@@ -2349,8 +2349,8 @@ extension ReviewMonitorSidebarViewController {
         rowHeights.workspace + outlineView.intercellSpacing.height
     }
 
-    var expectedJobRowRectHeightForTesting: CGFloat {
-        rowHeights.job + outlineView.intercellSpacing.height
+    var expectedReviewChatRowRectHeightForTesting: CGFloat {
+        rowHeights.reviewChat + outlineView.intercellSpacing.height
     }
 
     func workspaceRowHeightForTesting(_ workspace: CodexReviewWorkspace) -> CGFloat? {
@@ -2361,7 +2361,7 @@ extension ReviewMonitorSidebarViewController {
         return outlineView.rect(ofRow: row).height
     }
 
-    func jobRowHeightForTesting(_ job: CodexReviewJob) -> CGFloat? {
+    func reviewChatRowHeightForTesting(_ job: CodexReviewJob) -> CGFloat? {
         guard let row = row(forJobID: job.id) else {
             return nil
         }
@@ -2395,7 +2395,7 @@ extension ReviewMonitorSidebarViewController {
         return disclosureFrame.width > 0 ? disclosureFrame.maxX : nil
     }
 
-    func jobCellMinXForTesting(_ job: CodexReviewJob) -> CGFloat? {
+    func reviewChatCellMinXForTesting(_ job: CodexReviewJob) -> CGFloat? {
         guard let row = row(forJobID: job.id) else {
             return nil
         }
@@ -2404,27 +2404,27 @@ extension ReviewMonitorSidebarViewController {
             atColumn: 0,
             row: row,
             makeIfNecessary: true
-        ) as? ReviewMonitorJobCellView else {
+        ) as? ReviewMonitorReviewChatCellView else {
             return nil
         }
         outlineView.layoutSubtreeIfNeeded()
         return cellView.contentMinXForTesting(relativeTo: outlineView)
     }
 
-    func jobRowUsesReviewMonitorJobRowViewForTesting(_ job: CodexReviewJob) -> Bool {
+    func reviewChatRowUsesReviewMonitorChatRowViewForTesting(_ job: CodexReviewJob) -> Bool {
         guard let row = row(forJobID: job.id),
               let cellView = outlineView.view(
                 atColumn: 0,
                 row: row,
                 makeIfNecessary: true
-              ) as? ReviewMonitorJobCellView
+              ) as? ReviewMonitorReviewChatCellView
         else {
             return false
         }
-        return cellView.isHostingReviewMonitorJobRowViewForTesting
+        return cellView.isHostingReviewMonitorChatRowViewForTesting
     }
 
-    func cancelJobForTesting(_ job: CodexReviewJob) async {
+    func cancelReviewChatForTesting(_ job: CodexReviewJob) async {
         guard let row = reviewRowsByJobID[job.id] else {
             return
         }
@@ -3022,7 +3022,7 @@ private final class ReviewMonitorWorkspaceRowView: NSTableRowView {
 }
 
 @MainActor
-private final class ReviewMonitorJobTableRowView: NSTableRowView {
+private final class ReviewMonitorReviewChatTableRowView: NSTableRowView {
     override var isEmphasized: Bool {
         get { false }
         set { }
@@ -3030,7 +3030,7 @@ private final class ReviewMonitorJobTableRowView: NSTableRowView {
 }
 
 @MainActor
-private final class ReviewMonitorJobCellView: NSTableCellView {
+private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
 
     override init(frame frameRect: NSRect) {
@@ -3063,7 +3063,7 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
                 rootView: ReviewMonitorChatRowView(row: row)
             )
             hostingView.translatesAutoresizingMaskIntoConstraints = false
-            hostingView.setAccessibilityIdentifier("review-monitor.job-row")
+            hostingView.setAccessibilityIdentifier("review-monitor.review-chat-row")
             addSubview(hostingView)
             NSLayoutConstraint.activate([
                 hostingView.topAnchor.constraint(equalTo: topAnchor),
@@ -3080,7 +3080,7 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
     }
 
     #if DEBUG
-    var isHostingReviewMonitorJobRowViewForTesting: Bool {
+    var isHostingReviewMonitorChatRowViewForTesting: Bool {
         hostingView != nil
     }
 
@@ -3104,36 +3104,36 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
 
 #if DEBUG
 @MainActor
-func makeReviewMonitorJobCellViewForTesting(job: CodexReviewJob) -> NSTableCellView {
-    let cellView = ReviewMonitorJobCellView()
+func makeReviewMonitorReviewChatCellViewForTesting(job: CodexReviewJob) -> NSTableCellView {
+    let cellView = ReviewMonitorReviewChatCellView()
     cellView.configure(with: job)
     return cellView
 }
 
 @MainActor
-func configureReviewMonitorJobCellViewForTesting(
+func configureReviewMonitorReviewChatCellViewForTesting(
     _ cellView: NSTableCellView,
     job: CodexReviewJob
 ) {
-    guard let cellView = cellView as? ReviewMonitorJobCellView else {
-        fatalError("Expected ReviewMonitorJobCellView.")
+    guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
+        fatalError("Expected ReviewMonitorReviewChatCellView.")
     }
     cellView.configure(with: job)
 }
 
 @MainActor
-func reviewMonitorJobCellHostedJobIDForTesting(_ cellView: NSTableCellView) -> String? {
-    guard let cellView = cellView as? ReviewMonitorJobCellView else {
+func reviewMonitorReviewChatCellHostedJobIDForTesting(_ cellView: NSTableCellView) -> String? {
+    guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
         return nil
     }
     return cellView.hostedJobIDForTesting
 }
 
 @MainActor
-func reviewMonitorJobCellHostingViewIdentityForTesting(
+func reviewMonitorReviewChatCellHostingViewIdentityForTesting(
     _ cellView: NSTableCellView
 ) -> ObjectIdentifier? {
-    guard let cellView = cellView as? ReviewMonitorJobCellView else {
+    guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
         return nil
     }
     return cellView.hostingViewIdentityForTesting
