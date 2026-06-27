@@ -8,35 +8,36 @@ final class ReviewMonitorPreviewChatLogSource {
     let snapshot: ReviewMonitorCodexSidebarSnapshot
     let initialChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
-    private let jobsByChatID: [CodexThreadID: CodexReviewJob]
+    private let previewChatsByID: [CodexThreadID: PreviewReviewChat]
 
     init(jobs: [CodexReviewJob]) {
         var sections: [ReviewMonitorCodexSidebarSnapshot.Section] = []
         var sectionIndexesByCWD: [String: Int] = [:]
-        var jobsByChatID: [CodexThreadID: CodexReviewJob] = [:]
+        var previewChatsByID: [CodexThreadID: PreviewReviewChat] = [:]
         var initialRunningChat: ReviewMonitorCodexSidebarSnapshot.Chat?
         var firstChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
         for job in jobs {
-            guard let chat = job.reviewChatSelection else {
+            guard let previewChat = PreviewReviewChat(job: job) else {
                 continue
             }
 
-            jobsByChatID[chat.id] = job
+            let chat = previewChat.chat
+            previewChatsByID[chat.id] = previewChat
             firstChat = firstChat ?? chat
-            if initialRunningChat == nil, job.core.lifecycle.status == .running {
+            if initialRunningChat == nil, previewChat.isRunning {
                 initialRunningChat = chat
             }
 
-            if let sectionIndex = sectionIndexesByCWD[job.cwd] {
+            if let sectionIndex = sectionIndexesByCWD[previewChat.cwd] {
                 sections[sectionIndex].uncategorizedChats.append(chat)
             } else {
-                sectionIndexesByCWD[job.cwd] = sections.count
+                sectionIndexesByCWD[previewChat.cwd] = sections.count
                 sections.append(
                     ReviewMonitorCodexSidebarSnapshot.Section(
-                        rowID: .section(job.cwd),
-                        id: job.cwd,
-                        title: URL(fileURLWithPath: job.cwd).lastPathComponent,
+                        rowID: .section(previewChat.cwd),
+                        id: previewChat.cwd,
+                        title: URL(fileURLWithPath: previewChat.cwd).lastPathComponent,
                         workspaces: [],
                         uncategorizedChats: [chat]
                     ))
@@ -45,15 +46,15 @@ final class ReviewMonitorPreviewChatLogSource {
 
         self.snapshot = ReviewMonitorCodexSidebarSnapshot(sections: sections)
         self.initialChat = initialRunningChat ?? firstChat
-        self.jobsByChatID = jobsByChatID
+        self.previewChatsByID = previewChatsByID
     }
 
     func chatChangeStream(for chatID: CodexThreadID) -> AsyncStream<CodexChatChange>? {
-        guard let job = jobsByChatID[chatID] else {
+        guard let previewChat = previewChatsByID[chatID] else {
             return nil
         }
         let pair = AsyncStream<CodexChatChange>.makeStream(bufferingPolicy: .unbounded)
-        let subscription = PreviewChatLogSubscription(job: job, continuation: pair.continuation)
+        let subscription = PreviewChatLogSubscription(previewChat: previewChat, continuation: pair.continuation)
         subscription.start()
         pair.continuation.onTermination = { _ in
             Task { @MainActor in
@@ -65,17 +66,47 @@ final class ReviewMonitorPreviewChatLogSource {
 }
 
 @MainActor
-private final class PreviewChatLogSubscription {
+private final class PreviewReviewChat {
+    let chat: ReviewMonitorCodexSidebarSnapshot.Chat
     private let job: CodexReviewJob
+
+    var cwd: String {
+        job.cwd
+    }
+
+    var isRunning: Bool {
+        job.core.lifecycle.status == .running
+    }
+
+    init?(job: CodexReviewJob) {
+        guard let chat = job.reviewChatSelection else {
+            return nil
+        }
+        self.chat = chat
+        self.job = job
+    }
+
+    func trackTimelineRevision() {
+        _ = job.timeline.revision
+    }
+
+    func snapshot() -> CodexChatSnapshot {
+        CodexChatSnapshot.previewSnapshot(from: job)
+    }
+}
+
+@MainActor
+private final class PreviewChatLogSubscription {
+    private let previewChat: PreviewReviewChat
     private let continuation: AsyncStream<CodexChatChange>.Continuation
     private var observation: PortableObservationTracking.Token?
     private var previousSnapshot: CodexChatSnapshot?
 
     init(
-        job: CodexReviewJob,
+        previewChat: PreviewReviewChat,
         continuation: AsyncStream<CodexChatChange>.Continuation
     ) {
-        self.job = job
+        self.previewChat = previewChat
         self.continuation = continuation
     }
 
@@ -85,7 +116,7 @@ private final class PreviewChatLogSubscription {
             guard let self else {
                 return
             }
-            _ = job.timeline.revision
+            previewChat.trackTimelineRevision()
             publish()
         }
     }
@@ -96,7 +127,7 @@ private final class PreviewChatLogSubscription {
     }
 
     private func publish() {
-        let snapshot = CodexChatSnapshot.previewSnapshot(from: job)
+        let snapshot = previewChat.snapshot()
         let changes = CodexChatChange.previewChanges(from: previousSnapshot, to: snapshot)
         previousSnapshot = snapshot
         for change in changes {
