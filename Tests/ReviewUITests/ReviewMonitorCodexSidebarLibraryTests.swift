@@ -137,6 +137,50 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         ])
     }
 
+    @Test func sidebarOutlineTreePreservesNodeIdentityAcrossSnapshots() throws {
+        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+        let threadID = CodexThreadID(rawValue: "thread-app")
+        let tree = ReviewMonitorCodexSidebarOutlineTree()
+
+        tree.apply(snapshot: sidebarSnapshot(
+            workspaceID: workspaceID,
+            threadID: threadID,
+            chatTitle: "Initial review",
+            includesChat: true
+        ))
+
+        let root = try #require(tree.roots.first)
+        let workspace = try #require(tree.node(rowID: .workspace(workspaceID)))
+        let chat = try #require(tree.node(rowID: .chat(threadID)))
+
+        tree.apply(snapshot: sidebarSnapshot(
+            workspaceID: workspaceID,
+            threadID: threadID,
+            chatTitle: "Updated review",
+            includesChat: true
+        ))
+
+        let updatedRoot = try #require(tree.roots.first)
+        let updatedWorkspace = try #require(tree.node(rowID: .workspace(workspaceID)))
+        let updatedChat = try #require(tree.node(rowID: .chat(threadID)))
+        #expect(updatedRoot === root)
+        #expect(updatedWorkspace === workspace)
+        #expect(updatedChat === chat)
+        #expect(chat.title == "Updated review")
+        #expect(root.children.first === workspace)
+        #expect(workspace.children.first === chat)
+
+        tree.apply(snapshot: sidebarSnapshot(
+            workspaceID: workspaceID,
+            threadID: threadID,
+            chatTitle: "Removed review",
+            includesChat: false
+        ))
+
+        #expect(tree.node(rowID: .chat(threadID)) == nil)
+        #expect(workspace.children.isEmpty)
+    }
+
     @Test func sidebarViewControllerInstallsCodexSidebarLibraryFromModelContext() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
@@ -172,6 +216,41 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
 private struct ThreadListParams: Decodable {
     var sourceKinds: [String]?
+}
+
+private func sidebarSnapshot(
+    workspaceID: CodexWorkspaceID,
+    threadID: CodexThreadID,
+    chatTitle: String,
+    includesChat: Bool
+) -> ReviewMonitorCodexSidebarSnapshot {
+    let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
+        rowID: .chat(threadID),
+        id: threadID,
+        title: chatTitle,
+        preview: nil,
+        workspaceCWD: workspaceID.rawValue,
+        updatedAt: nil
+    )
+    return ReviewMonitorCodexSidebarSnapshot(
+        sections: [
+            ReviewMonitorCodexSidebarSnapshot.Section(
+                rowID: .section("repo"),
+                id: "repo",
+                title: "Repo",
+                workspaces: [
+                    ReviewMonitorCodexSidebarSnapshot.Workspace(
+                        rowID: .workspace(workspaceID),
+                        id: workspaceID,
+                        cwd: workspaceID.rawValue,
+                        title: "App",
+                        chats: includesChat ? [chat] : []
+                    ),
+                ],
+                uncategorizedChats: []
+            ),
+        ]
+    )
 }
 
 private func makeDirectory(_ name: String, in parent: URL) throws -> URL {

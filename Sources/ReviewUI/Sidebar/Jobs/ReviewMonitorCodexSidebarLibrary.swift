@@ -168,6 +168,62 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
 }
 
 @MainActor
+final class ReviewMonitorCodexSidebarOutlineTree {
+    private var nodesByRowID: [ReviewMonitorCodexSidebarRowID: ReviewMonitorCodexSidebarOutlineNode] = [:]
+    private(set) var roots: [ReviewMonitorCodexSidebarOutlineNode] = []
+
+    func apply(snapshot: ReviewMonitorCodexSidebarSnapshot) {
+        var activeRowIDs: Set<ReviewMonitorCodexSidebarRowID> = []
+        roots = snapshot.outlineItems.map { node(for: $0, activeRowIDs: &activeRowIDs) }
+        nodesByRowID = nodesByRowID.filter { activeRowIDs.contains($0.key) }
+    }
+
+    func node(rowID: ReviewMonitorCodexSidebarRowID) -> ReviewMonitorCodexSidebarOutlineNode? {
+        nodesByRowID[rowID]
+    }
+
+    private func node(
+        for item: ReviewMonitorCodexSidebarOutlineItem,
+        activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
+    ) -> ReviewMonitorCodexSidebarOutlineNode {
+        activeRowIDs.insert(item.rowID)
+        let node = nodesByRowID[item.rowID] ?? ReviewMonitorCodexSidebarOutlineNode(item: item)
+        nodesByRowID[item.rowID] = node
+        node.item = item
+        node.children = item.children.map { child in
+            self.node(for: child, activeRowIDs: &activeRowIDs)
+        }
+        return node
+    }
+}
+
+@MainActor
+final class ReviewMonitorCodexSidebarOutlineNode {
+    fileprivate(set) var item: ReviewMonitorCodexSidebarOutlineItem
+    fileprivate(set) var children: [ReviewMonitorCodexSidebarOutlineNode] = []
+
+    fileprivate init(item: ReviewMonitorCodexSidebarOutlineItem) {
+        self.item = item
+    }
+
+    var rowID: ReviewMonitorCodexSidebarRowID {
+        item.rowID
+    }
+
+    var title: String {
+        item.title
+    }
+
+    var selectionID: ReviewMonitorSelectionID {
+        item.selectionID
+    }
+
+    var isExpandable: Bool {
+        children.isEmpty == false
+    }
+}
+
+@MainActor
 package struct ReviewMonitorCodexSidebarWorkspace {
     package var workspace: CodexWorkspace
     package var chats: [CodexChat]
