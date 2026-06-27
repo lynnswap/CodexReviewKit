@@ -1,6 +1,93 @@
 import CodexKit
 import Foundation
 
+package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringConvertible {
+    package var rawValue: String
+
+    package init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    package static func section(_ id: String) -> Self {
+        .init(rawValue: "section:\(id)")
+    }
+
+    package static func workspace(_ id: CodexWorkspaceID) -> Self {
+        .init(rawValue: "workspace:\(id.rawValue)")
+    }
+
+    package static func chat(_ id: CodexThreadID) -> Self {
+        .init(rawValue: "chat:\(id.rawValue)")
+    }
+
+    package var description: String {
+        rawValue
+    }
+}
+
+package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
+    package struct Section: Equatable, Sendable {
+        package var rowID: ReviewMonitorCodexSidebarRowID
+        package var id: String
+        package var title: String
+        package var workspaces: [Workspace]
+        package var uncategorizedChats: [Chat]
+
+        package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
+            [rowID] + workspaces.flatMap(\.rowIDs) + uncategorizedChats.map(\.rowID)
+        }
+
+        var selection: ReviewMonitorWorkspaceSectionSelection {
+            ReviewMonitorWorkspaceSectionSelection(
+                id: id,
+                title: title,
+                workspaceCWDs: workspaces.map(\.cwd)
+            )
+        }
+    }
+
+    package struct Workspace: Equatable, Sendable {
+        package var rowID: ReviewMonitorCodexSidebarRowID
+        package var id: CodexWorkspaceID
+        package var cwd: String
+        package var title: String
+        package var chats: [Chat]
+
+        package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
+            [rowID] + chats.map(\.rowID)
+        }
+    }
+
+    package struct Chat: Equatable, Sendable {
+        package var rowID: ReviewMonitorCodexSidebarRowID
+        package var id: CodexThreadID
+        package var title: String
+        package var preview: String?
+        package var workspaceCWD: String?
+        package var updatedAt: Date?
+    }
+
+    package var sections: [Section]
+
+    package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
+        sections.flatMap(\.rowIDs)
+    }
+
+    package func chat(id: CodexThreadID) -> Chat? {
+        for section in sections {
+            for workspace in section.workspaces {
+                if let chat = workspace.chats.first(where: { $0.id == id }) {
+                    return chat
+                }
+            }
+            if let chat = section.uncategorizedChats.first(where: { $0.id == id }) {
+                return chat
+            }
+        }
+        return nil
+    }
+}
+
 @MainActor
 package struct ReviewMonitorCodexSidebarWorkspace {
     package var workspace: CodexWorkspace
@@ -43,6 +130,7 @@ package struct ReviewMonitorCodexSidebarSection {
 package final class ReviewMonitorCodexSidebarLibrary {
     package static var defaultRequest: CodexFetchRequest<CodexChat> {
         CodexFetchRequest<CodexChat>(
+            filter: .init(sourceKinds: [.subAgentReview]),
             sortDescriptors: [.updatedAt(.reverse)],
             sectionDescriptor: .workspaceGroup
         )
@@ -71,6 +159,10 @@ package final class ReviewMonitorCodexSidebarLibrary {
 
     package var sections: [ReviewMonitorCodexSidebarSection] {
         Self.sidebarSections(from: fetchedResults.sections)
+    }
+
+    package var snapshot: ReviewMonitorCodexSidebarSnapshot {
+        Self.sidebarSnapshot(from: sections)
     }
 
     package func performFetch() async throws {
@@ -121,5 +213,40 @@ package final class ReviewMonitorCodexSidebarLibrary {
                 uncategorizedChats: uncategorizedChats
             )
         }
+    }
+
+    private static func sidebarSnapshot(
+        from sections: [ReviewMonitorCodexSidebarSection]
+    ) -> ReviewMonitorCodexSidebarSnapshot {
+        ReviewMonitorCodexSidebarSnapshot(
+            sections: sections.map { section in
+                ReviewMonitorCodexSidebarSnapshot.Section(
+                    rowID: .section(section.id),
+                    id: section.id,
+                    title: section.title,
+                    workspaces: section.workspaces.map { workspace in
+                        ReviewMonitorCodexSidebarSnapshot.Workspace(
+                            rowID: .workspace(workspace.id),
+                            id: workspace.id,
+                            cwd: workspace.cwd,
+                            title: workspace.title,
+                            chats: workspace.chats.map(Self.snapshotChat(_:))
+                        )
+                    },
+                    uncategorizedChats: section.uncategorizedChats.map(Self.snapshotChat(_:))
+                )
+            }
+        )
+    }
+
+    private static func snapshotChat(_ chat: CodexChat) -> ReviewMonitorCodexSidebarSnapshot.Chat {
+        ReviewMonitorCodexSidebarSnapshot.Chat(
+            rowID: .chat(chat.id),
+            id: chat.id,
+            title: chat.title,
+            preview: chat.preview,
+            workspaceCWD: chat.workspace?.url.path,
+            updatedAt: chat.updatedAt
+        )
     }
 }

@@ -35,8 +35,11 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await library.performFetch()
 
         let section = try #require(library.sections.first)
+        let snapshotSection = try #require(library.snapshot.sections.first)
         let appWorkspace = try #require(section.workspaces.first)
         let appChat = try #require(appWorkspace.chats.first)
+        let snapshotAppWorkspace = try #require(snapshotSection.workspaces.first)
+        let snapshotAppChat = try #require(snapshotAppWorkspace.chats.first)
         let resolvedAppPath = app.standardizedFileURL.resolvingSymlinksInPath().path
         let resolvedToolsPath = tools.standardizedFileURL.resolvingSymlinksInPath().path
 
@@ -46,7 +49,71 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(section.workspaces.map(\.title) == ["App", "Tools"])
         #expect(section.chats.map(\.title) == ["App chat", "Tools chat"])
         #expect(appChat === library.chat(id: CodexThreadID(rawValue: "thread-app")))
+        #expect(snapshotSection.selection.workspaceCWDs == [resolvedAppPath, resolvedToolsPath])
+        #expect(snapshotAppWorkspace.cwd == resolvedAppPath)
+        #expect(snapshotAppChat.id == CodexThreadID(rawValue: "thread-app"))
+        #expect(snapshotAppChat.title == "App chat")
+        #expect(snapshotAppChat.workspaceCWD == resolvedAppPath)
+        #expect(library.snapshot.chat(id: CodexThreadID(rawValue: "thread-app")) == snapshotAppChat)
+        #expect(library.snapshot.rowIDs.map(\.rawValue) == [
+            "section:\(section.id)",
+            "workspace:\(resolvedAppPath)",
+            "chat:thread-app",
+            "workspace:\(resolvedToolsPath)",
+            "chat:thread-tools",
+        ])
     }
+
+    @Test func defaultRequestFetchesReviewThreadsOnly() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+
+        try await runtime.transport.enqueueThreadList(.init(threads: []))
+
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
+        try await library.performFetch()
+
+        let request = try #require(await runtime.transport.recordedRequests(method: "thread/list").first)
+        let params = try request.decodeParams(ThreadListParams.self)
+        #expect(params.sourceKinds == ["subAgentReview"])
+    }
+
+    @Test func sidebarSnapshotIncludesUncategorizedChatsWithStableRowIDs() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: "thread-uncategorized",
+                    name: "Floating review",
+                    preview: "Uncategorized preview",
+                    updatedAt: Date(timeIntervalSince1970: 4_000)
+                ),
+            ]
+        ))
+
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
+        try await library.performFetch()
+
+        let section = try #require(library.snapshot.sections.first)
+        let chat = try #require(section.uncategorizedChats.first)
+
+        #expect(section.workspaces.isEmpty)
+        #expect(chat.id == CodexThreadID(rawValue: "thread-uncategorized"))
+        #expect(chat.rowID.rawValue == "chat:thread-uncategorized")
+        #expect(chat.title == "Floating review")
+        #expect(chat.preview == "Uncategorized preview")
+        #expect(chat.workspaceCWD == nil)
+        #expect(section.rowIDs.map(\.rawValue) == [
+            section.rowID.rawValue,
+            "chat:thread-uncategorized",
+        ])
+    }
+}
+
+private struct ThreadListParams: Decodable {
+    var sourceKinds: [String]?
 }
 
 private func makeDirectory(_ name: String, in parent: URL) throws -> URL {
