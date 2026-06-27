@@ -2,6 +2,7 @@ import CodexKit
 import CodexAppServerKitTesting
 import Foundation
 import Testing
+@_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 
 @Suite("ReviewMonitor Codex sidebar library")
@@ -109,6 +110,38 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             section.rowID.rawValue,
             "chat:thread-uncategorized",
         ])
+    }
+
+    @Test func sidebarViewControllerInstallsCodexSidebarLibraryFromModelContext() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: "thread-app",
+                    workspace: try makeGitRepository(),
+                    name: "App review",
+                    updatedAt: Date(timeIntervalSince1970: 5_000)
+                ),
+            ]
+        ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, workspaces: [])
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarSnapshotForTesting?
+                .chat(id: CodexThreadID(rawValue: "thread-app"))?
+                .title == "App review"
+        }
     }
 }
 

@@ -1,4 +1,5 @@
 import AppKit
+import CodexKit
 import ObservationBridge
 import CodexReviewKit
 import SwiftUI
@@ -190,6 +191,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
+    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let scrollView = NSScrollView()
     private let outlineView = ReviewMonitorSidebarOutlineView()
     private let accountsViewController: ReviewMonitorAccountsViewController
@@ -200,6 +202,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarKindObservation: PortableObservationTracking.Token?
     private var sidebarTopologyObservation: PortableObservationTracking.Token?
     private var sidebarFilterObservation: PortableObservationTracking.Token?
+    private var codexSidebarObservation: PortableObservationTracking.Token?
+    private var codexSidebarFetchTask: Task<Void, Never>?
+    private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
     private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
@@ -211,9 +216,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var incrementalMembershipChangeCountForTesting = 0
 #endif
 
-    init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil
+    ) {
         self.store = store
         self.uiState = uiState
+        self.codexModelSource = codexModelSource
         self.accountsViewController = ReviewMonitorAccountsViewController(store: store)
         self.unavailableView = NSHostingView(rootView: MCPServerUnavailableView(store: store))
         self.rowHeights = SidebarRowHeights.measure()
@@ -229,6 +239,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarKindObservation?.cancel()
         sidebarTopologyObservation?.cancel()
         sidebarFilterObservation?.cancel()
+        codexSidebarObservation?.cancel()
+        codexSidebarFetchTask?.cancel()
     }
 
     override func loadView() {
@@ -240,6 +252,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         configureHierarchy()
         configureOutlineView()
         bindObservation()
+        bindCodexSidebarLibrary()
     }
 
     override func viewDidLayout() {
@@ -366,6 +379,40 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             filter: initialFilter,
             animatedInitialDelivery: false
         )
+    }
+
+    private func bindCodexSidebarLibrary() {
+        guard let codexModelSource else {
+            return
+        }
+        codexSidebarObservation?.cancel()
+        codexSidebarObservation = withPortableContinuousObservation { [weak self, codexModelSource] _ in
+            _ = codexModelSource.generation
+            self?.installCodexSidebarLibrary(modelContext: codexModelSource.modelContext)
+        }
+    }
+
+    private func installCodexSidebarLibrary(modelContext: CodexModelContext?) {
+        codexSidebarFetchTask?.cancel()
+        codexSidebarFetchTask = nil
+        guard let modelContext else {
+            codexSidebarLibrary = nil
+            return
+        }
+
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: modelContext)
+        codexSidebarLibrary = library
+        codexSidebarFetchTask = Task { @MainActor [weak self, library] in
+            do {
+                try await library.performFetch()
+            } catch is CancellationError {
+            } catch {
+            }
+            guard self?.codexSidebarLibrary === library else {
+                return
+            }
+            self?.codexSidebarFetchTask = nil
+        }
     }
 
     private func bindSidebarStoreTopologyObservation(
@@ -1943,6 +1990,10 @@ extension ReviewMonitorSidebarViewController {
 
     var selectedWorkspaceSectionForTesting: ReviewMonitorWorkspaceSectionSelection? {
         uiState.selectedWorkspaceSectionEntry
+    }
+
+    var codexSidebarSnapshotForTesting: ReviewMonitorCodexSidebarSnapshot? {
+        codexSidebarLibrary?.snapshot
     }
 
     var sidebarFullReloadCountForTesting: Int {

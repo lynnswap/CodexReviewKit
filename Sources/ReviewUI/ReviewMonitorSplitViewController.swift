@@ -78,7 +78,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
         let sidebarViewController = ReviewMonitorSidebarViewController(
             store: store,
-            uiState: uiState
+            uiState: uiState,
+            codexModelSource: codexModelSource
         )
         let transportViewController = ReviewMonitorTransportViewController(
             store: store,
