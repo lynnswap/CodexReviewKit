@@ -2285,14 +2285,6 @@ extension ReviewMonitorSidebarViewController {
         emptyStateViewController.view.isHidden == false
     }
 
-    func selectReviewChatForTesting(_ job: CodexReviewJob) {
-        // Jobs are review-operation fixtures here. Sidebar selection remains chat-only.
-        guard let chatID = job.reviewChatID else {
-            return
-        }
-        selectReviewChatForTesting(id: chatID)
-    }
-
     func selectReviewChatForTesting(id chatID: CodexThreadID) {
         guard let row = row(forCodexSidebarSelectionID: .chat(chatID)) ?? row(forReviewChatID: chatID) else {
             return
