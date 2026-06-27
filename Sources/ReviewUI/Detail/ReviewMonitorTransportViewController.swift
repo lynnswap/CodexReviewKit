@@ -483,27 +483,49 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) {
         selectedCodexChatDocumentTask?.cancel()
         selectedCodexChatDocumentHasRendered = false
-        let stream = selectedCodexChat.timelineDocumentStream()
+        let stream = selectedCodexChat.timelineDocumentChangeStream()
         selectedCodexChatDocumentTask = Task { @MainActor [weak self] in
             var didRenderInitialDocument = false
-            for await timelineDocument in stream {
+            for await change in stream {
                 guard let self,
                     self.isCurrentLogRenderTarget(target)
                 else {
                     return
                 }
-                self.selectedCodexChatDocumentHasRendered = true
-                self.renderBoundLog(
-                    timelineDocument: timelineDocument,
+                self.applySelectedCodexChatDocumentChange(
+                    change,
                     target: target,
                     restorationTarget: didRenderInitialDocument
                         ? self.logScrollView.currentScrollRestorationTarget
                         : initialRestorationTarget,
-                    allowIncrementalUpdate: didRenderInitialDocument
+                    allowIncrementalUpdate: didRenderInitialDocument && change.allowsIncrementalRender
                 )
-                didRenderInitialDocument = true
+                if change.document != nil {
+                    didRenderInitialDocument = true
+                }
             }
         }
+    }
+
+    private func applySelectedCodexChatDocumentChange(
+        _ change: ReviewTimelineDocumentChange,
+        target: LogRenderTarget,
+        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
+        allowIncrementalUpdate: Bool
+    ) {
+        guard let document = change.document else {
+            selectedCodexChatDocumentHasRendered = false
+            resetLogRenderer()
+            logScrollView.clear()
+            return
+        }
+        selectedCodexChatDocumentHasRendered = true
+        renderBoundLog(
+            timelineDocument: document,
+            target: target,
+            restorationTarget: restorationTarget,
+            allowIncrementalUpdate: allowIncrementalUpdate
+        )
     }
 
     private func isCurrentLogRenderTarget(_ target: LogRenderTarget) -> Bool {

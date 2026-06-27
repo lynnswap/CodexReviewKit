@@ -63,7 +63,7 @@ final class ReviewMonitorSelectedCodexChat {
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
     @ObservationIgnored
-    private var documentContinuations: [UUID: AsyncStream<ReviewTimelineDocument>.Continuation] = [:]
+    private var documentChangeContinuations: [UUID: AsyncStream<ReviewTimelineDocumentChange>.Continuation] = [:]
 
     init(modelSource: ReviewMonitorCodexModelSource?) {
         self.modelSource = modelSource
@@ -90,16 +90,16 @@ final class ReviewMonitorSelectedCodexChat {
         refreshBinding()
     }
 
-    func timelineDocumentStream() -> AsyncStream<ReviewTimelineDocument> {
+    func timelineDocumentChangeStream() -> AsyncStream<ReviewTimelineDocumentChange> {
         let id = UUID()
-        let pair = AsyncStream<ReviewTimelineDocument>.makeStream(bufferingPolicy: .unbounded)
-        documentContinuations[id] = pair.continuation
+        let pair = AsyncStream<ReviewTimelineDocumentChange>.makeStream(bufferingPolicy: .unbounded)
+        documentChangeContinuations[id] = pair.continuation
         if let timelineDocument {
-            pair.continuation.yield(timelineDocument)
+            pair.continuation.yield(.replaceAll(timelineDocument))
         }
         pair.continuation.onTermination = { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.documentContinuations.removeValue(forKey: id)
+                self?.documentChangeContinuations.removeValue(forKey: id)
             }
         }
         return pair.stream
@@ -126,7 +126,7 @@ final class ReviewMonitorSelectedCodexChat {
         identity = nextTarget?.reviewIdentity
         chatID = nextTarget?.chatID
         chat = nil
-        publishTimelineDocument(nil)
+        publishTimelineDocumentChange(.clear)
         documentProjection.reset()
         boundModelContext = nextModelContext
 
@@ -156,7 +156,7 @@ final class ReviewMonitorSelectedCodexChat {
                     else {
                         break
                     }
-                    self.publishTimelineDocument(
+                    self.publishTimelineDocumentChange(
                         self.documentProjection.apply(
                             change,
                             activeTurnID: nextTarget.activeTurnID,
@@ -177,13 +177,13 @@ final class ReviewMonitorSelectedCodexChat {
         observation = nil
     }
 
-    private func publishTimelineDocument(_ document: ReviewTimelineDocument?) {
-        timelineDocument = document
-        guard let document else {
+    private func publishTimelineDocumentChange(_ change: ReviewTimelineDocumentChange?) {
+        guard let change else {
             return
         }
-        for continuation in documentContinuations.values {
-            continuation.yield(document)
+        timelineDocument = change.document
+        for continuation in documentChangeContinuations.values {
+            continuation.yield(change)
         }
     }
 

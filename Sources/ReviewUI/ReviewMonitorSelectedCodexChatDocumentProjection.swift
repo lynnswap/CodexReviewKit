@@ -3,6 +3,37 @@ import Foundation
 import ReviewMonitorRendering
 
 @MainActor
+enum ReviewTimelineDocumentChange: Equatable {
+    case replaceAll(ReviewTimelineDocument)
+    case upsertBlock(ReviewTimelineDocument, ReviewTimelineDocument.Block.ID)
+    case removeBlock(ReviewTimelineDocument?, ReviewTimelineDocument.Block.ID)
+    case clear
+
+    var document: ReviewTimelineDocument? {
+        switch self {
+        case .replaceAll(let document),
+            .upsertBlock(let document, _):
+            return document
+        case .removeBlock(let document, _):
+            return document
+        case .clear:
+            return nil
+        }
+    }
+
+    var allowsIncrementalRender: Bool {
+        switch self {
+        case .upsertBlock,
+            .removeBlock:
+            return true
+        case .replaceAll,
+            .clear:
+            return false
+        }
+    }
+}
+
+@MainActor
 struct ReviewMonitorSelectedCodexChatDocumentProjection {
     private var turnProjection = CodexChatTurnProjection()
     private var document: ReviewTimelineDocument?
@@ -19,15 +50,16 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         activeTurnID: CodexTurnID?,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
-    ) -> ReviewTimelineDocument? {
+    ) -> ReviewTimelineDocumentChange? {
         turnProjection.selection = activeTurnID.map(CodexChatTurnSelection.turn) ?? .latest
         let update = turnProjection.apply(change)
         guard update.affectsSelectedTurn else {
-            return document
+            return nil
         }
         guard let snapshot = update.snapshot else {
+            let hadDocument = document != nil
             document = nil
-            return nil
+            return hadDocument ? .clear : nil
         }
 
         switch update.kind {
@@ -59,7 +91,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
                 turnSnapshot: snapshot.turn
             )
         case .ignored:
-            return document
+            return nil
         }
     }
 
@@ -67,15 +99,20 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         from snapshot: CodexChatProjectedTurnSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
-    ) -> ReviewTimelineDocument? {
-        document = ReviewMonitorCodexChatTimelineProjection().document(
+    ) -> ReviewTimelineDocumentChange? {
+        let hadDocument = document != nil
+        guard let nextDocument = ReviewMonitorCodexChatTimelineProjection().document(
             from: snapshot.turn,
             items: snapshot.items,
             chatCreatedAt: chatCreatedAt,
             chatUpdatedAt: chatUpdatedAt,
             revision: nextRevision()
-        )
-        return document
+        ) else {
+            document = nil
+            return hadDocument ? .clear : nil
+        }
+        document = nextDocument
+        return .replaceAll(nextDocument)
     }
 
     private mutating func rebuildOrReplaceBlock(
@@ -83,7 +120,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         turnSnapshot: CodexChatTurnStateSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
-    ) -> ReviewTimelineDocument? {
+    ) -> ReviewTimelineDocumentChange? {
         guard document != nil else {
             guard let snapshot = turnProjection.snapshot else {
                 return nil
@@ -107,7 +144,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         turnSnapshot: CodexChatTurnStateSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
-    ) -> ReviewTimelineDocument? {
+    ) -> ReviewTimelineDocumentChange? {
         guard var document else {
             guard let snapshot = turnProjection.snapshot else {
                 return nil
@@ -139,13 +176,13 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
             revision: nextRevision()
         )
         self.document = document
-        return document
+        return .upsertBlock(document, block.id)
     }
 
     private mutating func removeBlock(
         id: ReviewTimelineDocument.Block.ID,
         turnSnapshot: CodexChatTurnStateSnapshot
-    ) -> ReviewTimelineDocument? {
+    ) -> ReviewTimelineDocumentChange? {
         guard var document else {
             return nil
         }
@@ -159,7 +196,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
             revision: nextRevision()
         )
         self.document = document.blocks.isEmpty ? nil : document
-        return self.document
+        return .removeBlock(self.document, id)
     }
 
     private mutating func nextRevision() -> UInt64 {
