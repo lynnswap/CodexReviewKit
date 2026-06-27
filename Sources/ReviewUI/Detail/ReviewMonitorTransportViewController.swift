@@ -267,9 +267,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             if let previewJob = previewChatLogSource?.job(for: chatID) {
                 return previewJob
             }
-            return store.orderedJobs.first { job in
-                job.reviewChatID == chatID
-            }
+            return store.reviewJob(forChatID: chatID)
         }
     #endif
 

@@ -273,9 +273,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     }
 
     private func reviewJob(for chatID: CodexThreadID) -> CodexReviewJob? {
-        store.orderedJobs.first { job in
-            job.reviewChatID == chatID
-        }
+        store.reviewJob(forChatID: chatID)
     }
 
     private func applyWindowTitle(_ presentation: WindowTitlePresentation) {
