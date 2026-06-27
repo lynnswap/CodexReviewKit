@@ -20,6 +20,34 @@ extension ReviewUITests {
         #expect(rootViewController.isSplitViewEmbeddedForTesting)
     }
 
+    @Test func previewPreparationLoadsSelectedChatStreamBeforeWindowAttachment() async throws {
+        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let selectedReviewChatJob = try #require(
+            store.orderedJobs.first { $0.core.lifecycle.status == .running }
+                ?? store.orderedJobs.first
+        )
+        let selectedChatID = try #require(selectedReviewChatJob.core.run.reviewThreadID)
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewStore: store
+        )
+
+        #expect(viewController.isViewLoaded == false)
+
+        viewController.prepareForSwiftUIPreviewRendering()
+
+        #expect(viewController.isViewLoaded)
+        #expect(viewController.isSplitViewEmbeddedForTesting)
+        #expect(viewController.splitViewControllerForTesting.isTransportViewLoadedForTesting)
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let snapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
+        #expect(snapshot.log.isEmpty == false)
+    }
+
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
         let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
         let selectedReviewChatJob = try #require(

@@ -30,12 +30,14 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     var serverState: CodexReviewServerState = .running
 
     func makeNSViewController(context: Context) -> ReviewMonitorRootViewController {
-        makeReviewMonitorPreviewContentViewControllerForPreview(
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             authPhase: authPhase,
             account: account,
             serverState: serverState,
             previewStore: previewStore()
         )
+        viewController.prepareForSwiftUIPreviewRendering()
+        return viewController
     }
 
     func updateNSViewController(

@@ -252,6 +252,12 @@ final class ReviewMonitorRootViewController: NSViewController {
 #if DEBUG
 @MainActor
 extension ReviewMonitorRootViewController {
+    func prepareForSwiftUIPreviewRendering() {
+        loadViewIfNeeded()
+        splitViewController.prepareForSwiftUIPreviewRendering()
+        view.layoutSubtreeIfNeeded()
+    }
+
     var splitViewControllerForTesting: ReviewMonitorSplitViewController {
         splitViewController
     }
