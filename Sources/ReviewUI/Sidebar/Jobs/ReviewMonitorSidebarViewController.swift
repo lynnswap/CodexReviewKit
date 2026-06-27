@@ -191,6 +191,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let codexModelSource: ReviewMonitorCodexModelSource?
+    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let scrollView = NSScrollView()
     private let outlineView = ReviewMonitorSidebarOutlineView()
     private let accountsViewController: ReviewMonitorAccountsViewController
@@ -219,11 +220,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
     ) {
         self.store = store
         self.uiState = uiState
         self.codexModelSource = codexModelSource
+        self.previewChatLogSource = previewChatLogSource
         self.accountsViewController = ReviewMonitorAccountsViewController(store: store)
         self.unavailableView = NSHostingView(rootView: MCPServerUnavailableView(store: store))
         self.rowHeights = SidebarRowHeights.measure()
@@ -252,6 +255,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         configureHierarchy()
         configureOutlineView()
         bindObservation()
+        applyPreviewCodexSidebarSnapshotIfNeeded()
         bindCodexSidebarLibrary()
     }
 
@@ -398,7 +402,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         codexSidebarFetchTask = nil
         guard let modelContext else {
             codexSidebarLibrary = nil
-            applyCodexSidebarSnapshot(ReviewMonitorCodexSidebarSnapshot(sections: []))
+            applyPreviewCodexSidebarSnapshotIfNeeded()
             return
         }
 
@@ -415,6 +419,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             self?.applyCodexSidebarSnapshot(library.snapshot)
             self?.codexSidebarFetchTask = nil
+        }
+    }
+
+    private func applyPreviewCodexSidebarSnapshotIfNeeded() {
+        if let previewChatLogSource {
+            applyCodexSidebarSnapshot(previewChatLogSource.snapshot)
+        } else {
+            applyCodexSidebarSnapshot(ReviewMonitorCodexSidebarSnapshot(sections: []))
         }
     }
 

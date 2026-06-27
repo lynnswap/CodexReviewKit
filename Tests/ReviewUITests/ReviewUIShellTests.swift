@@ -716,12 +716,13 @@ extension ReviewUITests {
         #expect(window.isMovableByWindowBackground == false)
     }
 
-    @Test func previewContentViewControllerRendersSelectedJobLog() async throws {
+    @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
         let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
         let selectedJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
         )
+        let selectedChatID = try #require(selectedJob.core.run.reviewThreadID)
         let expectedLog = reviewMonitorLogText(for: selectedJob)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
@@ -737,6 +738,7 @@ extension ReviewUITests {
             snapshot.log == expectedLog && snapshot.isShowingEmptyState == false
         }
 
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
         #expect(snapshot.log.isEmpty == false)
     }
 

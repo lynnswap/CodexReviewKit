@@ -12,6 +12,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private let codexModelSource: ReviewMonitorCodexModelSource?
+    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
@@ -40,21 +41,25 @@ final class ReviewMonitorTransportViewController: NSViewController {
     convenience init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        modelContext: CodexModelContext
+        modelContext: CodexModelContext,
+        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
     ) {
         self.init(
             store: store,
             uiState: uiState,
-            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext)
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
+            previewChatLogSource: previewChatLogSource
         )
     }
 
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
     ) {
         self.codexModelSource = codexModelSource
+        self.previewChatLogSource = previewChatLogSource
         self.store = store
         self.uiState = uiState
         self.selectedCodexChat = ReviewMonitorSelectedCodexChat(modelSource: codexModelSource)
@@ -214,6 +219,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             guard codexModelSource?.modelContext != nil else {
                 renderPreviewJobTimeline(
                     selectedJob,
+                    target: .job(selectedJob.id),
                     restoring: restorationTarget(selectedJob),
                     allowIncrementalUpdate: false
                 )
@@ -231,6 +237,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     _ = selectedJob.timeline.revision
                     self.renderPreviewJobTimeline(
                         selectedJob,
+                        target: .job(selectedJob.id),
                         restoring: self.logScrollView.currentScrollRestorationTarget,
                         allowIncrementalUpdate: true
                     )
@@ -257,6 +264,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         @discardableResult
         private func renderPreviewJobTimeline(
             _ selectedJob: CodexReviewJob,
+            target: LogRenderTarget,
             restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
             allowIncrementalUpdate: Bool
         ) -> Bool {
@@ -264,7 +272,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             let sourceDocument = previewTimelineLogProjection.render(timelineDocument: timelineDocument)
             return renderBoundLog(
                 sourceDocument: sourceDocument,
-                target: .job(selectedJob.id),
+                target: target,
                 restorationTarget: restorationTarget,
                 allowIncrementalUpdate: allowIncrementalUpdate && hasAppliedBoundLog
             )
@@ -277,9 +285,38 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedCodexChatLogTask?.cancel()
         selectedCodexChatLogTask = nil
+        selectedJobObservation?.cancel()
+        selectedJobObservation = nil
         resetLogRenderer()
         boundChatID = selectedChat.id
         selectedCodexChat.bind(toChatID: selectedChat.id)
+        #if DEBUG
+            if codexModelSource?.modelContext == nil,
+               let previewJob = previewChatLogSource?.job(for: selectedChat.id)
+            {
+                renderPreviewJobTimeline(
+                    previewJob,
+                    target: .chat(selectedChat.id),
+                    restoring: .bottom,
+                    allowIncrementalUpdate: false
+                )
+                selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
+                    guard let self,
+                          self.boundChatID == selectedChat.id
+                    else {
+                        return
+                    }
+                    _ = previewJob.timeline.revision
+                    self.renderPreviewJobTimeline(
+                        previewJob,
+                        target: .chat(selectedChat.id),
+                        restoring: self.logScrollView.currentScrollRestorationTarget,
+                        allowIncrementalUpdate: true
+                    )
+                }
+                return
+            }
+        #endif
         startSelectedCodexChatLogStream(target: .chat(selectedChat.id), initialRestorationTarget: .bottom)
     }
 

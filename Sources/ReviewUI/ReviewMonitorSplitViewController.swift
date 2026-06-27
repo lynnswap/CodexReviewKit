@@ -21,6 +21,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let codexModelSource: ReviewMonitorCodexModelSource?
+    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let showSettings: (@MainActor () -> Void)?
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
@@ -41,12 +42,14 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         modelContext: CodexModelContext,
+        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             uiState: uiState,
             codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
+            previewChatLogSource: previewChatLogSource,
             showSettings: showSettings
         )
     }
@@ -55,11 +58,13 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
         self.codexModelSource = codexModelSource
+        self.previewChatLogSource = previewChatLogSource
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
@@ -79,12 +84,14 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         let sidebarViewController = ReviewMonitorSidebarViewController(
             store: store,
             uiState: uiState,
-            codexModelSource: codexModelSource
+            codexModelSource: codexModelSource,
+            previewChatLogSource: previewChatLogSource
         )
         let transportViewController = ReviewMonitorTransportViewController(
             store: store,
             uiState: uiState,
-            codexModelSource: codexModelSource
+            codexModelSource: codexModelSource,
+            previewChatLogSource: previewChatLogSource
         )
         let statusAccessoryViewController = ReviewMonitorServerStatusAccessoryViewController(
             store: store,
