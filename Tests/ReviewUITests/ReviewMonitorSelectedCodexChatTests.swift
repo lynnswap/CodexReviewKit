@@ -200,7 +200,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
         job.core.run.turnID = "turn-1"
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline trigger"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline trigger"))
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
@@ -251,7 +251,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: "review-thread",
             turnID: "turn-1"
         )
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline fallback"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline fallback"))
         uiState.selection = .job(job)
 
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in

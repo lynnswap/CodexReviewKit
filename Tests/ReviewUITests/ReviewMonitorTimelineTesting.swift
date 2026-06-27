@@ -1,7 +1,138 @@
 import Foundation
-import CodexReviewKit
+@_spi(Testing) @testable import CodexReviewKit
 import ReviewMonitorRendering
 @_spi(PreviewSupport) @testable import ReviewUI
+
+struct ReviewTimelineEntryForTesting: Sendable, Hashable {
+    enum Kind: String, Sendable, Hashable {
+        case command
+        case commandOutput
+        case agentMessage
+        case plan
+        case todoList
+        case reasoning
+        case reasoningSummary
+        case rawReasoning
+        case contextCompaction
+        case toolCall
+        case diagnostic
+        case error
+        case progress
+        case event
+    }
+
+    struct Metadata: Sendable, Hashable {
+        var sourceType: String?
+        var title: String?
+        var status: String?
+        var itemID: String?
+        var command: String?
+        var cwd: String?
+        var exitCode: Int?
+        var startedAt: Date?
+        var completedAt: Date?
+        var durationMs: Int?
+        var commandStatus: String?
+
+        init(
+            sourceType: String? = nil,
+            title: String? = nil,
+            status: String? = nil,
+            itemID: String? = nil,
+            command: String? = nil,
+            cwd: String? = nil,
+            exitCode: Int? = nil,
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil,
+            commandStatus: String? = nil
+        ) {
+            self.sourceType = sourceType
+            self.title = title
+            self.status = status
+            self.itemID = itemID
+            self.command = command
+            self.cwd = cwd
+            self.exitCode = exitCode
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMs = durationMs
+            self.commandStatus = commandStatus
+        }
+    }
+
+    var id: UUID
+    var kind: Kind
+    var groupID: String?
+    var replacesGroup: Bool
+    var text: String
+    var metadata: Metadata?
+
+    init(
+        id: UUID = UUID(),
+        kind: Kind,
+        groupID: String? = nil,
+        replacesGroup: Bool = false,
+        text: String,
+        metadata: Metadata? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.groupID = groupID
+        self.replacesGroup = replacesGroup
+        self.text = text
+        self.metadata = metadata
+    }
+}
+
+extension CodexReviewJob {
+    @MainActor
+    static func makeForTesting(
+        id: String = UUID().uuidString,
+        sessionID: String = "session-1",
+        cwd: String = "/tmp/repo",
+        targetSummary: String,
+        model: String? = "gpt-5",
+        threadID: String? = nil,
+        turnID: String? = nil,
+        status: ReviewJobState,
+        cancellationRequested: Bool = false,
+        cancellation: ReviewCancellation? = nil,
+        startedAt: Date? = nil,
+        endedAt: Date? = nil,
+        summary: String,
+        hasFinalReview: Bool = false,
+        reviewResult: ParsedReviewResult? = nil,
+        lastAgentMessage: String? = "",
+        timelineEntries: [ReviewTimelineEntryForTesting],
+        errorMessage: String? = nil,
+        exitCode: Int? = nil
+    ) -> CodexReviewJob {
+        let job = CodexReviewJob.makeForTesting(
+            id: id,
+            sessionID: sessionID,
+            cwd: cwd,
+            targetSummary: targetSummary,
+            model: model,
+            threadID: threadID,
+            turnID: turnID,
+            status: status,
+            cancellationRequested: cancellationRequested,
+            cancellation: cancellation,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            summary: summary,
+            hasFinalReview: hasFinalReview,
+            reviewResult: reviewResult,
+            lastAgentMessage: lastAgentMessage,
+            logEntries: [],
+            errorMessage: errorMessage,
+            exitCode: exitCode
+        )
+        seedTimelineForTesting(job, entries: timelineEntries)
+        return job
+    }
+}
 
 @MainActor
 func seedTimelineForTesting(
@@ -32,17 +163,17 @@ func seedTimelineForTesting(
 }
 
 @MainActor
-func seedTimelineForTesting(_ job: CodexReviewJob, logEntries: [ReviewLogEntry]) {
+func seedTimelineForTesting(_ job: CodexReviewJob, entries: [ReviewTimelineEntryForTesting]) {
     guard job.timeline.items.isEmpty else {
         return
     }
-    for entry in logEntries {
-        appendTimelineLogEntryForTesting(job, entry)
+    for entry in entries {
+        appendTimelineEntryForTesting(job, entry)
     }
 }
 
 @MainActor
-func appendTimelineLogEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewLogEntry) {
+func appendTimelineEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewTimelineEntryForTesting) {
     let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
     let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
     let phase = timelinePhase(for: entry)
@@ -76,7 +207,7 @@ func reviewMonitorLogText(for job: CodexReviewJob) -> String {
     return projection.render(timelineDocument: timelineDocument).text
 }
 
-private func timelineKind(for entry: ReviewLogEntry) -> ReviewItemKind {
+private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {
     switch entry.kind {
     case .command, .commandOutput:
         .commandExecution
@@ -95,7 +226,7 @@ private func timelineKind(for entry: ReviewLogEntry) -> ReviewItemKind {
     }
 }
 
-private func timelineFamily(for entry: ReviewLogEntry) -> ReviewItemFamily {
+private func timelineFamily(for entry: ReviewTimelineEntryForTesting) -> ReviewItemFamily {
     switch entry.kind {
     case .command, .commandOutput:
         .command
@@ -115,7 +246,7 @@ private func timelineFamily(for entry: ReviewLogEntry) -> ReviewItemFamily {
 }
 
 private func timelineContent(
-    for entry: ReviewLogEntry,
+    for entry: ReviewTimelineEntryForTesting,
     existing: ReviewTimelineItem.Content?
 ) -> ReviewTimelineItem.Content {
     switch entry.kind {
@@ -199,7 +330,7 @@ private func existingText(_ content: ReviewTimelineItem.Content?, diagnostic def
     return defaultValue
 }
 
-private func commandText(for entry: ReviewLogEntry) -> String {
+private func commandText(for entry: ReviewTimelineEntryForTesting) -> String {
     if let command = entry.metadata?.command, command.isEmpty == false {
         return command
     }
@@ -209,7 +340,7 @@ private func commandText(for entry: ReviewLogEntry) -> String {
     return entry.text
 }
 
-private func timelinePhase(for entry: ReviewLogEntry) -> ReviewItemPhase {
+private func timelinePhase(for entry: ReviewTimelineEntryForTesting) -> ReviewItemPhase {
     let status = entry.metadata?.commandStatus ?? entry.metadata?.status
     switch status {
     case "inProgress", "running", "started":
@@ -223,7 +354,7 @@ private func timelinePhase(for entry: ReviewLogEntry) -> ReviewItemPhase {
     }
 }
 
-private func commandStatus(for entry: ReviewLogEntry) -> ReviewCommandStatus? {
+private func commandStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewCommandStatus? {
     guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
         return nil
     }
@@ -235,7 +366,7 @@ private func commandStatus(for entry: ReviewLogEntry) -> ReviewCommandStatus? {
     }
 }
 
-private func contextCompactionStatus(for entry: ReviewLogEntry) -> ReviewContextCompactionStatus? {
+private func contextCompactionStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewContextCompactionStatus? {
     guard let rawValue = entry.metadata?.status else {
         return nil
     }
@@ -249,7 +380,7 @@ private func contextCompactionStatus(for entry: ReviewLogEntry) -> ReviewContext
     }
 }
 
-private func toolCallStatus(for entry: ReviewLogEntry) -> ReviewToolCallStatus? {
+private func toolCallStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewToolCallStatus? {
     guard let rawValue = entry.metadata?.status else {
         return nil
     }

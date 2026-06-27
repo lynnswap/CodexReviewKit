@@ -2371,8 +2371,8 @@ struct ReviewUITests {
         #expect(window.title == "Commit: def456")
         #expect(window.subtitle == recentJob.cwd)
         activeJob.updateStateForTesting(summary: "Old selection should not render.")
-        activeJob.replaceLogEntries([.init(kind: .agentMessage, text: "Old selection log")])
-        appendTimelineLogEntryForTesting(
+        replaceTimelineLogTextForTesting(activeJob, "Old selection log")
+        appendTimelineEntryForTesting(
             recentJob, .init(kind: .progress, text: "Current selection log after stale mutation"))
 
         let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
@@ -3284,7 +3284,7 @@ struct ReviewUITests {
             summary: "Review completed.",
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
-            logEntries: [
+            timelineEntries: [
                 .init(
                     kind: .command,
                     groupID: "cmd_1",
@@ -3353,7 +3353,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: []
+            timelineEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -3370,7 +3370,6 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        let initialLogEntries = job.logEntries
 
         job.timeline.apply(
             .itemCompleted(
@@ -3384,7 +3383,6 @@ struct ReviewUITests {
 
         var snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Timeline-only detail update")
-        #expect(job.logEntries == initialLogEntries)
 
         let startedAt = Date(timeIntervalSince1970: 250)
         job.timeline.apply(
@@ -3414,7 +3412,6 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Ran swift test for 2s"))
         #expect(snapshot.log.contains("$ swift test") == false)
         #expect(snapshot.log.contains("Tests passed") == false)
-        #expect(job.logEntries == initialLogEntries)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
         let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-direct")
@@ -3438,7 +3435,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: []
+            timelineEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -3499,7 +3496,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: []
+            timelineEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -3559,7 +3556,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: []
+            timelineEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -3901,7 +3898,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: []
+            timelineEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -3963,7 +3960,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(
                     kind: .contextCompaction,
                     groupID: "compact_1",
@@ -3997,7 +3994,7 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
 
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .contextCompaction,
@@ -4022,7 +4019,7 @@ struct ReviewUITests {
         let outputText = (1...9)
             .map { "output line \($0)" }
             .joined(separator: "\n")
-        let commandMetadata = ReviewLogEntry.Metadata(
+        let commandMetadata = ReviewTimelineEntryForTesting.Metadata(
             sourceType: "command",
             title: "Ran command for 17s",
             status: "succeeded",
@@ -4039,7 +4036,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
                     kind: .commandOutput,
@@ -4123,7 +4120,7 @@ struct ReviewUITests {
             transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
         let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -4159,7 +4156,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -4167,7 +4164,7 @@ struct ReviewUITests {
                 text: "\noutput line 11",
                 metadata: commandMetadata
             ))
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
         _ = try await awaitTransportRender(transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
@@ -4191,7 +4188,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
                     kind: .commandOutput,
@@ -4255,7 +4252,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test")
             ]
         )
@@ -4279,7 +4276,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -4314,7 +4311,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(kind: .commandOutput, groupID: "cmd_1", text: outputText),
             ]
@@ -4354,7 +4351,7 @@ struct ReviewUITests {
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
-            appendTimelineLogEntryForTesting(
+            appendTimelineEntryForTesting(
                 job, .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
             _ = try await awaitTransportRender(transport)
             await awaitNativeLayoutTurn()
@@ -4527,7 +4524,7 @@ struct ReviewUITests {
 
         #expect(transport.isLogPinnedToBottomForTesting)
 
-        appendTimelineLogEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
+        appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
         viewController.sidebarViewControllerForTesting.selectJobForTesting(activeJob)
         let snapshot = try await awaitTransportRender(transport)
 
@@ -4723,8 +4720,8 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(recentJob)
         _ = try await awaitTransportRender(transport)
-        appendTimelineLogEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
-        appendTimelineLogEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
+        appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
+        appendTimelineEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
 
         let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("fresh update")
@@ -4913,7 +4910,7 @@ struct ReviewUITests {
         #expect(window.title == "")
         #expect(window.subtitle == "")
         job.updateStateForTesting(summary: "Deselected summary")
-        job.replaceLogEntries([.init(kind: .agentMessage, text: "Deselected log")])
+        replaceTimelineLogTextForTesting(job, "Deselected log")
 
         #expect(contentPane.selectedJobObservationForTesting == nil)
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
@@ -4963,7 +4960,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -4982,7 +4979,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " log"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Initial log")
@@ -5001,7 +4998,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -5014,7 +5011,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
@@ -5033,7 +5030,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: decomposedPrefix)
             ]
         )
@@ -5065,7 +5062,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -5077,8 +5074,8 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "Initial one two")
@@ -5094,7 +5091,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -5106,8 +5103,8 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
@@ -5123,7 +5120,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -5137,8 +5134,8 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .progress,
@@ -5176,7 +5173,7 @@ struct ReviewUITests {
         #expect(
             abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting)
                 < 0.5)
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .progress,
@@ -5203,7 +5200,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .plan, groupID: "plan_1", text: "- original")
             ]
         )
@@ -5218,7 +5215,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job, .init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
         let snapshot = try await awaitTransportRender(transport)
@@ -5240,7 +5237,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: startedAt,
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(
                     kind: .command,
                     groupID: "cmd_1",
@@ -5266,7 +5263,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
 
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .command,
@@ -5285,7 +5282,7 @@ struct ReviewUITests {
                     commandStatus: "completed"
                 )
             ))
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .rawReasoning,
@@ -5309,7 +5306,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: startedAt,
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(
                     kind: .rawReasoning,
                     groupID: "reasoning_1",
@@ -5329,7 +5326,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .command,
@@ -5344,7 +5341,7 @@ struct ReviewUITests {
                     commandStatus: "inProgress"
                 )
             ))
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .rawReasoning,
@@ -5370,7 +5367,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "**bo")
             ]
         )
@@ -5385,7 +5382,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
+        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
 
         let snapshot = try await awaitTransportRender(transport)
         #expect(snapshot.log == "bold")
@@ -5404,7 +5401,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .plan, groupID: "plan_1", text: "- original")
             ]
         )
@@ -5416,7 +5413,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .plan,
@@ -5428,7 +5425,7 @@ struct ReviewUITests {
         let replaceCount = transport.logReplaceCountForTesting
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
+        appendTimelineEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Command output")
         }
@@ -5477,7 +5474,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -5490,7 +5487,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
         _ = try await awaitTransportRender(transport)
 
@@ -5499,13 +5496,13 @@ struct ReviewUITests {
         transport.completeLogWordGlowAnimationsForTesting()
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
+        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
         _ = try await awaitTransportRender(transport)
 
@@ -5522,7 +5519,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -5535,7 +5532,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 201),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Other job")
             ]
         )
@@ -5551,14 +5548,14 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         viewController.sidebarViewControllerForTesting.selectJobForTesting(secondJob)
         _ = try await awaitTransportRender(transport)
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
         viewController.sidebarViewControllerForTesting.selectJobForTesting(firstJob)
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendTimelineLogEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
+        appendTimelineEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting > 0)
     }
@@ -5573,7 +5570,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -5589,7 +5586,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
         _ = try await awaitTransportRender(transport)
 
@@ -5615,7 +5612,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            logEntries: [
+            timelineEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -5630,7 +5627,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         transport.setLogReduceMotionForTesting(false)
 
-        appendTimelineLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logWordGlowCountForTesting > 0)
 
@@ -5667,7 +5664,7 @@ struct ReviewUITests {
         transport.scrollLogToTopForTesting()
         #expect(transport.isLogPinnedToBottomForTesting == false)
         let unpinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logAutoFollowCountForTesting == unpinnedAutoFollow)
         #expect(transport.isLogPinnedToBottomForTesting == false)
@@ -5675,7 +5672,7 @@ struct ReviewUITests {
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         let pinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5706,7 +5703,7 @@ struct ReviewUITests {
         let wrappedLine = (0..<140)
             .map { "wrapped-append-segment-\($0)" }
             .joined(separator: " ")
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
@@ -5745,7 +5742,7 @@ struct ReviewUITests {
         let offsetBeforeAppend = transport.logVerticalScrollOffsetForTesting
         let autoFollowBeforeAppend = transport.logAutoFollowCountForTesting
         let programmaticScrollsBeforeAppend = transport.logProgrammaticScrollCountForTesting
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job,
             .init(
                 kind: .progress,
@@ -5785,7 +5782,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -5818,7 +5815,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5848,7 +5845,7 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "short update"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "short update"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5922,7 +5919,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingScrollerImpPair)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -5954,7 +5951,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingHideMethods)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
@@ -6044,7 +6041,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
         _ = try await awaitTransportRender(transport)
         let appendCount = transport.logAppendCountForTesting
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logAppendCountForTesting == appendCount + 1)
@@ -6216,7 +6213,7 @@ struct ReviewUITests {
         }
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logHasActiveFindQueryForTesting)
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
 
         let appendedLength = (reviewMonitorLogText(for: job) as NSString).length
@@ -6242,7 +6239,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
         let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
-        appendTimelineLogEntryForTesting(
+        appendTimelineEntryForTesting(
             job, .init(kind: .progress, text: "needle appended while the log is not following bottom"))
         _ = try await awaitTransportRender(transport)
 
@@ -6346,7 +6343,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineLogEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
+        appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6398,7 +6395,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineLogEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
+        appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
         _ = try await awaitTransportRender(transport)
         #expect(
             transport.displayedLogForTesting.trimmingCharacters(in: .newlines)
@@ -6489,7 +6486,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -6526,7 +6523,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6536,7 +6533,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logFindBarVisibleForTesting)
@@ -6570,7 +6567,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -6581,7 +6578,7 @@ struct ReviewUITests {
             #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
             #expect(transport.logHasActiveFindQueryForTesting == false)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
+            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6617,7 +6614,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
+            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6654,7 +6651,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("core"))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
             #expect(transport.logHasActiveFindQueryForTesting)
-            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
+            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
             _ = try await awaitTransportRender(transport)
 
             #expect(transport.logFindBarVisibleForTesting)
@@ -6693,7 +6690,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("alpha"))
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
-            appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
+            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
             _ = try await awaitTransportRender(transport)
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindStringLengthForTesting == initialLength)
@@ -6737,7 +6734,7 @@ struct ReviewUITests {
             transport.setSelectedLogRangeForTesting(normalSelectionRange)
             #expect(transport.logSelectedTextForTesting == "copyable")
             #expect(transport.logHasActiveFindQueryForTesting == false)
-            appendTimelineLogEntryForTesting(
+            appendTimelineEntryForTesting(
                 job, .init(kind: .progress, text: "needle appended after normal selection"))
             _ = try await awaitTransportRender(transport)
 
@@ -6777,7 +6774,7 @@ struct ReviewUITests {
             #expect(transport.logHasActiveFindQueryForTesting)
 
             let initialLength = (reviewMonitorLogText(for: job) as NSString).length
-            appendTimelineLogEntryForTesting(
+            appendTimelineEntryForTesting(
                 job, .init(kind: .progress, text: "active query appears after no-result search"))
             _ = try await awaitTransportRender(transport)
 
@@ -6835,7 +6832,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
         #expect(transport.logFindStringLengthForTesting == 0)
-        appendTimelineLogEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
+        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
         _ = try await awaitTransportRender(transport)
 
         #expect(transport.logFindBarVisibleForTesting)
@@ -7339,7 +7336,7 @@ func makeJob(
         summary: summary ?? status.displayText,
         reviewResult: reviewResult,
         lastAgentMessage: "",
-        logEntries: [],
+        timelineEntries: [],
         errorMessage: status == .failed ? summary ?? status.displayText : nil
     )
     seedTimelineForTesting(job, logText: logText, rawLogText: rawLogText)
@@ -7361,9 +7358,6 @@ func makeWorkspaces(from jobs: [CodexReviewJob]) -> [CodexReviewWorkspace] {
 
 @MainActor
 func makeSidebarContent(from jobs: [CodexReviewJob]) -> (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]) {
-    for job in jobs {
-        seedTimelineForTesting(job, logEntries: job.logEntries)
-    }
     return (makeWorkspaces(from: jobs), Array(jobs.reversed()))
 }
 
