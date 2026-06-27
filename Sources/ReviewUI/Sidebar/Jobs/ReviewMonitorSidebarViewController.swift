@@ -207,9 +207,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
+    private let reviewChatIndex = ReviewMonitorSidebarReviewChatIndex()
     private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
-    private var reviewRowsByJobID: [String: ReviewMonitorSidebarReviewChatRow] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
     private var isReconcilingSelection = false
 #if DEBUG
@@ -535,29 +535,18 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func sidebarWorkspaceTopologies() -> [SidebarWorkspaceTopology] {
         let workspaces = store.orderedWorkspaces
-        let activeJobIDs = Set(workspaces.flatMap { workspace in
-            store.orderedJobs(in: workspace).map(\.id)
-        })
-        let topologies = workspaces.map { workspace in
+        let workspaceJobs = workspaces.map { workspace in
+            (workspace: workspace, jobs: store.orderedJobs(in: workspace))
+        }
+        let activeJobIDs = Set(workspaceJobs.flatMap { $0.jobs.map(\.id) })
+        let topologies = workspaceJobs.map { workspace, jobs in
             SidebarWorkspaceTopology(
                 workspace: workspace,
-                reviewRows: reviewRows(for: store.orderedJobs(in: workspace))
+                reviewRows: reviewChatIndex.rows(for: jobs)
             )
         }
-        reviewRowsByJobID = reviewRowsByJobID.filter { activeJobIDs.contains($0.key) }
+        reviewChatIndex.prune(keeping: activeJobIDs)
         return topologies
-    }
-
-    private func reviewRows(for jobs: [CodexReviewJob]) -> [ReviewMonitorSidebarReviewChatRow] {
-        jobs.map { job in
-            if let row = reviewRowsByJobID[job.id] {
-                row.update(from: job)
-                return row
-            }
-            let row = ReviewMonitorSidebarReviewChatRow(job: job)
-            reviewRowsByJobID[job.id] = row
-            return row
-        }
     }
 
     private func sidebarRootTopologies(
@@ -1340,7 +1329,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func row(forJobID jobID: String) -> Int? {
-        guard let rowItem = reviewRowsByJobID[jobID] else {
+        guard let rowItem = reviewChatIndex.row(jobID: jobID) else {
             return nil
         }
         let row = outlineView.row(forItem: rowItem)
@@ -1348,7 +1337,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func row(forReviewChatID chatID: CodexThreadID) -> Int? {
-        guard let rowItem = reviewRowsByJobID.values.first(where: { $0.chat?.id == chatID }) else {
+        guard let rowItem = reviewChatIndex.row(chatID: chatID) else {
             return nil
         }
         let row = outlineView.row(forItem: rowItem)
@@ -1426,7 +1415,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         id: CodexThreadID,
         in workspaces: [CodexReviewWorkspace]
     ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
-        store.reviewJob(forChatID: id, in: workspaces)?.reviewChatSelection
+        reviewChatIndex.chat(id: id, in: workspaces)
+            ?? store.reviewJob(forChatID: id, in: workspaces)?.reviewChatSelection
     }
 
     private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
@@ -2425,7 +2415,7 @@ extension ReviewMonitorSidebarViewController {
     }
 
     func cancelReviewChatForTesting(_ job: CodexReviewJob) async {
-        guard let row = reviewRowsByJobID[job.id] else {
+        guard let row = reviewChatIndex.row(jobID: job.id) else {
             return
         }
         await performCancellation(for: row)
@@ -2624,7 +2614,7 @@ extension ReviewMonitorSidebarViewController {
         proposedJob targetJob: CodexReviewJob
     ) -> Bool {
         guard let section = workspaceSection(containing: workspace),
-              let targetRow = reviewRowsByJobID[targetJob.id]
+              let targetRow = reviewChatIndex.row(jobID: targetJob.id)
         else {
             return true
         }
@@ -2642,7 +2632,7 @@ extension ReviewMonitorSidebarViewController {
         hoveringBelowMidpoint: Bool
     ) -> Bool {
         guard let section = workspaceSection(containing: workspace),
-              let targetRowItem = reviewRowsByJobID[targetJob.id],
+              let targetRowItem = reviewChatIndex.row(jobID: targetJob.id),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return false
@@ -2744,7 +2734,7 @@ extension ReviewMonitorSidebarViewController {
         proposedJob targetJob: CodexReviewJob,
         hoveringBelowMidpoint: Bool
     ) -> Bool {
-        guard let targetRowItem = reviewRowsByJobID[targetJob.id],
+        guard let targetRowItem = reviewChatIndex.row(jobID: targetJob.id),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return false
