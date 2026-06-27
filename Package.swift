@@ -29,10 +29,9 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        .package(
-            url: "https://github.com/lynnswap/CodexKit.git",
-            revision: "77340166f494e16077a156b4a2a832d2cd88527d"
-        ),
+        // Temporary local reference while CodexKit integration work is in flight.
+        // Replace this with a pinned remote CodexKit revision before merging.
+        .package(path: "../CodexKit"),
     ],
     targets: [
         .target(

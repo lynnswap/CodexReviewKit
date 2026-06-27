@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CodexDataKit
 import ObservationBridge
 import CodexReviewKit
 
@@ -13,6 +14,7 @@ typealias ReviewMonitorContentTransitionAnimator = @MainActor (
 final class ReviewMonitorRootViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
+    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
     private var observation: PortableObservationTracking.Token?
@@ -22,19 +24,38 @@ final class ReviewMonitorRootViewController: NSViewController {
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
         uiState: uiState,
+        codexModelSource: codexModelSource,
         showSettings: showSettings
     )
 
     private lazy var signInViewController = ReviewMonitorSignInViewController(store: store)
 
+    convenience init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        modelContext: CodexModelContext,
+        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
+        self.init(
+            store: store,
+            uiState: uiState,
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
+            contentTransitionAnimator: contentTransitionAnimator,
+            showSettings: showSettings
+        )
+    }
+
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
+        self.codexModelSource = codexModelSource
         self.contentTransitionAnimator = contentTransitionAnimator
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)

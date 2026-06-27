@@ -25,6 +25,7 @@ private extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         transport: FakeCodexAppServerTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -38,6 +39,7 @@ private extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
+            appServerLifecycleHandler: appServerLifecycleHandler,
             appServerFactory: { codexHomeURL in
                 try await CodexAppServerTestRuntime.start(
                     transport: transport,
@@ -63,6 +65,7 @@ private extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> FakeCodexAppServerTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -77,6 +80,7 @@ private extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
+            appServerLifecycleHandler: appServerLifecycleHandler,
             appServerFactory: { codexHomeURL in
                 let transport = try await transportFactory(codexHomeURL)
                 return try await CodexAppServerTestRuntime.start(
@@ -271,6 +275,40 @@ struct CodexReviewHostTests {
 
         #expect(store.serverState == .running)
         await store.stop()
+    }
+
+    @Test func liveStorePublishesPrimaryAppServerLifecycle() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            mcpHTTPServerFactory: { _, configuration in
+                NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { appServer in
+                observedLifecycleStates.append(appServer != nil)
+            },
+            transportFactory: { _ in transport }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == .running)
+        #expect(observedLifecycleStates == [true])
+
+        await store.stop()
+
+        #expect(observedLifecycleStates == [true, false])
     }
 
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {

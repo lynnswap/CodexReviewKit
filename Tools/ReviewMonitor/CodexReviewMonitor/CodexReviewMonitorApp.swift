@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import CodexDataKit
 import CodexReviewKit
 import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
@@ -219,7 +220,8 @@ struct ReviewMonitorAppComposition {
     typealias PresentationAnchorProvider = @MainActor () -> NSWindow?
     typealias LiveStoreFactory = (
         CodexReviewRuntime.Preferences,
-        CodexReviewNativeAuthentication.Configuration?
+        CodexReviewNativeAuthentication.Configuration?,
+        CodexReviewAppServerLifecycleHandler?
     ) -> CodexReviewStore
 
     var makeStore: (ReviewMonitorLaunchContext, @escaping PresentationAnchorProvider) -> CodexReviewStore
@@ -262,14 +264,16 @@ struct ReviewMonitorAppComposition {
 
     static func live(
         runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore = CodexReviewRuntime.UserDefaultsPreferencesStore(),
-        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration in
+        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration, appServerLifecycleHandler in
             CodexReviewStore.makeLiveStore(
                 runtimePreferences: runtimePreferences,
-                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                appServerLifecycleHandler: appServerLifecycleHandler
             )
         }
     ) -> ReviewMonitorAppComposition {
-        ReviewMonitorAppComposition(
+        let codexModelSource = ReviewMonitorCodexModelSource()
+        return ReviewMonitorAppComposition(
             makeStore: { context, presentationAnchorProvider in
                 if context.requestsPreviewContent {
                     return ReviewMonitorPreviewContent.makeStore()
@@ -280,12 +284,20 @@ struct ReviewMonitorAppComposition {
                         callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
                         browserSessionPolicy: .ephemeral,
                         presentationAnchorProvider: presentationAnchorProvider
-                    )
+                    ),
+                    { appServer in
+                        if let appServer {
+                            codexModelSource.install(container: CodexModelContainer(appServer: appServer))
+                        } else {
+                            codexModelSource.clear()
+                        }
+                    }
                 )
             },
             makeWindowController: { store, showSettings in
                 ReviewMonitorWindowController(
                     store: store,
+                    codexModelSource: codexModelSource,
                     showSettings: showSettings
                 )
             },

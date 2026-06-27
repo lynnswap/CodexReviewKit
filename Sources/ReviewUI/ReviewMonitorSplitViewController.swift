@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CodexDataKit
 import Foundation
 import ObservationBridge
 import CodexReviewKit
@@ -19,6 +20,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
+    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let showSettings: (@MainActor () -> Void)?
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
@@ -35,13 +37,29 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private weak var attachedWindow: NSWindow?
     private var isSidebarCollapsed = false
 
+    convenience init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        modelContext: CodexModelContext,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
+        self.init(
+            store: store,
+            uiState: uiState,
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
+            showSettings: showSettings
+        )
+    }
+
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
+        self.codexModelSource = codexModelSource
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
@@ -64,7 +82,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         )
         let transportViewController = ReviewMonitorTransportViewController(
             store: store,
-            uiState: uiState
+            uiState: uiState,
+            codexModelSource: codexModelSource
         )
         let statusAccessoryViewController = ReviewMonitorServerStatusAccessoryViewController(
             store: store,

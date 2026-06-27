@@ -223,6 +223,7 @@ extension CodexReviewStore {
     private func applyBackendRun(_ backendRun: CodexReviewBackendModel.Review.Run, to job: CodexReviewJob) {
         runtimeState.setActiveRun(backendRun, for: job.id)
         job.core.run = .init(
+            attemptID: backendRun.attemptID,
             reviewThreadID: backendRun.reviewThreadID,
             threadID: backendRun.threadID,
             turnID: backendRun.turnID,
@@ -1088,6 +1089,7 @@ private extension CodexReviewJob {
             return nil
         }
         return .init(
+            attemptID: core.run.attemptID ?? "attempt-1",
             threadID: threadID,
             turnID: core.run.turnID,
             reviewThreadID: core.run.reviewThreadID,

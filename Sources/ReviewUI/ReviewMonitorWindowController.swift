@@ -1,4 +1,5 @@
 import AppKit
+import CodexDataKit
 import CodexReviewKit
 
 @MainActor
@@ -21,6 +22,19 @@ public final class ReviewMonitorWindowController: NSWindowController {
     public convenience init(store: CodexReviewStore) {
         self.init(
             store: store,
+            codexModelSource: nil,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            showSettings: nil
+        )
+    }
+
+    public convenience init(
+        store: CodexReviewStore,
+        codexModelContext: CodexModelContext
+    ) {
+        self.init(
+            store: store,
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: codexModelContext),
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             showSettings: nil
         )
@@ -33,6 +47,21 @@ public final class ReviewMonitorWindowController: NSWindowController {
     ) {
         self.init(
             store: store,
+            codexModelSource: nil,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            showSettings: showSettings
+        )
+    }
+
+    @_spi(PreviewSupport)
+    public convenience init(
+        store: CodexReviewStore,
+        codexModelSource: ReviewMonitorCodexModelSource,
+        showSettings: @escaping @MainActor () -> Void
+    ) {
+        self.init(
+            store: store,
+            codexModelSource: codexModelSource,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             showSettings: showSettings
         )
@@ -40,12 +69,14 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
     convenience init(
         store: CodexReviewStore,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
+            codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
             frameAutosaveName: Self.frameAutosaveName,
             sidebarJobFilterDefaults: sidebarJobFilterDefaults,
@@ -55,6 +86,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
 
     init(
         store: CodexReviewStore,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarJobFilterDefaults: UserDefaults? = .standard,
@@ -67,6 +99,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
             uiState: uiState,
+            codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
             showSettings: showSettings
         )
@@ -112,20 +145,20 @@ public final class ReviewMonitorWindowController: NSWindowController {
 enum ReviewMonitorSidebar {}
 
 extension ReviewMonitorSidebar {
-enum JobFilterPersistence {
-    static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
+    enum JobFilterPersistence {
+        static let defaultsKey = "CodexReviewKit.ReviewMonitor.sidebarJobFilter"
 
-    static func load(from defaults: UserDefaults) -> SidebarJobFilter {
-        guard let rawValue = defaults.string(forKey: defaultsKey),
-              let filter = SidebarJobFilter(persistedValue: rawValue)
-        else {
-            return .all
+        static func load(from defaults: UserDefaults) -> SidebarJobFilter {
+            guard let rawValue = defaults.string(forKey: defaultsKey),
+                  let filter = SidebarJobFilter(persistedValue: rawValue)
+            else {
+                return .all
+            }
+            return filter
         }
-        return filter
-    }
 
-    static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
-        defaults.set(filter.persistedValue, forKey: defaultsKey)
+        static func save(_ filter: SidebarJobFilter, to defaults: UserDefaults) {
+            defaults.set(filter.persistedValue, forKey: defaultsKey)
+        }
     }
-}
 }

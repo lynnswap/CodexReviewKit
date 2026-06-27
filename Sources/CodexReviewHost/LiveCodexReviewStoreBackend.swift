@@ -10,6 +10,7 @@ private typealias ReviewCodexAccount = CodexReviewKit.CodexAccount
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
 private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void
+public typealias CodexReviewAppServerLifecycleHandler = @MainActor @Sendable (CodexAppServer?) -> Void
 
 private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
@@ -110,12 +111,14 @@ public extension CodexReviewStore {
     static func makeLiveStore(
         runtimePreferences: CodexReviewRuntime.Preferences = .defaults,
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
-        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system
+        webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil
     ) -> CodexReviewStore {
         CodexReviewStore(backend: LiveCodexReviewStoreBackend(
             runtimePreferences: runtimePreferences,
             nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
-            webAuthenticationSessionFactory: webAuthenticationSessionFactory
+            webAuthenticationSessionFactory: webAuthenticationSessionFactory,
+            appServerLifecycleHandler: appServerLifecycleHandler
         ))
     }
 
@@ -130,7 +133,8 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
-        appServer: CodexAppServer
+        appServer: CodexAppServer,
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
             environment: environment,
@@ -143,6 +147,7 @@ public extension CodexReviewStore {
             shutdownCleanupTimeout: shutdownCleanupTimeout,
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
+            appServerLifecycleHandler: appServerLifecycleHandler,
             appServerFactory: { _ in appServer }
         )
     }
@@ -162,6 +167,7 @@ public extension CodexReviewStore {
         shutdownCleanupTimeout: Duration = .seconds(2),
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         appServerFactory: @escaping @MainActor @Sendable (URL) async throws -> CodexAppServer
     ) -> CodexReviewStore {
         CodexReviewStore(
@@ -175,6 +181,7 @@ public extension CodexReviewStore {
                 mcpPortOwnerResolver: mcpPortOwnerResolver,
                 mcpHTTPServerBindChecker: mcpHTTPServerBindChecker,
                 shutdownCleanupTimeout: shutdownCleanupTimeout,
+                appServerLifecycleHandler: appServerLifecycleHandler,
                 appServerRuntimeFactory: { codexHomeURL in
                     let appServer = try await appServerFactory(codexHomeURL)
                     return .init(
@@ -222,6 +229,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker
     private let appServerRuntimeFactory: AppServerRuntimeFactory
     private let shutdownCleanupTimeout: Duration
+    private let appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler?
     private weak var attachedStore: CodexReviewStore?
 
     init(
@@ -239,6 +247,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
         shutdownCleanupTimeout: Duration = .seconds(2),
+        appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
         appServerRuntimeFactory: AppServerRuntimeFactory? = nil
     ) {
         let runtimePreferences = runtimePreferences.normalized
@@ -258,6 +267,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.mcpPortOwnerResolver = mcpPortOwnerResolver ?? Self.defaultMCPPortOwnerResolver
         self.mcpHTTPServerBindChecker = mcpHTTPServerBindChecker ?? Self.defaultMCPHTTPServerBindChecker
         self.shutdownCleanupTimeout = shutdownCleanupTimeout
+        self.appServerLifecycleHandler = appServerLifecycleHandler
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
         )
@@ -435,6 +445,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             startedAppServer = appServer
             self.appServer = appServer
             self.appServerBackend = backend
+            appServerLifecycleHandler?(appServer)
             observeAuthNotifications(appServer: appServer, backend: backend, store: store)
             if let mcpHTTPServerFactory {
                 let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
@@ -455,6 +466,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.appServer = nil
             self.appServerBackend = nil
             self.mcpHTTPServer = nil
+            appServerLifecycleHandler?(nil)
             authNotificationTask?.cancel()
             authNotificationTask = nil
             store.transitionToFailed(failureMessage)
@@ -527,6 +539,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         self.appServer = nil
         self.mcpHTTPServer = nil
+        appServerLifecycleHandler?(nil)
         authNotificationTask?.cancel()
         authNotificationTask = nil
         await mcpHTTPServer?.stop()

@@ -1,6 +1,6 @@
 import AppKit
+import CodexDataKit
 import ObservationBridge
-import CodexReviewKit
 import CodexReviewKit
 import ReviewMonitorRendering
 
@@ -13,6 +13,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
+    private let selectedReviewChat: ReviewMonitorSelectedReviewChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
@@ -30,9 +31,26 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var appliedLogRenderGeneration: UInt64 = 0
     private var hasAppliedBoundJobLog = false
 
-    init(store: CodexReviewStore, uiState: ReviewMonitorUIState) {
+    convenience init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        modelContext: CodexModelContext
+    ) {
+        self.init(
+            store: store,
+            uiState: uiState,
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext)
+        )
+    }
+
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil
+    ) {
         self.store = store
         self.uiState = uiState
+        self.selectedReviewChat = ReviewMonitorSelectedReviewChat(modelSource: codexModelSource)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -159,22 +177,21 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation = nil
         resetLogRenderer()
         boundJob = selectedJob
+        selectedReviewChat.bind(to: selectedJob)
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
-            let timeline = selectedJob.timeline
-            _ = timeline.revision
             let eventKind = event.kind
-            let shouldRender = eventKind == .initial || event.matches(\ReviewTimeline.revision)
             guard let self,
                   self.boundJob === selectedJob
             else {
                 return
             }
-            guard shouldRender else {
-                return
-            }
+            self.selectedReviewChat.bind(to: selectedJob)
+            let timeline = selectedJob.timeline
+            _ = timeline.revision
+            let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline)
             self.renderBoundJobLog(
-                timeline: timeline,
+                timelineDocument: timelineDocument,
                 restorationTarget: eventKind == .initial
                     ? self.restorationTarget(selectedJob)
                     : self.logScrollView.currentScrollRestorationTarget,
@@ -188,6 +205,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
         boundJob = nil
+        selectedReviewChat.bind(to: nil)
         resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
         logScrollView.clear()
@@ -362,7 +380,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderBoundJobLog(
-        timeline: ReviewTimeline,
+        timelineDocument: ReviewTimelineDocument,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
@@ -376,7 +394,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let jobID = boundJob.id
         logRenderTask?.cancel()
         logRenderTask = Task { @MainActor [weak self] in
-            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: timeline)
             let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
             guard Task.isCancelled == false,
                   let self,
@@ -395,6 +412,20 @@ final class ReviewMonitorTransportViewController: NSViewController {
             self.hasAppliedBoundJobLog = true
         }
         return true
+    }
+
+    private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
+        if let chat = selectedReviewChat.chat,
+           let link = selectedReviewChat.link,
+           let document = ReviewMonitorCodexChatTimelineProjection().document(
+               from: chat,
+               link: link,
+               revision: logRenderGeneration &+ 1
+           ) {
+            return document
+        }
+
+        return ReviewTimelineDocumentRenderer().document(from: timeline)
     }
 
     private func cacheBoundJobScrollTarget() {
@@ -480,6 +511,22 @@ extension ReviewMonitorTransportViewController {
 
     var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
         selectedWorkspaceFindingsObservation
+    }
+
+    var selectedReviewChatLinkForTesting: ReviewChatLink? {
+        selectedReviewChat.link
+    }
+
+    var selectedReviewChatIDForTesting: String? {
+        selectedReviewChat.chat?.id.rawValue
+    }
+
+    var selectedReviewChatPhaseForTesting: CodexDataPhase {
+        selectedReviewChat.phase
+    }
+
+    var selectedReviewChatItemTextsForTesting: [String] {
+        selectedReviewChat.chat?.items.compactMap(\.text) ?? []
     }
 
     var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {

@@ -222,7 +222,7 @@ struct CodexReviewMonitorCITests {
         var didCallLiveStoreFactory = false
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, _ in
+            makeLiveStore: { _, _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview store creation should not build a live store.")
                 return CodexReviewStore.makePreviewStore()
@@ -266,7 +266,7 @@ struct CodexReviewMonitorCITests {
         var capturedAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { runtimePreferences, authenticationConfiguration in
+            makeLiveStore: { runtimePreferences, authenticationConfiguration, _ in
                 capturedRuntimePreferences = runtimePreferences
                 capturedAuthenticationConfiguration = authenticationConfiguration
                 return expectedStore
@@ -294,6 +294,29 @@ struct CodexReviewMonitorCITests {
         }
         #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
         #expect(didRequestPresentationAnchor)
+    }
+
+    @Test func liveCompositionPassesAppServerLifecycleHandlerToLiveStoreFactory() {
+        let runtimePreferencesStore = RuntimePreferencesStoreStub()
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var capturedLifecycleHandler: CodexReviewAppServerLifecycleHandler?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _, appServerLifecycleHandler in
+                capturedLifecycleHandler = appServerLifecycleHandler
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [:],
+            arguments: [],
+            launchMode: .application
+        )
+
+        let store = composition.makeStore(context) { nil }
+
+        #expect(store === expectedStore)
+        #expect(capturedLifecycleHandler != nil)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {

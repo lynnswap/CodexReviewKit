@@ -2,17 +2,20 @@ import Foundation
 
 public struct ReviewJobCore: Codable, Sendable, Hashable {
     public struct Run: Codable, Sendable, Hashable {
+        public internal(set) var attemptID: String?
         public internal(set) var reviewThreadID: String?
         public internal(set) var threadID: String?
         public internal(set) var turnID: String?
         public internal(set) var model: String?
 
         public init(
+            attemptID: String? = nil,
             reviewThreadID: String? = nil,
             threadID: String? = nil,
             turnID: String? = nil,
             model: String? = nil
         ) {
+            self.attemptID = attemptID
             self.reviewThreadID = reviewThreadID
             self.threadID = threadID
             self.turnID = turnID
