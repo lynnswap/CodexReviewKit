@@ -1,4 +1,4 @@
-import CodexDataKit
+import CodexKit
 import Observation
 
 @MainActor

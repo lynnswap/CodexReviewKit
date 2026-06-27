@@ -95,8 +95,7 @@ let package = Package(
                 "CodexReviewKit",
                 "ReviewMonitorRendering",
                 "TextTransitions",
-                .product(name: "CodexAppServerKit", package: "CodexKit"),
-                .product(name: "CodexDataKit", package: "CodexKit"),
+                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
             swiftSettings: [
@@ -165,9 +164,8 @@ let package = Package(
         .testTarget(
             name: "ReviewUITests",
             dependencies: [
-                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
-                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewTesting",
                 "ReviewUI",
