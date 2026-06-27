@@ -498,14 +498,17 @@ final class ReviewMonitorCommandOutputPanelAttachment: NSTextAttachment {
     let blockID: ReviewMonitorLog.BlockID
     let panel: ReviewMonitorLog.CommandOutputPanel
     let outputLineHeight: CGFloat
+    let restoredOutputScrollOffset: CGFloat?
 
     init(
         panel: ReviewMonitorLog.CommandOutputPanel,
-        outputLineHeight: CGFloat
+        outputLineHeight: CGFloat,
+        restoredOutputScrollOffset: CGFloat? = nil
     ) {
         self.blockID = panel.blockID
         self.panel = panel
         self.outputLineHeight = outputLineHeight
+        self.restoredOutputScrollOffset = restoredOutputScrollOffset
         super.init(data: nil, ofType: nil)
 
         allowsTextAttachmentView = true
@@ -711,7 +714,10 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
         attachment: ReviewMonitorCommandOutputPanelAttachment,
         backgroundAlpha: CGFloat
     ) {
-        let panelChanged = panelView.configure(attachment.panel)
+        let panelChanged = panelView.configure(
+            attachment.panel,
+            restoredOutputScrollOffset: attachment.restoredOutputScrollOffset
+        )
         let blockIDChanged = blockID != attachment.blockID
         let backgroundChanged = abs(self.backgroundAlpha - backgroundAlpha) > 0.001
         guard panelChanged || blockIDChanged || backgroundChanged else {
@@ -772,6 +778,11 @@ final class ReviewMonitorCommandOutputPanelAttachmentView: NSView {
     func drawTerminalCharacters(in range: NSRange, forContentView view: NSView) {
         prepareForRangeQueries()
         panelView.drawTerminalCharacters(in: range, forContentView: view)
+    }
+
+    var outputScrollRestoreOffset: CGFloat? {
+        prepareForRangeQueries()
+        return panelView.outputScrollRestoreOffset
     }
 
     private func prepareForRangeQueries() {
@@ -878,6 +889,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     private var outputLineCount = 0
     private var outputMaximumLineUTF16Length = 0
     private var shouldScrollOutputToBottomOnNextLayout = false
+    private var pendingOutputScrollOffset: CGFloat?
 
     override var isFlipped: Bool {
         true
@@ -929,8 +941,17 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
     }
 
     @discardableResult
-    func configure(_ panel: ReviewMonitorLog.CommandOutputPanel) -> Bool {
+    func configure(
+        _ panel: ReviewMonitorLog.CommandOutputPanel,
+        restoredOutputScrollOffset: CGFloat? = nil
+    ) -> Bool {
         guard self.panel != panel else {
+            if let restoredOutputScrollOffset, panel.isExpanded {
+                pendingOutputScrollOffset = restoredOutputScrollOffset
+                shouldScrollOutputToBottomOnNextLayout = false
+                needsLayout = true
+                return true
+            }
             return false
         }
 
@@ -946,7 +967,10 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
         let outputChanged = previousPanel?.outputText != panel.outputText ||
             outputText != panel.outputText
         let shouldFollowOutput = wasExpanded == false || outputScrollIsPinnedToBottom()
-        if isExpanded, wasExpanded == false || (outputChanged && shouldFollowOutput) {
+        if let restoredOutputScrollOffset, isExpanded {
+            pendingOutputScrollOffset = restoredOutputScrollOffset
+            shouldScrollOutputToBottomOnNextLayout = false
+        } else if isExpanded, wasExpanded == false || (outputChanged && shouldFollowOutput) {
             shouldScrollOutputToBottomOnNextLayout = true
         }
 
@@ -1075,6 +1099,7 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             width: resultWidth,
             height: footerHeight
         )
+        restorePendingOutputScrollOffsetIfNeeded()
         scrollOutputToBottomIfNeeded()
     }
 
@@ -1155,6 +1180,32 @@ final class ReviewMonitorCommandOutputPanelView: NSView {
             return true
         }
         return abs(maxY - clipView.bounds.origin.y) <= 0.5
+    }
+
+    var outputScrollRestoreOffset: CGFloat? {
+        guard panel?.isExpanded == true,
+              outputScrollView.isHidden == false,
+              outputScrollIsPinnedToBottom() == false
+        else {
+            return nil
+        }
+        return outputScrollView.contentView.bounds.origin.y
+    }
+
+    private func restorePendingOutputScrollOffsetIfNeeded() {
+        guard let pendingOutputScrollOffset,
+              outputScrollView.isHidden == false,
+              outputScrollView.contentSize.height > 0
+        else {
+            return
+        }
+
+        let clipView = outputScrollView.contentView
+        let maxY = max(0, outputTextView.frame.height - clipView.bounds.height)
+        let nextY = min(max(0, pendingOutputScrollOffset), maxY)
+        clipView.scroll(to: NSPoint(x: clipView.bounds.origin.x, y: nextY))
+        outputScrollView.reflectScrolledClipView(clipView)
+        self.pendingOutputScrollOffset = nil
     }
 
     private func scrollOutputToBottomIfNeeded() {

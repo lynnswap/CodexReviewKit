@@ -44,6 +44,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
     private var currentDecorations: [ReviewMonitorLog.Decoration] = []
     private var currentCommandOutputPanels: [ReviewMonitorLog.CommandOutputPanel] = []
     private var expandedCommandOutputBlockIDs = Set<ReviewMonitorLog.BlockID>()
+    private var commandOutputPanelOutputScrollOffsetsByBlockID: [ReviewMonitorLog.BlockID: CGFloat] = [:]
     private var cachedFinderStringMapping: FinderStringMapping?
     private(set) var estimatedDocumentHeight: CGFloat = 0
     private var glowTimer: Timer?
@@ -391,6 +392,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
             return
         }
 
+        cacheCommandOutputPanelOutputScrollOffsets()
         let commandOutputPanels = displayPanelsWithCurrentExpansionState(document.commandOutputPanels)
         let changedPanelRanges = changedCommandOutputPanelRanges(
             from: currentCommandOutputPanels,
@@ -398,6 +400,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
         )
         currentDecorations = document.decorations
         currentCommandOutputPanels = commandOutputPanels
+        pruneCommandOutputPanelOutputScrollOffsets(for: commandOutputPanels)
         invalidateFinderStringMapping()
         if let append,
             let invalidationRange = styleInvalidationRange(for: append, in: document)
@@ -428,6 +431,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
 
     func resetCommandOutputPanelState() {
         expandedCommandOutputBlockIDs.removeAll()
+        commandOutputPanelOutputScrollOffsetsByBlockID.removeAll()
         currentCommandOutputPanels = displayPanelsWithCurrentExpansionState(currentCommandOutputPanels)
         invalidateFinderStringMapping()
     }
@@ -435,6 +439,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
     func pruneCommandOutputPanelExpansionState(for panels: [ReviewMonitorLog.CommandOutputPanel]) {
         let blockIDs = Set(panels.map(\.blockID))
         expandedCommandOutputBlockIDs.formIntersection(blockIDs)
+        commandOutputPanelOutputScrollOffsetsByBlockID = commandOutputPanelOutputScrollOffsetsByBlockID
+            .filter { blockIDs.contains($0.key) }
     }
 
     @discardableResult
@@ -643,7 +649,8 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
                 .attachment,
                 value: ReviewMonitorCommandOutputPanelAttachment(
                     panel: commandOutputPanelAttachmentPayload(for: panel),
-                    outputLineHeight: commandOutputPanelLineHeight
+                    outputLineHeight: commandOutputPanelLineHeight,
+                    restoredOutputScrollOffset: commandOutputPanelOutputScrollOffsetsByBlockID[panel.blockID]
                 ),
                 range: panelAttachmentRange
             )
@@ -2453,6 +2460,24 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
         visibleFragmentViews.flatMap { fragmentView in
             fragmentView.subviews.compactMap { $0 as? ReviewMonitorCommandOutputPanelAttachmentView }
         }
+    }
+
+    private func cacheCommandOutputPanelOutputScrollOffsets() {
+        for panelView in commandOutputPanelAttachmentViews() {
+            if let offset = panelView.outputScrollRestoreOffset {
+                commandOutputPanelOutputScrollOffsetsByBlockID[panelView.blockID] = offset
+            } else {
+                commandOutputPanelOutputScrollOffsetsByBlockID.removeValue(forKey: panelView.blockID)
+            }
+        }
+    }
+
+    private func pruneCommandOutputPanelOutputScrollOffsets(
+        for panels: [ReviewMonitorLog.CommandOutputPanel]
+    ) {
+        let expandedBlockIDs = Set(panels.lazy.filter(\.isExpanded).map(\.blockID))
+        commandOutputPanelOutputScrollOffsetsByBlockID = commandOutputPanelOutputScrollOffsetsByBlockID
+            .filter { expandedBlockIDs.contains($0.key) }
     }
 
     private func visibleCommandOutputPanelAttachmentViews() -> [ReviewMonitorCommandOutputPanelAttachmentView] {
