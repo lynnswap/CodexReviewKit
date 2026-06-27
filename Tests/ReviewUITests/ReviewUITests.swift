@@ -348,7 +348,7 @@ struct ReviewUITests {
         #expect(sidebar.displayedSectionTitlesForTesting == [workspaceBeta.displayTitle, workspaceAlpha.displayTitle])
     }
 
-    @Test func jobDropOnBlankAreaMovesToFullOrderEnd() async {
+    @Test func reviewChatDropOnBlankAreaMovesToFullOrderEnd() async {
         let firstJob = makeJob(
             id: "job-blank-area-reject",
             cwd: "/tmp/workspace-alpha",
@@ -379,7 +379,7 @@ struct ReviewUITests {
         #expect(store.orderedJobs(in: workspace).map(\.id) == ["job-blank-area-peer", "job-blank-area-reject"])
     }
 
-    @Test func jobDropReordersWithinWorkspaceAndPreservesSelection() async throws {
+    @Test func reviewChatDropReordersWithinWorkspaceAndPreservesSelection() async throws {
         let firstJob = makeJob(
             id: "job-1",
             cwd: "/tmp/workspace-alpha",
@@ -412,7 +412,7 @@ struct ReviewUITests {
         let secondJobRowHeightBeforeDrop = try #require(sidebar.jobRowHeightForTesting(secondJob))
         #expect(firstJobRowHeightBeforeDrop == secondJobRowHeightBeforeDrop)
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 firstJob,
                 proposedJob: secondJob,
                 hoveringBelowMidpoint: false
@@ -420,7 +420,7 @@ struct ReviewUITests {
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-1", "job-2"])
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 firstJob,
                 proposedJob: secondJob,
                 hoveringBelowMidpoint: true
@@ -773,7 +773,7 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func jobDropWhileFilteredMapsVisibleIndexToStoreOrder() async throws {
+    @Test func reviewChatDropWhileFilteredMapsVisibleIndexToStoreOrder() async throws {
         let hiddenPrefix = makeJob(
             id: "job-hidden-prefix",
             cwd: "/tmp/workspace-alpha",
@@ -820,7 +820,7 @@ struct ReviewUITests {
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running-a", "job-running-b"])
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 runningA,
                 proposedJob: runningB,
                 hoveringBelowMidpoint: false
@@ -838,7 +838,7 @@ struct ReviewUITests {
             ])
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 runningA,
                 proposedJob: runningB,
                 hoveringBelowMidpoint: true
@@ -869,7 +869,7 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func jobDropIsRejectedForLatestFinishedOnlyFilter() {
+    @Test func reviewChatDropIsRejectedForLatestFinishedOnlyFilter() {
         let runningJob = makeJob(
             id: "job-running",
             cwd: "/tmp/workspace-alpha",
@@ -905,10 +905,10 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-finished-latest"])
-        #expect(sidebar.performJobDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
+        #expect(sidebar.performReviewChatDropForTesting(latestJob, proposedWorkspace: workspace, childIndex: 0) == false)
     }
 
-    @Test func jobDropWhileRunningAndLatestFinishedFilterReordersVisibleJobs() async throws {
+    @Test func reviewChatDropWhileRunningAndLatestFinishedFilterReordersVisibleReviewChats() async throws {
         let runningJob = makeJob(
             id: "job-running",
             cwd: "/tmp/workspace-alpha",
@@ -944,7 +944,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         #expect(sidebar.displayedJobIDsForTesting(in: workspace) == ["job-running", "job-finished-latest"])
-        #expect(sidebar.performJobDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 2))
+        #expect(sidebar.performReviewChatDropForTesting(runningJob, proposedWorkspace: workspace, childIndex: 2))
         await Task.yield()
 
         try await waitForObservedValueFromCurrentObservation(
@@ -1460,7 +1460,7 @@ struct ReviewUITests {
         #expect(sidebar.workspaceIsExpandedForTesting(betaWorkspace) == false)
     }
 
-    @Test func crossWorkspaceJobDropIsRejected() {
+    @Test func crossWorkspaceReviewChatDropIsRejected() {
         let alphaJob = makeJob(
             id: "job-alpha",
             cwd: "/tmp/workspace-alpha",
@@ -1486,7 +1486,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        #expect(sidebar.performJobDropForTesting(alphaJob, proposedWorkspace: betaWorkspace, childIndex: 0) == false)
+        #expect(sidebar.performReviewChatDropForTesting(alphaJob, proposedWorkspace: betaWorkspace, childIndex: 0) == false)
         #expect(store.orderedJobs(in: alphaWorkspace).map(\.id) == ["job-alpha"])
         #expect(store.orderedJobs(in: betaWorkspace).map(\.id) == ["job-beta"])
     }
@@ -2696,14 +2696,14 @@ struct ReviewUITests {
             ])
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 firstRunningJob,
                 proposedWorkspaceSectionContaining: secondWorkspace,
                 childIndex: 3
             ) == false)
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 firstRunningJob,
                 proposedWorkspaceSectionContaining: firstWorkspace,
                 childIndex: 2
@@ -3000,7 +3000,7 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func workspaceSectionJobDropUsesRootChildIndexesForLaterWorkspaceJobs() async throws {
+    @Test func workspaceSectionReviewChatDropUsesRootChildIndexesForLaterWorkspaceReviewChats() async throws {
         let fixture = try makeLinkedWorktreeFixtureForTesting(repositoryName: "CodexReviewKit")
         defer {
             try? FileManager.default.removeItem(at: fixture.rootURL)
@@ -3043,21 +3043,21 @@ struct ReviewUITests {
             ])
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 secondWorkspaceFirstJob,
                 proposedWorkspaceSectionContaining: secondWorkspace,
                 childIndex: 0
             ) == false)
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 secondWorkspaceFirstJob,
                 proposedJob: firstWorkspaceJob,
                 hoveringBelowMidpoint: true
             ) == false)
 
         #expect(
-            sidebar.performJobDropForTesting(
+            sidebar.performReviewChatDropForTesting(
                 secondWorkspaceFirstJob,
                 proposedJob: secondWorkspaceSecondJob,
                 hoveringBelowMidpoint: true
