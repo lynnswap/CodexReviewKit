@@ -215,8 +215,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
             }
             self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
             let timeline = selectedJob.timeline
+#if DEBUG
             _ = timeline.revision
-            let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline)
+#endif
+            guard let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline) else {
+                self.logScrollView.clear()
+                return
+            }
             self.renderBoundLog(
                 timelineDocument: timelineDocument,
                 target: .job(selectedJob.id),
@@ -482,12 +487,16 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
+    private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument? {
         if let document = selectedCodexChat.timelineDocument {
             return document
         }
 
+#if DEBUG
         return ReviewTimelineDocumentRenderer().document(from: timeline)
+#else
+        return nil
+#endif
     }
 
     private func cacheBoundJobScrollTarget() {
