@@ -57,7 +57,9 @@ struct ReviewMonitorSelectedReviewChatTests {
                 && transport.selectedReviewChatPhaseForTesting == .loading
                 && transport.selectedReviewChatItemTextsForTesting == ["Review snapshot"]
         }
-        #expect(transport.selectedReviewChatLinkForTesting?.activeChatThreadID == "review-thread")
+        #expect(
+            transport.selectedReviewChatIdentityForTesting?.activeTurnThreadID == "review-thread"
+        )
         #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
     }
 
@@ -89,7 +91,7 @@ struct ReviewMonitorSelectedReviewChatTests {
 
         uiState.selection = nil
         try await waitForCondition {
-            transport.selectedReviewChatIDForTesting == nil && transport.selectedReviewChatLinkForTesting == nil
+            transport.selectedReviewChatIDForTesting == nil && transport.selectedReviewChatIdentityForTesting == nil
                 && transport.selectedReviewChatPhaseForTesting == .idle
         }
     }
@@ -138,7 +140,7 @@ struct ReviewMonitorSelectedReviewChatTests {
             ))
 
         try await waitForCondition {
-            transport.selectedReviewChatLinkForTesting?.activeChatThreadID == "review-thread"
+            transport.selectedReviewChatIdentityForTesting?.activeTurnThreadID == "review-thread"
         }
         #expect(transport.selectedReviewChatIDForTesting == nil)
 
@@ -194,7 +196,7 @@ struct ReviewMonitorSelectedReviewChatTests {
         )
         uiState.selection = .job(job)
 
-        #expect(transport.selectedReviewChatLinkForTesting == nil)
+        #expect(transport.selectedReviewChatIdentityForTesting == nil)
 
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"

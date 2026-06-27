@@ -8,7 +8,7 @@ import ObservationBridge
 @MainActor
 @Observable
 final class ReviewMonitorSelectedReviewChat {
-    private(set) var link: ReviewChatLink?
+    private(set) var identity: CodexReviewIdentity?
     private(set) var chat: CodexChat?
     var phase: CodexDataPhase {
         chat?.phase ?? .idle
@@ -17,10 +17,10 @@ final class ReviewMonitorSelectedReviewChat {
         chat?.lastErrorDescription
     }
     var turnSnapshot: CodexChatTurnSnapshot? {
-        guard let chat, let link else {
+        guard let chat, let identity else {
             return nil
         }
-        return chat.turnSnapshot(for: CodexTurnID(rawValue: link.turnID))
+        return chat.turnSnapshot(for: identity.turnID)
     }
     var chatCreatedAt: Date? {
         chat?.createdAt
@@ -68,29 +68,29 @@ final class ReviewMonitorSelectedReviewChat {
     }
 
     private func refreshBinding() {
-        let nextLink = boundJob?.reviewChatLink
+        let nextIdentity = boundJob?.reviewIdentity
         let nextModelContext = modelSource?.modelContext
-        guard nextLink != link || nextModelContext !== boundModelContext else {
+        guard nextIdentity != identity || nextModelContext !== boundModelContext else {
             return
         }
         cancelObservation()
-        link = nextLink
+        identity = nextIdentity
         chat = nil
         boundModelContext = nextModelContext
 
-        guard let nextLink, let modelContext = nextModelContext else {
+        guard let nextIdentity, let modelContext = nextModelContext else {
             return
         }
 
-        let nextChat = modelContext.model(for: CodexThreadID(rawValue: nextLink.activeChatThreadID))
+        let nextChat = modelContext.model(for: nextIdentity)
         chat = nextChat
 
-        observationTask = Task { @MainActor [weak self, nextChat, nextLink] in
+        observationTask = Task { @MainActor [weak self, nextChat, nextIdentity, modelContext] in
             do {
-                let observation = try await nextChat.observe()
+                let observation = try await modelContext.observe(nextIdentity)
                 guard Task.isCancelled == false,
                     let self,
-                    self.link == nextLink,
+                    self.identity == nextIdentity,
                     self.chat === nextChat
                 else {
                     observation.cancel()
@@ -108,5 +108,21 @@ final class ReviewMonitorSelectedReviewChat {
         observationTask = nil
         observation?.cancel()
         observation = nil
+    }
+}
+
+private extension CodexReviewJob {
+    var reviewIdentity: CodexReviewIdentity? {
+        guard let sourceThreadID = core.run.threadID?.nilIfEmpty,
+            let turnID = core.run.turnID?.nilIfEmpty
+        else {
+            return nil
+        }
+        return CodexReviewIdentity(
+            threadID: CodexThreadID(rawValue: sourceThreadID),
+            turnID: CodexTurnID(rawValue: turnID),
+            reviewThreadID: core.run.reviewThreadID?.nilIfEmpty.map(CodexThreadID.init(rawValue:)),
+            model: core.run.model?.nilIfEmpty
+        )
     }
 }

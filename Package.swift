@@ -95,6 +95,7 @@ let package = Package(
                 "CodexReviewKit",
                 "ReviewMonitorRendering",
                 "TextTransitions",
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
                 .product(name: "CodexDataKit", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],

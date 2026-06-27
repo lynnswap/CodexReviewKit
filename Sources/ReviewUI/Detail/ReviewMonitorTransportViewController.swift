@@ -1,7 +1,8 @@
 import AppKit
+import CodexAppServerKit
 import CodexDataKit
-import ObservationBridge
 import CodexReviewKit
+import ObservationBridge
 import ReviewMonitorRendering
 
 @MainActor
@@ -513,8 +514,8 @@ extension ReviewMonitorTransportViewController {
         selectedWorkspaceFindingsObservation
     }
 
-    var selectedReviewChatLinkForTesting: ReviewChatLink? {
-        selectedReviewChat.link
+    var selectedReviewChatIdentityForTesting: CodexReviewIdentity? {
+        selectedReviewChat.identity
     }
 
     var selectedReviewChatIDForTesting: String? {
