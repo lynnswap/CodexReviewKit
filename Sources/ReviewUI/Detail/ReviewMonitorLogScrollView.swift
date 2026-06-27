@@ -1,6 +1,5 @@
 import AppKit
 import ObjectiveC.runtime
-import CodexReviewKit
 
 @MainActor
 final class ReviewMonitorLogScrollView: NSScrollView {
@@ -41,7 +40,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
     private var displayedFinderSupplementSignature: Int?
     private var sourceDocument: ReviewMonitorLog.Document?
     private var currentDisplayDocument: ReviewMonitorLog.Document?
-    private var logProjection = ReviewMonitorLog.Projection()
     private var liveResizeRestorationTarget: ScrollRestorationTarget?
     private var isFindQueryActive = false
     private var activeFindQueryString: String?
@@ -172,7 +170,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
 
     @discardableResult
     func clear() -> Bool {
-        logProjection = ReviewMonitorLog.Projection()
         displayedRevision = nil
         displayedPresentationSignature = nil
         displayedFinderSupplementSignature = nil
@@ -184,20 +181,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             document: .init(),
             restoring: .top,
             countBottomRestoreAsAutoFollow: false
-        )
-    }
-
-    @discardableResult
-    func render(
-        entries: [ReviewLogEntry],
-        restoring restorationTarget: ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) -> Bool {
-        let document = logProjection.render(entries: entries)
-        return render(
-            document: document,
-            restoring: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate
         )
     }
 
