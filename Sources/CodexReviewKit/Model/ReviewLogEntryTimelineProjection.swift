@@ -61,8 +61,8 @@ package struct ReviewLogEntryTimelineProjector {
     package func trimTextContent(
         to entries: [ReviewLogEntry],
         directTimelineTextItemIDs: Set<ReviewTimelineItem.ID>,
-        directTimelineTextItemIDsWithCompatibilityLog: Set<ReviewTimelineItem.ID>,
-        directTimelineTextCompatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>],
+        directTimelineTextItemIDsWithRetainedLogText: Set<ReviewTimelineItem.ID>,
+        retainedTimelineTextItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>],
         legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     ) {
         guard directTimelineTextItemIDs.isEmpty == false
@@ -76,7 +76,7 @@ package struct ReviewLogEntryTimelineProjector {
             }
             for itemID in directTimelineTextCandidateIDs(
                 for: entry,
-                compatibilityItemIDsByLogEntryID: directTimelineTextCompatibilityItemIDsByLogEntryID
+                retainedTextItemIDsByLogEntryID: retainedTimelineTextItemIDsByLogEntryID
             ) {
                 if entry.shouldAppendRetainedTimelineText {
                     textByItemID[itemID, default: ""] += retainedTimelineText
@@ -89,7 +89,7 @@ package struct ReviewLogEntryTimelineProjector {
             let text: String
             if let retainedText = textByItemID[itemID] {
                 text = retainedText
-            } else if directTimelineTextItemIDsWithCompatibilityLog.contains(itemID) {
+            } else if directTimelineTextItemIDsWithRetainedLogText.contains(itemID) {
                 text = ""
             } else {
                 continue
@@ -143,11 +143,11 @@ package struct ReviewLogEntryTimelineProjector {
 
     private func directTimelineTextCandidateIDs(
         for entry: ReviewLogEntry,
-        compatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
+        retainedTextItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
     ) -> [ReviewTimelineItem.ID] {
         var ids = entry.directTimelineTextCandidateIDs
-        if let compatibilityItemIDs = compatibilityItemIDsByLogEntryID[entry.id] {
-            ids.append(contentsOf: compatibilityItemIDs)
+        if let retainedTextItemIDs = retainedTextItemIDsByLogEntryID[entry.id] {
+            ids.append(contentsOf: retainedTextItemIDs)
         }
         var seen: Set<ReviewTimelineItem.ID> = []
         return ids.filter { seen.insert($0).inserted }
@@ -175,8 +175,8 @@ extension CodexReviewJob {
         ReviewLogEntryTimelineProjector(timeline: timeline).trimTextContent(
             to: logEntries,
             directTimelineTextItemIDs: directTimelineTextItemIDs,
-            directTimelineTextItemIDsWithCompatibilityLog: directTimelineTextItemIDsWithCompatibilityLog,
-            directTimelineTextCompatibilityItemIDsByLogEntryID: directTimelineTextCompatibilityItemIDsByLogEntryID,
+            directTimelineTextItemIDsWithRetainedLogText: directTimelineTextItemIDsWithRetainedLogText,
+            retainedTimelineTextItemIDsByLogEntryID: retainedTimelineTextItemIDsByLogEntryID,
             legacyProjectedTimelineTextItemIDs: legacyProjectedTimelineTextItemIDs
         )
     }
@@ -252,7 +252,7 @@ package extension ReviewLogEntry {
             if kind == .todoList {
                 ids.append(.init(rawValue: "\(rawID):turn/plan/updated"))
             }
-            if isMCPToolProgressCompatibilityLog {
+            if isMCPToolProgressSummaryLog {
                 ids.append(.init(rawValue: "\(rawID):progress"))
             }
         }
@@ -261,7 +261,7 @@ package extension ReviewLogEntry {
         return ids.filter { seen.insert($0).inserted }
     }
 
-    var isMCPToolProgressCompatibilityLog: Bool {
+    var isMCPToolProgressSummaryLog: Bool {
         kind == .toolCall
             && metadata?.sourceType == "mcpToolCall"
             && metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines) == "Tool progress"

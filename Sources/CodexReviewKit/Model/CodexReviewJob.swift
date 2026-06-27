@@ -38,11 +38,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
     @ObservationIgnored
     package var directTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     @ObservationIgnored
-    package var directTimelineTextItemIDsWithCompatibilityLog: Set<ReviewTimelineItem.ID>
+    package var directTimelineTextItemIDsWithRetainedLogText: Set<ReviewTimelineItem.ID>
     @ObservationIgnored
-    package var directTimelineTextCompatibilityItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
+    package var retainedTimelineTextItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>]
     @ObservationIgnored
-    private var pendingDirectTimelineTextItemIDsForCompatibilityLog: [ReviewTimelineItem.ID]
+    private var pendingDirectTimelineTextItemIDsForLogRetention: [ReviewTimelineItem.ID]
     @ObservationIgnored
     private var latestDirectTimelineTextItemIDs: [ReviewTimelineItem.ID]
     @ObservationIgnored
@@ -96,9 +96,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.pendingLegacyTimelineProjectionSuppressions = 0
         self.pendingTerminalFailureLogTimelineProjectionSuppressions = 0
         self.directTimelineTextItemIDs = []
-        self.directTimelineTextItemIDsWithCompatibilityLog = []
-        self.directTimelineTextCompatibilityItemIDsByLogEntryID = [:]
-        self.pendingDirectTimelineTextItemIDsForCompatibilityLog = []
+        self.directTimelineTextItemIDsWithRetainedLogText = []
+        self.retainedTimelineTextItemIDsByLogEntryID = [:]
+        self.pendingDirectTimelineTextItemIDsForLogRetention = []
         self.latestDirectTimelineTextItemIDs = []
         self.legacyProjectedTimelineTextItemIDs = []
         self.legacyLogBuffer = initialLogBuffer
@@ -132,9 +132,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
             pendingLegacyTimelineProjectionSuppressions = 0
             pendingTerminalFailureLogTimelineProjectionSuppressions = 0
             directTimelineTextItemIDs.removeAll(keepingCapacity: true)
-            directTimelineTextItemIDsWithCompatibilityLog.removeAll(keepingCapacity: true)
-            directTimelineTextCompatibilityItemIDsByLogEntryID.removeAll(keepingCapacity: true)
-            pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll(keepingCapacity: true)
+            directTimelineTextItemIDsWithRetainedLogText.removeAll(keepingCapacity: true)
+            retainedTimelineTextItemIDsByLogEntryID.removeAll(keepingCapacity: true)
+            pendingDirectTimelineTextItemIDsForLogRetention.removeAll(keepingCapacity: true)
             latestDirectTimelineTextItemIDs.removeAll(keepingCapacity: true)
             legacyProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
         }
@@ -151,16 +151,16 @@ public final class CodexReviewJob: Identifiable, Hashable {
         let entry = appendResult.entry
         syncLogEntriesFromBuffer()
         if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
-            let allowsPendingFallback = suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
+            let allowsPendingRetainedText = suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
             if entry.retainedTimelineText != nil {
-                recordDirectTimelineTextCompatibilityLog(
+                recordDirectTimelineTextRetention(
                     for: entry,
-                    allowsPendingFallback: allowsPendingFallback
+                    allowsPendingRetainedText: allowsPendingRetainedText
                 )
             } else {
-                discardDirectTimelineTextCompatibilityLog(
+                discardDirectTimelineTextRetention(
                     for: entry,
-                    allowsPendingFallback: allowsPendingFallback
+                    allowsPendingRetainedText: allowsPendingRetainedText
                 )
             }
         }
@@ -215,7 +215,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
         latestDirectTimelineTextItemIDs = directTextItemIDsApplied
         if legacyProjectionSuppressionCount > 0 {
-            appendPendingDirectTimelineTextItemIDsForCompatibilityLog(directTextItemIDsApplied)
+            appendPendingDirectTimelineTextItemIDsForLogRetention(directTextItemIDsApplied)
         }
     }
 
@@ -229,61 +229,61 @@ public final class CodexReviewJob: Identifiable, Hashable {
         }
     }
 
-    private func recordDirectTimelineTextCompatibilityLog(
+    private func recordDirectTimelineTextRetention(
         for entry: ReviewLogEntry,
-        allowsPendingFallback: Bool
+        allowsPendingRetainedText: Bool
     ) {
         var itemIDs: Set<ReviewTimelineItem.ID> = []
         for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
             itemIDs.insert(itemID)
         }
         if itemIDs.isEmpty,
-           allowsPendingFallback,
-           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+           allowsPendingRetainedText,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForLogRetention() {
             itemIDs.insert(pendingItemID)
         }
         guard itemIDs.isEmpty == false else {
             return
         }
-        directTimelineTextItemIDsWithCompatibilityLog.formUnion(itemIDs)
-        directTimelineTextCompatibilityItemIDsByLogEntryID[entry.id, default: []].formUnion(itemIDs)
-        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+        directTimelineTextItemIDsWithRetainedLogText.formUnion(itemIDs)
+        retainedTimelineTextItemIDsByLogEntryID[entry.id, default: []].formUnion(itemIDs)
+        removePendingDirectTimelineTextItemIDsForLogRetention(itemIDs)
     }
 
-    private func discardDirectTimelineTextCompatibilityLog(
+    private func discardDirectTimelineTextRetention(
         for entry: ReviewLogEntry,
-        allowsPendingFallback: Bool
+        allowsPendingRetainedText: Bool
     ) {
         var itemIDs: Set<ReviewTimelineItem.ID> = []
         for itemID in entry.directTimelineTextCandidateIDs where directTimelineTextItemIDs.contains(itemID) {
             itemIDs.insert(itemID)
         }
         if itemIDs.isEmpty,
-           allowsPendingFallback,
-           let pendingItemID = popPendingDirectTimelineTextItemIDForCompatibilityLog() {
+           allowsPendingRetainedText,
+           let pendingItemID = popPendingDirectTimelineTextItemIDForLogRetention() {
             itemIDs.insert(pendingItemID)
         }
-        removePendingDirectTimelineTextItemIDsForCompatibilityLog(itemIDs)
+        removePendingDirectTimelineTextItemIDsForLogRetention(itemIDs)
     }
 
-    private func appendPendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: [ReviewTimelineItem.ID]) {
-        for itemID in itemIDs where pendingDirectTimelineTextItemIDsForCompatibilityLog.contains(itemID) == false {
-            pendingDirectTimelineTextItemIDsForCompatibilityLog.append(itemID)
+    private func appendPendingDirectTimelineTextItemIDsForLogRetention(_ itemIDs: [ReviewTimelineItem.ID]) {
+        for itemID in itemIDs where pendingDirectTimelineTextItemIDsForLogRetention.contains(itemID) == false {
+            pendingDirectTimelineTextItemIDsForLogRetention.append(itemID)
         }
     }
 
-    private func popPendingDirectTimelineTextItemIDForCompatibilityLog() -> ReviewTimelineItem.ID? {
-        guard pendingDirectTimelineTextItemIDsForCompatibilityLog.isEmpty == false else {
+    private func popPendingDirectTimelineTextItemIDForLogRetention() -> ReviewTimelineItem.ID? {
+        guard pendingDirectTimelineTextItemIDsForLogRetention.isEmpty == false else {
             return nil
         }
-        return pendingDirectTimelineTextItemIDsForCompatibilityLog.removeFirst()
+        return pendingDirectTimelineTextItemIDsForLogRetention.removeFirst()
     }
 
-    private func removePendingDirectTimelineTextItemIDsForCompatibilityLog(_ itemIDs: Set<ReviewTimelineItem.ID>) {
+    private func removePendingDirectTimelineTextItemIDsForLogRetention(_ itemIDs: Set<ReviewTimelineItem.ID>) {
         guard itemIDs.isEmpty == false else {
             return
         }
-        pendingDirectTimelineTextItemIDsForCompatibilityLog.removeAll { itemIDs.contains($0) }
+        pendingDirectTimelineTextItemIDsForLogRetention.removeAll { itemIDs.contains($0) }
     }
 
     private func recordLegacyProjectedTimelineTextItemIDsFromLogEntries() {
@@ -297,12 +297,12 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     package func suppressNextLegacyTimelineProjection() {
         pendingLegacyTimelineProjectionSuppressions += 1
-        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
+        appendPendingDirectTimelineTextItemIDsForLogRetention(latestDirectTimelineTextItemIDs)
     }
 
     package func suppressNextTerminalFailureLogTimelineProjection() {
         pendingTerminalFailureLogTimelineProjectionSuppressions += 1
-        appendPendingDirectTimelineTextItemIDsForCompatibilityLog(latestDirectTimelineTextItemIDs)
+        appendPendingDirectTimelineTextItemIDsForLogRetention(latestDirectTimelineTextItemIDs)
     }
 
     package func discardPendingLegacyTimelineProjectionSuppression() {
