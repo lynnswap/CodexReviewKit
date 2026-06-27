@@ -195,7 +195,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let scrollView = NSScrollView()
     private let outlineView = ReviewMonitorSidebarOutlineView()
     private let accountsViewController: ReviewMonitorAccountsViewController
-    private let emptyStateViewController = PlaceholderViewController(content: .noReviewJobs)
+    private let emptyStateViewController = PlaceholderViewController(content: .noReviewChats)
     private let unavailableView: NSHostingView<MCPServerUnavailableView>
     private let rowHeights: SidebarRowHeights
 
