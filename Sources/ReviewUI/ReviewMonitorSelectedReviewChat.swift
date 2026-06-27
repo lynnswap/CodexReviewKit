@@ -1,5 +1,4 @@
 import CodexKit
-import CodexReviewKit
 import Foundation
 import Observation
 import ObservationBridge
@@ -23,7 +22,7 @@ final class ReviewMonitorSelectedReviewChat {
     @ObservationIgnored
     private weak var boundModelContext: CodexModelContext?
     @ObservationIgnored
-    private weak var boundJob: CodexReviewJob?
+    private var boundChatBinding: ReviewMonitorReviewChatBinding?
     @ObservationIgnored
     private var observation: CodexChatObservation?
     @ObservationIgnored
@@ -43,8 +42,8 @@ final class ReviewMonitorSelectedReviewChat {
         cancelObservation()
     }
 
-    func bind(to job: CodexReviewJob?) {
-        boundJob = job
+    func bind(to chatBinding: ReviewMonitorReviewChatBinding?) {
+        boundChatBinding = chatBinding
         refreshBinding()
     }
 
@@ -59,7 +58,7 @@ final class ReviewMonitorSelectedReviewChat {
     }
 
     private func refreshBinding() {
-        let nextIdentity = boundJob?.reviewIdentity
+        let nextIdentity = boundChatBinding?.identity
         let nextModelContext = modelSource?.modelContext
         guard nextIdentity != identity || nextModelContext !== boundModelContext else {
             return
@@ -115,21 +114,5 @@ final class ReviewMonitorSelectedReviewChat {
         observationTask = nil
         observation?.cancel()
         observation = nil
-    }
-}
-
-private extension CodexReviewJob {
-    var reviewIdentity: CodexReviewIdentity? {
-        guard let sourceThreadID = core.run.threadID?.nilIfEmpty,
-            let turnID = core.run.turnID?.nilIfEmpty
-        else {
-            return nil
-        }
-        return CodexReviewIdentity(
-            threadID: CodexThreadID(rawValue: sourceThreadID),
-            turnID: CodexTurnID(rawValue: turnID),
-            reviewThreadID: core.run.reviewThreadID?.nilIfEmpty.map(CodexThreadID.init(rawValue:)),
-            model: core.run.model?.nilIfEmpty
-        )
     }
 }
