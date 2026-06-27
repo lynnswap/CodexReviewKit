@@ -280,6 +280,79 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(updatedSnapshot.log.contains("Log fallback") == false)
     }
 
+    @Test func selectedCodexChatTextAppendUsesAppendPath() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
+        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
+        try await runtime.transport.enqueueThreadRead(
+            .init(
+                id: "review-thread",
+                turns: [
+                    .init(
+                        id: "turn-1",
+                        status: .running,
+                        items: [
+                            .init(
+                                id: "message-1",
+                                kind: .agentMessage,
+                                content: .message(
+                                    .init(
+                                        id: "message-1",
+                                        role: .assistant,
+                                        phase: .finalAnswer,
+                                        text: "Initial"
+                                    ))
+                            )
+                        ]
+                    )
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let transport = ReviewMonitorTransportViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: modelContext
+        )
+        transport.loadViewIfNeeded()
+
+        let job = makeRunningReviewJob(
+            sourceThreadID: "source-thread",
+            reviewThreadID: "review-thread",
+            turnID: "turn-1"
+        )
+        uiState.selection = .job(job)
+
+        _ = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log == "Initial"
+        }
+        transport.setLogReduceMotionForTesting(false)
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/updated",
+            params: ThreadItemParams(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(
+                    id: "message-1",
+                    type: "agentMessage",
+                    text: "Initial log",
+                    phase: "final_answer"
+                )
+            )
+        )
+
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log == "Initial log"
+        }
+        #expect(updatedSnapshot.log == "Initial log")
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
     @Test func selectedCodexChatRendersThreadAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext

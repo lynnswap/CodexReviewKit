@@ -716,6 +716,30 @@ extension ReviewUITests {
         #expect(window.isMovableByWindowBackground == false)
     }
 
+    @Test func previewContentViewControllerRendersSelectedJobLog() async throws {
+        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let selectedJob = try #require(
+            store.orderedJobs.first { $0.core.lifecycle.status == .running }
+                ?? store.orderedJobs.first
+        )
+        let expectedLog = reviewMonitorLogText(for: selectedJob)
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewStore: store
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        window.layoutIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let snapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log == expectedLog && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(snapshot.log.isEmpty == false)
+    }
+
     @Test func windowControllerUsesSeededAuthenticatedStateOnFirstPresentation() {
         let backend = AuthActionBackend(
             initialAuthState: .signedIn(accountID: "review@example.com")
@@ -1358,7 +1382,8 @@ extension ReviewUITests {
             }
             window.close()
         }
-        try await renderDetailLogForShellLayoutTesting(streamLog, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(
+            streamLog, in: transport, viewController: viewController, job: job)
         #expect(transport.isLogPinnedToBottomForTesting)
 
         transport.beginLogLiveResizeForTesting()

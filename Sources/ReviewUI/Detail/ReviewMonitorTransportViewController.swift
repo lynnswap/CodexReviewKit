@@ -11,12 +11,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
         case chat(CodexThreadID)
     }
 
+    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
-    private var timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
+    private var previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
@@ -51,6 +52,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil
     ) {
+        self.codexModelSource = codexModelSource
         self.store = store
         self.uiState = uiState
         self.selectedCodexChat = ReviewMonitorSelectedCodexChat(modelSource: codexModelSource)
@@ -206,6 +208,34 @@ final class ReviewMonitorTransportViewController: NSViewController {
         resetLogRenderer()
         boundJob = selectedJob
         selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
+        #if DEBUG
+            guard codexModelSource?.modelContext != nil else {
+                renderPreviewJobTimeline(
+                    selectedJob,
+                    restoring: restorationTarget(selectedJob),
+                    allowIncrementalUpdate: false
+                )
+                selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
+                    guard let self,
+                        self.boundJob === selectedJob
+                    else {
+                        return
+                    }
+                    _ = self.codexModelSource?.generation
+                    if self.codexModelSource?.modelContext != nil {
+                        self.displayJob(selectedJob)
+                        return
+                    }
+                    _ = selectedJob.timeline.revision
+                    self.renderPreviewJobTimeline(
+                        selectedJob,
+                        restoring: self.logScrollView.currentScrollRestorationTarget,
+                        allowIncrementalUpdate: true
+                    )
+                }
+                return
+            }
+        #endif
         startSelectedCodexChatLogStream(
             target: .job(selectedJob.id),
             initialRestorationTarget: restorationTarget(selectedJob)
@@ -220,6 +250,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
             self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
         }
     }
+
+    #if DEBUG
+        @discardableResult
+        private func renderPreviewJobTimeline(
+            _ selectedJob: CodexReviewJob,
+            restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
+            allowIncrementalUpdate: Bool
+        ) -> Bool {
+            let timelineDocument = ReviewTimelineDocumentRenderer().document(from: selectedJob.timeline)
+            let sourceDocument = previewTimelineLogProjection.render(timelineDocument: timelineDocument)
+            return renderBoundLog(
+                sourceDocument: sourceDocument,
+                target: .job(selectedJob.id),
+                restorationTarget: restorationTarget,
+                allowIncrementalUpdate: allowIncrementalUpdate && hasAppliedBoundLog
+            )
+        }
+    #endif
 
     private func displayChat(_ selectedChat: ReviewMonitorCodexSidebarSnapshot.Chat) {
         if boundChatID != selectedChat.id {
@@ -518,7 +566,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         appliedLogRenderGeneration = logRenderGeneration
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
-        timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
+        previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
     }
 
     private func restorationTarget(
@@ -1292,17 +1340,19 @@ final class ReviewMonitorTransportViewController: NSViewController {
             case .workspaceSection, .workspace, nil:
                 return false
             }
-            let resolvedRestorationTarget = restorationTarget ?? {
-                guard hasAppliedBoundLog == false else {
-                    return logScrollView.currentScrollRestorationTarget
-                }
-                switch resolvedTarget {
-                case .job(let id):
-                    return logScrollTargetsByJobID[id] ?? .bottom
-                case .chat:
-                    return .bottom
-                }
-            }()
+            let resolvedRestorationTarget =
+                restorationTarget
+                ?? {
+                    guard hasAppliedBoundLog == false else {
+                        return logScrollView.currentScrollRestorationTarget
+                    }
+                    switch resolvedTarget {
+                    case .job(let id):
+                        return logScrollTargetsByJobID[id] ?? .bottom
+                    case .chat:
+                        return .bottom
+                    }
+                }()
             let renderedDocument = logDocumentForTesting(from: timelineDocument)
             return renderBoundLog(
                 sourceDocument: renderedDocument,
@@ -1315,7 +1365,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         private func logDocumentForTesting(
             from timelineDocument: ReviewTimelineDocument
         ) -> ReviewMonitorLog.Document {
-            timelineLogProjectionForTesting.render(timelineDocument: timelineDocument)
+            previewTimelineLogProjection.render(timelineDocument: timelineDocument)
         }
 
         func copyLogSelectionForTesting() {
