@@ -86,20 +86,6 @@ struct ReviewMonitorWorkspaceFindingsIndex {
     }
 
     private func workspaceFindingThreadID(for job: CodexReviewJob) -> String {
-        if let reviewThreadID = nonEmptyID(job.core.run.reviewThreadID) {
-            return reviewThreadID
-        }
-        if let threadID = nonEmptyID(job.core.run.threadID) {
-            return threadID
-        }
-        return job.id
-    }
-
-    private func nonEmptyID(_ id: String?) -> String? {
-        guard let id else {
-            return nil
-        }
-        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        job.reviewChatID?.rawValue ?? job.id
     }
 }
