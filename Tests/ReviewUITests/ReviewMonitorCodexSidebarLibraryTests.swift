@@ -60,6 +60,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let outlineAppWorkspace = try #require(outlineSection.children.first)
         #expect(outlineSection.rowID == snapshotSection.rowID)
         #expect(outlineSection.title == section.title)
+        #expect(outlineSection.selectionID == .workspaceSection(section.id))
         #expect(outlineSection.isExpandable)
         #expect(outlineSection.children.map(\.rowID.rawValue) == [
             "workspace:\(resolvedAppPath)",
@@ -67,7 +68,10 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         ])
         #expect(outlineAppWorkspace.rowID == snapshotAppWorkspace.rowID)
         #expect(outlineAppWorkspace.title == "App")
+        #expect(outlineAppWorkspace.selectionID == .workspace(snapshotAppWorkspace.id))
         #expect(outlineAppWorkspace.isExpandable)
+        let outlineAppChat = try #require(outlineAppWorkspace.children.first)
+        #expect(outlineAppChat.selectionID == .chat(snapshotAppChat.id))
         #expect(outlineAppWorkspace.children.map(\.rowID.rawValue) == ["chat:thread-app"])
         #expect(library.snapshot.outlineItem(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == .chat(snapshotAppChat))
         #expect(library.snapshot.rowIDs.map(\.rawValue) == [
@@ -124,6 +128,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let outlineChat = try #require(outlineSection.children.first)
         #expect(outlineSection.children.map(\.rowID.rawValue) == ["chat:thread-uncategorized"])
         #expect(outlineChat == .chat(chat))
+        #expect(outlineChat.selectionID == .chat(chat.id))
         #expect(outlineChat.isExpandable == false)
         #expect(library.snapshot.outlineItem(rowID: chat.rowID) == .chat(chat))
         #expect(section.rowIDs.map(\.rawValue) == [

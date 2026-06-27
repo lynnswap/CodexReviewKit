@@ -139,6 +139,17 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
         }
     }
 
+    var selectionID: ReviewMonitorSelectionID {
+        switch self {
+        case .section(let section):
+            .workspaceSection(section.id)
+        case .workspace(let workspace):
+            .workspace(workspace.id)
+        case .chat(let chat):
+            .chat(chat.id)
+        }
+    }
+
     package var children: [ReviewMonitorCodexSidebarOutlineItem] {
         switch self {
         case .section(let section):

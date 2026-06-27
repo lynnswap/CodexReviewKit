@@ -1,7 +1,10 @@
+import CodexKit
 import CodexReviewKit
 
 enum ReviewMonitorSelectionID: Hashable, Sendable {
     case workspaceSection(String)
+    case workspace(CodexWorkspaceID)
+    case chat(CodexThreadID)
     case job(String)
 }
 

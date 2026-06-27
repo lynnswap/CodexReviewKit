@@ -446,7 +446,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return logScrollView.performDisplayedTextFinderAction(sender)
         case .workspaceSection:
             return workspaceFindingsView.performDisplayedTextFinderAction(sender)
-        case nil:
+        case .workspace, .chat, nil:
             return false
         }
     }
@@ -457,7 +457,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return logScrollView.validateDisplayedTextFinderAction(item)
         case .workspaceSection:
             return workspaceFindingsView.validateDisplayedTextFinderAction(item)
-        case nil:
+        case .workspace, .chat, nil:
             return false
         }
     }
@@ -930,7 +930,7 @@ extension ReviewMonitorTransportViewController {
             .job(id)
         case .workspaceSection(let id):
             .workspaceSection(id)
-        case nil:
+        case .workspace, .chat, nil:
             nil
         }
     }
