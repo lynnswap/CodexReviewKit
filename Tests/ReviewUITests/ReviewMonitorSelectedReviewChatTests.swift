@@ -54,7 +54,7 @@ struct ReviewMonitorSelectedReviewChatTests {
 
         try await waitForCondition {
             transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loaded
+                && transport.selectedReviewChatPhaseForTesting == .loading
                 && transport.selectedReviewChatItemTextsForTesting == ["Review snapshot"]
         }
         #expect(transport.selectedReviewChatLinkForTesting?.activeChatThreadID == "review-thread")
@@ -146,7 +146,7 @@ struct ReviewMonitorSelectedReviewChatTests {
 
         try await waitForCondition {
             transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loaded
+                && transport.selectedReviewChatPhaseForTesting == .loading
                 && transport.selectedReviewChatItemTextsForTesting == ["Late source"]
         }
     }
@@ -203,7 +203,7 @@ struct ReviewMonitorSelectedReviewChatTests {
 
         try await waitForCondition {
             transport.selectedReviewChatIDForTesting == "review-thread"
-                && transport.selectedReviewChatPhaseForTesting == .loaded
+                && transport.selectedReviewChatPhaseForTesting == .loading
                 && transport.selectedReviewChatItemTextsForTesting == ["Arrived after selection"]
         }
     }

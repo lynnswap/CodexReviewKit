@@ -7,19 +7,22 @@ import ReviewMonitorRendering
 @MainActor
 struct ReviewMonitorCodexChatTimelineProjection {
     func document(
-        from chat: CodexChat,
-        link: ReviewChatLink,
+        from turnSnapshot: CodexChatTurnSnapshot,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?,
         revision: UInt64
     ) -> ReviewTimelineDocument? {
-        let turnID = CodexTurnID(rawValue: link.turnID)
-        guard let turnSnapshot = chat.turnSnapshot(for: turnID),
-              turnSnapshot.items.isEmpty == false
-        else {
+        guard turnSnapshot.items.isEmpty == false else {
             return nil
         }
 
         let blocks = turnSnapshot.items.map {
-            block(from: $0, turnSnapshot: turnSnapshot, chat: chat)
+            block(
+                from: $0,
+                turnSnapshot: turnSnapshot,
+                chatCreatedAt: chatCreatedAt,
+                chatUpdatedAt: chatUpdatedAt
+            )
         }
         let activeBlockIDs = blocks.filter(\.isActive).map(\.id)
         return ReviewTimelineDocument(
@@ -38,13 +41,14 @@ struct ReviewMonitorCodexChatTimelineProjection {
     private func block(
         from item: CodexChat.Item,
         turnSnapshot: CodexChatTurnSnapshot,
-        chat: CodexChat
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
     ) -> ReviewTimelineDocument.Block {
         let content = content(from: item, turnSnapshot: turnSnapshot)
         let phase = phase(for: item, turnSnapshot: turnSnapshot)
         let blockID = blockID(for: item)
         let sourceItemID = ReviewTimelineItem.ID(rawValue: blockID.rawValue)
-        let timestamp = chat.updatedAt ?? chat.createdAt ?? Date(timeIntervalSince1970: 0)
+        let timestamp = chatUpdatedAt ?? chatCreatedAt ?? Date(timeIntervalSince1970: 0)
         return ReviewTimelineDocument.Block(
             id: blockID,
             sourceItemID: sourceItemID,
@@ -55,7 +59,7 @@ struct ReviewMonitorCodexChatTimelineProjection {
             primaryText: primaryText(for: content),
             rawTranscriptText: rawTranscriptText(for: content),
             content: content,
-            createdAt: chat.createdAt ?? timestamp,
+            createdAt: chatCreatedAt ?? timestamp,
             updatedAt: timestamp
         )
     }

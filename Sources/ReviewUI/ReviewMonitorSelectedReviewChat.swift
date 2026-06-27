@@ -1,6 +1,7 @@
 import CodexAppServerKit
 import CodexDataKit
 import CodexReviewKit
+import Foundation
 import Observation
 import ObservationBridge
 
@@ -14,6 +15,18 @@ final class ReviewMonitorSelectedReviewChat {
     }
     var lastErrorDescription: String? {
         chat?.lastErrorDescription
+    }
+    var turnSnapshot: CodexChatTurnSnapshot? {
+        guard let chat, let link else {
+            return nil
+        }
+        return chat.turnSnapshot(for: CodexTurnID(rawValue: link.turnID))
+    }
+    var chatCreatedAt: Date? {
+        chat?.createdAt
+    }
+    var chatUpdatedAt: Date? {
+        chat?.updatedAt
     }
 
     @ObservationIgnored
