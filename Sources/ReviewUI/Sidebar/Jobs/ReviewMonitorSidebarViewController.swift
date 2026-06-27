@@ -902,19 +902,19 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func restoreSelectedReviewChatRowAfterExpansion(of section: SidebarWorkspaceSection) {
-        guard let selectedReviewJob = reviewJobForCurrentChatSelection(),
-              section.workspaces.contains(where: { $0.cwd == selectedReviewJob.cwd })
+        guard let selectedRuntimeJob = runtimeJobForCurrentChatSelection(),
+              section.workspaces.contains(where: { $0.cwd == selectedRuntimeJob.cwd })
         else {
             return
         }
-        let selectedReviewJobID = selectedReviewJob.id
+        let selectedRuntimeJobID = selectedRuntimeJob.id
         DispatchQueue.main.async { [weak self, weak section] in
             guard let self,
                   let section,
-                  let currentSelectedReviewJob = self.reviewJobForCurrentChatSelection(),
+                  let currentSelectedRuntimeJob = self.runtimeJobForCurrentChatSelection(),
                   section.isExpanded,
-                  currentSelectedReviewJob.id == selectedReviewJobID,
-                  let row = self.row(forJobID: selectedReviewJobID),
+                  currentSelectedRuntimeJob.id == selectedRuntimeJobID,
+                  let row = self.row(forJobID: selectedRuntimeJobID),
                   self.outlineView.selectedRow != row
             else {
                 return
@@ -925,7 +925,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func reviewJobForCurrentChatSelection() -> CodexReviewJob? {
+    private func runtimeJobForCurrentChatSelection() -> CodexReviewJob? {
         switch uiState.selection {
         case .chat(let chat):
             return store.reviewJob(forChatID: chat.id, in: workspaces())
