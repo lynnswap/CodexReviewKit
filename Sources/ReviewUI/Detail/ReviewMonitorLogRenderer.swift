@@ -17,14 +17,17 @@ actor ReviewMonitorLogRenderer {
         displayDocument = ReviewMonitorLog.Document()
     }
 
+#if DEBUG
     func render(entries: [ReviewLogEntry]) -> ReviewMonitorRenderedLogDocument {
         renderedDocument(from: projection.render(entries: entries))
     }
+#endif
 
     func render(timelineDocument: ReviewTimelineDocument) -> ReviewMonitorRenderedLogDocument {
         renderedDocument(from: timelineProjection.render(timelineDocument: timelineDocument))
     }
 
+#if DEBUG
     func append(
         entries: [ReviewLogEntry],
         sourceRange: Range<Int>
@@ -70,6 +73,7 @@ actor ReviewMonitorLogRenderer {
         }
         return documents
     }
+#endif
 
     private func currentRenderedDocument() -> ReviewMonitorRenderedLogDocument {
         .init(
