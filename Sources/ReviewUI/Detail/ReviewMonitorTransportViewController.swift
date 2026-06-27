@@ -21,9 +21,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
     private var selectedJobObservation: PortableObservationTracking.Token?
-    private var selectedChatObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
-    private var selectedCodexChatDocumentTask: Task<Void, Never>?
+    private var selectedCodexChatLogTask: Task<Void, Never>?
     private var boundJob: CodexReviewJob?
     private var boundChatID: CodexThreadID?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
@@ -33,7 +32,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var hasAppliedBoundLog = false
-    private var selectedCodexChatDocumentHasRendered = false
 
     convenience init(
         store: CodexReviewStore,
@@ -66,9 +64,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
     isolated deinit {
         selectionObservation?.cancel()
         selectedJobObservation?.cancel()
-        selectedChatObservation?.cancel()
         selectedWorkspaceFindingsObservation?.cancel()
-        selectedCodexChatDocumentTask?.cancel()
+        selectedCodexChatLogTask?.cancel()
         logRenderTask?.cancel()
     }
 
@@ -202,15 +199,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
-        selectedChatObservation?.cancel()
-        selectedChatObservation = nil
-        selectedCodexChatDocumentTask?.cancel()
-        selectedCodexChatDocumentTask = nil
+        selectedCodexChatLogTask?.cancel()
+        selectedCodexChatLogTask = nil
         boundChatID = nil
         resetLogRenderer()
         boundJob = selectedJob
         selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
-        startSelectedCodexChatDocumentStream(
+        startSelectedCodexChatLogStream(
             target: .job(selectedJob.id),
             initialRestorationTarget: restorationTarget(selectedJob)
         )
@@ -229,25 +224,20 @@ final class ReviewMonitorTransportViewController: NSViewController {
         if boundChatID != selectedChat.id {
             logScrollView.resetFindStateForContentReuse()
         }
-        selectedChatObservation?.cancel()
-        selectedChatObservation = nil
-        selectedCodexChatDocumentTask?.cancel()
-        selectedCodexChatDocumentTask = nil
+        selectedCodexChatLogTask?.cancel()
+        selectedCodexChatLogTask = nil
         resetLogRenderer()
         boundChatID = selectedChat.id
         selectedCodexChat.bind(toChatID: selectedChat.id)
-        startSelectedCodexChatDocumentStream(target: .chat(selectedChat.id), initialRestorationTarget: .bottom)
+        startSelectedCodexChatLogStream(target: .chat(selectedChat.id), initialRestorationTarget: .bottom)
     }
 
     private func clearDisplayedLogSelection() {
         cacheBoundJobScrollTarget()
         selectedJobObservation?.cancel()
         selectedJobObservation = nil
-        selectedChatObservation?.cancel()
-        selectedChatObservation = nil
-        selectedCodexChatDocumentTask?.cancel()
-        selectedCodexChatDocumentTask = nil
-        selectedCodexChatDocumentHasRendered = false
+        selectedCodexChatLogTask?.cancel()
+        selectedCodexChatLogTask = nil
         boundJob = nil
         boundChatID = nil
         selectedCodexChat.unbind()
@@ -456,14 +446,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
         return true
     }
 
-    private func startSelectedCodexChatDocumentStream(
+    private func startSelectedCodexChatLogStream(
         target: LogRenderTarget,
         initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
     ) {
-        selectedCodexChatDocumentTask?.cancel()
-        selectedCodexChatDocumentHasRendered = false
-        let stream = selectedCodexChat.timelineDocumentChangeStream()
-        selectedCodexChatDocumentTask = Task { @MainActor [weak self] in
+        selectedCodexChatLogTask?.cancel()
+        let stream = selectedCodexChat.logSourceChangeStream()
+        selectedCodexChatLogTask = Task { @MainActor [weak self] in
             var didRenderInitialDocument = false
             for await change in stream {
                 guard let self,
@@ -471,7 +460,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 else {
                     return
                 }
-                self.applySelectedCodexChatDocumentChange(
+                self.applySelectedCodexChatLogChange(
                     change,
                     target: target,
                     restorationTarget: didRenderInitialDocument
@@ -479,26 +468,24 @@ final class ReviewMonitorTransportViewController: NSViewController {
                         : initialRestorationTarget,
                     allowIncrementalUpdate: didRenderInitialDocument && change.allowsIncrementalRender
                 )
-                if change.document != nil {
+                if change.sourceDocument != nil {
                     didRenderInitialDocument = true
                 }
             }
         }
     }
 
-    private func applySelectedCodexChatDocumentChange(
-        _ change: ReviewTimelineDocumentChange,
+    private func applySelectedCodexChatLogChange(
+        _ change: ReviewMonitorLogSourceChange,
         target: LogRenderTarget,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) {
-        guard let document = change.document else {
-            selectedCodexChatDocumentHasRendered = false
+        guard let document = change.sourceDocument else {
             resetLogRenderer()
             logScrollView.clear()
             return
         }
-        selectedCodexChatDocumentHasRendered = true
         renderBoundLog(
             timelineDocument: document,
             target: target,
@@ -601,10 +588,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         var selectedJobObservationForTesting: PortableObservationTracking.Token? {
             selectedJobObservation
-        }
-
-        var selectedChatObservationForTesting: PortableObservationTracking.Token? {
-            selectedChatObservation
         }
 
         var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
