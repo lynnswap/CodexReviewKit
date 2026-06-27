@@ -3006,7 +3006,7 @@ private final class ReviewMonitorJobTableRowView: NSTableRowView {
 
 @MainActor
 private final class ReviewMonitorJobCellView: NSTableCellView {
-    private var hostingView: NSHostingView<ReviewMonitorJobRowView>?
+    private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -3021,11 +3021,12 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
     func configure(with job: CodexReviewJob) {
         objectValue = job
         toolTip = job.cwd
+        let row = ReviewMonitorSidebarChatRow(job: job)
         if let hostingView {
-            hostingView.rootView.job = job
+            hostingView.rootView.row = row
         } else {
             let hostingView = NSHostingView(
-                rootView: ReviewMonitorJobRowView(job: job)
+                rootView: ReviewMonitorChatRowView(row: row)
             )
             hostingView.translatesAutoresizingMaskIntoConstraints = false
             hostingView.setAccessibilityIdentifier("review-monitor.job-row")
@@ -3050,7 +3051,7 @@ private final class ReviewMonitorJobCellView: NSTableCellView {
     }
 
     var hostedJobIDForTesting: String? {
-        hostingView?.rootView.job.id
+        hostingView?.rootView.row.id
     }
 
     var hostingViewIdentityForTesting: ObjectIdentifier? {
