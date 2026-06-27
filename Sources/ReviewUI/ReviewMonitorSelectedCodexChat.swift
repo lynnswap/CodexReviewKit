@@ -2,7 +2,6 @@ import CodexKit
 import Foundation
 import Observation
 import ObservationBridge
-import ReviewMonitorRendering
 
 @MainActor
 @Observable
@@ -38,7 +37,6 @@ final class ReviewMonitorSelectedCodexChat {
     private(set) var identity: CodexReviewIdentity?
     private(set) var chatID: CodexThreadID?
     private(set) var chat: CodexChat?
-    private(set) var logSourceDocument: ReviewMonitorLog.Document?
     var phase: CodexDataPhase {
         chat?.phase ?? .idle
     }
@@ -62,6 +60,8 @@ final class ReviewMonitorSelectedCodexChat {
     private var logProjection = ReviewMonitorSelectedCodexChatLogProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
+    @ObservationIgnored
+    private var currentLogSourceDocument: ReviewMonitorLog.Document?
     @ObservationIgnored
     private var logSourceChangeContinuations: [UUID: AsyncStream<ReviewMonitorLogSourceChange>.Continuation] = [:]
 
@@ -94,8 +94,8 @@ final class ReviewMonitorSelectedCodexChat {
         let id = UUID()
         let pair = AsyncStream<ReviewMonitorLogSourceChange>.makeStream(bufferingPolicy: .unbounded)
         logSourceChangeContinuations[id] = pair.continuation
-        if let logSourceDocument {
-            pair.continuation.yield(.replaceAll(logSourceDocument))
+        if let currentLogSourceDocument {
+            pair.continuation.yield(.replaceAll(currentLogSourceDocument))
         }
         pair.continuation.onTermination = { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -181,7 +181,7 @@ final class ReviewMonitorSelectedCodexChat {
         guard let change else {
             return
         }
-        logSourceDocument = change.sourceDocument
+        currentLogSourceDocument = change.sourceDocument
         for continuation in logSourceChangeContinuations.values {
             continuation.yield(change)
         }
