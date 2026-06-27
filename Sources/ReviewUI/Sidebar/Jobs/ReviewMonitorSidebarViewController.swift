@@ -203,9 +203,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarTopologyObservation: PortableObservationTracking.Token?
     private var sidebarFilterObservation: PortableObservationTracking.Token?
     private var codexSidebarObservation: PortableObservationTracking.Token?
+    private var codexSidebarSnapshotObservation: PortableObservationTracking.Token?
     private var selectedChatSnapshotObservation: PortableObservationTracking.Token?
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
+    private var codexSidebarModelContext: CodexModelContext?
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
     private let reviewChatIndex = ReviewMonitorSidebarReviewChatIndex()
     private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
@@ -245,6 +247,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarTopologyObservation?.cancel()
         sidebarFilterObservation?.cancel()
         codexSidebarObservation?.cancel()
+        codexSidebarSnapshotObservation?.cancel()
         selectedChatSnapshotObservation?.cancel()
         codexSidebarFetchTask?.cancel()
     }
@@ -413,16 +416,38 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func installCodexSidebarLibrary(modelContext: CodexModelContext?) {
+        if let modelContext,
+           let codexSidebarModelContext,
+           codexSidebarModelContext === modelContext,
+           codexSidebarLibrary != nil {
+            return
+        }
         codexSidebarFetchTask?.cancel()
         codexSidebarFetchTask = nil
+        codexSidebarSnapshotObservation?.cancel()
+        codexSidebarSnapshotObservation = nil
         guard let modelContext else {
+            codexSidebarModelContext = nil
             codexSidebarLibrary = nil
             applyPreviewCodexSidebarSnapshotIfNeeded()
             return
         }
 
         let library = ReviewMonitorCodexSidebarLibrary(modelContext: modelContext)
+        codexSidebarModelContext = modelContext
         codexSidebarLibrary = library
+        codexSidebarSnapshotObservation = withPortableContinuousObservation { [weak self, library] event in
+            guard let self,
+                  self.codexSidebarLibrary === library
+            else {
+                return
+            }
+            let snapshot = library.snapshot
+            guard event.kind != .initial else {
+                return
+            }
+            self.applyCodexSidebarSnapshot(snapshot)
+        }
         codexSidebarFetchTask = Task { @MainActor [weak self, library] in
             do {
                 try await library.performFetch()

@@ -233,6 +233,82 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(selectedChat.id == CodexThreadID(rawValue: "thread-app"))
         #expect(selectedChat.title == "App review")
     }
+
+    @Test func sidebarViewControllerTracksCodexSidebarFetchResultChanges() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let threadID = CodexThreadID(rawValue: "thread-app")
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: threadID,
+                    workspace: repo,
+                    name: "App review",
+                    updatedAt: Date(timeIntervalSince1970: 5_000)
+                ),
+            ]
+        ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-job-store")]
+        )
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition(timeout: .milliseconds(500)) {
+            sidebar.codexSidebarSnapshotForTesting?
+                .chat(id: threadID)?
+                .title == "App review"
+        }
+        try await waitForCondition(timeout: .milliseconds(500)) {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
+        }
+
+        let chat = context.model(for: threadID)
+        try await runtime.transport.enqueueThreadResume(.init(id: threadID))
+        try await runtime.transport.enqueueThreadRead(.init(
+            id: threadID,
+            workspace: repo,
+            name: "App review renamed",
+            updatedAt: Date(timeIntervalSince1970: 6_000)
+        ))
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: threadID,
+                    workspace: repo,
+                    name: "App review renamed",
+                    updatedAt: Date(timeIntervalSince1970: 6_000)
+                ),
+            ]
+        ))
+        try await chat.refresh(includeTurns: false)
+        #expect(await runtime.transport.recordedRequests(method: "thread/list").count == 2)
+
+        try await waitForCondition {
+            sidebar.codexSidebarSnapshotForTesting?
+                .chat(id: threadID)?
+                .title == "App review renamed"
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review renamed"
+        }
+        #expect(sidebar.displayedCodexSidebarTitlesForTesting == [
+            repo.lastPathComponent,
+            repo.lastPathComponent,
+            "App review renamed",
+        ])
+    }
 }
 
 private struct ThreadListParams: Decodable {
