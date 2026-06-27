@@ -36,7 +36,7 @@ final class ReviewMonitorSidebarReviewChatIndex {
         in workspaces: [CodexReviewWorkspace]
     ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
         guard let row = row(chatID: id),
-              workspaces.contains(where: { $0.cwd == row.cwd })
+              workspaces.contains(where: { $0.cwd == row.operation.cwd })
         else {
             return nil
         }

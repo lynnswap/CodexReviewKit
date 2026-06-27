@@ -70,18 +70,6 @@ final class ReviewMonitorSidebarReviewChatRow {
     private(set) var isTerminal: Bool
     private(set) var cancellationRequested: Bool
 
-    var jobID: String {
-        operation.jobID
-    }
-
-    var sessionID: String {
-        operation.sessionID
-    }
-
-    var cwd: String {
-        operation.cwd
-    }
-
     init(
         chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
         runtime: ReviewMonitorSidebarReviewChatRuntime
