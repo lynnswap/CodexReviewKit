@@ -200,7 +200,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
         job.core.run.turnID = "turn-1"
-        job.appendLogEntry(.init(kind: .agentMessage, text: "Legacy trigger"))
+        job.appendLogEntry(.init(kind: .agentMessage, text: "Log trigger"))
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
@@ -251,13 +251,13 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: "review-thread",
             turnID: "turn-1"
         )
-        job.appendLogEntry(.init(kind: .agentMessage, text: "Legacy fallback"))
+        job.appendLogEntry(.init(kind: .agentMessage, text: "Log fallback"))
         uiState.selection = .job(job)
 
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Chat snapshot")
         }
-        #expect(initialSnapshot.log.contains("Legacy fallback") == false)
+        #expect(initialSnapshot.log.contains("Log fallback") == false)
 
         try await runtime.transport.emitServerNotification(
             method: "item/updated",
@@ -277,7 +277,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             snapshot.log.contains("Chat stream update")
         }
         #expect(updatedSnapshot.log.contains("Chat snapshot") == false)
-        #expect(updatedSnapshot.log.contains("Legacy fallback") == false)
+        #expect(updatedSnapshot.log.contains("Log fallback") == false)
     }
 
     @Test func selectedCodexChatRendersThreadAndLiveUpdates() async throws {

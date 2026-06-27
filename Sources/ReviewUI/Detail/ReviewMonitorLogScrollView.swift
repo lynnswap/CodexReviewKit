@@ -1253,7 +1253,7 @@ extension ReviewMonitorLogScrollView {
         false
     }
 
-    var usesLegacyLayoutManagerForTesting: Bool {
+    var usesLogLayoutManagerForTesting: Bool {
         false
     }
 

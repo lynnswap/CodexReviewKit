@@ -835,14 +835,14 @@ extension CodexReviewStore {
         }
         var updatedRun = currentRun
         switch event {
-        case .domainEvents(let events, let legacyProjectionSuppressionCount):
+        case .domainEvents(let events, let logProjectionSuppressionCount):
             job.applyDirectTimelineEvents(
                 events,
-                legacyProjectionSuppressionCount: legacyProjectionSuppressionCount,
+                logProjectionSuppressionCount: logProjectionSuppressionCount,
                 at: clock.now()
             )
-        case .suppressNextLegacyTimelineProjection:
-            job.suppressNextLegacyTimelineProjection()
+        case .suppressNextLogTimelineProjection:
+            job.suppressNextLogTimelineProjection()
         case .suppressNextTerminalFailureLogTimelineProjection:
             job.suppressNextTerminalFailureLogTimelineProjection()
         case .started(let turnID, let reviewThreadID, let model):
@@ -865,7 +865,7 @@ extension CodexReviewStore {
             job.appendLogEntry(.init(kind: .agentMessage, text: text, timestamp: clock.now()))
         case .messageDelta(let text, let itemID):
             guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
-                job.discardPendingLegacyTimelineProjectionSuppression()
+                job.discardPendingLogTimelineProjectionSuppression()
                 return updatedRun
             }
             job.core.output.lastAgentMessage = updatedMessage
@@ -1071,7 +1071,7 @@ private extension CodexReviewBackendModel.Review.Event {
         case .completed, .failed, .cancelled:
             true
         case .domainEvents,
-             .suppressNextLegacyTimelineProjection,
+             .suppressNextLogTimelineProjection,
              .suppressNextTerminalFailureLogTimelineProjection,
              .started,
              .message,

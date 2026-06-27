@@ -63,10 +63,10 @@ package struct ReviewLogEntryTimelineProjector {
         directTimelineTextItemIDs: Set<ReviewTimelineItem.ID>,
         directTimelineTextItemIDsWithRetainedLogText: Set<ReviewTimelineItem.ID>,
         retainedTimelineTextItemIDsByLogEntryID: [ReviewLogEntry.ID: Set<ReviewTimelineItem.ID>],
-        legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
+        logProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     ) {
         guard directTimelineTextItemIDs.isEmpty == false
-            || legacyProjectedTimelineTextItemIDs.isEmpty == false else {
+            || logProjectedTimelineTextItemIDs.isEmpty == false else {
             return
         }
         var textByItemID: [ReviewTimelineItem.ID: String] = [:]
@@ -101,7 +101,7 @@ package struct ReviewLogEntryTimelineProjector {
             }
             timeline.updateItemContent(trimmedContent, for: itemID)
         }
-        for itemID in legacyProjectedTimelineTextItemIDs {
+        for itemID in logProjectedTimelineTextItemIDs {
             guard let item = timeline.item(for: itemID),
                   let trimmedContent = item.content.replacingTimelineText(textByItemID[itemID] ?? "")
             else {
@@ -177,7 +177,7 @@ extension CodexReviewJob {
             directTimelineTextItemIDs: directTimelineTextItemIDs,
             directTimelineTextItemIDsWithRetainedLogText: directTimelineTextItemIDsWithRetainedLogText,
             retainedTimelineTextItemIDsByLogEntryID: retainedTimelineTextItemIDsByLogEntryID,
-            legacyProjectedTimelineTextItemIDs: legacyProjectedTimelineTextItemIDs
+            logProjectedTimelineTextItemIDs: logProjectedTimelineTextItemIDs
         )
     }
 

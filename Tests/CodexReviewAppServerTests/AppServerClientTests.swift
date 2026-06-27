@@ -15,7 +15,7 @@ private struct BackendReviewEventSequence: AsyncSequence {
                 if includesDomainEvents == false {
                     switch event {
                     case .domainEvents,
-                         .suppressNextLegacyTimelineProjection,
+                         .suppressNextLogTimelineProjection,
                          .suppressNextTerminalFailureLogTimelineProjection:
                         continue
                     case .started,
@@ -271,7 +271,7 @@ struct AppServerClientTests {
         guard case .domainEvents = try await nextEvent(from: attempt.events),
               case .domainEvents = try await nextEvent(from: attempt.events)
         else {
-            Issue.record("expected direct timeline updates before coalesced legacy log")
+            Issue.record("expected direct timeline updates before coalesced log")
             return
         }
         guard case .logEntry(.commandOutput, let text, let groupID, let replacesGroup, let metadata) =

@@ -1,7 +1,7 @@
 import Foundation
 
 @MainActor
-package struct ReviewTimelineLegacyLogProjector {
+package struct ReviewTimelineLogProjector {
     private let timeline: ReviewTimeline
 
     package init(timeline: ReviewTimeline) {
@@ -16,7 +16,7 @@ package struct ReviewTimelineLegacyLogProjector {
 @MainActor
 extension CodexReviewJob {
     package var timelineLogEntries: [ReviewLogEntry] {
-        ReviewTimelineLegacyLogProjector(timeline: timeline).logEntries
+        ReviewTimelineLogProjector(timeline: timeline).logEntries
     }
 }
 
@@ -59,11 +59,11 @@ private extension ReviewLogEntry {
                 )
             )]
         case .plan(let plan):
-            return [entry(item: item, kind: legacyKind(for: item), text: plan.markdown)]
+            return [entry(item: item, kind: logKind(for: item), text: plan.markdown)]
         case .reasoning(let reasoning):
             return [entry(
                 item: item,
-                kind: legacyKind(for: item, fallback: reasoning.style == .raw ? .rawReasoning : .reasoningSummary),
+                kind: logKind(for: item, fallback: reasoning.style == .raw ? .rawReasoning : .reasoningSummary),
                 text: reasoning.text
             )]
         case .toolCall(let toolCall):
@@ -109,7 +109,7 @@ private extension ReviewLogEntry {
         case .contextCompaction(let contextCompaction):
             return [entry(item: item, kind: .contextCompaction, text: contextCompaction.title)]
         case .diagnostic(let diagnostic):
-            return [entry(item: item, kind: legacyKind(for: item), text: diagnostic.message)]
+            return [entry(item: item, kind: logKind(for: item), text: diagnostic.message)]
         case .approval(let approval):
             return [entry(
                 item: item,
@@ -119,7 +119,7 @@ private extension ReviewLogEntry {
         case .unknown(let unknown):
             return [entry(
                 item: item,
-                kind: legacyKind(for: item),
+                kind: logKind(for: item),
                 text: [unknown.title, unknown.detail].compactMap { $0 }.joined(separator: "\n")
             )]
         }
@@ -155,7 +155,7 @@ private extension ReviewLogEntry {
         ReviewLogEntry(
             id: stableLogEntryID(item: item, kind: kind),
             kind: kind,
-            groupID: legacyGroupID(for: item, kind: kind),
+            groupID: logGroupID(for: item, kind: kind),
             replacesGroup: false,
             text: text,
             metadata: metadata,
@@ -208,7 +208,7 @@ private extension ReviewLogEntry {
     }
 
     @MainActor
-    private static func legacyKind(
+    private static func logKind(
         for item: ReviewTimelineItem,
         fallback: ReviewLogEntry.Kind = .event
     ) -> ReviewLogEntry.Kind {
@@ -216,7 +216,7 @@ private extension ReviewLogEntry {
     }
 
     @MainActor
-    private static func legacyGroupID(
+    private static func logGroupID(
         for item: ReviewTimelineItem,
         kind: ReviewLogEntry.Kind
     ) -> String {

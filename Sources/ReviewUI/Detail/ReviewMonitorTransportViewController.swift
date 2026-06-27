@@ -839,8 +839,8 @@ extension ReviewMonitorTransportViewController {
         logScrollView.usesTextViewForTesting
     }
 
-    var logUsesLegacyLayoutManagerForTesting: Bool {
-        logScrollView.usesLegacyLayoutManagerForTesting
+    var logUsesLogLayoutManagerForTesting: Bool {
+        logScrollView.usesLogLayoutManagerForTesting
     }
 
     var logIsEditableForTesting: Bool {

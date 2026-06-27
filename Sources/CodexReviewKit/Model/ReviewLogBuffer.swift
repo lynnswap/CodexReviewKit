@@ -1,6 +1,6 @@
 import Foundation
 
-package struct ReviewLegacyLogBuffer {
+package struct ReviewLogBuffer {
     package enum TruncationDirection {
         case prefix
         case suffix
@@ -27,7 +27,7 @@ package struct ReviewLegacyLogBuffer {
     }
 
     package private(set) var entries: [ReviewLogEntry]
-    private var projectionState: ReviewLegacyLogProjectionState
+    private var projectionState: ReviewLogProjectionState
 
     package init(entries: [ReviewLogEntry]) {
         let trimmed = Self.trimmedEntriesAndProjection(entries: entries)
@@ -65,7 +65,7 @@ package struct ReviewLegacyLogBuffer {
         }
         entries.append(entry)
         if supportsIncrementalAppend == false {
-            projectionState = ReviewLegacyLogProjectionState(entries: entries)
+            projectionState = ReviewLogProjectionState(entries: entries)
         }
         return AppendResult(
             entry: entry,
@@ -155,7 +155,7 @@ package struct ReviewLegacyLogBuffer {
 
     private struct TrimmedEntriesAndProjection {
         var entries: [ReviewLogEntry]
-        var projectionState: ReviewLegacyLogProjectionState
+        var projectionState: ReviewLogProjectionState
     }
 
     private static func trimmedEntriesAndProjection(
@@ -164,7 +164,7 @@ package struct ReviewLegacyLogBuffer {
         var entries = initialEntries.map {
             $0.clampingUnownedRetainedMetadata(maxBytes: limitBytes)
         }
-        var projectionState = ReviewLegacyLogProjectionState(entries: entries)
+        var projectionState = ReviewLogProjectionState(entries: entries)
 
         while projectionState.cappedBytes > limitBytes {
             let overflowBytes = projectionState.cappedBytes - limitBytes
@@ -172,7 +172,7 @@ package struct ReviewLegacyLogBuffer {
                 break
             }
             entries = trimmedEntries
-            projectionState = ReviewLegacyLogProjectionState(entries: entries)
+            projectionState = ReviewLogProjectionState(entries: entries)
         }
 
         return .init(entries: entries, projectionState: projectionState)
@@ -201,7 +201,7 @@ package struct ReviewLegacyLogBuffer {
         }
 
         if let index = entries.firstIndex(where: {
-            ReviewLegacyLogProjectionState.prefixTrimmableCappedKinds.contains($0.kind)
+            ReviewLogProjectionState.prefixTrimmableCappedKinds.contains($0.kind)
         }) {
             return trimEntry(
                 entries: entries,
@@ -232,7 +232,7 @@ package struct ReviewLegacyLogBuffer {
         let entry = entries[index]
         let hasNewerEntryOfSameKind = entries.dropFirst(index + 1).contains { $0.kind == kind }
         let hasOtherCappedEntries = entries.contains {
-            $0.id != entry.id && ReviewLegacyLogProjectionState.cappedLogKinds.contains($0.kind)
+            $0.id != entry.id && ReviewLogProjectionState.cappedLogKinds.contains($0.kind)
         }
 
         if hasNewerEntryOfSameKind || hasOtherCappedEntries {
@@ -327,7 +327,7 @@ package struct ReviewLegacyLogBuffer {
     package static let limitBytes = 256 * 1024
 }
 
-package struct ReviewLegacyLogProjectionState {
+package struct ReviewLogProjectionState {
     private struct GroupKey: Hashable {
         var kind: ReviewLogEntry.Kind
         var groupID: String
@@ -490,8 +490,8 @@ package struct ReviewLegacyLogProjectionState {
         self.cappedProjection = cappedProjection
     }
 
-    private static func rebuild(entries: [ReviewLogEntry]) -> ReviewLegacyLogProjectionState {
-        var state = ReviewLegacyLogProjectionState(
+    private static func rebuild(entries: [ReviewLogEntry]) -> ReviewLogProjectionState {
+        var state = ReviewLogProjectionState(
             blocks: [],
             indexByGroup: [:],
             logProjection: .init(joinMode: .rendered),

@@ -564,11 +564,11 @@ private enum AppServerTypedReviewEventAdapter {
         case .completed:
             .itemCompleted(seed)
         }
-        let legacyEvents = legacyLogEvents(for: item, phase: phase)
+        let logEvents = logProjectionEvents(for: item, phase: phase)
         return [.domainEvents(
             [domainEvent],
-            legacyProjectionSuppressionCount: legacyEvents.legacyTimelineProjectionCount
-        )] + legacyEvents.addingTerminalFailureLogProjectionSuppressionIfNeeded
+            logProjectionSuppressionCount: logEvents.immediateLogTimelineProjectionCount
+        )] + logEvents.addingTerminalFailureLogProjectionSuppressionIfNeeded
     }
 
     private static func messageEvents(
@@ -602,7 +602,7 @@ private enum AppServerTypedReviewEventAdapter {
             delta: delta.text
         )
         return [
-            .domainEvents([domainEvent], legacyProjectionSuppressionCount: 1),
+            .domainEvents([domainEvent], logProjectionSuppressionCount: 1),
             .messageDelta(delta.text, itemID: itemID),
         ]
     }
@@ -623,7 +623,7 @@ private enum AppServerTypedReviewEventAdapter {
             phase: .running,
             content: .reasoning(.init(text: "", style: style))
         )
-        return [.domainEvents([.itemStarted(seed)], legacyProjectionSuppressionCount: 0)]
+        return [.domainEvents([.itemStarted(seed)], logProjectionSuppressionCount: 0)]
     }
 
     private static func reasoningDeltaEvents(
@@ -650,7 +650,7 @@ private enum AppServerTypedReviewEventAdapter {
             delta: delta.delta
         )
         return [
-            .domainEvents([domainEvent], legacyProjectionSuppressionCount: 1),
+            .domainEvents([domainEvent], logProjectionSuppressionCount: 1),
             .logEntry(kind: kind, text: delta.delta, groupID: delta.id, replacesGroup: false),
         ]
     }
@@ -673,7 +673,7 @@ private enum AppServerTypedReviewEventAdapter {
                 rawKind: .init(rawValue: raw.method)
             ))
         )
-        return [.domainEvents([.itemUpdated(seed)], legacyProjectionSuppressionCount: 0)]
+        return [.domainEvents([.itemUpdated(seed)], logProjectionSuppressionCount: 0)]
     }
 
     private static func timelineSeed(
@@ -689,7 +689,7 @@ private enum AppServerTypedReviewEventAdapter {
         )
     }
 
-    private static func legacyLogEvents(
+    private static func logProjectionEvents(
         for item: CodexThreadItem,
         phase: AppServerTypedItemPhase
     ) -> [CodexReviewBackendModel.Review.Event] {
@@ -737,7 +737,7 @@ private enum AppServerTypedReviewEventAdapter {
         case .fileChange(let fileChange):
             let text = fileChange.output?.nilIfEmpty
                 ?? fileChange.path?.nilIfEmpty
-                ?? "File changes \(item.legacyStatus(phase: phase) ?? "updated")."
+                ?? "File changes \(item.logStatus(phase: phase) ?? "updated")."
             let kind: ReviewLogEntry.Kind = fileChange.output?.nilIfEmpty == nil ? .toolCall : .commandOutput
             return [item.logEntry(
                 kind: kind,
@@ -749,7 +749,7 @@ private enum AppServerTypedReviewEventAdapter {
             let label = item.toolLabel
             let text = toolCall.error?.nilIfEmpty
                 ?? toolCall.result?.nilIfEmpty
-                ?? "\(label) \(item.legacyStatus(phase: phase) ?? "updated")."
+                ?? "\(label) \(item.logStatus(phase: phase) ?? "updated")."
             return [item.logEntry(
                 kind: .toolCall,
                 text: text,
@@ -759,7 +759,7 @@ private enum AppServerTypedReviewEventAdapter {
         case .contextCompaction(let text):
             return [item.logEntry(
                 kind: .contextCompaction,
-                text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.legacyStatus(phase: phase)),
+                text: text?.nilIfEmpty ?? contextCompactionText(phase: phase, status: item.logStatus(phase: phase)),
                 phase: phase,
                 title: nil
             )]
@@ -897,7 +897,7 @@ private extension CodexThreadItem {
         case .contextCompaction(let text):
             .contextCompaction(.init(
                 title: text?.nilIfEmpty ?? appServerContextCompactionStartedText,
-                status: legacyStatus(phase: .updated).map { .init(rawValue: $0) }
+                status: logStatus(phase: .updated).map { .init(rawValue: $0) }
             ))
         case .diagnostic(let text):
             .diagnostic(.init(
@@ -954,7 +954,7 @@ private extension CodexThreadItem {
             .nilIfEmpty ?? kind.rawValue
     }
 
-    func legacyStatus(phase: AppServerTypedItemPhase) -> String? {
+    func logStatus(phase: AppServerTypedItemPhase) -> String? {
         if let status = statusRaw?.nilIfEmpty {
             return status
         }
@@ -997,7 +997,7 @@ private extension CodexThreadItem {
         title: String?,
         phase: AppServerTypedItemPhase
     ) -> ReviewLogEntry.Metadata {
-        let status = legacyStatus(phase: phase)
+        let status = logStatus(phase: phase)
         let command: CodexCommand?
         let fileChange: CodexFileChange?
         let toolCall: CodexToolCall?

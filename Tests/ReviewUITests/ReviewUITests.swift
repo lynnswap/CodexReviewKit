@@ -5784,7 +5784,7 @@ struct ReviewUITests {
 
         #expect(transport.logUsesCustomTextKit2SurfaceForTesting)
         #expect(transport.logUsesTextViewForTesting == false)
-        #expect(transport.logUsesLegacyLayoutManagerForTesting == false)
+        #expect(transport.logUsesLogLayoutManagerForTesting == false)
         #expect(transport.logIsEditableForTesting == false)
         #expect(transport.logIsSelectableForTesting)
         #expect(transport.logHitTestTargetsDocumentViewForTesting)

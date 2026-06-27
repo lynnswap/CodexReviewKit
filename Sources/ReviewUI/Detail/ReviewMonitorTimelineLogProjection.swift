@@ -112,7 +112,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         case .diagnostic(let diagnostic):
             return [projectedBlock(
                 block,
-                kind: legacyKind(for: block, fallback: .diagnostic),
+                kind: logKind(for: block, fallback: .diagnostic),
                 text: diagnostic.message,
                 metadata: metadata(
                     for: block,
@@ -136,11 +136,11 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         case .message(let message):
             return [projectedBlock(block, kind: .agentMessage, text: message.text)]
         case .plan(let plan):
-            return [projectedBlock(block, kind: legacyKind(for: block, fallback: .plan), text: plan.markdown)]
+            return [projectedBlock(block, kind: logKind(for: block, fallback: .plan), text: plan.markdown)]
         case .reasoning(let reasoning):
             return [projectedBlock(
                 block,
-                kind: legacyKind(
+                kind: logKind(
                     for: block,
                     fallback: reasoning.style == .raw ? .rawReasoning : .reasoningSummary
                 ),
@@ -188,7 +188,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         case .unknown(let unknown):
             return [projectedBlock(
                 block,
-                kind: legacyKind(for: block, fallback: .event),
+                kind: logKind(for: block, fallback: .event),
                 text: [unknown.title, unknown.detail].compactMap { $0 }.joined(separator: "\n"),
                 metadata: metadata(
                     for: block,
@@ -224,7 +224,7 @@ struct ReviewMonitorTimelineLogProjection: Sendable {
         ReviewMonitorLog.BlockID("\(prefix):\(block.id.rawValue)")
     }
 
-    private static func legacyKind(
+    private static func logKind(
         for block: ReviewTimelineDocument.Block,
         fallback: ReviewLogEntry.Kind
     ) -> ReviewLogEntry.Kind {

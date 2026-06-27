@@ -215,7 +215,7 @@ package actor ReviewBackendEventSession {
             case .completed(let summary, nil):
                 return .completed(summary: summary, result: typedReviewResultText)
             case .domainEvents,
-                 .suppressNextLegacyTimelineProjection,
+                 .suppressNextLogTimelineProjection,
                  .suppressNextTerminalFailureLogTimelineProjection,
                  .started,
                  .log,
@@ -391,7 +391,7 @@ package actor ReviewBackendEventSession {
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
         case .domainEvents,
-             .suppressNextLegacyTimelineProjection,
+             .suppressNextLogTimelineProjection,
              .suppressNextTerminalFailureLogTimelineProjection,
              .message,
              .messageDelta,
@@ -481,7 +481,7 @@ private struct PendingStreamedLogEntry: Sendable {
             metadata: metadata
         )
         return suppressesTimelineProjection
-            ? [.suppressNextLegacyTimelineProjection, logEntry]
+            ? [.suppressNextLogTimelineProjection, logEntry]
             : [logEntry]
     }
 
@@ -522,9 +522,9 @@ private struct PendingStreamedLogEntry: Sendable {
 }
 
 package extension Array where Element == CodexReviewBackendModel.Review.Event {
-    var legacyTimelineProjectionCount: Int {
+    var immediateLogTimelineProjectionCount: Int {
         reduce(0) { count, event in
-            count + (event.createsImmediateLegacyTimelineProjection ? 1 : 0)
+            count + (event.createsImmediateLogTimelineProjection ? 1 : 0)
         }
     }
 
@@ -544,7 +544,7 @@ private extension CodexReviewBackendModel.Review.Event {
         case .completed, .failed, .cancelled:
             true
         case .domainEvents,
-             .suppressNextLegacyTimelineProjection,
+             .suppressNextLogTimelineProjection,
              .suppressNextTerminalFailureLogTimelineProjection,
              .started,
              .message,
@@ -562,7 +562,7 @@ private extension CodexReviewBackendModel.Review.Event {
         return result?.nilIfEmpty == nil
     }
 
-    var createsImmediateLegacyTimelineProjection: Bool {
+    var createsImmediateLogTimelineProjection: Bool {
         guard PendingStreamedLogEntry(self) == nil else {
             return false
         }
@@ -570,7 +570,7 @@ private extension CodexReviewBackendModel.Review.Event {
         case .message, .messageDelta, .log, .logEntry:
             true
         case .domainEvents,
-             .suppressNextLegacyTimelineProjection,
+             .suppressNextLogTimelineProjection,
              .suppressNextTerminalFailureLogTimelineProjection,
              .started,
              .completed,

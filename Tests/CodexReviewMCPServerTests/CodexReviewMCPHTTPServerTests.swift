@@ -482,7 +482,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPReviewReadAddsSemanticTimelineWithoutChangingLegacyShape() async throws {
+    @Test func streamableHTTPReviewReadAddsSemanticTimelineWithoutChangingLogShape() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)

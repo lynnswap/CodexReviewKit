@@ -66,7 +66,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func domainEventsMutateTimelineAndSuppressLegacyLogProjection() async throws {
+    @Test func domainEventsMutateTimelineAndSuppressLogProjection() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -90,7 +90,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .message(.init(text: ""))
                 )),
-            ], legacyProjectionSuppressionCount: 0))
+            ], logProjectionSuppressionCount: 0))
             #expect(await waitUntil {
                 store.job(id: "job-1")?.timeline.item(for: itemID) != nil
             })
@@ -104,7 +104,7 @@ struct CodexReviewStoreCommandTests {
                     content: .message(.init(text: "")),
                     delta: "domain text"
                 ),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             #expect(await waitUntil {
                 guard let item = store.job(id: "job-1")?.timeline.item(for: itemID),
                       case .message(let message) = item.content
@@ -118,12 +118,12 @@ struct CodexReviewStoreCommandTests {
 
             await backend.yield(.logEntry(
                 kind: .agentMessage,
-                text: " legacy text",
+                text: " log text",
                 groupID: "msg-1",
                 replacesGroup: false
             ))
             #expect(await waitUntil {
-                store.job(id: "job-1")?.logEntries.contains { $0.text == " legacy text" } == true
+                store.job(id: "job-1")?.logEntries.contains { $0.text == " log text" } == true
             })
 
             let job = try #require(store.job(id: "job-1"))
@@ -137,7 +137,7 @@ struct CodexReviewStoreCommandTests {
 
             await backend.yield(.logEntry(
                 kind: .diagnostic,
-                text: "legacy-only diagnostic",
+                text: "log-only diagnostic",
                 groupID: nil,
                 replacesGroup: false
             ))
@@ -148,7 +148,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func terminalCommandCompatibilityLogUpdatesDirectTimelineItem() async throws {
+    @Test func terminalCommandRetainedLogTextUpdatesDirectTimelineItem() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -171,7 +171,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .command(.init(command: "swift test"))
                 )),
-            ], legacyProjectionSuppressionCount: 0))
+            ], logProjectionSuppressionCount: 0))
             #expect(await waitUntil {
                 store.job(id: "job-1")?.timeline.activeItemIDs.contains(itemID) == true
             })
@@ -203,7 +203,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func skippedLegacyDeltaConsumesDirectProjectionSuppression() async throws {
+    @Test func skippedLogDeltaConsumesDirectProjectionSuppression() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -226,7 +226,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: "final"))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: "final",
@@ -245,7 +245,7 @@ struct CodexReviewStoreCommandTests {
                     content: .message(.init(text: "")),
                     delta: "late"
                 ),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.messageDelta("late", itemID: "msg-1"))
             #expect(await waitUntil {
                 store.job(id: "job-1")?.logEntries.contains { $0.text == "late" } == false
@@ -260,7 +260,7 @@ struct CodexReviewStoreCommandTests {
             let timelineCount = try #require(store.job(id: "job-1")?.timeline.items.count)
             await backend.yield(.logEntry(
                 kind: .diagnostic,
-                text: "legacy-only diagnostic",
+                text: "log-only diagnostic",
                 groupID: nil,
                 replacesGroup: false
             ))
@@ -293,7 +293,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .message(.init(text: "partial"))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: "partial",
@@ -309,7 +309,7 @@ struct CodexReviewStoreCommandTests {
                     content: .message(.init(text: "")),
                     delta: " delta"
                 ),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.messageDelta(" delta", itemID: "msg-1"))
 
             #expect(await waitUntil {
@@ -326,7 +326,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func directTerminalErrorSuppressesCompatibleErrorLogTimelineProjection() async throws {
+    @Test func directTerminalErrorSuppressesErrorLogTimelineProjection() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -350,7 +350,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .failed,
                     content: .diagnostic(.init(message: longError))
                 )),
-            ], legacyProjectionSuppressionCount: 0))
+            ], logProjectionSuppressionCount: 0))
             await backend.yield(.suppressNextTerminalFailureLogTimelineProjection)
             await backend.yield(.failed(longError))
 
@@ -400,7 +400,7 @@ struct CodexReviewStoreCommandTests {
                     content: .message(.init(text: "")),
                     delta: longText
                 ),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: longText,
@@ -453,7 +453,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: longText,
@@ -521,7 +521,7 @@ struct CodexReviewStoreCommandTests {
                     content: .command(.init(command: "swift test")),
                     delta: secondChunk
                 ),
-            ], legacyProjectionSuppressionCount: 2))
+            ], logProjectionSuppressionCount: 2))
             let outputMetadata = ReviewLogEntry.Metadata(
                 sourceType: "commandExecution",
                 title: "Command output",
@@ -563,7 +563,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func syntheticDirectTimelineTextIsTrimmedThroughSuppressedCompatibilityLog() async throws {
+    @Test func syntheticDirectTimelineTextIsTrimmedThroughSuppressedRetainedLogText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -587,7 +587,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: longText,
@@ -608,7 +608,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func eventCompatibilityLogTrimsDirectDiagnosticTimelineText() async throws {
+    @Test func eventRetainedLogTextTrimsDirectDiagnosticTimelineText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -632,7 +632,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .diagnostic(.init(message: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .event,
                 text: longText,
@@ -656,7 +656,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func diffCompatibilityLogTrimsDirectFileChangeTimelineText() async throws {
+    @Test func diffRetainedLogTextTrimsDirectFileChangeTimelineText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -680,7 +680,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .fileChange(.init(title: "", output: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .event,
                 text: longText,
@@ -704,7 +704,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func fileChangeOutputCompatibilityLogTrimsDirectFileChangeTimelineText() async throws {
+    @Test func fileChangeOutputRetainedLogTextTrimsDirectFileChangeTimelineText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -728,7 +728,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .fileChange(.init(title: "Sources/App.swift", output: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .commandOutput,
                 text: longText,
@@ -753,7 +753,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func fileChangeStatusCompatibilityLogDoesNotTrimDirectPatchText() async throws {
+    @Test func fileChangeStatusRetainedLogTextDoesNotTrimDirectPatchText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -777,7 +777,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .fileChange(.init(title: "Sources/App.swift", output: patchText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: "File changes updated.",
@@ -806,7 +806,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func searchCompatibilityLogTrimsDirectSearchResult() async throws {
+    @Test func searchRetainedLogTextTrimsDirectSearchResult() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -830,7 +830,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .search(.init(query: "ReviewTimeline", result: longResult))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: longResult,
@@ -877,7 +877,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func searchCompletionSummaryCompatibilityLogDoesNotClearDirectResult() async throws {
+    @Test func searchCompletionSummaryRetainedLogTextDoesNotClearDirectResult() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -900,7 +900,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .search(.init(query: "ReviewTimeline", result: "short result"))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: "Web search completed: ReviewTimeline.",
@@ -935,7 +935,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func unownedLargeResultMetadataIsDroppedBeforeLegacyTimelineProjection() async throws {
+    @Test func unownedLargeResultMetadataIsDroppedBeforeLogTimelineProjection() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -980,7 +980,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func directRawReasoningTimelineTextTrimUsesLegacyGroupIDAndBumpsRevision() async throws {
+    @Test func directRawReasoningTimelineTextTrimUsesLogGroupIDAndBumpsRevision() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1004,7 +1004,7 @@ struct CodexReviewStoreCommandTests {
                     content: .reasoning(.init(text: "", style: .raw)),
                     delta: longText
                 ),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .rawReasoning,
                 text: longText,
@@ -1060,7 +1060,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .running,
                     content: .plan(.init(markdown: longText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .todoList,
                 text: longText,
@@ -1111,7 +1111,7 @@ struct CodexReviewStoreCommandTests {
                         progress: "Reading review job"
                     ))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: "Reading review job",
@@ -1356,7 +1356,7 @@ struct CodexReviewStoreCommandTests {
                         error: longError
                     ))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: longError,
@@ -1417,7 +1417,7 @@ struct CodexReviewStoreCommandTests {
                         result: longResult
                     ))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .toolCall,
                 text: longResult,
@@ -1450,7 +1450,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func mappedDirectTimelineTextClearsWhenCompatibilityLogIsRemovedByLimit() async throws {
+    @Test func mappedDirectTimelineTextClearsWhenRetainedLogTextIsRemovedByLimit() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1476,7 +1476,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: firstText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: firstText,
@@ -1491,7 +1491,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: secondText))
                 )),
-            ], legacyProjectionSuppressionCount: 1))
+            ], logProjectionSuppressionCount: 1))
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: secondText,
@@ -1517,7 +1517,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func legacyTimelineTextFromBeforeDirectEventsIsTrimmed() async throws {
+    @Test func logTimelineTextFromBeforeDirectEventsIsTrimmed() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1531,11 +1531,11 @@ struct CodexReviewStoreCommandTests {
             )
             _ = try await result
 
-            let longText = String(repeating: "legacy", count: 60_000)
+            let longText = String(repeating: "log", count: 120_000)
             await backend.yield(.logEntry(
                 kind: .agentMessage,
                 text: longText,
-                groupID: "legacy-message",
+                groupID: "log-message",
                 replacesGroup: true
             ))
             #expect(await waitUntil {
@@ -1546,7 +1546,7 @@ struct CodexReviewStoreCommandTests {
                     return message.text == longText
                 } == true
             })
-            let legacyItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
+            let logItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
                 guard case .message(let message) = item.content else {
                     return false
                 }
@@ -1561,14 +1561,14 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: "direct"))
                 )),
-            ], legacyProjectionSuppressionCount: 0))
+            ], logProjectionSuppressionCount: 0))
             #expect(await waitUntil {
                 store.job(id: "job-1")?.timeline.item(for: .init(rawValue: "direct-message")) != nil
             })
 
             let job = try #require(store.job(id: "job-1"))
             #expect(job.applyReviewLogLimit())
-            let item = try #require(job.timeline.item(for: legacyItemID))
+            let item = try #require(job.timeline.item(for: logItemID))
             guard case .message(let message) = item.content else {
                 Issue.record("expected message timeline content")
                 return
@@ -1577,7 +1577,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func legacyProjectedTimelineTextIsTrimmedAfterDirectEvents() async throws {
+    @Test func logProjectedTimelineTextIsTrimmedAfterDirectEvents() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1599,7 +1599,7 @@ struct CodexReviewStoreCommandTests {
                     phase: .completed,
                     content: .message(.init(text: "direct"))
                 )),
-            ], legacyProjectionSuppressionCount: 0))
+            ], logProjectionSuppressionCount: 0))
 
             let longText = String(repeating: "y", count: 300_000)
             await backend.yield(.logEntry(
@@ -1616,7 +1616,7 @@ struct CodexReviewStoreCommandTests {
                     return diagnostic.message == longText
                 } == true
             })
-            let legacyItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
+            let logItemID = try #require(store.job(id: "job-1")?.timeline.items.first { item in
                 guard case .diagnostic(let diagnostic) = item.content else {
                     return false
                 }
@@ -1627,7 +1627,7 @@ struct CodexReviewStoreCommandTests {
             #expect(await waitUntil {
                 store.job(id: "job-1")?.core.lifecycle.status == .failed
             })
-            let item = try #require(store.job(id: "job-1")?.timeline.item(for: legacyItemID))
+            let item = try #require(store.job(id: "job-1")?.timeline.item(for: logItemID))
             guard case .diagnostic(let diagnostic) = item.content else {
                 Issue.record("expected diagnostic timeline content")
                 return

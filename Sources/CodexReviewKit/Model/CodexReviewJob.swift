@@ -15,7 +15,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     @ObservationIgnored
-    private var legacyLogBuffer: ReviewLegacyLogBuffer
+    private var logBuffer: ReviewLogBuffer
 
     public nonisolated let id: String
     public let timeline: ReviewTimeline
@@ -32,7 +32,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     @ObservationIgnored
     package private(set) var usesDirectTimelineEvents: Bool
     @ObservationIgnored
-    private var pendingLegacyTimelineProjectionSuppressions: Int
+    private var pendingLogTimelineProjectionSuppressions: Int
     @ObservationIgnored
     private var pendingTerminalFailureLogTimelineProjectionSuppressions: Int
     @ObservationIgnored
@@ -46,7 +46,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     @ObservationIgnored
     private var latestDirectTimelineTextItemIDs: [ReviewTimelineItem.ID]
     @ObservationIgnored
-    package var legacyProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
+    package var logProjectedTimelineTextItemIDs: Set<ReviewTimelineItem.ID>
     public private(set) var logEntries: [ReviewLogEntry]
     public private(set) var logText: String
     public private(set) var rawLogText: String
@@ -80,7 +80,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         cancellationRequested: Bool = false,
         logEntries: [ReviewLogEntry]
     ) {
-        let initialLogBuffer = ReviewLegacyLogBuffer(entries: logEntries)
+        let initialLogBuffer = ReviewLogBuffer(entries: logEntries)
         let initialLogSnapshot = initialLogBuffer.snapshot
         self.id = id
         self.timeline = ReviewTimeline()
@@ -93,15 +93,15 @@ public final class CodexReviewJob: Identifiable, Hashable {
         self.agentMessagesByItemID = [:]
         self.completedAgentMessageItemIDs = []
         self.usesDirectTimelineEvents = false
-        self.pendingLegacyTimelineProjectionSuppressions = 0
+        self.pendingLogTimelineProjectionSuppressions = 0
         self.pendingTerminalFailureLogTimelineProjectionSuppressions = 0
         self.directTimelineTextItemIDs = []
         self.directTimelineTextItemIDsWithRetainedLogText = []
         self.retainedTimelineTextItemIDsByLogEntryID = [:]
         self.pendingDirectTimelineTextItemIDsForLogRetention = []
         self.latestDirectTimelineTextItemIDs = []
-        self.legacyProjectedTimelineTextItemIDs = []
-        self.legacyLogBuffer = initialLogBuffer
+        self.logProjectedTimelineTextItemIDs = []
+        self.logBuffer = initialLogBuffer
         self.logEntries = initialLogSnapshot.entries
         self.logText = initialLogSnapshot.logText
         self.rawLogText = initialLogSnapshot.rawLogText
@@ -125,18 +125,18 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func replaceLogEntries(_ entries: [ReviewLogEntry], resetDirectTimeline: Bool = false) {
-        legacyLogBuffer.replace(with: entries)
+        logBuffer.replace(with: entries)
         syncLogEntriesFromBuffer()
         if resetDirectTimeline {
             usesDirectTimelineEvents = false
-            pendingLegacyTimelineProjectionSuppressions = 0
+            pendingLogTimelineProjectionSuppressions = 0
             pendingTerminalFailureLogTimelineProjectionSuppressions = 0
             directTimelineTextItemIDs.removeAll(keepingCapacity: true)
             directTimelineTextItemIDsWithRetainedLogText.removeAll(keepingCapacity: true)
             retainedTimelineTextItemIDsByLogEntryID.removeAll(keepingCapacity: true)
             pendingDirectTimelineTextItemIDsForLogRetention.removeAll(keepingCapacity: true)
             latestDirectTimelineTextItemIDs.removeAll(keepingCapacity: true)
-            legacyProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
+            logProjectedTimelineTextItemIDs.removeAll(keepingCapacity: true)
         }
         if usesDirectTimelineEvents {
             trimTimelineTextContentToLogEntries()
@@ -147,11 +147,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func appendLogEntry(_ entry: ReviewLogEntry, suppressTimelineProjection: Bool = false) {
-        let appendResult = legacyLogBuffer.append(entry)
+        let appendResult = logBuffer.append(entry)
         let entry = appendResult.entry
         syncLogEntriesFromBuffer()
         if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
-            let allowsPendingRetainedText = suppressTimelineProjection || pendingLegacyTimelineProjectionSuppressions > 0
+            let allowsPendingRetainedText = suppressTimelineProjection || pendingLogTimelineProjectionSuppressions > 0
             if entry.retainedTimelineText != nil {
                 recordDirectTimelineTextRetention(
                     for: entry,
@@ -165,10 +165,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
             }
         }
         if suppressTimelineProjection == false,
-           consumeLegacyTimelineProjectionSuppression() == false {
+           consumeLogTimelineProjectionSuppression() == false {
             applyTimelineEntry(entry)
             if usesDirectTimelineEvents, entry.canProvideDirectTimelineText {
-                legacyProjectedTimelineTextItemIDs.insert(entry.timelineItemID)
+                logProjectedTimelineTextItemIDs.insert(entry.timelineItemID)
             }
         }
         let didTrim = core.lifecycle.status.isTerminal ? trimReviewLogToLimit() : false
@@ -179,7 +179,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     package func closeActiveCommandLogEntries(status: String, completedAt: Date) {
-        let replacements = ReviewLegacyLogBuffer.activeCommandClosingEntries(
+        let replacements = ReviewLogBuffer.activeCommandClosingEntries(
             entries: logEntries,
             status: status,
             completedAt: completedAt
@@ -191,7 +191,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     package func applyDirectTimelineEvents(
         _ events: [ReviewDomainEvent],
-        legacyProjectionSuppressionCount: Int,
+        logProjectionSuppressionCount: Int,
         at timestamp: Date
     ) {
         let directEvents = events.filter {
@@ -201,10 +201,10 @@ public final class CodexReviewJob: Identifiable, Hashable {
             return
         }
         if usesDirectTimelineEvents == false {
-            recordLegacyProjectedTimelineTextItemIDsFromLogEntries()
+            recordLogProjectedTimelineTextItemIDsFromLogEntries()
         }
         usesDirectTimelineEvents = true
-        pendingLegacyTimelineProjectionSuppressions += max(0, legacyProjectionSuppressionCount)
+        pendingLogTimelineProjectionSuppressions += max(0, logProjectionSuppressionCount)
         var directTextItemIDsApplied: [ReviewTimelineItem.ID] = []
         for event in directEvents {
             if let itemID = event.directTimelineTextItemID {
@@ -214,7 +214,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
             timeline.apply(event, at: timestamp)
         }
         latestDirectTimelineTextItemIDs = directTextItemIDsApplied
-        if legacyProjectionSuppressionCount > 0 {
+        if logProjectionSuppressionCount > 0 {
             appendPendingDirectTimelineTextItemIDsForLogRetention(directTextItemIDsApplied)
         }
     }
@@ -286,17 +286,17 @@ public final class CodexReviewJob: Identifiable, Hashable {
         pendingDirectTimelineTextItemIDsForLogRetention.removeAll { itemIDs.contains($0) }
     }
 
-    private func recordLegacyProjectedTimelineTextItemIDsFromLogEntries() {
+    private func recordLogProjectedTimelineTextItemIDsFromLogEntries() {
         for entry in logEntries where entry.retainedTimelineText != nil {
             let itemID = entry.timelineItemID
             if timeline.item(for: itemID) != nil {
-                legacyProjectedTimelineTextItemIDs.insert(itemID)
+                logProjectedTimelineTextItemIDs.insert(itemID)
             }
         }
     }
 
-    package func suppressNextLegacyTimelineProjection() {
-        pendingLegacyTimelineProjectionSuppressions += 1
+    package func suppressNextLogTimelineProjection() {
+        pendingLogTimelineProjectionSuppressions += 1
         appendPendingDirectTimelineTextItemIDsForLogRetention(latestDirectTimelineTextItemIDs)
     }
 
@@ -305,8 +305,8 @@ public final class CodexReviewJob: Identifiable, Hashable {
         appendPendingDirectTimelineTextItemIDsForLogRetention(latestDirectTimelineTextItemIDs)
     }
 
-    package func discardPendingLegacyTimelineProjectionSuppression() {
-        _ = consumeLegacyTimelineProjectionSuppression()
+    package func discardPendingLogTimelineProjectionSuppression() {
+        _ = consumeLogTimelineProjectionSuppression()
     }
 
     package func consumeTerminalFailureLogTimelineProjectionSuppression() -> Bool {
@@ -317,11 +317,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
         return true
     }
 
-    private func consumeLegacyTimelineProjectionSuppression() -> Bool {
-        guard pendingLegacyTimelineProjectionSuppressions > 0 else {
+    private func consumeLogTimelineProjectionSuppression() -> Bool {
+        guard pendingLogTimelineProjectionSuppressions > 0 else {
             return false
         }
-        pendingLegacyTimelineProjectionSuppressions -= 1
+        pendingLogTimelineProjectionSuppressions -= 1
         return true
     }
 
@@ -336,7 +336,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 
     @discardableResult
     private func trimReviewLogToLimit() -> Bool {
-        guard legacyLogBuffer.applyLimit() else {
+        guard logBuffer.applyLimit() else {
             return false
         }
         syncLogEntriesFromBuffer()
@@ -353,9 +353,9 @@ public final class CodexReviewJob: Identifiable, Hashable {
         keeping direction: TruncationDirection,
         overflowBytes: Int
     ) {
-        guard legacyLogBuffer.truncateOrRemoveEntry(
+        guard logBuffer.truncateOrRemoveEntry(
             at: index,
-            keeping: ReviewLegacyLogBuffer.TruncationDirection(direction),
+            keeping: ReviewLogBuffer.TruncationDirection(direction),
             overflowBytes: overflowBytes
         ) else {
             return
@@ -370,11 +370,11 @@ public final class CodexReviewJob: Identifiable, Hashable {
     }
 
     private func syncLogEntriesFromBuffer() {
-        logEntries = legacyLogBuffer.entries
+        logEntries = logBuffer.entries
     }
 
     private func syncLogSnapshot(mutation: LogMutation) {
-        let snapshot = legacyLogBuffer.snapshot
+        let snapshot = logBuffer.snapshot
         logEntries = snapshot.entries
         logText = snapshot.logText
         rawLogText = snapshot.rawLogText
@@ -389,7 +389,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
 }
 
 private extension CodexReviewJob.LogMutation {
-    init(_ mutation: ReviewLegacyLogBuffer.Mutation) {
+    init(_ mutation: ReviewLogBuffer.Mutation) {
         switch mutation {
         case .reload:
             self = .reload
@@ -399,7 +399,7 @@ private extension CodexReviewJob.LogMutation {
     }
 }
 
-private extension ReviewLegacyLogBuffer.TruncationDirection {
+private extension ReviewLogBuffer.TruncationDirection {
     init(_ direction: CodexReviewJob.TruncationDirection) {
         switch direction {
         case .prefix:

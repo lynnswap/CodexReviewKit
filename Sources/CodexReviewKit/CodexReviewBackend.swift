@@ -174,7 +174,7 @@ package actor BackendReviewEventMailbox {
         case .completed, .failed, .cancelled:
             return true
         case .domainEvents,
-             .suppressNextLegacyTimelineProjection,
+             .suppressNextLogTimelineProjection,
              .suppressNextTerminalFailureLogTimelineProjection,
              .started,
              .message,

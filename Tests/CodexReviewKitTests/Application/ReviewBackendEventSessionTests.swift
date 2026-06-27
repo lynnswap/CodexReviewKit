@@ -176,7 +176,7 @@ private func commandDomainEvent(output: String) -> CodexReviewBackendModel.Revie
             phase: .running,
             content: .command(.init(command: "swift test", output: output))
         )),
-    ], legacyProjectionSuppressionCount: 1)
+    ], logProjectionSuppressionCount: 1)
 }
 
 private func commandOutputDeltaLogEntry(text: String) -> CodexReviewBackendModel.Review.Event {

@@ -272,7 +272,7 @@ struct ReviewTimelineDocumentRendererTests {
         ])
     }
 
-    @Test func plainTextIsDerivedFromDocumentAndMatchesLegacyText() throws {
+    @Test func plainTextIsDerivedFromDocumentAndMatchesLogText() throws {
         let timeline = ReviewTimeline()
 
         complete(
