@@ -1714,8 +1714,7 @@ private enum CodexReviewAccountRegistry {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.accountKey = try container.decodeIfPresent(String.self, forKey: .accountKey)
             self.email = try container.decode(String.self, forKey: .email)
-            self.kind = try container.decodeIfPresent(Kind.self, forKey: .kind)
-                ?? Kind.legacyDefault(accountKey: accountKey, email: email)
+            self.kind = try container.decode(Kind.self, forKey: .kind)
             self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
             self.lastActivatedAt = try container.decodeIfPresent(Date.self, forKey: .lastActivatedAt)
             self.lastRateLimitFetchAt = try container.decodeIfPresent(Date.self, forKey: .lastRateLimitFetchAt)
@@ -1754,19 +1753,6 @@ private enum CodexReviewAccountRegistry {
             }
         }
 
-        static func legacyDefault(accountKey: String?, email: String) -> Self {
-            let normalizedAccountKey = accountKey
-                .map(CodexReviewAccount.normalizedEmail)
-                .flatMap { $0.isEmpty ? nil : $0 }
-            switch normalizedAccountKey ?? CodexReviewAccount.normalizedEmail(email) {
-            case "api-key":
-                return .apiKey
-            case "amazon-bedrock":
-                return .amazonBedrock
-            default:
-                return .chatGPT
-            }
-        }
     }
 
     private struct SavedRateLimitWindow: Codable {

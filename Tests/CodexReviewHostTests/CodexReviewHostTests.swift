@@ -471,53 +471,6 @@ struct CodexReviewHostTests {
         #expect(providerAccount.capabilities.supportsRateLimitRefresh == false)
     }
 
-    @Test func liveStoreInfersMissingPersistedRegistryKind() throws {
-        let homeURL = try temporaryHome()
-        try writeRegistryRecords(
-            homeURL: homeURL,
-            activeAccountKey: nil,
-            records: [
-                [
-                    "accountKey": "review@example.com",
-                    "email": "review@example.com",
-                    "planType": "pro",
-                ],
-                [
-                    "accountKey": "api-key",
-                    "email": "API Key",
-                    "planType": "pro",
-                ],
-                [
-                    "accountKey": "amazon-bedrock",
-                    "email": "Amazon Bedrock",
-                    "planType": "pro",
-                ],
-            ]
-        )
-        let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": homeURL.path],
-            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            transport: FakeCodexAppServerTransport()
-        )
-
-        let reviewAccount = try #require(store.auth.persistedAccounts.first {
-            $0.accountKey == "review@example.com"
-        })
-        let apiKeyAccount = try #require(store.auth.persistedAccounts.first {
-            $0.accountKey == "api-key"
-        })
-        let bedrockAccount = try #require(store.auth.persistedAccounts.first {
-            $0.accountKey == "amazon-bedrock"
-        })
-
-        #expect(reviewAccount.kind == .chatGPT)
-        #expect(reviewAccount.capabilities.supportsRateLimitRefresh)
-        #expect(apiKeyAccount.kind == .apiKey)
-        #expect(apiKeyAccount.capabilities.supportsRateLimitRefresh == false)
-        #expect(bedrockAccount.kind == .amazonBedrock)
-        #expect(bedrockAccount.capabilities.supportsRateLimitRefresh == false)
-    }
-
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -1433,7 +1386,7 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests().map(\.method).contains("turn/interrupt"))
     }
 
-    @Test func liveStoreStopCleansRecoveryWaitingReviewWithoutLegacyCleanup() async throws {
+    @Test func liveStoreStopCleansRecoveryWaitingReviewWithoutAppServerCleanup() async throws {
         let homeURL = try temporaryHome()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
         let transport = FakeCodexAppServerTransport()
