@@ -522,7 +522,7 @@ extension ReviewMonitorSplitViewController {
     }
 
     enum SidebarPresentationForTesting: Sendable, Equatable {
-        case jobList
+        case chatList
         case accountList
         case unavailable
     }
@@ -537,8 +537,8 @@ extension ReviewMonitorSplitViewController {
 
     var sidebarPresentationForTesting: SidebarPresentationForTesting {
         switch sidebarViewControllerForTesting.sidebarKindForTesting {
-        case .jobList, .empty:
-            return .jobList
+        case .chatList, .empty:
+            return .chatList
         case .accountList:
             return .accountList
         case .unavailable:

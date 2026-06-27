@@ -105,7 +105,7 @@ extension ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarTopAccessoryCountForTesting == 0)
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
     }
@@ -121,7 +121,7 @@ extension ReviewUITests {
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarBottomAccessoryIsHiddenForTesting == false)
 
         uiState.sidebarSelection = .account
@@ -130,7 +130,7 @@ extension ReviewUITests {
 
         uiState.sidebarSelection = .workspace
         try await waitForSidebarBottomAccessoryHidden(viewController, false)
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
     }
 
     @Test func statusAccessoryViewControllerVisibilityTracksOnlySidebarSelection() async throws {
@@ -241,7 +241,7 @@ extension ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
 
         store.loadForTesting(
             serverState: .failed("Embedded server is unavailable in preview mode."),
@@ -261,7 +261,7 @@ extension ReviewUITests {
         )
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
@@ -494,7 +494,7 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .workspace)
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
@@ -622,7 +622,7 @@ extension ReviewUITests {
         uiState.sidebarSelection = .workspace
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: sidebar.sidebarKindObservationForTesting
         )
 
@@ -643,7 +643,7 @@ extension ReviewUITests {
         )
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: sidebar.sidebarKindObservationForTesting
         )
     }

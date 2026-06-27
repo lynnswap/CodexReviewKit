@@ -13,7 +13,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     enum SidebarKind: Equatable {
         case unavailable
         case empty
-        case jobList
+        case chatList
         case accountList
     }
 
@@ -522,7 +522,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             break
         }
         let hasSidebarContent = hasReviewJobs || hasWorkspaces || hasCodexSidebarContent
-        return hasSidebarContent ? .jobList : .empty
+        return hasSidebarContent ? .chatList : .empty
     }
 
     private var hasCodexSidebarContent: Bool {
@@ -780,7 +780,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             scrollView.isHidden = true
             emptyStateViewController.view.isHidden = false
             accountsViewController.view.isHidden = true
-        case .jobList:
+        case .chatList:
             unavailableView.isHidden = true
             scrollView.isHidden = false
             emptyStateViewController.view.isHidden = true
