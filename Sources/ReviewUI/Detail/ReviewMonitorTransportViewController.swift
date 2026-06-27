@@ -17,7 +17,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
-    private var previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
+    #if DEBUG
+        private var previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
+    #endif
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
@@ -566,7 +568,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
         appliedLogRenderGeneration = logRenderGeneration
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
-        previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
+        #if DEBUG
+            previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
+        #endif
     }
 
     private func restorationTarget(
