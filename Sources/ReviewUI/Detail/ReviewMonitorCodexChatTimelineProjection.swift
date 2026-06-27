@@ -6,16 +6,36 @@ import ReviewMonitorRendering
 @MainActor
 struct ReviewMonitorCodexChatTimelineProjection {
     func document(
-        from turnSnapshot: CodexChatTurnSnapshot,
+        from snapshot: CodexChatSnapshot,
+        activeTurnID: CodexTurnID,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
         revision: UInt64
     ) -> ReviewTimelineDocument? {
-        guard turnSnapshot.items.isEmpty == false else {
+        guard let turn = snapshot.turns.first(where: { $0.id == activeTurnID }) else {
+            return nil
+        }
+        return document(
+            from: turn,
+            items: snapshot.items.filter { $0.turnID == activeTurnID },
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt,
+            revision: revision
+        )
+    }
+
+    func document(
+        from turnSnapshot: CodexChatTurnStateSnapshot,
+        items: [CodexChatItemSnapshot],
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?,
+        revision: UInt64
+    ) -> ReviewTimelineDocument? {
+        guard items.isEmpty == false else {
             return nil
         }
 
-        let blocks = turnSnapshot.items.map {
+        let blocks = items.map {
             block(
                 from: $0,
                 turnSnapshot: turnSnapshot,
@@ -37,9 +57,9 @@ struct ReviewMonitorCodexChatTimelineProjection {
         )
     }
 
-    private func block(
-        from item: CodexChat.Item,
-        turnSnapshot: CodexChatTurnSnapshot,
+    func block(
+        from item: CodexChatItemSnapshot,
+        turnSnapshot: CodexChatTurnStateSnapshot,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewTimelineDocument.Block {
@@ -63,7 +83,7 @@ struct ReviewMonitorCodexChatTimelineProjection {
         )
     }
 
-    private func blockID(for item: CodexChat.Item) -> ReviewTimelineDocument.Block.ID {
+    func blockID(for item: CodexChatItemSnapshot) -> ReviewTimelineDocument.Block.ID {
         let rawTurnID = item.turnID?.rawValue ?? "unknown-turn"
         return .init(rawValue: "\(rawTurnID):\(item.id)")
     }
@@ -99,7 +119,7 @@ struct ReviewMonitorCodexChatTimelineProjection {
         }
     }
 
-    private func family(for item: CodexChat.Item) -> ReviewItemFamily {
+    private func family(for item: CodexChatItemSnapshot) -> ReviewItemFamily {
         switch item.content {
         case .message:
             return .message
@@ -123,8 +143,8 @@ struct ReviewMonitorCodexChatTimelineProjection {
     }
 
     private func content(
-        from item: CodexChat.Item,
-        turnSnapshot: CodexChatTurnSnapshot
+        from item: CodexChatItemSnapshot,
+        turnSnapshot: CodexChatTurnStateSnapshot
     ) -> ReviewTimelineDocument.Content {
         switch item.content {
         case .message(let message):
@@ -201,13 +221,13 @@ struct ReviewMonitorCodexChatTimelineProjection {
     }
 
     private func phase(
-        for item: CodexChat.Item,
-        turnSnapshot: CodexChatTurnSnapshot
+        for item: CodexChatItemSnapshot,
+        turnSnapshot: CodexChatTurnStateSnapshot
     ) -> ReviewItemPhase {
         statusPhase(item.itemStatus ?? turnSnapshot.status)
     }
 
-    private func terminalStatus(for turnSnapshot: CodexChatTurnSnapshot) -> ReviewLifecycleStatus? {
+    func terminalStatus(for turnSnapshot: CodexChatTurnStateSnapshot) -> ReviewLifecycleStatus? {
         switch turnSnapshot.status {
         case .completed:
             return .succeeded
@@ -385,7 +405,7 @@ struct ReviewMonitorCodexChatTimelineProjection {
     }
 }
 
-private extension CodexChat.Item {
+private extension CodexChatItemSnapshot {
     var itemStatus: CodexTurnStatus? {
         switch content {
         case .command(let command):

@@ -415,13 +415,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private func timelineDocumentForBoundJob(timeline: ReviewTimeline) -> ReviewTimelineDocument {
-        if let turnSnapshot = selectedReviewChat.turnSnapshot,
-           let document = ReviewMonitorCodexChatTimelineProjection().document(
-               from: turnSnapshot,
-               chatCreatedAt: selectedReviewChat.chatCreatedAt,
-               chatUpdatedAt: selectedReviewChat.chatUpdatedAt,
-               revision: logRenderGeneration &+ 1
-           ) {
+        if let document = selectedReviewChat.timelineDocument {
             return document
         }
 

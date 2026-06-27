@@ -3,29 +3,19 @@ import CodexReviewKit
 import Foundation
 import Observation
 import ObservationBridge
+import ReviewMonitorRendering
 
 @MainActor
 @Observable
 final class ReviewMonitorSelectedReviewChat {
     private(set) var identity: CodexReviewIdentity?
     private(set) var chat: CodexChat?
+    private(set) var timelineDocument: ReviewTimelineDocument?
     var phase: CodexDataPhase {
         chat?.phase ?? .idle
     }
     var lastErrorDescription: String? {
         chat?.lastErrorDescription
-    }
-    var turnSnapshot: CodexChatTurnSnapshot? {
-        guard let chat, let identity else {
-            return nil
-        }
-        return chat.turnSnapshot(for: identity.turnID)
-    }
-    var chatCreatedAt: Date? {
-        chat?.createdAt
-    }
-    var chatUpdatedAt: Date? {
-        chat?.updatedAt
     }
 
     @ObservationIgnored
@@ -38,6 +28,8 @@ final class ReviewMonitorSelectedReviewChat {
     private var observation: CodexChatObservation?
     @ObservationIgnored
     private var observationTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var documentProjection = ReviewMonitorSelectedReviewChatDocumentProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
 
@@ -75,6 +67,8 @@ final class ReviewMonitorSelectedReviewChat {
         cancelObservation()
         identity = nextIdentity
         chat = nil
+        timelineDocument = nil
+        documentProjection.reset()
         boundModelContext = nextModelContext
 
         guard let nextIdentity, let modelContext = nextModelContext else {
@@ -96,6 +90,20 @@ final class ReviewMonitorSelectedReviewChat {
                     return
                 }
                 self.observation = observation
+                for await change in observation.changes {
+                    guard Task.isCancelled == false,
+                          self.identity == nextIdentity,
+                          self.chat === nextChat
+                    else {
+                        break
+                    }
+                    self.timelineDocument = self.documentProjection.apply(
+                        change,
+                        activeTurnID: nextIdentity.turnID,
+                        chatCreatedAt: nextChat.createdAt,
+                        chatUpdatedAt: nextChat.updatedAt
+                    )
+                }
             } catch is CancellationError {
             } catch {
             }
