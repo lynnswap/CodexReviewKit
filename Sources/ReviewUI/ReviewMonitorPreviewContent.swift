@@ -1,4 +1,5 @@
 import Foundation
+import CodexKit
 @_spi(Testing) import CodexReviewKit
 
 @_spi(PreviewSupport)
@@ -204,6 +205,32 @@ public enum ReviewMonitorPreviewContent {
             )
         }
         return store
+    }
+
+    static func makeChatLogFixtures(
+        from jobs: [CodexReviewJob]
+    ) -> [ReviewMonitorPreviewChatLogFixture] {
+        jobs.compactMap { job in
+            guard let chat = job.reviewChatSelection else {
+                return nil
+            }
+            return ReviewMonitorPreviewChatLogFixture(
+                chat: chat,
+                cwd: job.cwd,
+                isRunning: job.core.lifecycle.status == .running,
+                turn: CodexChatTurnStateSnapshot(
+                    id: job.previewTurnID,
+                    status: CodexTurnStatus(job.core.lifecycle.status),
+                    errorDescription: job.core.lifecycle.errorMessage,
+                    usage: nil
+                ),
+                phase: CodexDataPhase(
+                    job.core.lifecycle.status,
+                    errorMessage: job.core.lifecycle.errorMessage
+                ),
+                timeline: job.timeline
+            )
+        }
     }
 
     @_spi(PreviewSupport)
@@ -1214,5 +1241,37 @@ public enum ReviewMonitorPreviewContent {
                 hasFinalReview: true
             ),
         ]
+    }
+}
+
+private extension CodexReviewJob {
+    var previewTurnID: CodexTurnID {
+        core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
+    }
+}
+
+private extension CodexTurnStatus {
+    init(_ jobState: ReviewJobState) {
+        switch jobState {
+        case .queued, .running:
+            self = .running
+        case .succeeded:
+            self = .completed
+        case .failed:
+            self = .failed
+        case .cancelled:
+            self = .cancelled
+        }
+    }
+}
+
+private extension CodexDataPhase {
+    init(_ jobState: ReviewJobState, errorMessage: String?) {
+        switch jobState {
+        case .queued, .running, .succeeded, .cancelled:
+            self = .loaded
+        case .failed:
+            self = .failed(errorMessage ?? "Review failed")
+        }
     }
 }

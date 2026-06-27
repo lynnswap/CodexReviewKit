@@ -4,24 +4,31 @@ import Foundation
 import ObservationBridge
 
 @MainActor
+struct ReviewMonitorPreviewChatLogFixture {
+    let chat: ReviewMonitorCodexSidebarSnapshot.Chat
+    let cwd: String
+    let isRunning: Bool
+    let turn: CodexChatTurnStateSnapshot
+    let phase: CodexDataPhase
+    let timeline: ReviewTimeline
+}
+
+@MainActor
 final class ReviewMonitorPreviewChatLogSource {
     let snapshot: ReviewMonitorCodexSidebarSnapshot
     let initialChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
     private let previewChatsByID: [CodexThreadID: PreviewReviewChat]
 
-    init(jobs: [CodexReviewJob]) {
+    init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
         var sections: [ReviewMonitorCodexSidebarSnapshot.Section] = []
         var sectionIndexesByCWD: [String: Int] = [:]
         var previewChatsByID: [CodexThreadID: PreviewReviewChat] = [:]
         var initialRunningChat: ReviewMonitorCodexSidebarSnapshot.Chat?
         var firstChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
-        for job in jobs {
-            guard let previewChat = PreviewReviewChat(job: job) else {
-                continue
-            }
-
+        for fixture in fixtures {
+            let previewChat = PreviewReviewChat(fixture: fixture)
             let chat = previewChat.chat
             previewChatsByID[chat.id] = previewChat
             firstChat = firstChat ?? chat
@@ -75,24 +82,13 @@ private final class PreviewReviewChat {
     private let phase: CodexDataPhase
     private let timeline: ReviewTimeline
 
-    init?(job: CodexReviewJob) {
-        guard let chat = job.reviewChatSelection else {
-            return nil
-        }
-        self.chat = chat
-        self.cwd = job.cwd
-        self.isRunning = job.core.lifecycle.status == .running
-        self.turn = CodexChatTurnStateSnapshot(
-            id: job.previewTurnID,
-            status: CodexTurnStatus(job.core.lifecycle.status),
-            errorDescription: job.core.lifecycle.errorMessage,
-            usage: nil
-        )
-        self.phase = CodexDataPhase(
-            job.core.lifecycle.status,
-            errorMessage: job.core.lifecycle.errorMessage
-        )
-        self.timeline = job.timeline
+    init(fixture: ReviewMonitorPreviewChatLogFixture) {
+        self.chat = fixture.chat
+        self.cwd = fixture.cwd
+        self.isRunning = fixture.isRunning
+        self.turn = fixture.turn
+        self.phase = fixture.phase
+        self.timeline = fixture.timeline
     }
 
     func trackTimelineRevision() {
@@ -322,19 +318,6 @@ private extension CodexThreadItem.Content {
 }
 
 private extension CodexTurnStatus {
-    init(_ jobState: ReviewJobState) {
-        switch jobState {
-        case .queued, .running:
-            self = .running
-        case .succeeded:
-            self = .completed
-        case .failed:
-            self = .failed
-        case .cancelled:
-            self = .cancelled
-        }
-    }
-
     init(_ phase: ReviewItemPhase) {
         switch phase {
         case .awaitingApproval, .queued, .running, .waitingForInput:
@@ -350,23 +333,6 @@ private extension CodexTurnStatus {
 
     init(_ status: some ReviewOpenStringValue) {
         self.init(rawValue: status.rawValue)
-    }
-}
-
-private extension CodexDataPhase {
-    init(_ jobState: ReviewJobState, errorMessage: String?) {
-        switch jobState {
-        case .queued, .running, .succeeded, .cancelled:
-            self = .loaded
-        case .failed:
-            self = .failed(errorMessage ?? "Review failed")
-        }
-    }
-}
-
-private extension CodexReviewJob {
-    var previewTurnID: CodexTurnID {
-        core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
     }
 }
 
