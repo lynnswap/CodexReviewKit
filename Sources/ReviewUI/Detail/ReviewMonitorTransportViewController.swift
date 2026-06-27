@@ -6,11 +6,6 @@ import ReviewMonitorRendering
 
 @MainActor
 final class ReviewMonitorTransportViewController: NSViewController {
-    private enum DisplayedSelection: Equatable {
-        case job(String)
-        case workspaceSection(String)
-    }
-
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let selectedReviewChat: ReviewMonitorSelectedReviewChat
@@ -24,7 +19,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var boundJob: CodexReviewJob?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
-    private var displayedSelection: DisplayedSelection?
+    private var displayedSelection: ReviewMonitorSelectionID?
     private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
     private var logRenderTask: Task<Void, Never>?
     private var logRenderGeneration: UInt64 = 0
@@ -133,9 +128,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
         switch selection {
         case .job(let selectedJob):
-            return boundJob !== selectedJob || displayedSelection != .job(selectedJob.id)
+            return boundJob !== selectedJob || displayedSelection != selection?.id
         case .workspaceSection(let selectedSection):
-            return boundWorkspaceSection != selectedSection || displayedSelection != .workspaceSection(selectedSection.id)
+            return boundWorkspaceSection != selectedSection || displayedSelection != selection?.id
         case nil:
             return displayedSelection != nil
         }
@@ -149,13 +144,13 @@ final class ReviewMonitorTransportViewController: NSViewController {
             hidePlaceholder()
             logScrollView.isHidden = false
             workspaceFindingsView.isHidden = true
-            displayedSelection = .job(selectedJob.id)
+            displayedSelection = selection?.id
 
         case .workspaceSection(let selectedSection):
             clearDisplayedJob()
             displayWorkspaceSection(selectedSection)
             logScrollView.isHidden = true
-            displayedSelection = .workspaceSection(selectedSection.id)
+            displayedSelection = selection?.id
 
         case nil:
             clearDisplayedJob()
