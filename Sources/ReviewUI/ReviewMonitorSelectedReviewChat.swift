@@ -22,7 +22,7 @@ final class ReviewMonitorSelectedReviewChat {
     @ObservationIgnored
     private weak var boundModelContext: CodexModelContext?
     @ObservationIgnored
-    private var boundChatBinding: ReviewMonitorReviewChatBinding?
+    private var boundIdentity: CodexReviewIdentity?
     @ObservationIgnored
     private var observation: CodexChatObservation?
     @ObservationIgnored
@@ -42,8 +42,8 @@ final class ReviewMonitorSelectedReviewChat {
         cancelObservation()
     }
 
-    func bind(to chatBinding: ReviewMonitorReviewChatBinding?) {
-        boundChatBinding = chatBinding
+    func bind(to identity: CodexReviewIdentity?) {
+        boundIdentity = identity
         refreshBinding()
     }
 
@@ -58,7 +58,7 @@ final class ReviewMonitorSelectedReviewChat {
     }
 
     private func refreshBinding() {
-        let nextIdentity = boundChatBinding?.identity
+        let nextIdentity = boundIdentity
         let nextModelContext = modelSource?.modelContext
         guard nextIdentity != identity || nextModelContext !== boundModelContext else {
             return

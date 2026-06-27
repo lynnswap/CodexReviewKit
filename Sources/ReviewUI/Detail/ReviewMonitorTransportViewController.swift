@@ -172,7 +172,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedJobObservation = nil
         resetLogRenderer()
         boundJob = selectedJob
-        selectedReviewChat.bind(to: ReviewMonitorReviewChatBinding(job: selectedJob))
+        selectedReviewChat.bind(to: selectedJob.reviewChatIdentity)
 
         selectedJobObservation = withPortableContinuousObservation { [weak self] event in
             let eventKind = event.kind
@@ -181,7 +181,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             else {
                 return
             }
-            self.selectedReviewChat.bind(to: ReviewMonitorReviewChatBinding(job: selectedJob))
+            self.selectedReviewChat.bind(to: selectedJob.reviewChatIdentity)
             let timeline = selectedJob.timeline
             _ = timeline.revision
             let timelineDocument = self.timelineDocumentForBoundJob(timeline: timeline)
