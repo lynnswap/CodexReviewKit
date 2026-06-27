@@ -16,46 +16,129 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private struct PreviewStreamTemplate {
-        let kind: ReviewLogEntry.Kind
-        let groupName: String?
-        let text: String
-        let metadata: ReviewLogEntry.Metadata?
-        let replacesGroup: Bool
+        let itemName: String?
+        let kind: ReviewItemKind
+        let family: ReviewItemFamily
+        let phase: ReviewItemPhase
+        let content: ReviewTimelineItem.Content
+        let mode: PreviewStreamMode
+        let deltaText: String?
+        let startedAt: Date?
+        let completedAt: Date?
+        let durationMs: Int?
         let chunkByWord: Bool
         let delayBeforeFrameCount: Int
         let chunkIntervalFrameCount: Int
 
         init(
-            kind: ReviewLogEntry.Kind,
-            groupName: String? = nil,
-            text: String,
-            metadata: ReviewLogEntry.Metadata? = nil,
-            replacesGroup: Bool = false,
+            itemName: String? = nil,
+            kind: ReviewItemKind,
+            family: ReviewItemFamily,
+            phase: ReviewItemPhase = .completed,
+            content: ReviewTimelineItem.Content,
+            mode: PreviewStreamMode = .complete,
+            deltaText: String? = nil,
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil,
             chunkByWord: Bool = false,
             delayBeforeFrameCount: Int,
             chunkIntervalFrameCount: Int = 1
         ) {
+            self.itemName = itemName
             self.kind = kind
-            self.groupName = groupName
-            self.text = text
-            self.metadata = metadata
-            self.replacesGroup = replacesGroup
+            self.family = family
+            self.phase = phase
+            self.content = content
+            self.mode = mode
+            self.deltaText = deltaText
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMs = durationMs
             self.chunkByWord = chunkByWord
             self.delayBeforeFrameCount = delayBeforeFrameCount
             self.chunkIntervalFrameCount = chunkIntervalFrameCount
         }
     }
 
-    private struct PreviewStreamStep {
-        let kind: ReviewLogEntry.Kind
-        let groupName: String?
-        let text: String
-        let metadata: ReviewLogEntry.Metadata?
-        let replacesGroup: Bool
+    private enum PreviewStreamMode {
+        case update
+        case complete
+        case textDelta
+    }
+
+    private struct PreviewTimelineItemTemplate {
+        let itemName: String
+        let kind: ReviewItemKind
+        let family: ReviewItemFamily
+        let phase: ReviewItemPhase
+        let content: ReviewTimelineItem.Content
+        let startedAt: Date?
+        let completedAt: Date?
+        let durationMs: Int?
+
+        init(
+            itemName: String,
+            kind: ReviewItemKind,
+            family: ReviewItemFamily,
+            phase: ReviewItemPhase,
+            content: ReviewTimelineItem.Content,
+            startedAt: Date? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil
+        ) {
+            self.itemName = itemName
+            self.kind = kind
+            self.family = family
+            self.phase = phase
+            self.content = content
+            self.startedAt = startedAt
+            self.completedAt = completedAt
+            self.durationMs = durationMs
+        }
+
+        func seed(id: ReviewTimelineItem.ID) -> ReviewTimelineItemSeed {
+            .init(
+                id: id,
+                kind: kind,
+                family: family,
+                phase: phase,
+                content: content,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: durationMs
+            )
+        }
+    }
+
+    private struct PreviewTimelineStep {
+        let itemName: String
+        let kind: ReviewItemKind
+        let family: ReviewItemFamily
+        let phase: ReviewItemPhase
+        let content: ReviewTimelineItem.Content
+        let mode: PreviewStreamMode
+        let deltaText: String?
+        let startedAt: Date?
+        let completedAt: Date?
+        let durationMs: Int?
+
+        func seed(id: ReviewTimelineItem.ID) -> ReviewTimelineItemSeed {
+            .init(
+                id: id,
+                kind: kind,
+                family: family,
+                phase: phase,
+                content: content,
+                startedAt: startedAt,
+                completedAt: completedAt,
+                durationMs: durationMs
+            )
+        }
     }
 
     private struct PreviewStreamFrame {
-        let step: PreviewStreamStep
+        let step: PreviewTimelineStep
         let cycle: Int
     }
 
@@ -143,7 +226,7 @@ public enum ReviewMonitorPreviewContent {
             hasFinalReview: false,
             reviewResult: nil,
             lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
-            logEntries: makeCommandOutputPreviewLogEntries()
+            timelineItems: makeCommandOutputPreviewTimelineItems()
         )
         store.loadForTesting(
             serverState: .running,
@@ -176,9 +259,7 @@ public enum ReviewMonitorPreviewContent {
         let nextTick = currentTick + 1
         for (index, job) in runningJobs.enumerated() {
             if let frame = streamFrame(forJobAt: index, tick: nextTick) {
-                let entry = streamEntry(from: frame.step, for: job, cycle: frame.cycle)
-                job.appendLogEntry(entry)
-                appendPreviewTimelineEntry(entry, to: job)
+                applyPreviewStreamStep(frame.step, to: job, cycle: frame.cycle)
             }
         }
         return nextTick
@@ -206,87 +287,39 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func streamEntry(
-        from step: PreviewStreamStep,
-        for job: CodexReviewJob,
+    private static func applyPreviewStreamStep(
+        _ step: PreviewTimelineStep,
+        to job: CodexReviewJob,
         cycle: Int
-    ) -> ReviewLogEntry {
-        let groupID = step.groupName.map { "preview-\($0)-\(job.id)-\(cycle)" }
-        return .init(
-            kind: step.kind,
-            groupID: groupID,
-            replacesGroup: step.replacesGroup,
-            text: step.text,
-            metadata: streamMetadata(from: step, groupID: groupID)
+    ) {
+        let itemID = previewTimelineItemID(
+            itemName: step.itemName,
+            jobID: job.id,
+            cycle: cycle
         )
-    }
-
-    private static func streamMetadata(
-        from step: PreviewStreamStep,
-        groupID: String?
-    ) -> ReviewLogEntry.Metadata? {
-        switch step.kind {
-        case .command:
-            let command = commandText(from: step.text)
-            let startedAt = Date()
-            return .init(
-                sourceType: "commandExecution",
-                status: "inProgress",
-                itemID: groupID,
-                command: command,
-                startedAt: startedAt,
-                commandStatus: "inProgress"
-            )
-        case .commandOutput:
-            guard let metadata = step.metadata else {
-                return nil
-            }
-            return commandOutputCompletionMetadata(
-                from: metadata,
-                groupID: groupID,
-                completedAt: Date()
-            )
-        case .agentMessage, .plan, .todoList, .reasoning, .reasoningSummary, .rawReasoning,
-            .toolCall, .diagnostic, .error, .progress, .event, .contextCompaction:
-            return step.metadata
+        switch step.mode {
+        case .update:
+            job.timeline.apply(.itemUpdated(step.seed(id: itemID)))
+        case .complete:
+            job.timeline.apply(.itemCompleted(step.seed(id: itemID)))
+        case .textDelta:
+            job.timeline.apply(
+                .textDelta(
+                    itemID: itemID,
+                    kind: step.kind,
+                    family: step.family,
+                    content: step.content,
+                    delta: step.deltaText ?? ""
+                ))
         }
     }
 
-    private static func commandOutputCompletionMetadata(
-        from metadata: ReviewLogEntry.Metadata,
-        groupID: String?,
-        completedAt: Date
-    ) -> ReviewLogEntry.Metadata {
-        .init(
-            sourceType: metadata.sourceType,
-            title: metadata.title,
-            status: metadata.status,
-            detail: metadata.detail,
-            itemID: metadata.itemID ?? groupID,
-            command: metadata.command,
-            cwd: metadata.cwd,
-            exitCode: metadata.exitCode,
-            startedAt: metadata.startedAt,
-            completedAt: metadata.completedAt ?? completedAt,
-            durationMs: metadata.durationMs,
-            commandActions: metadata.commandActions,
-            commandStatus: metadata.commandStatus ?? metadata.status ?? "completed",
-            namespace: metadata.namespace,
-            server: metadata.server,
-            tool: metadata.tool,
-            query: metadata.query,
-            path: metadata.path,
-            resultText: metadata.resultText,
-            errorText: metadata.errorText
-        )
-    }
-
-    private static func commandText(from text: String) -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("$ ") else {
-            return trimmed.nilIfEmpty
-        }
-        return String(trimmed.dropFirst(2)).nilIfEmpty
+    private static func previewTimelineItemID(
+        itemName: String,
+        jobID: String,
+        cycle: Int
+    ) -> ReviewTimelineItem.ID {
+        .init(rawValue: "preview-\(itemName)-\(jobID)-\(cycle)")
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -299,25 +332,32 @@ public enum ReviewMonitorPreviewContent {
         return "preview-turn-\(tick)"
     }
 
-    private static func streamTimeline(from templates: [PreviewStreamTemplate]) -> [PreviewStreamStep?] {
-        var timeline: [PreviewStreamStep?] = []
-        for template in templates {
+    private static func streamTimeline(from templates: [PreviewStreamTemplate]) -> [PreviewTimelineStep?] {
+        var timeline: [PreviewTimelineStep?] = []
+        for (templateIndex, template) in templates.enumerated() {
             let delay = timeline.isEmpty ? 1 : max(1, template.delayBeforeFrameCount)
             if delay > 1 {
                 timeline.append(contentsOf: Array(repeating: nil, count: delay - 1))
             }
-            let chunks = template.chunkByWord ? wordChunks(in: template.text) : [template.text]
+            let itemName = template.itemName ?? "stream-\(templateIndex)"
+            let streamText = template.deltaText ?? ""
+            let chunks = template.chunkByWord ? wordChunks(in: streamText) : [streamText]
             for (index, chunk) in chunks.enumerated() {
                 if index > 0 && template.chunkIntervalFrameCount > 1 {
                     timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
                 }
                 timeline.append(
-                    PreviewStreamStep(
+                    PreviewTimelineStep(
+                        itemName: itemName,
                         kind: template.kind,
-                        groupName: template.groupName,
-                        text: chunk,
-                        metadata: template.metadata,
-                        replacesGroup: template.replacesGroup
+                        family: template.family,
+                        phase: template.phase,
+                        content: template.content,
+                        mode: template.mode,
+                        deltaText: template.mode == .textDelta ? chunk : template.deltaText,
+                        startedAt: template.startedAt,
+                        completedAt: template.completedAt,
+                        durationMs: template.durationMs
                     ))
             }
         }
@@ -344,138 +384,186 @@ public enum ReviewMonitorPreviewContent {
 
     private static let previewStreamTemplates: [PreviewStreamTemplate] = [
         .init(
-            kind: .event,
-            text: "Turn started: \(previewTurnID(1))",
+            kind: ReviewItemKind(rawValue: "event"),
+            family: .diagnostic,
+            content: .diagnostic(.init(message: "Turn started: \(previewTurnID(1))")),
             delayBeforeFrameCount: 1
         ),
         .init(
+            itemName: "plan",
             kind: .plan,
-            groupName: "plan",
-            text: """
-                [completed] Inspect ReviewMonitor log rendering
-                [in_progress] Preserve active find UI while streaming
-                [pending] Run focused UI tests
-                """,
+            family: .plan,
+            content: .plan(
+                .init(
+                    markdown: """
+                        [completed] Inspect ReviewMonitor log rendering
+                        [in_progress] Preserve active find UI while streaming
+                        [pending] Run focused UI tests
+                        """)),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .command,
-            groupName: "command-search-test",
-            text: "$ /bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
+            itemName: "command-search-test",
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(
+                .init(
+                    command:
+                        "/bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
+                    status: .inProgress
+                )),
+            mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .commandOutput,
-            groupName: "command-search-test",
-            text: """
-                Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
-                Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
-                Test Suite 'ReviewUITests' passed.
-                """,
-            metadata: .init(
-                sourceType: "command",
-                title: "Ran command for 5s",
-                status: "succeeded",
-                exitCode: 0
-            ),
+            itemName: "command-search-test",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(
+                .init(
+                    command: "",
+                    output: """
+                        Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
+                        Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift:20: final class ReviewMonitorLogDocumentView
+                        Test Suite 'ReviewUITests' passed.
+                        """,
+                    exitCode: 0,
+                    status: .completed
+                )),
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
-            kind: .toolCall,
-            text: "MCP codex_review.review_read started.",
+            kind: .mcpToolCall,
+            family: .tool,
+            content: .toolCall(
+                .init(
+                    result: "MCP codex_review.review_read started.",
+                    status: .started
+                )),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .reasoningSummary,
-            groupName: "reasoning-summary",
-            text:
+            itemName: "reasoning-summary",
+            kind: .reasoning,
+            family: .reasoning,
+            content: .reasoning(.init(text: "", style: .summary)),
+            mode: .textDelta,
+            deltaText:
                 "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .command,
-            groupName: "command-open-log-scroll",
-            text: "$ /bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
+            itemName: "command-open-log-scroll",
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(
+                .init(
+                    command:
+                        "/bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
+                    status: .inProgress
+                )),
+            mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .commandOutput,
-            groupName: "command-open-log-scroll",
-            text: """
-                import AppKit
-                import ObjectiveC.runtime
-                import CodexReviewKit
+            itemName: "command-open-log-scroll",
+            kind: .commandExecution,
+            family: .command,
+            phase: .completed,
+            content: .command(
+                .init(
+                    command: "",
+                    output: """
+                        import AppKit
+                        import ObjectiveC.runtime
+                        import CodexReviewKit
 
-                @MainActor
-                final class ReviewMonitorLogScrollView: NSScrollView {
-                    private let logDocumentView = ReviewMonitorLogDocumentView()
-                """,
-            metadata: .init(
-                sourceType: "command",
-                title: "Ran command for 2s",
-                status: "succeeded",
-                exitCode: 0
-            ),
+                        @MainActor
+                        final class ReviewMonitorLogScrollView: NSScrollView {
+                            private let logDocumentView = ReviewMonitorLogDocumentView()
+                        """,
+                    exitCode: 0,
+                    status: .completed
+                )),
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
+            itemName: "context-compaction",
             kind: .contextCompaction,
-            groupName: "context-compaction",
-            text: "Automatically compacting context",
-            metadata: .init(
-                sourceType: "contextCompaction",
-                status: "inProgress",
-                itemID: "preview-context-compaction"
-            ),
-            replacesGroup: true,
+            family: .contextCompaction,
+            phase: .running,
+            content: .contextCompaction(
+                .init(
+                    title: "Automatically compacting context",
+                    status: .inProgress
+                )),
+            mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
+            itemName: "context-compaction",
             kind: .contextCompaction,
-            groupName: "context-compaction",
-            text: "Context automatically compacted",
-            metadata: .init(
-                sourceType: "contextCompaction",
-                status: "completed",
-                itemID: "preview-context-compaction"
-            ),
-            replacesGroup: true,
+            family: .contextCompaction,
+            phase: .completed,
+            content: .contextCompaction(
+                .init(
+                    title: "Context automatically compacted",
+                    status: .completed
+                )),
             delayBeforeFrameCount: compactionCompletionDelayFrameCount
         ),
         .init(
-            kind: .toolCall,
-            text: "File changes updated.",
+            kind: .mcpToolCall,
+            family: .tool,
+            content: .toolCall(
+                .init(
+                    result: "File changes updated.",
+                    status: .completed
+                )),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .rawReasoning,
-            groupName: "raw-reasoning",
-            text:
+            itemName: "raw-reasoning",
+            kind: .reasoning,
+            family: .reasoning,
+            content: .reasoning(.init(text: "", style: .raw)),
+            mode: .textDelta,
+            deltaText:
                 "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
-            kind: .rawReasoning,
-            groupName: "raw-reasoning-follow-up",
-            text:
+            itemName: "raw-reasoning-follow-up",
+            kind: .reasoning,
+            family: .reasoning,
+            content: .reasoning(.init(text: "", style: .raw)),
+            mode: .textDelta,
+            deltaText:
                 "I found the log update path and am keeping the current find session stable while new output streams in.\n",
             chunkByWord: true,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
+            itemName: "agent-message-summary",
             kind: .agentMessage,
-            groupName: "agent-message-summary",
-            text:
-                "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
+            family: .message,
+            content: .message(
+                .init(
+                    text:
+                        "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
+                )),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]
 
     private static let previewStreamTimeline = streamTimeline(from: previewStreamTemplates)
 
-    private static func makeCommandOutputPreviewLogEntries() -> [ReviewLogEntry] {
+    private static func makeCommandOutputPreviewTimelineItems() -> [PreviewTimelineItemTemplate] {
         let output = """
             Command line invocation:
                 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
@@ -491,9 +579,13 @@ public enum ReviewMonitorPreviewContent {
             Test Suite 'Selected tests' passed.
             """
         return [
-            .init(kind: .event, text: "Turn started: preview-command-output-panel"),
-            .init(
-                kind: .agentMessage,
+            diagnosticItem(
+                "command-output-event",
+                kind: ReviewItemKind(rawValue: "event"),
+                message: "Turn started: preview-command-output-panel"
+            ),
+            messageItem(
+                "command-output-intro",
                 text: """
                     Checking the command output rendering path.
 
@@ -502,27 +594,19 @@ public enum ReviewMonitorPreviewContent {
                     - Expand into a bounded TextKit 2 scroll view.
                     """
             ),
-            .init(
-                kind: .command,
-                groupID: "preview-command-output",
-                text:
-                    "$ xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
+            commandStartedItem(
+                "preview-command-output",
+                command:
+                    "xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor"
             ),
-            .init(
-                kind: .commandOutput,
-                groupID: "preview-command-output",
-                text: output,
-                metadata: .init(
-                    sourceType: "command",
-                    title: "Ran command for 17s",
-                    status: "succeeded",
-                    exitCode: 0
-                )
+            commandCompletedItem(
+                "preview-command-output",
+                output: output,
+                exitCode: 0,
+                status: .completed
             ),
-            .init(
-                kind: .agentMessage,
-                text: "The output remains available without taking over the whole log."
-            ),
+            messageItem(
+                "command-output-summary", text: "The output remains available without taking over the whole log."),
         ]
     }
 
@@ -649,7 +733,7 @@ public enum ReviewMonitorPreviewContent {
                         cwd: cwd
                     ),
                     lastAgentMessage: definition.lastAgentMessage,
-                    logEntries: makePreviewLogEntries(for: definition, workspaceName: workspaceName)
+                    timelineItems: makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
                 )
             }
         }
@@ -668,7 +752,7 @@ public enum ReviewMonitorPreviewContent {
         hasFinalReview: Bool,
         reviewResult: ParsedReviewResult?,
         lastAgentMessage: String,
-        logEntries: [ReviewLogEntry]
+        timelineItems: [PreviewTimelineItemTemplate]
     ) -> CodexReviewJob {
         let job = CodexReviewJob.makeForTesting(
             id: id,
@@ -683,239 +767,158 @@ public enum ReviewMonitorPreviewContent {
             summary: summary,
             hasFinalReview: hasFinalReview,
             reviewResult: reviewResult,
-            lastAgentMessage: lastAgentMessage,
-            logEntries: logEntries
+            lastAgentMessage: lastAgentMessage
         )
-        seedPreviewTimeline(logEntries, in: job)
+        seedPreviewTimeline(timelineItems, in: job)
         return job
     }
 
-    private static func seedPreviewTimeline(_ logEntries: [ReviewLogEntry], in job: CodexReviewJob) {
-        for entry in logEntries {
-            appendPreviewTimelineEntry(entry, to: job)
+    private static func seedPreviewTimeline(_ timelineItems: [PreviewTimelineItemTemplate], in job: CodexReviewJob) {
+        for item in timelineItems {
+            let itemID = previewTimelineItemID(
+                itemName: item.itemName,
+                jobID: job.id,
+                cycle: 0
+            )
+            let seed = item.seed(id: itemID)
+            let event: ReviewDomainEvent = item.phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed)
+            job.timeline.apply(event)
         }
     }
 
-    private static func appendPreviewTimelineEntry(_ entry: ReviewLogEntry, to job: CodexReviewJob) {
-        let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
-        let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
-        job.timeline.apply(
-            .itemUpdated(
+    private static func diagnosticItem(
+        _ itemName: String,
+        kind: ReviewItemKind,
+        message: String,
+        phase: ReviewItemPhase = .completed
+    ) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: kind,
+            family: .diagnostic,
+            phase: phase,
+            content: .diagnostic(.init(message: message))
+        )
+    }
+
+    private static func messageItem(_ itemName: String, text: String) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .agentMessage,
+            family: .message,
+            phase: .completed,
+            content: .message(.init(text: text))
+        )
+    }
+
+    private static func planItem(_ itemName: String, markdown: String) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .plan,
+            family: .plan,
+            phase: .completed,
+            content: .plan(.init(markdown: markdown))
+        )
+    }
+
+    private static func reasoningItem(
+        _ itemName: String,
+        text: String,
+        style: ReviewTimelineItem.Reasoning.Style = .summary
+    ) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .reasoning,
+            family: .reasoning,
+            phase: .completed,
+            content: .reasoning(.init(text: text, style: style))
+        )
+    }
+
+    private static func contextCompactionItem(
+        _ itemName: String,
+        title: String,
+        status: ReviewContextCompactionStatus
+    ) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .contextCompaction,
+            family: .contextCompaction,
+            phase: status == .completed ? .completed : .running,
+            content: .contextCompaction(.init(title: title, status: status))
+        )
+    }
+
+    private static func commandStartedItem(
+        _ itemName: String,
+        command: String,
+        cwd: String? = nil,
+        startedAt: Date? = nil,
+        actions: [ReviewTimelineItem.CommandAction] = []
+    ) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .commandExecution,
+            family: .command,
+            phase: .running,
+            content: .command(
                 .init(
-                    id: itemID,
-                    kind: previewTimelineKind(for: entry),
-                    family: previewTimelineFamily(for: entry),
-                    phase: previewTimelinePhase(for: entry),
-                    content: previewTimelineContent(for: entry, existing: existingContent),
-                    startedAt: entry.metadata?.startedAt,
-                    completedAt: entry.metadata?.completedAt,
-                    durationMs: entry.metadata?.durationMs
-                )))
+                    command: command,
+                    cwd: cwd,
+                    status: .inProgress,
+                    actions: actions
+                )),
+            startedAt: startedAt
+        )
     }
 
-    private static func previewTimelineKind(for entry: ReviewLogEntry) -> ReviewItemKind {
-        switch entry.kind {
-        case .command, .commandOutput:
-            .commandExecution
-        case .agentMessage:
-            .agentMessage
-        case .plan, .todoList:
-            .plan
-        case .reasoning, .reasoningSummary, .rawReasoning:
-            .reasoning
-        case .contextCompaction:
-            .contextCompaction
-        case .toolCall:
-            .mcpToolCall
-        case .diagnostic, .error, .progress, .event:
-            ReviewItemKind(rawValue: entry.kind.rawValue)
-        }
-    }
-
-    private static func previewTimelineFamily(for entry: ReviewLogEntry) -> ReviewItemFamily {
-        switch entry.kind {
-        case .command, .commandOutput:
-            .command
-        case .agentMessage:
-            .message
-        case .plan, .todoList:
-            .plan
-        case .reasoning, .reasoningSummary, .rawReasoning:
-            .reasoning
-        case .contextCompaction:
-            .contextCompaction
-        case .toolCall:
-            .tool
-        case .diagnostic, .error, .progress, .event:
-            .diagnostic
-        }
-    }
-
-    private static func previewTimelineContent(
-        for entry: ReviewLogEntry,
-        existing: ReviewTimelineItem.Content?
-    ) -> ReviewTimelineItem.Content {
-        switch entry.kind {
-        case .command:
-            return .command(
+    private static func commandCompletedItem(
+        _ itemName: String,
+        output: String,
+        exitCode: Int,
+        status: ReviewCommandStatus,
+        durationMs: Int? = nil
+    ) -> PreviewTimelineItemTemplate {
+        .init(
+            itemName: itemName,
+            kind: .commandExecution,
+            family: .command,
+            phase: status == .failed ? .failed : .completed,
+            content: .command(
                 .init(
-                    command: previewCommandText(for: entry),
-                    cwd: entry.metadata?.cwd,
-                    output: "",
-                    exitCode: entry.metadata?.exitCode,
-                    status: previewCommandStatus(for: entry),
-                    durationMs: entry.metadata?.durationMs
-                ))
-        case .commandOutput:
-            let existingOutput: String
-            let existingCommand: String?
-            if case .command(let command) = existing {
-                existingOutput = command.output
-                existingCommand = command.command
-            } else {
-                existingOutput = ""
-                existingCommand = nil
+                    command: "",
+                    output: output,
+                    exitCode: exitCode,
+                    status: status,
+                    durationMs: durationMs
+                )),
+            durationMs: durationMs
+        )
+    }
+
+    private static func toolCallItem(
+        _ itemName: String,
+        result: String,
+        status: ReviewToolCallStatus
+    ) -> PreviewTimelineItemTemplate {
+        let phase: ReviewItemPhase =
+            switch status {
+            case .started, .inProgress:
+                .running
+            case .failed:
+                .failed
+            case .cancelled:
+                .cancelled
+            default:
+                .completed
             }
-            return .command(
-                .init(
-                    command: entry.metadata?.command ?? existingCommand ?? "Command",
-                    cwd: entry.metadata?.cwd,
-                    output: existingOutput + entry.text,
-                    exitCode: entry.metadata?.exitCode,
-                    status: previewCommandStatus(for: entry),
-                    durationMs: entry.metadata?.durationMs
-                ))
-        case .agentMessage:
-            return .message(.init(text: previewExistingText(existing, message: "") + entry.text))
-        case .plan, .todoList:
-            return .plan(.init(markdown: previewExistingText(existing, plan: "") + entry.text))
-        case .reasoning:
-            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .raw))
-        case .reasoningSummary:
-            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .summary))
-        case .rawReasoning:
-            return .reasoning(.init(text: previewExistingText(existing, reasoning: "") + entry.text, style: .raw))
-        case .contextCompaction:
-            return .contextCompaction(
-                .init(
-                    title: entry.text,
-                    status: previewContextCompactionStatus(for: entry)
-                ))
-        case .toolCall:
-            return .toolCall(
-                .init(
-                    result: entry.text,
-                    status: previewToolCallStatus(for: entry)
-                ))
-        case .diagnostic, .error, .progress, .event:
-            return .diagnostic(.init(message: previewExistingText(existing, diagnostic: "") + entry.text))
-        }
-    }
-
-    private static func previewExistingText(
-        _ content: ReviewTimelineItem.Content?,
-        message defaultValue: String
-    ) -> String {
-        if case .message(let message) = content {
-            return message.text
-        }
-        return defaultValue
-    }
-
-    private static func previewExistingText(
-        _ content: ReviewTimelineItem.Content?,
-        plan defaultValue: String
-    ) -> String {
-        if case .plan(let plan) = content {
-            return plan.markdown
-        }
-        return defaultValue
-    }
-
-    private static func previewExistingText(
-        _ content: ReviewTimelineItem.Content?,
-        reasoning defaultValue: String
-    ) -> String {
-        if case .reasoning(let reasoning) = content {
-            return reasoning.text
-        }
-        return defaultValue
-    }
-
-    private static func previewExistingText(
-        _ content: ReviewTimelineItem.Content?,
-        diagnostic defaultValue: String
-    ) -> String {
-        if case .diagnostic(let diagnostic) = content {
-            return diagnostic.message
-        }
-        return defaultValue
-    }
-
-    private static func previewCommandText(for entry: ReviewLogEntry) -> String {
-        if let command = entry.metadata?.command, command.isEmpty == false {
-            return command
-        }
-        if entry.text.hasPrefix("$ ") {
-            return String(entry.text.dropFirst(2))
-        }
-        return entry.text
-    }
-
-    private static func previewTimelinePhase(for entry: ReviewLogEntry) -> ReviewItemPhase {
-        let status = entry.metadata?.commandStatus ?? entry.metadata?.status
-        switch status {
-        case "inProgress", "running", "started":
-            return .running
-        case "failed":
-            return .failed
-        case "cancelled":
-            return .cancelled
-        default:
-            return entry.kind == .command ? .running : .completed
-        }
-    }
-
-    private static func previewCommandStatus(for entry: ReviewLogEntry) -> ReviewCommandStatus? {
-        guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
-            return nil
-        }
-        switch rawValue {
-        case "succeeded", "success":
-            return .completed
-        default:
-            return .init(rawValue: rawValue)
-        }
-    }
-
-    private static func previewContextCompactionStatus(for entry: ReviewLogEntry) -> ReviewContextCompactionStatus? {
-        guard let rawValue = entry.metadata?.status else {
-            return nil
-        }
-        switch rawValue {
-        case "inProgress", "running":
-            return .inProgress
-        case "completed", "succeeded", "success":
-            return .completed
-        default:
-            return .init(rawValue: rawValue)
-        }
-    }
-
-    private static func previewToolCallStatus(for entry: ReviewLogEntry) -> ReviewToolCallStatus? {
-        guard let rawValue = entry.metadata?.status else {
-            return nil
-        }
-        switch rawValue {
-        case "inProgress", "running":
-            return .inProgress
-        case "completed", "succeeded", "success":
-            return .completed
-        case "failed":
-            return .failed
-        default:
-            return .init(rawValue: rawValue)
-        }
+        return PreviewTimelineItemTemplate(
+            itemName: itemName,
+            kind: .mcpToolCall,
+            family: .tool,
+            phase: phase,
+            content: .toolCall(.init(result: result, status: status))
+        )
     }
 
     private static func makeReviewResult(
@@ -961,123 +964,144 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func makePreviewLogEntries(
+    private static func makePreviewTimelineItems(
         for definition: PreviewJobDefinition,
         workspaceName: String
-    ) -> [ReviewLogEntry] {
+    ) -> [PreviewTimelineItemTemplate] {
         switch definition.status {
         case .running:
-            makeRunningPreviewLogEntries(for: definition, workspaceName: workspaceName)
+            return makeRunningPreviewTimelineItems(for: definition, workspaceName: workspaceName)
         case .queued:
-            [
-                .init(kind: .event, text: "Queued review for \(definition.targetSummary)."),
-                .init(kind: .progress, text: definition.summary),
+            return [
+                diagnosticItem(
+                    "queued-event-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "event"),
+                    message: "Queued review for \(definition.targetSummary)."
+                ),
+                diagnosticItem(
+                    "queued-progress-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "progress"),
+                    message: definition.summary
+                ),
             ]
         case .failed:
-            [
-                .init(kind: .event, text: "Turn started: preview-failed-\(workspaceName.lowercased())"),
-                .init(
-                    kind: .command,
-                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: "$ /bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""
+            let commandName = "preview-failed-command-\(workspaceName)-\(definition.targetSummary)"
+            return [
+                diagnosticItem(
+                    "failed-event-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "event"),
+                    message: "Turn started: preview-failed-\(workspaceName.lowercased())"
                 ),
-                .init(
-                    kind: .commandOutput,
-                    groupID: "preview-failed-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: """
+                commandStartedItem(
+                    commandName,
+                    command: "/bin/zsh -lc \"swift test --build-system swiftbuild --no-parallel\""
+                ),
+                commandCompletedItem(
+                    commandName,
+                    output: """
                         Building for debugging...
                         Test Suite 'ReviewUITests' started.
                         ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
                         """,
-                    metadata: .init(
-                        sourceType: "command",
-                        title: "Ran command for 10s",
-                        status: "failed",
-                        exitCode: 1
-                    )
+                    exitCode: 1,
+                    status: .failed,
+                    durationMs: 10_000
                 ),
-                .init(kind: .error, text: definition.summary),
-                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+                diagnosticItem(
+                    "failed-error-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "error"),
+                    message: definition.summary
+                ),
+                messageItem(
+                    "failed-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
             ]
         case .cancelled:
-            [
-                .init(kind: .event, text: "Turn started: preview-cancelled-\(workspaceName.lowercased())"),
-                .init(kind: .progress, text: definition.summary),
-                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+            return [
+                diagnosticItem(
+                    "cancelled-event-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "event"),
+                    message: "Turn started: preview-cancelled-\(workspaceName.lowercased())"
+                ),
+                diagnosticItem(
+                    "cancelled-progress-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "progress"),
+                    message: definition.summary
+                ),
+                messageItem(
+                    "cancelled-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
             ]
         case .succeeded:
-            [
-                .init(kind: .event, text: "Turn started: preview-complete-\(workspaceName.lowercased())"),
-                .init(
-                    kind: .command,
-                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: "$ /bin/zsh -lc \"swift test --filter ReviewUI\""
+            let commandName = "preview-complete-command-\(workspaceName)-\(definition.targetSummary)"
+            return [
+                diagnosticItem(
+                    "complete-event-\(workspaceName)-\(definition.targetSummary)",
+                    kind: ReviewItemKind(rawValue: "event"),
+                    message: "Turn started: preview-complete-\(workspaceName.lowercased())"
                 ),
-                .init(
-                    kind: .commandOutput,
-                    groupID: "preview-complete-command-\(workspaceName)-\(definition.targetSummary)",
-                    text: """
+                commandStartedItem(
+                    commandName,
+                    command: "/bin/zsh -lc \"swift test --filter ReviewUI\""
+                ),
+                commandCompletedItem(
+                    commandName,
+                    output: """
                         Test Suite 'ReviewUITests' started.
                         Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
                         Test Suite 'ReviewUITests' passed.
                         """,
-                    metadata: .init(
-                        sourceType: "command",
-                        title: "Ran command for 4s",
-                        status: "succeeded",
-                        exitCode: 0
-                    )
+                    exitCode: 0,
+                    status: .completed,
+                    durationMs: 4_000
                 ),
-                .init(
-                    kind: .reasoningSummary,
-                    groupID: "preview-complete-summary-\(workspaceName)-\(definition.targetSummary)",
+                reasoningItem(
+                    "complete-summary-\(workspaceName)-\(definition.targetSummary)",
                     text: definition.summary
                 ),
-                .init(kind: .agentMessage, text: definition.lastAgentMessage),
+                messageItem(
+                    "complete-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
             ]
         }
     }
 
-    private static func makeRunningPreviewLogEntries(
+    private static func makeRunningPreviewTimelineItems(
         for definition: PreviewJobDefinition,
         workspaceName: String
-    ) -> [ReviewLogEntry] {
-        let sourceReadGroupID = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
+    ) -> [PreviewTimelineItemTemplate] {
+        let sourceReadItemName = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
         let sourceReadCommand =
             "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+        let initialCommandName = "preview-initial-command-\(workspaceName)-\(definition.targetSummary)"
         return [
-            .init(kind: .event, text: "Turn started: preview-\(workspaceName.lowercased())"),
-            .init(kind: .progress, text: "Reviewing \(definition.targetSummary)"),
-            .init(
-                kind: .contextCompaction,
-                groupID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
-                replacesGroup: true,
-                text: "Context automatically compacted",
-                metadata: .init(
-                    sourceType: "contextCompaction",
-                    status: "completed",
-                    itemID: "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)"
-                )
+            diagnosticItem(
+                "running-event-\(workspaceName)-\(definition.targetSummary)",
+                kind: ReviewItemKind(rawValue: "event"),
+                message: "Turn started: preview-\(workspaceName.lowercased())"
             ),
-            .init(
-                kind: .plan,
-                groupID: "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
-                replacesGroup: true,
-                text: """
+            diagnosticItem(
+                "running-progress-\(workspaceName)-\(definition.targetSummary)",
+                kind: ReviewItemKind(rawValue: "progress"),
+                message: "Reviewing \(definition.targetSummary)"
+            ),
+            contextCompactionItem(
+                "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
+                title: "Context automatically compacted",
+                status: .completed
+            ),
+            planItem(
+                "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
+                markdown: """
                     [completed] Inspect changed files
                     [in_progress] Check ReviewMonitor log behavior
                     [pending] Run focused tests
                     """
             ),
-            .init(
-                kind: .command,
-                groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
-                text: "$ /bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
+            commandStartedItem(
+                initialCommandName,
+                command: "/bin/zsh -lc \"git diff --stat && rg -n 'ReviewMonitor' Sources Tests\""
             ),
-            .init(
-                kind: .commandOutput,
-                groupID: "preview-initial-command-\(workspaceName)-\(definition.targetSummary)",
-                text: """
+            commandCompletedItem(
+                initialCommandName,
+                output: """
                     Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift | 34 +++++++++++++++++
                     Sources/ReviewUI/Detail/ReviewMonitorLogDocumentView.swift | 18 ++++++++--
                     Tests/ReviewUITests/ReviewUITests.swift | 12 ++++++
@@ -1085,46 +1109,35 @@ public enum ReviewMonitorPreviewContent {
                     Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift:42: private let logDocumentView = ReviewMonitorLogDocumentView()
                     Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
                     """,
-                metadata: .init(
-                    sourceType: "command",
-                    title: "Ran command for 6s",
-                    status: "succeeded",
-                    exitCode: 0
-                )
+                exitCode: 0,
+                status: .completed,
+                durationMs: 6_000
             ),
-            .init(
-                kind: .command,
-                groupID: sourceReadGroupID,
-                text: "$ /bin/zsh -lc \"\(sourceReadCommand)\"",
-                metadata: .init(
-                    sourceType: "commandExecution",
-                    status: "inProgress",
-                    itemID: sourceReadGroupID,
-                    command: "/bin/zsh -lc \"\(sourceReadCommand)\"",
-                    startedAt: Date().addingTimeInterval(-88),
-                    commandActions: [
-                        .init(
-                            kind: .read,
-                            command: sourceReadCommand,
-                            name: "ReviewMonitorCommandOutputDisplayDocument.swift",
-                            path: "Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
-                        )
-                    ],
-                    commandStatus: "inProgress"
-                ),
+            commandStartedItem(
+                sourceReadItemName,
+                command: "/bin/zsh -lc \"\(sourceReadCommand)\"",
+                startedAt: Date().addingTimeInterval(-88),
+                actions: [
+                    .init(
+                        kind: .read,
+                        command: sourceReadCommand,
+                        name: "ReviewMonitorCommandOutputDisplayDocument.swift",
+                        path: "Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
+                    )
+                ]
             ),
-            .init(kind: .toolCall, text: "MCP codex_review.review_start started."),
-            .init(
-                kind: .reasoningSummary,
-                groupID: "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
+            toolCallItem(
+                "running-tool-\(workspaceName)-\(definition.targetSummary)",
+                result: "MCP codex_review.review_start started.",
+                status: .started
+            ),
+            reasoningItem(
+                "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
                 text:
                     "I am comparing the current UI state with the streaming log updates before changing the finder integration."
             ),
-            .init(
-                kind: .agentMessage,
-                groupID: "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)",
-                text: definition.lastAgentMessage
-            ),
+            messageItem(
+                "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
         ]
     }
 

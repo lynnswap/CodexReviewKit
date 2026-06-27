@@ -22,7 +22,8 @@ extension ReviewUITests {
 
     @Test func bindingStoreAppliesInitialState() {
         let store = CodexReviewStore.makePreviewStore()
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarTopAccessoryCountForTesting == 0)
@@ -39,7 +40,8 @@ extension ReviewUITests {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.splitViewItems.count == 2)
@@ -56,7 +58,8 @@ extension ReviewUITests {
             serverState: .failed("Embedded server is unavailable in preview mode."),
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.splitViewItems.count == 2)
@@ -71,7 +74,8 @@ extension ReviewUITests {
             serverState: .starting,
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
@@ -83,7 +87,8 @@ extension ReviewUITests {
             serverState: .stopped,
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
@@ -96,7 +101,8 @@ extension ReviewUITests {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .jobList)
@@ -231,7 +237,8 @@ extension ReviewUITests {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             workspaces: []
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .jobList)
@@ -274,13 +281,16 @@ extension ReviewUITests {
 
         #expect(window.toolbar != nil)
         #expect(harness.rootViewController.contentKindForTesting == .contentView)
-        #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarPickerToolbarItemIdentifierForTesting))
-        #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
+        #expect(
+            viewController.toolbarIdentifiersForTesting.contains(
+                viewController.sidebarPickerToolbarItemIdentifierForTesting))
+        #expect(
+            viewController.toolbarIdentifiersForTesting.contains(
+                viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
         #expect(viewController.toolbarIdentifiersForTesting.contains(.toggleSidebar) == false)
         #expect(viewController.toolbarIdentifiersForTesting.contains(.sidebarTrackingSeparator))
         #expect(
-            viewController.sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting ==
-                ["Workspace", "Account"]
+            viewController.sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting == ["Workspace", "Account"]
         )
         #expect(window.styleMask.contains(.fullSizeContentView))
         #expect(window.titleVisibility == .hidden)
@@ -303,12 +313,13 @@ extension ReviewUITests {
         sidebarItem.isCollapsed = false
 
         #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
-        #expect(viewController.sidebarJobFilterToolbarMenuItemTitlesForTesting == [
-            "All Items",
-            "-",
-            "Running",
-            "Latest Finished",
-        ])
+        #expect(
+            viewController.sidebarJobFilterToolbarMenuItemTitlesForTesting == [
+                "All Items",
+                "-",
+                "Running",
+                "Latest Finished",
+            ])
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
@@ -326,7 +337,8 @@ extension ReviewUITests {
             viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
         }
         #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
+        #expect(
+            viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
         viewController.selectSidebarJobFilterForTesting(.running)
@@ -1035,12 +1047,14 @@ extension ReviewUITests {
         )
         defer { harness.window.close() }
 
-        applyTestAuthState(auth: store.auth, state: 
-            .failed(
-                "Authentication failed.",
-                isAuthenticated: true,
-                accountID: "review@example.com"
-            )
+        applyTestAuthState(
+            auth: store.auth,
+            state:
+                .failed(
+                    "Authentication failed.",
+                    isAuthenticated: true,
+                    accountID: "review@example.com"
+                )
         )
         await Task.yield()
 
@@ -1098,10 +1112,11 @@ extension ReviewUITests {
         #expect(transport.logAutomaticallyAdjustsContentInsetsForTesting)
         #expect(contentInsets.top > 0)
         #expect(abs(transport.logVerticalScrollOffsetForTesting + contentInsets.top) < 0.5)
-        #expect(abs(
-            transport.logMaximumVerticalScrollOffsetForTesting
-                - transport.logMinimumVerticalScrollOffsetForTesting
-        ) < 0.5)
+        #expect(
+            abs(
+                transport.logMaximumVerticalScrollOffsetForTesting
+                    - transport.logMinimumVerticalScrollOffsetForTesting
+            ) < 0.5)
     }
 
     @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
@@ -1139,7 +1154,8 @@ extension ReviewUITests {
             id: "job-sidebar-width-regression",
             status: .running,
             targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40).joined()
+            logText: Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
+                .joined()
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1185,7 +1201,8 @@ extension ReviewUITests {
             id: "job-sidebar-width-shrink-regression",
             status: .running,
             targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40).joined()
+            logText: Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
+                .joined()
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1383,7 +1400,9 @@ extension ReviewUITests {
             id: "job-toolbar-sidebar-toggle-textkit-width-regression",
             status: .running,
             targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40).joined()
+            logText: Array(
+                repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
+            ).joined()
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
@@ -1451,7 +1470,8 @@ extension ReviewUITests {
     @Test func splitViewAttachIsIdempotentForSameWindow() {
         let backend = CountingStartBackend()
         let store = makeStore(backend: backend)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = ReviewMonitorSplitViewController(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
 
@@ -1473,19 +1493,19 @@ extension ReviewUITests {
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
         )
         let initialLog = reviewMonitorLogText(for: runningJob)
-        let initialEntryCount = runningJob.logEntries.count
+        let initialItemCount = runningJob.timeline.items.count
 
         ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
 
         let appendedText = String(reviewMonitorLogText(for: runningJob).dropFirst(initialLog.count))
-        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
+        let appendedItems = Array(runningJob.timeline.items.dropFirst(initialItemCount))
         #expect(reviewMonitorLogText(for: runningJob) != initialLog)
         #expect(appendedText.contains("Turn started"))
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)
-        #expect(appendedEntries.count == 1)
-        #expect(appendedEntries.first?.kind == .event)
-        #expect(appendedEntries.first?.text.contains("preview-turn") == true)
+        #expect(appendedItems.count == 1)
+        #expect(appendedItems.first?.kind == ReviewItemKind(rawValue: "event"))
+        #expect(appendedItems.first.map(diagnosticMessage)?.contains("preview-turn") == true)
     }
 
     @Test func previewStreamUsesMixedReviewLogKinds() throws {
@@ -1495,41 +1515,32 @@ extension ReviewUITests {
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
         )
-        let initialEntryCount = runningJob.logEntries.count
+        let initialItemCount = runningJob.timeline.items.count
         var tick = 0
 
         for _ in 0..<720 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
 
-        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
-        let appendedKinds = appendedEntries.map(\.kind)
-        #expect(appendedKinds.contains(.event))
-        #expect(appendedKinds.contains(.command))
-        #expect(appendedKinds.contains(.toolCall))
+        let appendedItems = Array(runningJob.timeline.items.dropFirst(initialItemCount))
+        let appendedKinds = appendedItems.map(\.kind)
+        #expect(appendedKinds.contains(ReviewItemKind(rawValue: "event")))
+        #expect(appendedKinds.contains(.commandExecution))
+        #expect(appendedKinds.contains(.mcpToolCall))
         #expect(appendedKinds.contains(.plan))
         #expect(appendedKinds.contains(.contextCompaction))
-        #expect(appendedKinds.contains(.reasoningSummary))
+        #expect(appendedKinds.contains(.reasoning))
         #expect(appendedKinds.contains(.agentMessage))
         #expect(Set(appendedKinds).count >= 6)
+        #expect(Set(appendedItems.map(\.id)).count == appendedItems.count)
 
-        let repeatedNonReplacingGroups = Dictionary(
-            grouping: appendedEntries.filter { $0.replacesGroup == false },
-            by: { entry in "\(entry.groupID ?? "")|\(entry.kind.rawValue)" }
-        ).values.filter { entries in
-            entries.first?.groupID != nil && entries.count > 1
-        }
-        for entries in repeatedNonReplacingGroups {
-            let kind = try #require(entries.first?.kind)
-            #expect([.reasoning, .reasoningSummary, .rawReasoning].contains(kind))
-        }
-
-        let compactionEntries = runningJob.logEntries
-            .dropFirst(initialEntryCount)
+        let compactionItems = runningJob.timeline.items
+            .dropFirst(initialItemCount)
             .filter { $0.kind == .contextCompaction }
-        #expect(compactionEntries.count >= 2)
-        #expect(compactionEntries.last?.text == "Context automatically compacted")
-        #expect(compactionEntries.last?.metadata?.status == "completed")
+        let compactionItem = try #require(compactionItems.last)
+        #expect(compactionItem.phase == .completed)
+        #expect(contextCompactionTitle(compactionItem) == "Context automatically compacted")
+        #expect(contextCompactionStatus(compactionItem) == .completed)
         let renderedLog = reviewMonitorLogText(for: runningJob)
         #expect(renderedLog.contains("Context automatically compacted"))
         #expect(renderedLog.contains("Automatically compacting context") == false)
@@ -1542,56 +1553,51 @@ extension ReviewUITests {
         let runningJob = try #require(
             store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
         )
-        let initialEntryCount = runningJob.logEntries.count
+        let initialItemCount = runningJob.timeline.items.count
         var tick = 0
 
         tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == initialEntryCount + 1)
-        #expect(runningJob.logEntries.last?.kind == .event)
+        #expect(runningJob.timeline.items.count == initialItemCount + 1)
+        #expect(runningJob.timeline.items.last?.kind == ReviewItemKind(rawValue: "event"))
 
         for _ in 0..<38 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
-        #expect(runningJob.logEntries.count == initialEntryCount + 1)
+        #expect(runningJob.timeline.items.count == initialItemCount + 1)
 
         tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == initialEntryCount + 2)
-        #expect(runningJob.logEntries.last?.kind == .plan)
+        #expect(runningJob.timeline.items.count == initialItemCount + 2)
+        #expect(runningJob.timeline.items.last?.kind == .plan)
 
-        var observedEntryCount = runningJob.logEntries.count
-        for _ in 0..<180 where runningJob.logEntries.last?.kind != .reasoningSummary {
+        for _ in 0..<180 where runningJob.timeline.items.last?.kind != .reasoning {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            observedEntryCount = runningJob.logEntries.count
         }
-        let firstReasoning = try #require(runningJob.logEntries.last)
-        #expect(firstReasoning.kind == .reasoningSummary)
-        let reasoningGroupID = firstReasoning.groupID
-        var reasoningChunkCount = 1
+        let firstReasoning = try #require(runningJob.timeline.items.last)
+        #expect(firstReasoning.kind == .reasoning)
+        let reasoningID = firstReasoning.id
+        let initialReasoningText = reasoningText(firstReasoning)
+        var latestReasoningText = initialReasoningText
 
         for _ in 0..<80 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            let entries = Array(runningJob.logEntries.dropFirst(observedEntryCount))
-            if entries.isEmpty {
+            let item = try #require(runningJob.timeline.item(for: reasoningID))
+            let text = reasoningText(item)
+            if text == latestReasoningText {
                 break
             }
-            #expect(entries.count == 1)
-            let entry = try #require(entries.first)
-            #expect(entry.kind == .reasoningSummary)
-            #expect(entry.groupID == reasoningGroupID)
-            reasoningChunkCount += 1
-            observedEntryCount = runningJob.logEntries.count
+            latestReasoningText = text
         }
 
-        #expect(reasoningChunkCount > 1)
-        let countAfterReasoning = runningJob.logEntries.count
+        #expect(latestReasoningText.count > initialReasoningText.count)
+        let countAfterReasoning = runningJob.timeline.items.count
         for _ in 0..<37 {
             tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
         }
-        #expect(runningJob.logEntries.count == countAfterReasoning)
+        #expect(runningJob.timeline.items.count == countAfterReasoning)
 
         tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == countAfterReasoning + 1)
-        #expect(runningJob.logEntries.last?.kind == .command)
+        #expect(runningJob.timeline.items.count == countAfterReasoning + 1)
+        #expect(runningJob.timeline.items.last?.kind == .commandExecution)
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
@@ -1612,6 +1618,38 @@ extension ReviewUITests {
         #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
         #expect(accessibilityValue.isEmpty == false)
     }
+}
+
+@MainActor
+private func diagnosticMessage(_ item: ReviewTimelineItem) -> String {
+    if case .diagnostic(let diagnostic) = item.content {
+        return diagnostic.message
+    }
+    return ""
+}
+
+@MainActor
+private func reasoningText(_ item: ReviewTimelineItem) -> String {
+    if case .reasoning(let reasoning) = item.content {
+        return reasoning.text
+    }
+    return ""
+}
+
+@MainActor
+private func contextCompactionTitle(_ item: ReviewTimelineItem) -> String {
+    if case .contextCompaction(let contextCompaction) = item.content {
+        return contextCompaction.title
+    }
+    return ""
+}
+
+@MainActor
+private func contextCompactionStatus(_ item: ReviewTimelineItem) -> ReviewContextCompactionStatus? {
+    if case .contextCompaction(let contextCompaction) = item.content {
+        return contextCompaction.status
+    }
+    return nil
 }
 
 private func makeSidebarJobFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {

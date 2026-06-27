@@ -74,7 +74,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         targetSummary: String,
         core: ReviewJobCore,
         cancellationRequested: Bool = false,
-        logEntries: [ReviewLogEntry]
+        logEntries: [ReviewLogEntry] = []
     ) {
         let initialLogBuffer = ReviewLogBuffer(entries: logEntries)
         let initialLogSnapshot = initialLogBuffer.snapshot

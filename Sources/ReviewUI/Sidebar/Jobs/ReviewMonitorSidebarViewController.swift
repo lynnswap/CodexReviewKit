@@ -63,8 +63,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                         summary: "",
                         lastAgentMessage: "Review output preview"
                     )
-                ),
-                logEntries: []
+                )
             )
             let cellView = ReviewMonitorJobCellView()
             cellView.configure(with: job)
