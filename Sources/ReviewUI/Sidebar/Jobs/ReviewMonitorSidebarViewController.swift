@@ -748,17 +748,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func restoreSelectedJobRowAfterExpansion(of section: SidebarWorkspaceSection) {
-        guard let selectedJob = uiState.selectedJobEntry,
+        guard let selectedJobID = uiState.selectedJobID,
+              let selectedJob = job(withID: selectedJobID),
               section.workspaces.contains(where: { $0.cwd == selectedJob.cwd })
         else {
             return
         }
-        let selectedJobID = selectedJob.id
         DispatchQueue.main.async { [weak self, weak section] in
             guard let self,
                   let section,
                   section.isExpanded,
-                  self.uiState.selectedJobEntry?.id == selectedJobID,
+                  self.uiState.selectedJobID == selectedJobID,
                   let row = self.row(forJobID: selectedJobID),
                   self.outlineView.selectedRow != row
             else {
@@ -1170,8 +1170,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 || section.workspaceCWDs.contains { cwd in
                     workspaces.contains(where: { $0.cwd == cwd })
                 }
-        case .job(let job):
-            return containsJob(id: job.id, in: workspaces)
+        case .job:
+            guard case .job(let id) = selection.id else {
+                return false
+            }
+            return containsJob(id: id, in: workspaces)
         }
     }
 

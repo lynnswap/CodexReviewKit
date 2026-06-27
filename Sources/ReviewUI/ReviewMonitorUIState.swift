@@ -39,6 +39,13 @@ final class ReviewMonitorUIState {
         }
     }
 
+    var selectedJobID: String? {
+        guard case .job(let id) = selectionID else {
+            return nil
+        }
+        return id
+    }
+
     var selectedWorkspaceSectionEntry: ReviewMonitorWorkspaceSectionSelection? {
         get {
             guard case .workspaceSection(let section) = selection else {
