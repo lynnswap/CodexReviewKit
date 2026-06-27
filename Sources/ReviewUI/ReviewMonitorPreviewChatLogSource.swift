@@ -1,6 +1,7 @@
 import CodexKit
 import CodexReviewKit
 import Foundation
+import Observation
 import ObservationBridge
 
 @MainActor
@@ -9,9 +10,30 @@ struct ReviewMonitorPreviewChatLogFixture {
     let cwd: String
     let streamID: String
     let isRunning: Bool
-    let turn: CodexChatTurnStateSnapshot
-    let phase: CodexDataPhase
-    let initialItems: [ReviewTimelineItem]
+    let initialSnapshot: CodexChatSnapshot
+
+    init(
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat,
+        cwd: String,
+        streamID: String,
+        isRunning: Bool,
+        turn: CodexChatTurnStateSnapshot,
+        phase: CodexDataPhase,
+        initialItems: [ReviewTimelineItem]
+    ) {
+        self.chat = chat
+        self.cwd = cwd
+        self.streamID = streamID
+        self.isRunning = isRunning
+        self.initialSnapshot = CodexChatSnapshot(
+            chatID: chat.id,
+            phase: phase,
+            turns: [turn],
+            items: initialItems.map {
+                CodexChatItemSnapshot(previewItem: $0, turnID: turn.id)
+            }
+        )
+    }
 }
 
 @MainActor
@@ -102,43 +124,67 @@ final class ReviewMonitorPreviewChatLogSource {
 }
 
 @MainActor
+@Observable
 private final class PreviewReviewChat {
     let chat: ReviewMonitorCodexSidebarSnapshot.Chat
     let cwd: String
     let streamID: String
     let isRunning: Bool
 
-    private let turn: CodexChatTurnStateSnapshot
-    private let phase: CodexDataPhase
-    private let timeline = ReviewTimeline()
+    private var revision = 0
+    private var snapshotStorage: CodexChatSnapshot
 
     init(fixture: ReviewMonitorPreviewChatLogFixture) {
         self.chat = fixture.chat
         self.cwd = fixture.cwd
         self.streamID = fixture.streamID
         self.isRunning = fixture.isRunning
-        self.turn = fixture.turn
-        self.phase = fixture.phase
-        for item in fixture.initialItems {
-            timeline.apply(.itemUpdated(item.seed), at: item.updatedAt)
-        }
+        self.snapshotStorage = fixture.initialSnapshot
     }
 
-    func trackTimelineRevision() {
-        _ = timeline.revision
+    func trackRevision() {
+        _ = revision
     }
 
     func snapshot() -> CodexChatSnapshot {
-        CodexChatSnapshot(
-            chatID: chat.id,
-            phase: phase,
-            turns: [turn],
-            items: timeline.items.map { CodexChatItemSnapshot(previewItem: $0, turnID: turn.id) }
-        )
+        snapshotStorage
     }
 
     func apply(_ event: ReviewDomainEvent) {
-        timeline.apply(event)
+        switch event {
+        case .runStarted(let turnID, _, _):
+            snapshotStorage.turns = [
+                .init(
+                    id: CodexTurnID(rawValue: turnID.rawValue),
+                    status: .running
+                ),
+            ]
+            snapshotStorage.items.removeAll(keepingCapacity: true)
+            snapshotStorage.phase = .loaded
+            bumpRevision()
+
+        case .itemStarted(let seed),
+            .itemUpdated(let seed),
+            .itemCompleted(let seed):
+            upsertItem(seed)
+
+        case .textDelta(let itemID, let kind, _, let content, let delta):
+            appendTextDelta(
+                delta,
+                itemID: itemID.rawValue,
+                kind: CodexThreadItem.Kind(kind),
+                content: content
+            )
+
+        case .reviewCompleted:
+            updateTurnStatus(.completed)
+
+        case .reviewFailed:
+            updateTurnStatus(.failed)
+
+        case .reviewCancelled:
+            updateTurnStatus(.cancelled)
+        }
     }
 
     func applyPreviewStreamStep(
@@ -152,19 +198,74 @@ private final class PreviewReviewChat {
         )
         switch step.mode {
         case .update:
-            timeline.apply(.itemUpdated(step.seed(id: itemID)))
+            upsertItem(step.seed(id: itemID))
         case .complete:
-            timeline.apply(.itemCompleted(step.seed(id: itemID)))
+            upsertItem(step.seed(id: itemID))
         case .textDelta:
-            timeline.apply(
-                .textDelta(
-                    itemID: itemID,
-                    kind: step.kind,
-                    family: step.family,
-                    content: step.content,
-                    delta: step.deltaText ?? ""
-                ))
+            appendTextDelta(
+                step.deltaText ?? "",
+                itemID: itemID.rawValue,
+                kind: CodexThreadItem.Kind(step.kind),
+                content: step.content
+            )
         }
+    }
+
+    private var currentTurnID: CodexTurnID? {
+        snapshotStorage.turns.last?.id
+    }
+
+    private func upsertItem(_ seed: ReviewTimelineItemSeed) {
+        let item = CodexChatItemSnapshot(previewSeed: seed, turnID: currentTurnID)
+        if let index = snapshotStorage.items.firstIndex(where: { $0.id == item.id && $0.turnID == item.turnID }) {
+            snapshotStorage.items[index] = item
+        } else {
+            snapshotStorage.items.append(item)
+        }
+        bumpRevision()
+    }
+
+    private func appendTextDelta(
+        _ delta: String,
+        itemID: String,
+        kind: CodexThreadItem.Kind,
+        content: ReviewTimelineItem.Content
+    ) {
+        guard delta.isEmpty == false else {
+            return
+        }
+        let turnID = currentTurnID
+        if let index = snapshotStorage.items.firstIndex(where: { $0.id == itemID && $0.turnID == turnID }) {
+            snapshotStorage.items[index].content.appendPreviewText(delta)
+        } else {
+            var item = CodexChatItemSnapshot(
+                id: itemID,
+                turnID: turnID,
+                kind: kind,
+                content: CodexThreadItem.Content(
+                    previewContent: content,
+                    id: itemID,
+                    phase: .running,
+                    fallbackRawKind: kind.rawValue
+                )
+            )
+            item.content.appendPreviewText(delta)
+            snapshotStorage.items.append(item)
+        }
+        bumpRevision()
+    }
+
+    private func updateTurnStatus(_ status: CodexTurnStatus) {
+        guard snapshotStorage.turns.isEmpty == false else {
+            return
+        }
+        snapshotStorage.turns[snapshotStorage.turns.count - 1].status = status
+        snapshotStorage.phase = .loaded
+        bumpRevision()
+    }
+
+    private func bumpRevision() {
+        revision += 1
     }
 }
 
@@ -223,7 +324,7 @@ private final class PreviewChatLogSubscription {
             guard let self else {
                 return
             }
-            previewChat.trackTimelineRevision()
+            previewChat.trackRevision()
             publish()
         }
     }
@@ -328,21 +429,6 @@ private extension CodexChatItemSnapshot {
     }
 }
 
-private extension ReviewTimelineItem {
-    var seed: ReviewTimelineItemSeed {
-        ReviewTimelineItemSeed(
-            id: id,
-            kind: kind,
-            family: family,
-            phase: phase,
-            content: content,
-            startedAt: startedAt,
-            completedAt: completedAt,
-            durationMs: durationMs
-        )
-    }
-}
-
 private extension CodexThreadItem.Kind {
     init(_ kind: ReviewItemKind) {
         self.init(rawValue: kind.rawValue)
@@ -352,7 +438,21 @@ private extension CodexThreadItem.Kind {
 private extension CodexThreadItem.Content {
     @MainActor
     init(previewItem item: ReviewTimelineItem) {
-        switch item.content {
+        self.init(
+            previewContent: item.content,
+            id: item.id.rawValue,
+            phase: item.phase,
+            fallbackRawKind: item.kind.rawValue
+        )
+    }
+
+    init(
+        previewContent content: ReviewTimelineItem.Content,
+        id: String,
+        phase: ReviewItemPhase,
+        fallbackRawKind: String
+    ) {
+        switch content {
         case .approval(let approval):
             self = .diagnostic(
                 [
@@ -369,7 +469,7 @@ private extension CodexThreadItem.Content {
                     cwd: command.cwd,
                     output: command.output.nilIfEmpty,
                     exitCode: command.exitCode,
-                    status: command.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(item.phase)
+                    status: command.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
                 ))
         case .contextCompaction(let compaction):
             self = .contextCompaction(compaction.title)
@@ -380,10 +480,10 @@ private extension CodexThreadItem.Content {
                 .init(
                     path: fileChange.paths.first ?? fileChange.title.nilIfEmpty,
                     output: fileChange.output.nilIfEmpty ?? fileChange.patch?.nilIfEmpty,
-                    status: fileChange.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(item.phase)
+                    status: fileChange.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
                 ))
         case .message(let message):
-            self = .message(.init(id: item.id.rawValue, role: .assistant, text: message.text))
+            self = .message(.init(id: id, role: .assistant, text: message.text))
         case .plan(let plan):
             self = .plan(plan.markdown)
         case .reasoning(let reasoning):
@@ -399,7 +499,7 @@ private extension CodexThreadItem.Content {
                     name: "web_search",
                     arguments: search.query,
                     result: search.result,
-                    status: search.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(item.phase)
+                    status: search.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
                 ))
         case .toolCall(let toolCall):
             self = .toolCall(
@@ -410,7 +510,7 @@ private extension CodexThreadItem.Content {
                     arguments: toolCall.arguments,
                     result: toolCall.result,
                     error: toolCall.error,
-                    status: toolCall.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(item.phase)
+                    status: toolCall.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
                 ))
         case .unknown(let unknown):
             let text = [
@@ -422,10 +522,70 @@ private extension CodexThreadItem.Content {
             .nilIfEmpty
             self = .unknown(
                 .init(
-                    rawType: unknown.rawKind?.rawValue ?? item.kind.rawValue,
+                    rawType: unknown.rawKind?.rawValue ?? fallbackRawKind,
                     text: text
                 ))
         }
+    }
+
+    mutating func appendPreviewText(_ delta: String) {
+        switch self {
+        case .message(var message):
+            message.text += delta
+            self = .message(message)
+        case .plan(let text):
+            self = .plan(text + delta)
+        case .reasoning(var reasoning):
+            if reasoning.summary.isEmpty {
+                append(delta, to: &reasoning.content)
+            } else {
+                append(delta, to: &reasoning.summary)
+            }
+            self = .reasoning(reasoning)
+        case .command(var command):
+            command.output = (command.output ?? "") + delta
+            self = .command(command)
+        case .fileChange(var fileChange):
+            fileChange.output = (fileChange.output ?? "") + delta
+            self = .fileChange(fileChange)
+        case .toolCall(var toolCall):
+            toolCall.result = (toolCall.result ?? "") + delta
+            self = .toolCall(toolCall)
+        case .contextCompaction(let text):
+            self = .contextCompaction((text ?? "") + delta)
+        case .diagnostic(let text):
+            self = .diagnostic(text + delta)
+        case .log(let text):
+            self = .log(text + delta)
+        case .unknown(var rawItem):
+            rawItem.text = (rawItem.text ?? "") + delta
+            self = .unknown(rawItem)
+        }
+    }
+
+    private func append(_ delta: String, to parts: inout [String]) {
+        if parts.isEmpty {
+            parts.append(delta)
+        } else {
+            parts[parts.count - 1] += delta
+        }
+    }
+}
+
+private extension CodexChatItemSnapshot {
+    init(previewSeed seed: ReviewTimelineItemSeed, turnID: CodexTurnID?) {
+        self.init(
+            id: seed.id.rawValue,
+            turnID: turnID,
+            kind: CodexThreadItem.Kind(seed.kind),
+            content: CodexThreadItem.Content(
+                previewContent: seed.content,
+                id: seed.id.rawValue,
+                phase: seed.phase,
+                fallbackRawKind: seed.kind.rawValue
+            ),
+            rawPayload: nil
+        )
     }
 }
 
