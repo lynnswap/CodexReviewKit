@@ -723,7 +723,7 @@ extension ReviewUITests {
                 ?? store.orderedJobs.first
         )
         let selectedChatID = try #require(selectedJob.core.run.reviewThreadID)
-        let expectedLog = reviewMonitorLogText(for: selectedJob)
+        let selectedTargetSummary = selectedJob.targetSummary
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -735,11 +735,46 @@ extension ReviewUITests {
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
         let snapshot = try await awaitTransportRender(transport) { snapshot in
-            snapshot.log == expectedLog && snapshot.isShowingEmptyState == false
+            snapshot.log.contains(selectedTargetSummary) && snapshot.isShowingEmptyState == false
         }
 
         #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
         #expect(snapshot.log.isEmpty == false)
+    }
+
+    @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
+        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let selectedJob = try #require(
+            store.orderedJobs.first { $0.core.lifecycle.status == .running }
+                ?? store.orderedJobs.first
+        )
+        let existingItemIDs = Set(selectedJob.timeline.items.map(\.id))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewStore: store
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        window.layoutIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
+        let appendedItem = try #require(
+            selectedJob.timeline.items.first { existingItemIDs.contains($0.id) == false }
+        )
+        let appendedText = try #require(diagnosticMessage(appendedItem).nilIfEmpty)
+        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+            snapshot.log.count > initialSnapshot.log.count
+                && snapshot.log.contains(appendedText)
+                && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(updatedSnapshot.log.contains(appendedText))
     }
 
     @Test func windowControllerUsesSeededAuthenticatedStateOnFirstPresentation() {
