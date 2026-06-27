@@ -86,12 +86,14 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        uiState.selection = .job(
+        try selectReviewChat(
             makeRunningReviewJob(
                 sourceThreadID: "source-thread",
                 reviewThreadID: "review-thread",
                 turnID: "turn-1"
-            ))
+            ),
+            in: uiState
+        )
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
                 && transport.selectedCodexChatPhaseForTesting == .loaded
@@ -104,7 +106,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         }
     }
 
-    @Test func selectedReviewJobConnectsWhenModelSourceInstallsLater() async throws {
+    @Test func selectedReviewChatConnectsWhenModelSourceInstallsLater() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelSource = ReviewMonitorCodexModelSource()
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -140,12 +142,14 @@ struct ReviewMonitorSelectedCodexChatTests {
             codexModelSource: modelSource
         )
         transport.loadViewIfNeeded()
-        uiState.selection = .job(
+        try selectReviewChat(
             makeRunningReviewJob(
                 sourceThreadID: "source-thread",
                 reviewThreadID: "review-thread",
                 turnID: "turn-1"
-            ))
+            ),
+            in: uiState
+        )
 
         try await waitForCondition {
             transport.selectedCodexChatReviewIdentityForTesting?.activeTurnThreadID == "review-thread"
@@ -161,7 +165,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         }
     }
 
-    @Test func selectedReviewJobConnectsWhenRunIdentifiersArriveAfterSelection() async throws {
+    @Test func reviewChatSelectionCanStartAfterRunIdentifiersArrive() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -202,14 +206,13 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: nil,
             turnID: nil
         )
-        uiState.selection = .job(job)
-
-        #expect(transport.selectedCodexChatReviewIdentityForTesting == nil)
+        #expect(job.reviewChatSelection == nil)
 
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
         job.core.run.turnID = "turn-1"
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline trigger"))
+        try selectReviewChat(job, in: uiState)
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
@@ -218,7 +221,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         }
     }
 
-    @Test func selectedReviewJobRendersCodexChatTurnAndLiveUpdates() async throws {
+    @Test func selectedReviewChatRendersCodexChatTurnAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -261,7 +264,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             turnID: "turn-1"
         )
         appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline fallback"))
-        uiState.selection = .job(job)
+        try selectReviewChat(job, in: uiState)
 
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Chat snapshot")
@@ -331,7 +334,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: "review-thread",
             turnID: "turn-1"
         )
-        uiState.selection = .job(job)
+        try selectReviewChat(job, in: uiState)
 
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log == "Initial"
@@ -455,6 +458,14 @@ struct ReviewMonitorSelectedCodexChatTests {
         job.core.run.attemptID = "attempt-1"
         job.core.run.reviewThreadID = reviewThreadID
         return job
+    }
+
+    private func selectReviewChat(
+        _ job: CodexReviewJob,
+        in uiState: ReviewMonitorUIState
+    ) throws {
+        let chat = try #require(job.reviewChatSelection)
+        uiState.selection = .chat(chat)
     }
 }
 

@@ -267,11 +267,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 title: chat.title,
                 subtitle: chat.workspaceCWD ?? ""
             )
-        case .job(let job):
-            return WindowTitlePresentation(
-                title: job.targetSummary,
-                subtitle: job.cwd
-            )
         case nil:
             return WindowTitlePresentation(title: "", subtitle: "")
         }

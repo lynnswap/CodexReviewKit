@@ -13,7 +13,6 @@ enum ReviewMonitorSelection {
     case workspaceSection(ReviewMonitorWorkspaceSectionSelection)
     case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)
     case chat(ReviewMonitorCodexSidebarSnapshot.Chat)
-    case job(CodexReviewJob)
 
     var id: ReviewMonitorSelectionID {
         switch self {
@@ -23,8 +22,6 @@ enum ReviewMonitorSelection {
             return .workspace(workspace.id)
         case .chat(let chat):
             return .chat(chat.id)
-        case .job(let job):
-            return .job(job.id)
         }
     }
 }

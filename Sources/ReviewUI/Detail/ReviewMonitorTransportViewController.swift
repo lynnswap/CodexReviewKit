@@ -7,7 +7,6 @@ import ReviewMonitorRendering
 @MainActor
 final class ReviewMonitorTransportViewController: NSViewController {
     private enum LogRenderTarget: Equatable {
-        case job(String)
         case chat(CodexThreadID)
     }
 
@@ -25,14 +24,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
-    private var selectedJobObservation: PortableObservationTracking.Token?
+    private var previewChatJobObservation: PortableObservationTracking.Token?
     private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var selectedCodexChatLogTask: Task<Void, Never>?
-    private var boundJob: CodexReviewJob?
     private var boundChatID: CodexThreadID?
     private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
     private var displayedSelection: ReviewMonitorSelectionID?
-    private var logScrollTargetsByJobID: [String: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
     private var logScrollTargetsByChatID: [CodexThreadID: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
     private var logRenderTask: Task<Void, Never>?
     private var logRenderGeneration: UInt64 = 0
@@ -74,7 +71,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     isolated deinit {
         selectionObservation?.cancel()
-        selectedJobObservation?.cancel()
+        previewChatJobObservation?.cancel()
         selectedWorkspaceFindingsObservation?.cancel()
         selectedCodexChatLogTask?.cancel()
         logRenderTask?.cancel()
@@ -146,8 +143,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
         switch selection {
-        case .job(let selectedJob):
-            return boundJob !== selectedJob || displayedSelection != selection?.id
         case .workspaceSection(let selectedSection):
             return boundWorkspaceSection != selectedSection || displayedSelection != selection?.id
         case .workspace:
@@ -163,14 +158,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func updatePresentation(selection: ReviewMonitorSelection?) {
         switch selection {
-        case .job(let selectedJob):
-            clearDisplayedWorkspace()
-            displayJob(selectedJob)
-            hidePlaceholder()
-            logScrollView.isHidden = false
-            workspaceFindingsView.isHidden = true
-            displayedSelection = selection?.id
-
         case .workspaceSection(let selectedSection):
             clearDisplayedLogSelection()
             displayWorkspaceSection(selectedSection)
@@ -205,65 +192,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    private func displayJob(_ selectedJob: CodexReviewJob) {
-        let isSwitchingRenderedJob = boundJob != nil && boundJob !== selectedJob
-        cacheBoundLogScrollTarget()
-        if isSwitchingRenderedJob {
-            logScrollView.resetFindStateForContentReuse()
-        }
-        selectedJobObservation?.cancel()
-        selectedJobObservation = nil
-        selectedCodexChatLogTask?.cancel()
-        selectedCodexChatLogTask = nil
-        boundChatID = nil
-        resetLogRenderer()
-        boundJob = selectedJob
-        selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
-        #if DEBUG
-            guard codexModelSource?.modelContext != nil else {
-                renderPreviewJobTimeline(
-                    selectedJob,
-                    target: .job(selectedJob.id),
-                    restoring: restorationTarget(selectedJob),
-                    allowIncrementalUpdate: false
-                )
-                selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
-                    guard let self,
-                        self.boundJob === selectedJob
-                    else {
-                        return
-                    }
-                    _ = self.codexModelSource?.generation
-                    if self.codexModelSource?.modelContext != nil {
-                        self.displayJob(selectedJob)
-                        return
-                    }
-                    _ = selectedJob.timeline.revision
-                    self.renderPreviewJobTimeline(
-                        selectedJob,
-                        target: .job(selectedJob.id),
-                        restoring: self.logScrollView.currentScrollRestorationTarget,
-                        allowIncrementalUpdate: true
-                    )
-                }
-                return
-            }
-        #endif
-        startSelectedCodexChatLogStream(
-            target: .job(selectedJob.id),
-            initialRestorationTarget: restorationTarget(selectedJob)
-        )
-
-        selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
-            guard let self,
-                self.boundJob === selectedJob
-            else {
-                return
-            }
-            self.selectedCodexChat.bind(to: selectedJob.reviewChatIdentity)
-        }
-    }
-
     #if DEBUG
         @discardableResult
         private func renderPreviewJobTimeline(
@@ -291,10 +219,9 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
         selectedCodexChatLogTask?.cancel()
         selectedCodexChatLogTask = nil
-        selectedJobObservation?.cancel()
-        selectedJobObservation = nil
+        previewChatJobObservation?.cancel()
+        previewChatJobObservation = nil
         resetLogRenderer()
-        boundJob = nil
         boundChatID = selectedChat.id
         let restorationTarget = restorationTarget(chatID: selectedChat.id)
         if let reviewIdentity = selectedChat.reviewIdentity {
@@ -312,7 +239,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     restoring: restorationTarget,
                     allowIncrementalUpdate: false
                 )
-                selectedJobObservation = withPortableContinuousObservation { [weak self] _ in
+                previewChatJobObservation = withPortableContinuousObservation { [weak self] _ in
                     guard let self,
                           self.boundChatID == selectedChat.id
                     else {
@@ -348,11 +275,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func clearDisplayedLogSelection() {
         cacheBoundLogScrollTarget()
-        selectedJobObservation?.cancel()
-        selectedJobObservation = nil
+        previewChatJobObservation?.cancel()
+        previewChatJobObservation = nil
         selectedCodexChatLogTask?.cancel()
         selectedCodexChatLogTask = nil
-        boundJob = nil
         boundChatID = nil
         selectedCodexChat.unbind()
         resetLogRenderer()
@@ -610,8 +536,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func isCurrentLogRenderTarget(_ target: LogRenderTarget) -> Bool {
         switch target {
-        case .job(let id):
-            boundJob?.id == id
         case .chat(let id):
             boundChatID == id
         }
@@ -619,9 +543,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func cacheBoundLogScrollTarget() {
         let restorationTarget = logScrollView.currentScrollRestorationTarget
-        if let boundJob {
-            logScrollTargetsByJobID[boundJob.id] = restorationTarget
-        }
         if let boundChatID {
             logScrollTargetsByChatID[boundChatID] = restorationTarget
         }
@@ -637,17 +558,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         #if DEBUG
             previewTimelineLogProjection = ReviewMonitorTimelineLogProjection()
         #endif
-    }
-
-    private func restorationTarget(
-        _ job: CodexReviewJob
-    ) -> ReviewMonitorLogScrollView.ScrollRestorationTarget {
-        if let chatID = job.reviewChatID,
-           let chatTarget = logScrollTargetsByChatID[chatID]
-        {
-            return chatTarget
-        }
-        return logScrollTargetsByJobID[job.id] ?? .bottom
     }
 
     private func restorationTarget(
@@ -702,7 +612,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         enum DisplayedSelectionForTesting: Sendable, Equatable {
-            case job(String)
             case workspaceSection(String)
             case workspace(String)
             case chat(String)
@@ -717,8 +626,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             selectionObservation
         }
 
-        var selectedJobObservationForTesting: PortableObservationTracking.Token? {
-            selectedJobObservation
+        var previewChatJobObservationForTesting: PortableObservationTracking.Token? {
+            previewChatJobObservation
         }
 
         var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
@@ -747,8 +656,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 return selectionObservation
             }
             switch expectedSelection {
-            case .job:
-                return selectedJobObservation ?? selectionObservation
             case .workspaceSection:
                 return selectedWorkspaceFindingsObservation ?? selectionObservation
             case .workspace, .chat:
@@ -1111,13 +1018,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
             switch uiState.selection {
-            case .job:
-                .init(
-                    title: nil,
-                    summary: nil,
-                    log: displayedLogForTesting,
-                    isShowingEmptyState: false
-                )
             case .workspaceSection:
                 .init(
                     title: nil,
@@ -1158,23 +1058,19 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
             switch displayedSelection {
-            case .job(let id):
-                .job(id)
             case .workspaceSection(let id):
                 .workspaceSection(id)
             case .workspace(let id):
                 .workspace(id.rawValue)
             case .chat(let id):
                 .chat(id.rawValue)
-            case nil:
+            case .job, nil:
                 nil
             }
         }
 
         private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
             switch uiState.selection {
-            case .job(let job):
-                .job(job.id)
             case .workspaceSection(let section):
                 .workspaceSection(section.id)
             case .workspace(let workspace):
@@ -1414,8 +1310,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         ) -> Bool {
             let resolvedTarget: LogRenderTarget
             switch target ?? displayedSelectionForTesting {
-            case .job(let id):
-                resolvedTarget = .job(id)
             case .chat(let id):
                 resolvedTarget = .chat(CodexThreadID(rawValue: id))
             case .workspaceSection, .workspace, nil:
@@ -1428,8 +1322,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
                         return logScrollView.currentScrollRestorationTarget
                     }
                     switch resolvedTarget {
-                    case .job(let id):
-                        return logScrollTargetsByJobID[id] ?? .bottom
                     case .chat(let id):
                         return logScrollTargetsByChatID[id] ?? .bottom
                     }

@@ -1668,12 +1668,8 @@ private func renderDetailLogForShellLayoutTesting(
     job: CodexReviewJob
 ) async throws {
     viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting =
-        if let chatID = job.reviewChatID {
-            .chat(chatID.rawValue)
-        } else {
-            .job(job.id)
-        }
+    let chatID = try #require(job.reviewChatID)
+    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {
         transport.renderedStateForTesting.selection == expectedSelection
             && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false

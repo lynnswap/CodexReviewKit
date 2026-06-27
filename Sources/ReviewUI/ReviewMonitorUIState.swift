@@ -27,25 +27,6 @@ final class ReviewMonitorUIState {
         self.persistSidebarJobFilter = persistSidebarJobFilter
     }
 
-    var selectedJobEntry: CodexReviewJob? {
-        get {
-            guard case .job(let job) = selection else {
-                return nil
-            }
-            return job
-        }
-        set {
-            selection = newValue.map(ReviewMonitorSelection.job)
-        }
-    }
-
-    var selectedJobID: String? {
-        guard case .job(let id) = selectionID else {
-            return nil
-        }
-        return id
-    }
-
     var selectedWorkspaceSectionEntry: ReviewMonitorWorkspaceSectionSelection? {
         get {
             guard case .workspaceSection(let section) = selection else {

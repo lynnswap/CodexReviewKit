@@ -830,25 +830,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
-        case .job(let selectedJob):
-            guard let currentJob = job(withID: selectedJob.id) else {
-                uiState.selection = nil
-                outlineView.deselectAll(nil)
-                return
-            }
-
-            if currentJob !== selectedJob {
-                uiState.selection = .job(currentJob)
-            }
-
-            guard let row = row(forJobID: currentJob.id) else {
-                return
-            }
-
-            guard outlineView.selectedRow != row else {
-                return
-            }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
     }
 
@@ -924,8 +905,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func selectedJobForCurrentSelection() -> CodexReviewJob? {
         switch uiState.selection {
-        case .job(let selectedJob):
-            return job(withID: selectedJob.id)
         case .chat(let chat):
             return job(withReviewChatID: chat.id)
         case .workspaceSection, .workspace, nil:
@@ -1390,11 +1369,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         case .chat(let chat):
             return codexChatSelection(id: chat.id) != nil
                 || reviewChatSelection(id: chat.id, in: workspaces) != nil
-        case .job:
-            guard case .job(let id) = selection.id else {
-                return false
-            }
-            return containsJob(id: id, in: workspaces)
         }
     }
 

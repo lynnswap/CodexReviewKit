@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 @_spi(Testing) @testable import CodexReviewKit
 import ReviewMonitorRendering
 @_spi(PreviewSupport) @testable import ReviewUI
@@ -222,11 +223,11 @@ func renderTimelineForTesting(
     in transport: ReviewMonitorTransportViewController,
     restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
     allowIncrementalUpdate: Bool
-) -> Bool {
+) throws -> Bool {
     let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
     return transport.renderTimelineDocumentForTesting(
         timelineDocument,
-        target: timelineRenderTarget(for: job),
+        target: try timelineRenderTarget(for: job),
         restoring: restorationTarget,
         allowIncrementalUpdate: allowIncrementalUpdate
     )
@@ -242,12 +243,12 @@ func awaitTimelineRenderForTesting(
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     let expectedLog = reviewMonitorLogText(for: job)
-    let expectedTarget = timelineRenderTarget(for: job)
+    let expectedTarget = try timelineRenderTarget(for: job)
     try await waitForCondition(timeout: timeout) {
         transport.renderedStateForTesting.selection == expectedTarget
             && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
     }
-    _ = renderTimelineForTesting(
+    _ = try renderTimelineForTesting(
         job,
         in: transport,
         restoring: restorationTarget,
@@ -262,11 +263,9 @@ func awaitTimelineRenderForTesting(
 }
 
 @MainActor
-private func timelineRenderTarget(for job: CodexReviewJob) -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
-    if let chatID = job.reviewChatID {
-        return .chat(chatID.rawValue)
-    }
-    return .job(job.id)
+private func timelineRenderTarget(for job: CodexReviewJob) throws -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
+    let chatID = try #require(job.reviewChatID)
+    return .chat(chatID.rawValue)
 }
 
 private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {
