@@ -16,6 +16,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
+    private var timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
     private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
@@ -416,7 +417,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     @discardableResult
     private func renderBoundLog(
-        timelineDocument: ReviewTimelineDocument,
+        sourceDocument: ReviewMonitorLog.Document,
         target: LogRenderTarget,
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
@@ -426,7 +427,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         let renderer = logRenderer
         logRenderTask?.cancel()
         logRenderTask = Task { @MainActor [weak self] in
-            let renderedDocument = await renderer.render(timelineDocument: timelineDocument)
+            let renderedDocument = await renderer.render(sourceDocument: sourceDocument)
             guard Task.isCancelled == false,
                 let self,
                 self.logRenderGeneration == generation,
@@ -487,7 +488,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return
         }
         renderBoundLog(
-            timelineDocument: document,
+            sourceDocument: document,
             target: target,
             restorationTarget: restorationTarget,
             allowIncrementalUpdate: allowIncrementalUpdate
@@ -517,6 +518,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         appliedLogRenderGeneration = logRenderGeneration
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
+        timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
     }
 
     private func restorationTarget(
@@ -1301,12 +1303,19 @@ final class ReviewMonitorTransportViewController: NSViewController {
                     return .bottom
                 }
             }()
+            let renderedDocument = logDocumentForTesting(from: timelineDocument)
             return renderBoundLog(
-                timelineDocument: timelineDocument,
+                sourceDocument: renderedDocument,
                 target: resolvedTarget,
                 restorationTarget: resolvedRestorationTarget,
                 allowIncrementalUpdate: allowIncrementalUpdate
             )
+        }
+
+        private func logDocumentForTesting(
+            from timelineDocument: ReviewTimelineDocument
+        ) -> ReviewMonitorLog.Document {
+            timelineLogProjectionForTesting.render(timelineDocument: timelineDocument)
         }
 
         func copyLogSelectionForTesting() {

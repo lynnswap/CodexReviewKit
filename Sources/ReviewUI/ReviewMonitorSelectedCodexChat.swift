@@ -38,7 +38,7 @@ final class ReviewMonitorSelectedCodexChat {
     private(set) var identity: CodexReviewIdentity?
     private(set) var chatID: CodexThreadID?
     private(set) var chat: CodexChat?
-    private(set) var logSourceDocument: ReviewTimelineDocument?
+    private(set) var logSourceDocument: ReviewMonitorLog.Document?
     var phase: CodexDataPhase {
         chat?.phase ?? .idle
     }
@@ -59,7 +59,7 @@ final class ReviewMonitorSelectedCodexChat {
     @ObservationIgnored
     private var observationTask: Task<Void, Never>?
     @ObservationIgnored
-    private var documentProjection = ReviewMonitorSelectedCodexChatDocumentProjection()
+    private var logProjection = ReviewMonitorSelectedCodexChatLogProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
     @ObservationIgnored
@@ -127,7 +127,7 @@ final class ReviewMonitorSelectedCodexChat {
         chatID = nextTarget?.chatID
         chat = nil
         publishLogSourceChange(.clear)
-        documentProjection.reset()
+        logProjection.reset()
         boundModelContext = nextModelContext
 
         guard let nextTarget, let modelContext = nextModelContext else {
@@ -157,7 +157,7 @@ final class ReviewMonitorSelectedCodexChat {
                         break
                     }
                     self.publishLogSourceChange(
-                        self.documentProjection.apply(
+                        self.logProjection.apply(
                             change,
                             activeTurnID: nextTarget.activeTurnID,
                             chatCreatedAt: nextChat.createdAt,

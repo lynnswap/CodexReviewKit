@@ -4,17 +4,14 @@ import ReviewMonitorRendering
 
 @MainActor
 enum ReviewMonitorLogSourceChange: Equatable {
-    case replaceAll(ReviewTimelineDocument)
-    case upsertBlock(ReviewTimelineDocument, ReviewTimelineDocument.Block.ID)
-    case removeBlock(ReviewTimelineDocument?, ReviewTimelineDocument.Block.ID)
+    case replaceAll(ReviewMonitorLog.Document)
+    case update(ReviewMonitorLog.Document)
     case clear
 
-    var sourceDocument: ReviewTimelineDocument? {
+    var sourceDocument: ReviewMonitorLog.Document? {
         switch self {
         case .replaceAll(let document),
-            .upsertBlock(let document, _):
-            return document
-        case .removeBlock(let document, _):
+            .update(let document):
             return document
         case .clear:
             return nil
@@ -23,8 +20,7 @@ enum ReviewMonitorLogSourceChange: Equatable {
 
     var allowsIncrementalRender: Bool {
         switch self {
-        case .upsertBlock,
-            .removeBlock:
+        case .update:
             return true
         case .replaceAll,
             .clear:
@@ -34,14 +30,16 @@ enum ReviewMonitorLogSourceChange: Equatable {
 }
 
 @MainActor
-struct ReviewMonitorSelectedCodexChatDocumentProjection {
+struct ReviewMonitorSelectedCodexChatLogProjection {
     private var turnProjection = CodexChatTurnProjection()
     private var document: ReviewTimelineDocument?
+    private var logProjection = ReviewMonitorTimelineLogProjection()
     private var revision: UInt64 = 0
 
     mutating func reset() {
         turnProjection = CodexChatTurnProjection()
         document = nil
+        logProjection = ReviewMonitorTimelineLogProjection()
         revision = 0
     }
 
@@ -59,6 +57,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
         guard let snapshot = update.snapshot else {
             let hadDocument = document != nil
             document = nil
+            logProjection = ReviewMonitorTimelineLogProjection()
             return hadDocument ? .clear : nil
         }
 
@@ -109,10 +108,11 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
             revision: nextRevision()
         ) else {
             document = nil
+            logProjection = ReviewMonitorTimelineLogProjection()
             return hadDocument ? .clear : nil
         }
         document = nextDocument
-        return .replaceAll(nextDocument)
+        return .replaceAll(logProjection.render(timelineDocument: nextDocument))
     }
 
     private mutating func rebuildOrReplaceBlock(
@@ -176,7 +176,7 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
             revision: nextRevision()
         )
         self.document = document
-        return .upsertBlock(document, block.id)
+        return .update(logProjection.render(timelineDocument: document))
     }
 
     private mutating func removeBlock(
@@ -196,7 +196,11 @@ struct ReviewMonitorSelectedCodexChatDocumentProjection {
             revision: nextRevision()
         )
         self.document = document.blocks.isEmpty ? nil : document
-        return .removeBlock(self.document, id)
+        guard let document = self.document else {
+            logProjection = ReviewMonitorTimelineLogProjection()
+            return .clear
+        }
+        return .update(logProjection.render(timelineDocument: document))
     }
 
     private mutating func nextRevision() -> UInt64 {

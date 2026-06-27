@@ -18,6 +18,10 @@ actor ReviewMonitorLogRenderer {
         renderedDocument(from: timelineProjection.render(timelineDocument: timelineDocument))
     }
 
+    func render(sourceDocument: ReviewMonitorLog.Document) -> ReviewMonitorRenderedLogDocument {
+        renderedDocument(from: sourceDocument)
+    }
+
     private func renderedDocument(
         from source: ReviewMonitorLog.Document
     ) -> ReviewMonitorRenderedLogDocument {
