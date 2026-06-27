@@ -225,9 +225,15 @@ func renderTimelineForTesting(
     allowIncrementalUpdate: Bool
 ) throws -> Bool {
     let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-    return transport.renderTimelineDocumentForTesting(
-        timelineDocument,
-        target: try timelineRenderTarget(for: job),
+    let target = try timelineRenderTarget(for: job)
+    let sourceDocument = TimelineLogProjectionStore.document(
+        from: timelineDocument,
+        transport: transport,
+        target: target
+    )
+    return transport.renderLogDocumentForTesting(
+        sourceDocument,
+        target: target,
         restoring: restorationTarget,
         allowIncrementalUpdate: allowIncrementalUpdate
     )
@@ -266,6 +272,41 @@ func awaitTimelineRenderForTesting(
 private func timelineRenderTarget(for job: CodexReviewJob) throws -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
     let chatID = try #require(job.reviewChatID)
     return .chat(chatID.rawValue)
+}
+
+@MainActor
+private enum TimelineLogProjectionStore {
+    private struct Key: Hashable {
+        var transportID: ObjectIdentifier
+        var targetID: String
+    }
+
+    private static var projectionsByKey: [Key: ReviewMonitorTimelineLogProjection] = [:]
+
+    static func document(
+        from timelineDocument: ReviewTimelineDocument,
+        transport: ReviewMonitorTransportViewController,
+        target: ReviewMonitorTransportViewController.DisplayedSelectionForTesting
+    ) -> ReviewMonitorLog.Document {
+        let key = Key(transportID: ObjectIdentifier(transport), targetID: target.projectionStoreID)
+        var projection = projectionsByKey[key] ?? ReviewMonitorTimelineLogProjection()
+        let document = projection.render(timelineDocument: timelineDocument)
+        projectionsByKey[key] = projection
+        return document
+    }
+}
+
+private extension ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
+    var projectionStoreID: String {
+        switch self {
+        case .workspaceSection(let id):
+            "workspaceSection:\(id)"
+        case .workspace(let id):
+            "workspace:\(id)"
+        case .chat(let id):
+            "chat:\(id)"
+        }
+    }
 }
 
 private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {

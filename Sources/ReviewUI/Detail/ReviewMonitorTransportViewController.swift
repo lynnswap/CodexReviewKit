@@ -31,9 +31,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var logRenderGeneration: UInt64 = 0
     private var appliedLogRenderGeneration: UInt64 = 0
     private var hasAppliedBoundLog = false
-    #if DEBUG
-        private var timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
-    #endif
 
     convenience init(
         store: CodexReviewStore,
@@ -555,9 +552,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         appliedLogRenderGeneration = logRenderGeneration
         hasAppliedBoundLog = false
         logRenderer = ReviewMonitorLogRenderer()
-        #if DEBUG
-            timelineLogProjectionForTesting = ReviewMonitorTimelineLogProjection()
-        #endif
     }
 
     private func restorationTarget(
@@ -1298,8 +1292,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         @discardableResult
-        func renderTimelineDocumentForTesting(
-            _ timelineDocument: ReviewTimelineDocument,
+        func renderLogDocumentForTesting(
+            _ sourceDocument: ReviewMonitorLog.Document,
             target: DisplayedSelectionForTesting? = nil,
             restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
             allowIncrementalUpdate: Bool
@@ -1322,19 +1316,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
                         return logScrollTargetsByChatID[id] ?? .bottom
                     }
                 }()
-            let renderedDocument = logDocumentForTesting(from: timelineDocument)
             return renderBoundLog(
-                sourceDocument: renderedDocument,
+                sourceDocument: sourceDocument,
                 target: resolvedTarget,
                 restorationTarget: resolvedRestorationTarget,
                 allowIncrementalUpdate: allowIncrementalUpdate
             )
-        }
-
-        private func logDocumentForTesting(
-            from timelineDocument: ReviewTimelineDocument
-        ) -> ReviewMonitorLog.Document {
-            timelineLogProjectionForTesting.render(timelineDocument: timelineDocument)
         }
 
         func copyLogSelectionForTesting() {

@@ -1,6 +1,7 @@
 import Foundation
-import CodexReviewKit
+@_spi(Testing) @testable import CodexReviewKit
 import ReviewMonitorRendering
+@_spi(PreviewSupport) @testable import ReviewUI
 
 struct ReviewMonitorTimelineLogProjection: Sendable {
     private var documentProjection = ReviewMonitorLogDocumentProjection()
