@@ -38,7 +38,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             modelContext: modelContext
         )
@@ -71,7 +70,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             modelContext: modelContext
         )
@@ -121,7 +119,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             codexModelSource: modelSource
         )
@@ -170,7 +167,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             modelContext: modelContext
         )
@@ -235,7 +231,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             modelContext: modelContext
         )
@@ -303,7 +298,6 @@ struct ReviewMonitorSelectedCodexChatTests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let transport = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             modelContext: modelContext
         )

@@ -16,46 +16,53 @@ public enum ReviewMonitorPreviewContent {
         let hasFinalReview: Bool
     }
 
+    private struct PreviewReviewFixture {
+        let id: String
+        let chatID: CodexThreadID
+        let turnID: CodexTurnID
+        let cwd: String
+        let targetSummary: String
+        let summary: String
+        let lastAgentMessage: String
+        let model: String
+        let status: ReviewJobState
+        let startedAt: Date?
+        let endedAt: Date?
+        let hasFinalReview: Bool
+        let reviewResult: ParsedReviewResult?
+        let chatItems: [PreviewTimelineItemTemplate]
+    }
+
+    private enum PreviewReasoningStyle {
+        case raw
+        case summary
+    }
+
     private struct PreviewStreamTemplate {
         let itemName: String?
-        let kind: ReviewItemKind
-        let family: ReviewItemFamily
-        let phase: ReviewItemPhase
-        let content: ReviewTimelineItem.Content
+        let kind: CodexThreadItem.Kind
+        let content: CodexThreadItem.Content
         let mode: PreviewStreamMode
         let deltaText: String?
-        let startedAt: Date?
-        let completedAt: Date?
-        let durationMs: Int?
         let chunkByWord: Bool
         let delayBeforeFrameCount: Int
         let chunkIntervalFrameCount: Int
 
         init(
             itemName: String? = nil,
-            kind: ReviewItemKind,
-            family: ReviewItemFamily,
-            phase: ReviewItemPhase = .completed,
-            content: ReviewTimelineItem.Content,
+            kind: CodexThreadItem.Kind,
+            content: CodexThreadItem.Content,
             mode: PreviewStreamMode = .complete,
             deltaText: String? = nil,
-            startedAt: Date? = nil,
-            completedAt: Date? = nil,
-            durationMs: Int? = nil,
             chunkByWord: Bool = false,
             delayBeforeFrameCount: Int,
             chunkIntervalFrameCount: Int = 1
         ) {
             self.itemName = itemName
             self.kind = kind
-            self.family = family
-            self.phase = phase
             self.content = content
             self.mode = mode
             self.deltaText = deltaText
-            self.startedAt = startedAt
-            self.completedAt = completedAt
-            self.durationMs = durationMs
             self.chunkByWord = chunkByWord
             self.delayBeforeFrameCount = delayBeforeFrameCount
             self.chunkIntervalFrameCount = chunkIntervalFrameCount
@@ -70,70 +77,42 @@ public enum ReviewMonitorPreviewContent {
 
     private struct PreviewTimelineItemTemplate {
         let itemName: String
-        let kind: ReviewItemKind
-        let family: ReviewItemFamily
-        let phase: ReviewItemPhase
-        let content: ReviewTimelineItem.Content
-        let startedAt: Date?
-        let completedAt: Date?
-        let durationMs: Int?
+        let kind: CodexThreadItem.Kind
+        let content: CodexThreadItem.Content
 
         init(
             itemName: String,
-            kind: ReviewItemKind,
-            family: ReviewItemFamily,
-            phase: ReviewItemPhase,
-            content: ReviewTimelineItem.Content,
-            startedAt: Date? = nil,
-            completedAt: Date? = nil,
-            durationMs: Int? = nil
+            kind: CodexThreadItem.Kind,
+            content: CodexThreadItem.Content
         ) {
             self.itemName = itemName
             self.kind = kind
-            self.family = family
-            self.phase = phase
             self.content = content
-            self.startedAt = startedAt
-            self.completedAt = completedAt
-            self.durationMs = durationMs
         }
 
-        func seed(id: ReviewTimelineItem.ID) -> ReviewTimelineItemSeed {
-            .init(
+        func itemSnapshot(id: String, turnID: CodexTurnID) -> CodexChatItemSnapshot {
+            CodexChatItemSnapshot(
                 id: id,
+                turnID: turnID,
                 kind: kind,
-                family: family,
-                phase: phase,
-                content: content,
-                startedAt: startedAt,
-                completedAt: completedAt,
-                durationMs: durationMs
+                content: content
             )
         }
     }
 
     package struct PreviewTimelineStep {
         let itemName: String
-        let kind: ReviewItemKind
-        let family: ReviewItemFamily
-        let phase: ReviewItemPhase
-        let content: ReviewTimelineItem.Content
+        let kind: CodexThreadItem.Kind
+        let content: CodexThreadItem.Content
         let mode: PreviewStreamMode
         let deltaText: String?
-        let startedAt: Date?
-        let completedAt: Date?
-        let durationMs: Int?
 
-        func seed(id: ReviewTimelineItem.ID) -> ReviewTimelineItemSeed {
-            .init(
+        func itemSnapshot(id: String, turnID: CodexTurnID?) -> CodexChatItemSnapshot {
+            CodexChatItemSnapshot(
                 id: id,
+                turnID: turnID,
                 kind: kind,
-                family: family,
-                phase: phase,
-                content: content,
-                startedAt: startedAt,
-                completedAt: completedAt,
-                durationMs: durationMs
+                content: content
             )
         }
     }
@@ -207,21 +186,23 @@ public enum ReviewMonitorPreviewContent {
         let timelineItems = makeCommandOutputPreviewTimelineItems()
         let chatID = CodexThreadID(rawValue: "preview-command-output-panel")
         let turnID = CodexTurnID(rawValue: "preview-command-output-turn")
-        let job = makeJob(
+        let review = PreviewReviewFixture(
             id: "preview-command-output-panel",
-            threadID: chatID.rawValue,
-            turnID: turnID.rawValue,
+            chatID: chatID,
+            turnID: turnID,
             cwd: cwd,
+            targetSummary: "Command output panel",
+            summary: "A command output block is collapsed by default.",
+            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
             model: "gpt-5.4",
             status: .running,
-            targetSummary: "Command output panel",
             startedAt: now.addingTimeInterval(-135),
             endedAt: nil,
-            summary: "A command output block is collapsed by default.",
             hasFinalReview: false,
             reviewResult: nil,
-            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view."
+            chatItems: timelineItems
         )
+        let job = makeJob(from: review)
         store.loadForTesting(
             serverState: .running,
             account: accounts.first,
@@ -231,10 +212,7 @@ public enum ReviewMonitorPreviewContent {
             jobs: [job]
         )
         let fixture = makeChatLogFixture(
-            chatID: chatID,
-            turnID: turnID,
-            for: job,
-            timelineItems: timelineItems
+            for: review
         )
         store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
             chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
@@ -268,8 +246,8 @@ public enum ReviewMonitorPreviewContent {
         itemName: String,
         jobID: String,
         cycle: Int
-    ) -> ReviewTimelineItem.ID {
-        .init(rawValue: "preview-\(itemName)-\(jobID)-\(cycle)")
+    ) -> String {
+        "preview-\(itemName)-\(jobID)-\(cycle)"
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -300,14 +278,9 @@ public enum ReviewMonitorPreviewContent {
                     PreviewTimelineStep(
                         itemName: itemName,
                         kind: template.kind,
-                        family: template.family,
-                        phase: template.phase,
                         content: template.content,
                         mode: template.mode,
-                        deltaText: template.mode == .textDelta ? chunk : template.deltaText,
-                        startedAt: template.startedAt,
-                        completedAt: template.completedAt,
-                        durationMs: template.durationMs
+                        deltaText: template.mode == .textDelta ? chunk : template.deltaText
                     ))
             }
         }
@@ -334,34 +307,29 @@ public enum ReviewMonitorPreviewContent {
 
     private static let previewStreamTemplates: [PreviewStreamTemplate] = [
         .init(
-            kind: ReviewItemKind(rawValue: "event"),
-            family: .diagnostic,
-            content: .diagnostic(.init(message: "Turn started: \(previewTurnID(1))")),
+            kind: CodexThreadItem.Kind(rawValue: "event"),
+            content: .diagnostic("Turn started: \(previewTurnID(1))"),
             delayBeforeFrameCount: 1
         ),
         .init(
             itemName: "plan",
             kind: .plan,
-            family: .plan,
             content: .plan(
-                .init(
-                    markdown: """
+                """
                         [completed] Inspect ReviewMonitor log rendering
                         [in_progress] Preserve active find UI while streaming
                         [pending] Run focused UI tests
-                        """)),
+                        """),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             itemName: "command-search-test",
             kind: .commandExecution,
-            family: .command,
-            phase: .running,
             content: .command(
                 .init(
                     command:
                         "/bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
-                    status: .inProgress
+                    status: .running
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -369,8 +337,6 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "command-search-test",
             kind: .commandExecution,
-            family: .command,
-            phase: .completed,
             content: .command(
                 .init(
                     command: "",
@@ -386,19 +352,17 @@ public enum ReviewMonitorPreviewContent {
         ),
         .init(
             kind: .mcpToolCall,
-            family: .tool,
             content: .toolCall(
                 .init(
                     result: "MCP codex_review.review_read started.",
-                    status: .started
+                    status: .running
                 )),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             itemName: "reasoning-summary",
             kind: .reasoning,
-            family: .reasoning,
-            content: .reasoning(.init(text: "", style: .summary)),
+            content: .reasoning(.init(summary: "")),
             mode: .textDelta,
             deltaText:
                 "Checking whether append-only log updates are notifying NSTextFinder while an incremental search is active.\n",
@@ -408,13 +372,11 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "command-open-log-scroll",
             kind: .commandExecution,
-            family: .command,
-            phase: .running,
             content: .command(
                 .init(
                     command:
                         "/bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
-                    status: .inProgress
+                    status: .running
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -422,8 +384,6 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "command-open-log-scroll",
             kind: .commandExecution,
-            family: .command,
-            phase: .completed,
             content: .command(
                 .init(
                     command: "",
@@ -444,31 +404,18 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "context-compaction",
             kind: .contextCompaction,
-            family: .contextCompaction,
-            phase: .running,
-            content: .contextCompaction(
-                .init(
-                    title: "Automatically compacting context",
-                    status: .inProgress
-                )),
+            content: .contextCompaction("Automatically compacting context"),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
             itemName: "context-compaction",
             kind: .contextCompaction,
-            family: .contextCompaction,
-            phase: .completed,
-            content: .contextCompaction(
-                .init(
-                    title: "Context automatically compacted",
-                    status: .completed
-                )),
+            content: .contextCompaction("Context automatically compacted"),
             delayBeforeFrameCount: compactionCompletionDelayFrameCount
         ),
         .init(
             kind: .mcpToolCall,
-            family: .tool,
             content: .toolCall(
                 .init(
                     result: "File changes updated.",
@@ -479,8 +426,7 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "raw-reasoning",
             kind: .reasoning,
-            family: .reasoning,
-            content: .reasoning(.init(text: "", style: .raw)),
+            content: .reasoning(.init(content: "")),
             mode: .textDelta,
             deltaText:
                 "Need to avoid refreshing the finder client string until the user closes or clears the find bar. Appended text can wait for the next search session.\n",
@@ -490,8 +436,7 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "raw-reasoning-follow-up",
             kind: .reasoning,
-            family: .reasoning,
-            content: .reasoning(.init(text: "", style: .raw)),
+            content: .reasoning(.init(content: "")),
             mode: .textDelta,
             deltaText:
                 "I found the log update path and am keeping the current find session stable while new output streams in.\n",
@@ -501,9 +446,10 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: "agent-message-summary",
             kind: .agentMessage,
-            family: .message,
             content: .message(
                 .init(
+                    id: "agent-message-summary",
+                    role: .assistant,
                     text:
                         "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
                 )),
@@ -531,7 +477,7 @@ public enum ReviewMonitorPreviewContent {
         return [
             diagnosticItem(
                 "command-output-event",
-                kind: ReviewItemKind(rawValue: "event"),
+                kind: CodexThreadItem.Kind(rawValue: "event"),
                 message: "Turn started: preview-command-output-panel"
             ),
             messageItem(
@@ -671,32 +617,30 @@ public enum ReviewMonitorPreviewContent {
                 let timelineItems = makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
                 let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(jobIndex)")
                 let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(jobIndex)")
-                let job = makeJob(
+                let review = PreviewReviewFixture(
                     id: "preview-\(workspaceIndex)-\(jobIndex)",
-                    threadID: chatID.rawValue,
-                    turnID: turnID.rawValue,
+                    chatID: chatID,
+                    turnID: turnID,
                     cwd: cwd,
+                    targetSummary: definition.targetSummary,
+                    summary: definition.summary,
+                    lastAgentMessage: definition.lastAgentMessage,
                     model: definition.model,
                     status: definition.status,
-                    targetSummary: definition.targetSummary,
                     startedAt: definition.startedOffset.map { now.addingTimeInterval($0) },
                     endedAt: definition.endedOffset.map { now.addingTimeInterval($0) },
-                    summary: definition.summary,
                     hasFinalReview: definition.hasFinalReview,
                     reviewResult: makeReviewResult(
                         workspaceIndex: workspaceIndex,
                         jobIndex: jobIndex,
                         cwd: cwd
                     ),
-                    lastAgentMessage: definition.lastAgentMessage
+                    chatItems: timelineItems
                 )
-                jobs.append(job)
+                jobs.append(makeJob(from: review))
                 chatLogFixtures.append(
                     makeChatLogFixture(
-                        chatID: chatID,
-                        turnID: turnID,
-                        for: job,
-                        timelineItems: timelineItems
+                        for: review
                     ))
             }
         }
@@ -708,69 +652,80 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
-        chatID: CodexThreadID,
-        turnID: CodexTurnID,
-        for job: CodexReviewJob,
-        timelineItems: [PreviewTimelineItemTemplate]
+        for review: PreviewReviewFixture
     ) -> ReviewMonitorPreviewChatLogFixture {
         let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(chatID),
-            id: chatID,
-            title: job.displayTitle,
-            preview: job.core.output.lastAgentMessage?.nilIfEmpty ?? job.core.output.summary.nilIfEmpty,
-            model: job.core.run.model,
-            workspaceCWD: job.cwd,
-            updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-            recencyAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-            status: CodexThreadStatus(previewReviewJobState: job.core.lifecycle.status)
+            rowID: .chat(review.chatID),
+            id: review.chatID,
+            title: review.targetSummary,
+            preview: review.lastAgentMessage.nilIfEmpty ?? review.summary.nilIfEmpty,
+            model: review.model,
+            workspaceCWD: review.cwd,
+            updatedAt: review.endedAt ?? review.startedAt,
+            recencyAt: review.endedAt ?? review.startedAt,
+            status: CodexThreadStatus(previewReviewJobState: review.status)
         )
         let turn = CodexChatTurnStateSnapshot(
-            id: turnID,
-            status: CodexTurnStatus(job.core.lifecycle.status),
-            errorDescription: job.core.lifecycle.errorMessage,
+            id: review.turnID,
+            status: CodexTurnStatus(review.status),
+            errorDescription: review.status == .failed ? review.summary : nil,
             usage: nil
         )
         let initialSnapshot = CodexChatSnapshot(
             chatID: chat.id,
             phase: CodexDataPhase(
-                job.core.lifecycle.status,
-                errorMessage: job.core.lifecycle.errorMessage
+                review.status,
+                errorMessage: review.status == .failed ? review.summary : nil
             ),
             turns: [turn],
             items: makeInitialChatItems(
-                for: job,
-                timelineItems: timelineItems,
+                streamID: review.id,
+                timelineItems: review.chatItems,
                 turnID: turn.id
             )
         )
         return ReviewMonitorPreviewChatLogFixture(
             chat: chat,
-            cwd: job.cwd,
-            streamID: job.id,
-            isRunning: job.core.lifecycle.status == .running,
+            cwd: review.cwd,
+            streamID: review.id,
+            isRunning: review.status == .running,
             initialSnapshot: initialSnapshot
         )
     }
 
     private static func makeInitialChatItems(
-        for job: CodexReviewJob,
+        streamID: String,
         timelineItems: [PreviewTimelineItemTemplate],
         turnID: CodexTurnID
     ) -> [CodexChatItemSnapshot] {
-        let timeline = ReviewTimeline()
-        for item in timelineItems {
-            let itemID = previewTimelineItemID(
-                itemName: item.itemName,
-                jobID: job.id,
-                cycle: 0
+        timelineItems.map { item in
+            item.itemSnapshot(
+                id: previewTimelineItemID(
+                    itemName: item.itemName,
+                    jobID: streamID,
+                    cycle: 0
+                ),
+                turnID: turnID
             )
-            let seed = item.seed(id: itemID)
-            let event: ReviewDomainEvent = item.phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed)
-            timeline.apply(event)
         }
-        return timeline.items.map {
-            CodexChatItemSnapshot(previewItem: $0, turnID: turnID)
-        }
+    }
+
+    private static func makeJob(from review: PreviewReviewFixture) -> CodexReviewJob {
+        makeJob(
+            id: review.id,
+            threadID: review.chatID.rawValue,
+            turnID: review.turnID.rawValue,
+            cwd: review.cwd,
+            model: review.model,
+            status: review.status,
+            targetSummary: review.targetSummary,
+            startedAt: review.startedAt,
+            endedAt: review.endedAt,
+            summary: review.summary,
+            hasFinalReview: review.hasFinalReview,
+            reviewResult: review.reviewResult,
+            lastAgentMessage: review.lastAgentMessage
+        )
     }
 
     private static func makeJob(
@@ -801,22 +756,20 @@ public enum ReviewMonitorPreviewContent {
             summary: summary,
             hasFinalReview: hasFinalReview,
             reviewResult: reviewResult,
-            lastAgentMessage: lastAgentMessage
+            lastAgentMessage: lastAgentMessage,
+            errorMessage: status == .failed ? summary : nil
         )
     }
 
     private static func diagnosticItem(
         _ itemName: String,
-        kind: ReviewItemKind,
-        message: String,
-        phase: ReviewItemPhase = .completed
+        kind: CodexThreadItem.Kind,
+        message: String
     ) -> PreviewTimelineItemTemplate {
         .init(
             itemName: itemName,
             kind: kind,
-            family: .diagnostic,
-            phase: phase,
-            content: .diagnostic(.init(message: message))
+            content: .diagnostic(message)
         )
     }
 
@@ -824,9 +777,7 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: itemName,
             kind: .agentMessage,
-            family: .message,
-            phase: .completed,
-            content: .message(.init(text: text))
+            content: .message(.init(id: itemName, role: .assistant, text: text))
         )
     }
 
@@ -834,23 +785,19 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: itemName,
             kind: .plan,
-            family: .plan,
-            phase: .completed,
-            content: .plan(.init(markdown: markdown))
+            content: .plan(markdown)
         )
     }
 
     private static func reasoningItem(
         _ itemName: String,
         text: String,
-        style: ReviewTimelineItem.Reasoning.Style = .summary
+        style: PreviewReasoningStyle = .summary
     ) -> PreviewTimelineItemTemplate {
         .init(
             itemName: itemName,
             kind: .reasoning,
-            family: .reasoning,
-            phase: .completed,
-            content: .reasoning(.init(text: text, style: style))
+            content: .reasoning(style == .summary ? .init(summary: text) : .init(content: text))
         )
     }
 
@@ -862,32 +809,24 @@ public enum ReviewMonitorPreviewContent {
         .init(
             itemName: itemName,
             kind: .contextCompaction,
-            family: .contextCompaction,
-            phase: status == .completed ? .completed : .running,
-            content: .contextCompaction(.init(title: title, status: status))
+            content: .contextCompaction(title)
         )
     }
 
     private static func commandStartedItem(
         _ itemName: String,
         command: String,
-        cwd: String? = nil,
-        startedAt: Date? = nil,
-        actions: [ReviewTimelineItem.CommandAction] = []
+        cwd: String? = nil
     ) -> PreviewTimelineItemTemplate {
         .init(
             itemName: itemName,
             kind: .commandExecution,
-            family: .command,
-            phase: .running,
             content: .command(
                 .init(
                     command: command,
                     cwd: cwd,
-                    status: .inProgress,
-                    actions: actions
-                )),
-            startedAt: startedAt
+                    status: .running
+                ))
         )
     }
 
@@ -895,23 +834,18 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         output: String,
         exitCode: Int,
-        status: ReviewCommandStatus,
-        durationMs: Int? = nil
+        status: ReviewCommandStatus
     ) -> PreviewTimelineItemTemplate {
         .init(
             itemName: itemName,
             kind: .commandExecution,
-            family: .command,
-            phase: status == .failed ? .failed : .completed,
             content: .command(
                 .init(
                     command: "",
                     output: output,
                     exitCode: exitCode,
-                    status: status,
-                    durationMs: durationMs
-                )),
-            durationMs: durationMs
+                    status: CodexTurnStatus(status)
+                ))
         )
     }
 
@@ -920,23 +854,10 @@ public enum ReviewMonitorPreviewContent {
         result: String,
         status: ReviewToolCallStatus
     ) -> PreviewTimelineItemTemplate {
-        let phase: ReviewItemPhase =
-            switch status {
-            case .started, .inProgress:
-                .running
-            case .failed:
-                .failed
-            case .cancelled:
-                .cancelled
-            default:
-                .completed
-            }
         return PreviewTimelineItemTemplate(
             itemName: itemName,
             kind: .mcpToolCall,
-            family: .tool,
-            phase: phase,
-            content: .toolCall(.init(result: result, status: status))
+            content: .toolCall(.init(result: result, status: CodexTurnStatus(status)))
         )
     }
 
@@ -994,12 +915,12 @@ public enum ReviewMonitorPreviewContent {
             return [
                 diagnosticItem(
                     "queued-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "event"),
+                    kind: CodexThreadItem.Kind(rawValue: "event"),
                     message: "Queued review for \(definition.targetSummary)."
                 ),
                 diagnosticItem(
                     "queued-progress-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "progress"),
+                    kind: CodexThreadItem.Kind(rawValue: "progress"),
                     message: definition.summary
                 ),
             ]
@@ -1008,7 +929,7 @@ public enum ReviewMonitorPreviewContent {
             return [
                 diagnosticItem(
                     "failed-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "event"),
+                    kind: CodexThreadItem.Kind(rawValue: "event"),
                     message: "Turn started: preview-failed-\(workspaceName.lowercased())"
                 ),
                 commandStartedItem(
@@ -1021,14 +942,13 @@ public enum ReviewMonitorPreviewContent {
                         Building for debugging...
                         Test Suite 'ReviewUITests' started.
                         ReviewMonitorContentPreviewTests.testPreviewStore failed: expected command output panel metadata.
-                        """,
+                    """,
                     exitCode: 1,
-                    status: .failed,
-                    durationMs: 10_000
+                    status: .failed
                 ),
                 diagnosticItem(
                     "failed-error-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "error"),
+                    kind: .error,
                     message: definition.summary
                 ),
                 messageItem(
@@ -1038,12 +958,12 @@ public enum ReviewMonitorPreviewContent {
             return [
                 diagnosticItem(
                     "cancelled-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "event"),
+                    kind: CodexThreadItem.Kind(rawValue: "event"),
                     message: "Turn started: preview-cancelled-\(workspaceName.lowercased())"
                 ),
                 diagnosticItem(
                     "cancelled-progress-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "progress"),
+                    kind: CodexThreadItem.Kind(rawValue: "progress"),
                     message: definition.summary
                 ),
                 messageItem(
@@ -1054,7 +974,7 @@ public enum ReviewMonitorPreviewContent {
             return [
                 diagnosticItem(
                     "complete-event-\(workspaceName)-\(definition.targetSummary)",
-                    kind: ReviewItemKind(rawValue: "event"),
+                    kind: CodexThreadItem.Kind(rawValue: "event"),
                     message: "Turn started: preview-complete-\(workspaceName.lowercased())"
                 ),
                 commandStartedItem(
@@ -1067,10 +987,9 @@ public enum ReviewMonitorPreviewContent {
                         Test Suite 'ReviewUITests' started.
                         Test commandOutputRendersCollapsedTextKitPanelAndExpandsInline passed.
                         Test Suite 'ReviewUITests' passed.
-                        """,
+                    """,
                     exitCode: 0,
-                    status: .completed,
-                    durationMs: 4_000
+                    status: .completed
                 ),
                 reasoningItem(
                     "complete-summary-\(workspaceName)-\(definition.targetSummary)",
@@ -1093,12 +1012,12 @@ public enum ReviewMonitorPreviewContent {
         return [
             diagnosticItem(
                 "running-event-\(workspaceName)-\(definition.targetSummary)",
-                kind: ReviewItemKind(rawValue: "event"),
+                kind: CodexThreadItem.Kind(rawValue: "event"),
                 message: "Turn started: preview-\(workspaceName.lowercased())"
             ),
             diagnosticItem(
                 "running-progress-\(workspaceName)-\(definition.targetSummary)",
-                kind: ReviewItemKind(rawValue: "progress"),
+                kind: CodexThreadItem.Kind(rawValue: "progress"),
                 message: "Reviewing \(definition.targetSummary)"
             ),
             contextCompactionItem(
@@ -1129,21 +1048,11 @@ public enum ReviewMonitorPreviewContent {
                     Tests/ReviewUITests/ReviewUITests.swift:2322: commandOutputRendersCollapsedTextKitPanelAndExpandsInline
                     """,
                 exitCode: 0,
-                status: .completed,
-                durationMs: 6_000
+                status: .completed
             ),
             commandStartedItem(
                 sourceReadItemName,
-                command: "/bin/zsh -lc \"\(sourceReadCommand)\"",
-                startedAt: Date().addingTimeInterval(-88),
-                actions: [
-                    .init(
-                        kind: .read,
-                        command: sourceReadCommand,
-                        name: "ReviewMonitorCommandOutputDisplayDocument.swift",
-                        path: "Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
-                    )
-                ]
+                command: "/bin/zsh -lc \"\(sourceReadCommand)\""
             ),
             toolCallItem(
                 "running-tool-\(workspaceName)-\(definition.targetSummary)",
@@ -1259,6 +1168,10 @@ private extension CodexTurnStatus {
         case .cancelled:
             self = .cancelled
         }
+    }
+
+    init(_ status: some ReviewOpenStringValue) {
+        self.init(rawValue: status.rawValue)
     }
 }
 

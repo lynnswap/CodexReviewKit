@@ -171,31 +171,21 @@ private final class PreviewReviewChat {
         )
         switch step.mode {
         case .update:
-            upsertItem(step.seed(id: itemID))
+            upsertItem(step.itemSnapshot(id: itemID, turnID: currentTurnID))
         case .complete:
-            upsertItem(step.seed(id: itemID))
+            upsertItem(step.itemSnapshot(id: itemID, turnID: currentTurnID))
         case .textDelta:
             appendTextDelta(
                 step.deltaText ?? "",
-                itemID: itemID.rawValue,
-                kind: CodexThreadItem.Kind(step.kind),
-                content: CodexThreadItem.Content(
-                    previewContent: step.content,
-                    id: itemID.rawValue,
-                    phase: step.phase,
-                    fallbackRawKind: step.kind.rawValue
-                )
+                itemID: itemID,
+                kind: step.kind,
+                content: step.content
             )
         }
     }
 
     private var currentTurnID: CodexTurnID? {
         snapshotStorage.turns.last?.id
-    }
-
-    private func upsertItem(_ seed: ReviewTimelineItemSeed) {
-        let item = CodexChatItemSnapshot(previewSeed: seed, turnID: currentTurnID)
-        upsertItem(item)
     }
 
     func upsertItem(
@@ -392,17 +382,6 @@ private extension CodexChatChange {
 }
 
 extension CodexChatItemSnapshot {
-    @MainActor
-    init(previewItem item: ReviewTimelineItem, turnID: CodexTurnID) {
-        self.init(
-            id: item.id.rawValue,
-            turnID: turnID,
-            kind: CodexThreadItem.Kind(item.kind),
-            content: CodexThreadItem.Content(previewItem: item),
-            rawPayload: nil
-        )
-    }
-
     func textDelta(to item: CodexChatItemSnapshot) -> String? {
         guard
             turnID == item.turnID,
@@ -437,105 +416,7 @@ extension CodexChatItemSnapshot {
     }
 }
 
-private extension CodexThreadItem.Kind {
-    init(_ kind: ReviewItemKind) {
-        self.init(rawValue: kind.rawValue)
-    }
-}
-
 private extension CodexThreadItem.Content {
-    @MainActor
-    init(previewItem item: ReviewTimelineItem) {
-        self.init(
-            previewContent: item.content,
-            id: item.id.rawValue,
-            phase: item.phase,
-            fallbackRawKind: item.kind.rawValue
-        )
-    }
-
-    init(
-        previewContent content: ReviewTimelineItem.Content,
-        id: String,
-        phase: ReviewItemPhase,
-        fallbackRawKind: String
-    ) {
-        switch content {
-        case .approval(let approval):
-            self = .diagnostic(
-                [
-                    approval.title.nilIfEmpty,
-                    approval.detail?.nilIfEmpty,
-                ]
-                .compactMap { $0 }
-                .joined(separator: "\n")
-            )
-        case .command(let command):
-            self = .command(
-                .init(
-                    command: command.command,
-                    cwd: command.cwd,
-                    output: command.output.nilIfEmpty,
-                    exitCode: command.exitCode,
-                    status: command.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
-                ))
-        case .contextCompaction(let compaction):
-            self = .contextCompaction(compaction.title)
-        case .diagnostic(let diagnostic):
-            self = .diagnostic(diagnostic.message)
-        case .fileChange(let fileChange):
-            self = .fileChange(
-                .init(
-                    path: fileChange.paths.first ?? fileChange.title.nilIfEmpty,
-                    output: fileChange.output.nilIfEmpty ?? fileChange.patch?.nilIfEmpty,
-                    status: fileChange.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
-                ))
-        case .message(let message):
-            self = .message(.init(id: id, role: .assistant, text: message.text))
-        case .plan(let plan):
-            self = .plan(plan.markdown)
-        case .reasoning(let reasoning):
-            switch reasoning.style {
-            case .raw:
-                self = .reasoning(.init(content: reasoning.text))
-            case .summary:
-                self = .reasoning(.init(summary: reasoning.text))
-            }
-        case .search(let search):
-            self = .toolCall(
-                .init(
-                    name: "web_search",
-                    arguments: search.query,
-                    result: search.result,
-                    status: search.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
-                ))
-        case .toolCall(let toolCall):
-            self = .toolCall(
-                .init(
-                    namespace: toolCall.namespace,
-                    server: toolCall.server,
-                    name: toolCall.tool,
-                    arguments: toolCall.arguments,
-                    result: toolCall.result,
-                    error: toolCall.error,
-                    status: toolCall.status.map(CodexTurnStatus.init) ?? CodexTurnStatus(phase)
-                ))
-        case .unknown(let unknown):
-            let text = [
-                unknown.title.nilIfEmpty,
-                unknown.detail?.nilIfEmpty,
-            ]
-            .compactMap { $0 }
-            .joined(separator: "\n")
-            .nilIfEmpty
-            self = .unknown(
-                .init(
-                    rawType: unknown.rawKind?.rawValue ?? fallbackRawKind,
-                    text: text
-                ))
-        }
-    }
-
     mutating func appendPreviewText(_ delta: String) {
         switch self {
         case .message(var message):
@@ -577,47 +458,5 @@ private extension CodexThreadItem.Content {
         } else {
             parts[parts.count - 1] += delta
         }
-    }
-}
-
-private extension CodexChatItemSnapshot {
-    init(previewSeed seed: ReviewTimelineItemSeed, turnID: CodexTurnID?) {
-        self.init(
-            id: seed.id.rawValue,
-            turnID: turnID,
-            kind: CodexThreadItem.Kind(seed.kind),
-            content: CodexThreadItem.Content(
-                previewContent: seed.content,
-                id: seed.id.rawValue,
-                phase: seed.phase,
-                fallbackRawKind: seed.kind.rawValue
-            ),
-            rawPayload: nil
-        )
-    }
-}
-
-private extension CodexTurnStatus {
-    init(_ phase: ReviewItemPhase) {
-        switch phase {
-        case .awaitingApproval, .queued, .running, .waitingForInput:
-            self = .running
-        case .cancelled:
-            self = .cancelled
-        case .completed, .skipped:
-            self = .completed
-        case .failed, .incomplete:
-            self = .failed
-        }
-    }
-
-    init(_ status: some ReviewOpenStringValue) {
-        self.init(rawValue: status.rawValue)
-    }
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
     }
 }
