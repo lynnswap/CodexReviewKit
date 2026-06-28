@@ -5,15 +5,22 @@ import CodexKit
 @_spi(PreviewSupport)
 @MainActor
 public enum ReviewMonitorPreviewContent {
-    private struct PreviewJobDefinition {
-        let status: ReviewJobState
+    fileprivate enum PreviewChatLifecycle {
+        case queued
+        case running
+        case succeeded
+        case failed
+        case cancelled
+    }
+
+    private struct PreviewChatDefinition {
+        let lifecycle: PreviewChatLifecycle
         let targetSummary: String
         let summary: String
         let lastAgentMessage: String
         let model: String
         let startedOffset: TimeInterval?
         let endedOffset: TimeInterval?
-        let hasFinalReview: Bool
     }
 
     private struct PreviewReviewFixture {
@@ -25,11 +32,9 @@ public enum ReviewMonitorPreviewContent {
         let summary: String
         let lastAgentMessage: String
         let model: String
-        let status: ReviewJobState
+        let lifecycle: PreviewChatLifecycle
         let startedAt: Date?
         let endedAt: Date?
-        let hasFinalReview: Bool
-        let reviewResult: ParsedReviewResult?
         let chatItems: [PreviewTimelineItemTemplate]
     }
 
@@ -123,8 +128,6 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private struct PreviewSidebarContent {
-        var workspaces: [CodexReviewWorkspace]
-        var jobs: [CodexReviewJob]
         var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture]
     }
 
@@ -140,8 +143,7 @@ public enum ReviewMonitorPreviewContent {
             account: accounts.first,
             persistedAccounts: accounts,
             serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: previewContent.workspaces,
-            jobs: previewContent.jobs
+            workspaces: []
         )
         let chatLogSource = ReviewMonitorPreviewChatLogSource(
             fixtures: previewContent.chatLogFixtures
@@ -195,21 +197,17 @@ public enum ReviewMonitorPreviewContent {
             summary: "A command output block is collapsed by default.",
             lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
             model: "gpt-5.4",
-            status: .running,
+            lifecycle: .running,
             startedAt: now.addingTimeInterval(-135),
             endedAt: nil,
-            hasFinalReview: false,
-            reviewResult: nil,
             chatItems: timelineItems
         )
-        let job = makeJob(from: review)
         store.loadForTesting(
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
             serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: [CodexReviewWorkspace(cwd: cwd)],
-            jobs: [job]
+            workspaces: []
         )
         let fixture = makeChatLogFixture(
             for: review
@@ -607,18 +605,15 @@ public enum ReviewMonitorPreviewContent {
             "/path/to/workspace-gamma",
         ]
 
-        var workspaces: [CodexReviewWorkspace] = []
-        var jobs: [CodexReviewJob] = []
         var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture] = []
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
-            workspaces.append(CodexReviewWorkspace(cwd: cwd))
-            for (jobIndex, definition) in makeJobDefinitions(for: workspaceName).enumerated() {
+            for (chatIndex, definition) in makeChatDefinitions(for: workspaceName).enumerated() {
                 let timelineItems = makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
-                let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(jobIndex)")
-                let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(jobIndex)")
+                let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(chatIndex)")
+                let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(chatIndex)")
                 let review = PreviewReviewFixture(
-                    id: "preview-\(workspaceIndex)-\(jobIndex)",
+                    id: "preview-\(workspaceIndex)-\(chatIndex)",
                     chatID: chatID,
                     turnID: turnID,
                     cwd: cwd,
@@ -626,18 +621,11 @@ public enum ReviewMonitorPreviewContent {
                     summary: definition.summary,
                     lastAgentMessage: definition.lastAgentMessage,
                     model: definition.model,
-                    status: definition.status,
+                    lifecycle: definition.lifecycle,
                     startedAt: definition.startedOffset.map { now.addingTimeInterval($0) },
                     endedAt: definition.endedOffset.map { now.addingTimeInterval($0) },
-                    hasFinalReview: definition.hasFinalReview,
-                    reviewResult: makeReviewResult(
-                        workspaceIndex: workspaceIndex,
-                        jobIndex: jobIndex,
-                        cwd: cwd
-                    ),
                     chatItems: timelineItems
                 )
-                jobs.append(makeJob(from: review))
                 chatLogFixtures.append(
                     makeChatLogFixture(
                         for: review
@@ -645,8 +633,6 @@ public enum ReviewMonitorPreviewContent {
             }
         }
         return PreviewSidebarContent(
-            workspaces: workspaces,
-            jobs: jobs,
             chatLogFixtures: chatLogFixtures
         )
     }
@@ -663,19 +649,19 @@ public enum ReviewMonitorPreviewContent {
             workspaceCWD: review.cwd,
             updatedAt: review.endedAt ?? review.startedAt,
             recencyAt: review.endedAt ?? review.startedAt,
-            status: CodexThreadStatus(previewReviewJobState: review.status)
+            status: CodexThreadStatus(previewLifecycle: review.lifecycle)
         )
         let turn = CodexChatTurnStateSnapshot(
             id: review.turnID,
-            status: CodexTurnStatus(review.status),
-            errorDescription: review.status == .failed ? review.summary : nil,
+            status: CodexTurnStatus(review.lifecycle),
+            errorDescription: review.lifecycle == .failed ? review.summary : nil,
             usage: nil
         )
         let initialSnapshot = CodexChatSnapshot(
             chatID: chat.id,
             phase: CodexDataPhase(
-                review.status,
-                errorMessage: review.status == .failed ? review.summary : nil
+                review.lifecycle,
+                errorMessage: review.lifecycle == .failed ? review.summary : nil
             ),
             turns: [turn],
             items: makeInitialChatItems(
@@ -688,7 +674,7 @@ public enum ReviewMonitorPreviewContent {
             chat: chat,
             cwd: review.cwd,
             streamID: review.id,
-            isRunning: review.status == .running,
+            isRunning: review.lifecycle == .running,
             initialSnapshot: initialSnapshot
         )
     }
@@ -717,57 +703,6 @@ public enum ReviewMonitorPreviewContent {
             }
         }
         return snapshots
-    }
-
-    private static func makeJob(from review: PreviewReviewFixture) -> CodexReviewJob {
-        makeJob(
-            id: review.id,
-            threadID: review.chatID.rawValue,
-            turnID: review.turnID.rawValue,
-            cwd: review.cwd,
-            model: review.model,
-            status: review.status,
-            targetSummary: review.targetSummary,
-            startedAt: review.startedAt,
-            endedAt: review.endedAt,
-            summary: review.summary,
-            hasFinalReview: review.hasFinalReview,
-            reviewResult: review.reviewResult,
-            lastAgentMessage: review.lastAgentMessage
-        )
-    }
-
-    private static func makeJob(
-        id: String,
-        threadID: String,
-        turnID: String,
-        cwd: String,
-        model: String,
-        status: ReviewJobState,
-        targetSummary: String,
-        startedAt: Date?,
-        endedAt: Date?,
-        summary: String,
-        hasFinalReview: Bool,
-        reviewResult: ParsedReviewResult?,
-        lastAgentMessage: String
-    ) -> CodexReviewJob {
-        CodexReviewJob.makeForTesting(
-            id: id,
-            cwd: cwd,
-            targetSummary: targetSummary,
-            model: model,
-            threadID: threadID,
-            turnID: turnID,
-            status: status,
-            startedAt: startedAt,
-            endedAt: endedAt,
-            summary: summary,
-            hasFinalReview: hasFinalReview,
-            reviewResult: reviewResult,
-            lastAgentMessage: lastAgentMessage,
-            errorMessage: status == .failed ? summary : nil
-        )
     }
 
     private static func diagnosticItem(
@@ -870,54 +805,11 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func makeReviewResult(
-        workspaceIndex: Int,
-        jobIndex: Int,
-        cwd: String
-    ) -> ParsedReviewResult? {
-        guard workspaceIndex == 0,
-            jobIndex == 3
-        else {
-            return nil
-        }
-
-        return .init(
-            state: .hasFindings,
-            findingCount: 2,
-            findings: [
-                .init(
-                    title: "[P1] Keep workspace selection wired to findings",
-                    body:
-                        "The preview should make the first workspace show structured review findings as soon as it is selected.",
-                    priority: 1,
-                    location: .init(
-                        path: "\(cwd)/Sources/ReviewMonitorContentView.swift",
-                        startLine: 42,
-                        endLine: 48
-                    ),
-                    rawText: ""
-                ),
-                .init(
-                    title: "[P2] Preserve review mode preview data",
-                    body: "The application review mode should keep using the same preview store as Xcode previews.",
-                    priority: 2,
-                    location: .init(
-                        path: "\(cwd)/Tools/ReviewMonitor/ReviewMonitorApp.swift",
-                        startLine: 96,
-                        endLine: 104
-                    ),
-                    rawText: ""
-                ),
-            ],
-            source: .parsedFinalReviewText
-        )
-    }
-
     private static func makePreviewTimelineItems(
-        for definition: PreviewJobDefinition,
+        for definition: PreviewChatDefinition,
         workspaceName: String
     ) -> [PreviewTimelineItemTemplate] {
-        switch definition.status {
+        switch definition.lifecycle {
         case .running:
             return makeRunningPreviewTimelineItems(for: definition, workspaceName: workspaceName)
         case .queued:
@@ -1011,7 +903,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeRunningPreviewTimelineItems(
-        for definition: PreviewJobDefinition,
+        for definition: PreviewChatDefinition,
         workspaceName: String
     ) -> [PreviewTimelineItemTemplate] {
         let sourceReadItemName = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
@@ -1078,85 +970,78 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    private static func makeJobDefinitions(for workspaceName: String) -> [PreviewJobDefinition] {
+    private static func makeChatDefinitions(for workspaceName: String) -> [PreviewChatDefinition] {
         [
-            PreviewJobDefinition(
-                status: .running,
+            PreviewChatDefinition(
+                lifecycle: .running,
                 targetSummary: "Branch: feature/\(workspaceName.lowercased())-sidebar",
                 summary: "Review is streaming updates from the embedded server.",
                 lastAgentMessage: "Inspecting recent sidebar changes and collecting render timings.",
                 model: "gpt-5.4",
                 startedOffset: -420,
-                endedOffset: nil,
-                hasFinalReview: false
+                endedOffset: nil
             ),
-            PreviewJobDefinition(
-                status: .running,
+            PreviewChatDefinition(
+                lifecycle: .running,
                 targetSummary: "Uncommitted changes",
                 summary: "The working tree review is still in progress.",
                 lastAgentMessage: "Comparing row reuse behavior across the latest local edits.",
                 model: "gpt-5.4-mini",
                 startedOffset: -135,
-                endedOffset: nil,
-                hasFinalReview: false
+                endedOffset: nil
             ),
-            PreviewJobDefinition(
-                status: .queued,
+            PreviewChatDefinition(
+                lifecycle: .queued,
                 targetSummary: "Base branch: main",
                 summary: "Queued behind another active review in this workspace.",
                 lastAgentMessage: "Waiting for an available backend slot.",
                 model: "gpt-5.3-codex",
                 startedOffset: nil,
-                endedOffset: nil,
-                hasFinalReview: false
+                endedOffset: nil
             ),
-            PreviewJobDefinition(
-                status: .succeeded,
+            PreviewChatDefinition(
+                lifecycle: .succeeded,
                 targetSummary: "Commit: abc1234",
                 summary: "Review completed without correctness findings.",
                 lastAgentMessage: "No correctness issues found in the touched files.",
                 model: "gpt-5.4",
                 startedOffset: -1_500,
-                endedOffset: -1_260,
-                hasFinalReview: true
+                endedOffset: -1_260
             ),
-            PreviewJobDefinition(
-                status: .failed,
+            PreviewChatDefinition(
+                lifecycle: .failed,
                 targetSummary: "Custom: investigate CI flake",
                 summary: "The review stopped after the test command failed.",
                 lastAgentMessage: "Build failed before the model could finish evaluating the patch.",
                 model: "gpt-5.3-codex",
                 startedOffset: -2_400,
-                endedOffset: -2_190,
-                hasFinalReview: false
+                endedOffset: -2_190
             ),
-            PreviewJobDefinition(
-                status: .cancelled,
+            PreviewChatDefinition(
+                lifecycle: .cancelled,
                 targetSummary: "Branch: feature/\(workspaceName.lowercased())-transport",
                 summary: "Cancellation was requested after initial diagnostics completed.",
                 lastAgentMessage: "Stopped after the first pass to free the session for a retry.",
                 model: "gpt-5.4-mini",
                 startedOffset: -960,
-                endedOffset: -840,
-                hasFinalReview: false
+                endedOffset: -840
             ),
-            PreviewJobDefinition(
-                status: .succeeded,
+            PreviewChatDefinition(
+                lifecycle: .succeeded,
                 targetSummary: "Commit: def5678",
                 summary: "Review suggested a small cleanup in the sidebar row renderer.",
                 lastAgentMessage: "Suggested simplifying duplicated state handling in the row view.",
                 model: "gpt-5.4",
                 startedOffset: -5_400,
-                endedOffset: -5_040,
-                hasFinalReview: true
+                endedOffset: -5_040
             ),
         ]
     }
 }
 
 private extension CodexThreadStatus {
-    init(previewReviewJobState jobState: ReviewJobState) {
-        switch jobState {
+    init(previewLifecycle lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle) {
+        switch lifecycle {
         case .queued, .running:
             self = .active(activeFlags: [])
         case .succeeded, .failed, .cancelled:
@@ -1166,8 +1051,8 @@ private extension CodexThreadStatus {
 }
 
 private extension CodexTurnStatus {
-    init(_ jobState: ReviewJobState) {
-        switch jobState {
+    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle) {
+        switch lifecycle {
         case .queued, .running:
             self = .running
         case .succeeded:
@@ -1185,8 +1070,8 @@ private extension CodexTurnStatus {
 }
 
 private extension CodexDataPhase {
-    init(_ jobState: ReviewJobState, errorMessage: String?) {
-        switch jobState {
+    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle, errorMessage: String?) {
+        switch lifecycle {
         case .queued, .running, .succeeded, .cancelled:
             self = .loaded
         case .failed:

@@ -23,11 +23,8 @@ extension ReviewUITests {
 
     @Test func previewPreparationLoadsSelectedChatStreamBeforeWindowAttachment() async throws {
         let store = ReviewMonitorPreviewContent.makeStore()
-        let selectedReviewChatJob = try #require(
-            store.orderedJobs.first { $0.core.lifecycle.status == .running }
-                ?? store.orderedJobs.first
-        )
-        let selectedChatID = try #require(selectedReviewChatJob.core.run.reviewThreadID)
+        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let selectedChat = try #require(previewChatLogSource.initialChat)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -45,18 +42,14 @@ extension ReviewUITests {
             snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
         }
 
-        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChat.id.rawValue))
         #expect(snapshot.log.isEmpty == false)
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
         let store = ReviewMonitorPreviewContent.makeStore()
-        let selectedReviewChatJob = try #require(
-            store.orderedJobs.first { $0.core.lifecycle.status == .running }
-                ?? store.orderedJobs.first
-        )
-        let selectedChatID = try #require(selectedReviewChatJob.core.run.reviewThreadID)
-        let selectedTargetSummary = selectedReviewChatJob.targetSummary
+        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let selectedChat = try #require(previewChatLogSource.initialChat)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -66,10 +59,10 @@ extension ReviewUITests {
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
         let snapshot = try await awaitTransportRender(transport) { snapshot in
-            snapshot.log.contains(selectedTargetSummary) && snapshot.isShowingEmptyState == false
+            snapshot.log.contains(selectedChat.title) && snapshot.isShowingEmptyState == false
         }
 
-        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChat.id.rawValue))
         #expect(snapshot.log.isEmpty == false)
     }
 
@@ -794,12 +787,8 @@ extension ReviewUITests {
 
     @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
         let store = ReviewMonitorPreviewContent.makeStore()
-        let selectedReviewChatJob = try #require(
-            store.orderedJobs.first { $0.core.lifecycle.status == .running }
-                ?? store.orderedJobs.first
-        )
-        let selectedChatID = try #require(selectedReviewChatJob.core.run.reviewThreadID)
-        let selectedTargetSummary = selectedReviewChatJob.targetSummary
+        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let selectedChat = try #require(previewChatLogSource.initialChat)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -811,10 +800,10 @@ extension ReviewUITests {
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
         let snapshot = try await awaitTransportRender(transport) { snapshot in
-            snapshot.log.contains(selectedTargetSummary) && snapshot.isShowingEmptyState == false
+            snapshot.log.contains(selectedChat.title) && snapshot.isShowingEmptyState == false
         }
 
-        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID))
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChat.id.rawValue))
         #expect(snapshot.log.isEmpty == false)
     }
 
