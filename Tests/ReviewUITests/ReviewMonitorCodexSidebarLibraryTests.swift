@@ -242,6 +242,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
         let visibleThreadID = CodexThreadID(rawValue: "thread-app")
+        let hiddenLegacyThreadID = CodexThreadID(rawValue: "legacy-review-thread")
 
         try await runtime.transport.enqueueThreadList(.init(
             threads: [
@@ -264,7 +265,14 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             startedAt: Date(timeIntervalSince1970: 4_000),
             summary: "Running legacy review."
         )
-        let legacyChat = try #require(legacyJob.legacyReviewChatSelection)
+        let legacyChat = ReviewMonitorCodexSidebarSnapshot.Chat(
+            rowID: .chat(hiddenLegacyThreadID),
+            id: hiddenLegacyThreadID,
+            title: "Legacy review row",
+            preview: "Running legacy review.",
+            workspaceCWD: repo.path,
+            updatedAt: Date(timeIntervalSince1970: 4_000)
+        )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
