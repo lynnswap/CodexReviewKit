@@ -43,10 +43,10 @@ struct CodexReviewMCPServerTests {
             return
         }
         let read = snapshot.result
-        let timeline = snapshot.timeline
+        let log = snapshot.log
         #expect(read.runID == "job-1")
         #expect(read.core.lifecycle.status == .succeeded)
-        #expect(timeline.terminalSummary == "Done")
-        #expect(timeline.terminalResult == "review")
+        #expect(log.finalSummary == "Done")
+        #expect(log.finalResult == "review")
     }
 }

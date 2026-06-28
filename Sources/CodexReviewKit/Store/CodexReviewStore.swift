@@ -363,12 +363,12 @@ public final class CodexReviewStore {
         guard let diagnosticsURL else {
             return
         }
-        let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Job] = orderedReviewRuns.map { job in
-            return CodexReviewStoreDiagnosticsSnapshot.Job(
+        let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Run] = orderedReviewRuns.map { job in
+            return CodexReviewStoreDiagnosticsSnapshot.Run(
                 status: job.core.lifecycle.status.rawValue,
                 summary: job.core.output.summary,
-                timelineText: job.core.reviewText,
-                rawTimelineText: job.core.reviewText
+                logText: job.core.reviewText,
+                rawLogText: job.core.reviewText
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(

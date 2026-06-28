@@ -40,11 +40,11 @@ package extension CodexReviewMCP.Tool {
 package extension CodexReviewMCP.Tool {
     internal struct ReviewSnapshot: Equatable, Sendable {
         var result: CodexReviewAPI.Read.Result
-        var timeline: ReviewMCPProjection
+        var log: ReviewMCPLogProjection
 
-        init(result: CodexReviewAPI.Read.Result, timeline: ReviewMCPProjection) {
+        init(result: CodexReviewAPI.Read.Result, log: ReviewMCPLogProjection) {
             self.result = result
-            self.timeline = timeline
+            self.log = log
         }
     }
 }
@@ -140,7 +140,7 @@ package final class CodexReviewMCPServer {
         if let sessionID {
             _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
         }
-        return .init(result: result, timeline: ReviewMCPProjection(result: result))
+        return .init(result: result, log: ReviewMCPLogProjection(result: result))
     }
 
     package func closeSession(_ sessionID: String) async {

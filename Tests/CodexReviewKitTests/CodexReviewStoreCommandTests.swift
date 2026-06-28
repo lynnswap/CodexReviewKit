@@ -151,7 +151,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func awaitReviewReturnsWhenLocalTerminationUpdatesTimeline() async throws {
+    @Test func awaitReviewReturnsWhenLocalTerminationUpdatesRunOutput() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -320,7 +320,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func newlyStartedReviewAppearsBeforeExistingJobsInWorkspace() async throws {
+    @Test func newlyStartedReviewAppearsBeforeExistingRunsInWorkspace() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -1666,7 +1666,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func closeActiveReviewSessionsCancelsJobsWithoutClosingMCPServerSession() async throws {
+    @Test func closeActiveReviewSessionsCancelsRunsWithoutClosingMCPServerSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),

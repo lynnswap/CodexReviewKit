@@ -248,7 +248,7 @@ struct AppServerClientTests {
         guard case .domainEvents = try await nextEvent(from: attempt.events),
             case .domainEvents = try await nextEvent(from: attempt.events)
         else {
-            Issue.record("expected direct timeline updates")
+            Issue.record("expected direct log updates")
             return
         }
     }

@@ -249,10 +249,10 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String
+                awaited.value(for: ["result", "structuredContent", "log", "finalSummary"]) as? String
                     == "Done")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String
+                awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) as? String
                     == "review text")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
@@ -477,7 +477,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPReviewReadAddsSemanticTimeline() async throws {
+    @Test func streamableHTTPReviewReadAddsSemanticLog() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -529,31 +529,31 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
 
-            let timeline = try #require(
-                defaultResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            #expect(timeline["orderedItemIds"] as? [String] == ["job-semantic:message"])
-            #expect(timeline["activeItemIds"] as? [String] == [])
-            #expect(timeline["activeItemCount"] as? Int == 0)
-            #expect(timeline["latestActivityId"] as? String == "job-semantic:message")
-            let itemsPage = try #require(timeline["itemsPage"] as? [String: Any])
+            let log = try #require(
+                defaultResponse.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
+            #expect(log["orderedEntryIds"] as? [String] == ["job-semantic:message"])
+            #expect(log["activeEntryIds"] as? [String] == [])
+            #expect(log["activeEntryCount"] as? Int == 0)
+            #expect(log["latestEntryId"] as? String == "job-semantic:message")
+            let itemsPage = try #require(log["itemsPage"] as? [String: Any])
             #expect(itemsPage["total"] as? Int == 1)
             #expect(itemsPage["limit"] as? Int == 1)
             #expect(itemsPage["returned"] as? Int == 1)
-            let items = try #require(timeline["items"] as? [[String: Any]])
+            let items = try #require(log["items"] as? [[String: Any]])
             let messageItem = try #require(items.first)
             #expect(messageItem["id"] as? String == "job-semantic:message")
             #expect(messageItem["kind"] as? String == "agentMessage")
             let content = try #require(messageItem["content"] as? [String: Any])
             #expect(content["type"] as? String == "message")
-            let timelineOutput = try #require(content["text"] as? String)
-            #expect(timelineOutput.hasPrefix("Tests passed"))
-            #expect(timelineOutput.hasSuffix("..."))
-            #expect(timelineOutput.count < longOutput.count)
+            let logOutput = try #require(content["text"] as? String)
+            #expect(logOutput.hasPrefix("Tests passed"))
+            #expect(logOutput.hasSuffix("..."))
+            #expect(logOutput.count < longOutput.count)
             #expect(content["truncatedFields"] as? [String] == ["text"])
         }
     }
 
-    @Test func streamableHTTPReviewReadIncludesRunningSummaryInTimelineContent() async throws {
+    @Test func streamableHTTPReviewReadIncludesRunningSummaryInLogContent() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -591,11 +591,11 @@ struct CodexReviewMCPHTTPServerTests {
                 ]
             )
 
-            let timeline = try #require(
-                response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            #expect(timeline["activeItemIds"] as? [String] == ["job-tool-progress:summary"])
-            #expect(timeline["activeItemCount"] as? Int == 1)
-            let items = try #require(timeline["items"] as? [[String: Any]])
+            let log = try #require(
+                response.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
+            #expect(log["activeEntryIds"] as? [String] == ["job-tool-progress:summary"])
+            #expect(log["activeEntryCount"] as? Int == 1)
+            let items = try #require(log["items"] as? [[String: Any]])
             let item = try #require(items.first)
             #expect(item["id"] as? String == "job-tool-progress:summary")
             #expect(item["kind"] as? String == "diagnostic")
@@ -672,7 +672,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPCancelDefaultsSelectorToActiveJobsInTransportSession() async throws {
+    @Test func streamableHTTPCancelDefaultsSelectorToActiveRunsInTransportSession() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)

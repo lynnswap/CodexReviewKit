@@ -9,11 +9,11 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
     switch response {
     case .reviewStart(let snapshot),
         .reviewAwait(let snapshot):
-        value = snapshot.result.structuredContentForStartOrAwait(timeline: snapshot.timeline)
+        value = snapshot.result.structuredContentForStartOrAwait(log: snapshot.log)
         text = snapshot.result.textContentForStartOrAwait()
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewRead(let snapshot):
-        value = snapshot.result.structuredContentForRead(timeline: snapshot.timeline)
+        value = snapshot.result.structuredContentForRead(log: snapshot.log)
         text = snapshot.result.textContentForRead()
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewList(let result):
@@ -61,26 +61,26 @@ private extension CodexReviewAPI.Read.Result {
         return "\(status)."
     }
 
-    func structuredContentForStartOrAwait(timeline: ReviewMCPProjection) -> Value {
+    func structuredContentForStartOrAwait(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
             includeDetails: false,
             includeNextAction: core.lifecycle.status.isTerminal == false,
-            timeline: timeline
+            log: log
         )
     }
 
-    func structuredContentForRead(timeline: ReviewMCPProjection) -> Value {
+    func structuredContentForRead(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
             includeDetails: true,
             includeNextAction: false,
-            timeline: timeline
+            log: log
         )
     }
 
     func structuredContent(
         includeDetails: Bool,
         includeNextAction: Bool,
-        timeline: ReviewMCPProjection
+        log: ReviewMCPLogProjection
     ) -> Value {
         var object: [String: Value] = [
             "runId": .string(runID),
@@ -91,10 +91,10 @@ private extension CodexReviewAPI.Read.Result {
             ),
             "output": core.output.structuredContent(review: core.reviewText),
         ]
-        object["timeline"] =
+        object["log"] =
             includeDetails
-            ? timeline.structuredContentWithItems()
-            : timeline.structuredContent()
+            ? log.structuredContentWithItems()
+            : log.structuredContent()
         if includeNextAction {
             object["nextAction"] = .object([
                 "tool": .string(CodexReviewMCP.Tool.Name.reviewAwait.rawValue),
@@ -105,27 +105,27 @@ private extension CodexReviewAPI.Read.Result {
     }
 }
 
-private extension ReviewMCPProjection {
+private extension ReviewMCPLogProjection {
     func structuredContent() -> Value {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
             "revision": .string(revision),
-            "orderedItemIds": .array(orderedItemIDs.map(Value.string)),
-            "activeItemIds": .array(activeItemIDs.map(Value.string)),
-            "activeItemCount": .int(activeItemCount),
-            "latestActivityId": latestActivityID.map(Value.string) ?? .null,
-            "terminalSummary": boundedTimelineString(
-                terminalSummary,
-                field: "terminalSummary",
+            "orderedEntryIds": .array(orderedEntryIDs.map(Value.string)),
+            "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
+            "activeEntryCount": .int(activeEntryCount),
+            "latestEntryId": latestEntryID.map(Value.string) ?? .null,
+            "finalSummary": boundedLogString(
+                finalSummary,
+                field: "finalSummary",
                 truncatedFields: &truncatedFields
             ),
-            "terminalResult": boundedTimelineString(
-                terminalResult,
-                field: "terminalResult",
+            "finalResult": boundedLogString(
+                finalResult,
+                field: "finalResult",
                 truncatedFields: &truncatedFields
             ),
         ]
-        let page = TimelineItemPage.unreturned(total: items.count)
+        let page = LogEntryPage.unreturned(total: items.count)
         object["items"] = .array([])
         object["itemsPage"] = page.structuredContent()
         object["truncatedFields"] = .array(truncatedFields.map(Value.string))
@@ -136,22 +136,22 @@ private extension ReviewMCPProjection {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
             "revision": .string(revision),
-            "orderedItemIds": .array(orderedItemIDs.map(Value.string)),
-            "activeItemIds": .array(activeItemIDs.map(Value.string)),
-            "activeItemCount": .int(activeItemCount),
-            "latestActivityId": latestActivityID.map(Value.string) ?? .null,
-            "terminalSummary": boundedTimelineString(
-                terminalSummary,
-                field: "terminalSummary",
+            "orderedEntryIds": .array(orderedEntryIDs.map(Value.string)),
+            "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
+            "activeEntryCount": .int(activeEntryCount),
+            "latestEntryId": latestEntryID.map(Value.string) ?? .null,
+            "finalSummary": boundedLogString(
+                finalSummary,
+                field: "finalSummary",
                 truncatedFields: &truncatedFields
             ),
-            "terminalResult": boundedTimelineString(
-                terminalResult,
-                field: "terminalResult",
+            "finalResult": boundedLogString(
+                finalResult,
+                field: "finalResult",
                 truncatedFields: &truncatedFields
             ),
         ]
-        let page = TimelineItemPage(
+        let page = LogEntryPage(
             total: items.count,
             offset: 0,
             limit: items.count,
@@ -168,7 +168,7 @@ private extension ReviewMCPProjection {
     }
 }
 
-private extension ReviewMCPProjection.Item {
+private extension ReviewMCPLogProjection.Item {
     func structuredContent() -> Value {
         .object([
             "id": .string(id),
@@ -178,14 +178,14 @@ private extension ReviewMCPProjection.Item {
     }
 }
 
-private extension ReviewMCPProjection.Content {
+private extension ReviewMCPLogProjection.Content {
     func structuredContent() -> Value {
         switch self {
         case .diagnostic(let message):
             var truncatedFields: [String] = []
             return .object([
                 "type": .string("diagnostic"),
-                "message": boundedTimelineString(
+                "message": boundedLogString(
                     message,
                     field: "message",
                     truncatedFields: &truncatedFields
@@ -196,7 +196,7 @@ private extension ReviewMCPProjection.Content {
             var truncatedFields: [String] = []
             return .object([
                 "type": .string("message"),
-                "text": boundedTimelineString(
+                "text": boundedLogString(
                     text,
                     field: "text",
                     truncatedFields: &truncatedFields
@@ -207,7 +207,7 @@ private extension ReviewMCPProjection.Content {
     }
 }
 
-private struct TimelineItemPage {
+private struct LogEntryPage {
     var total: Int
     var offset: Int
     var limit: Int
@@ -241,8 +241,8 @@ private struct TimelineItemPage {
         self.nextOffset = nextOffset
     }
 
-    static func unreturned(total: Int) -> TimelineItemPage {
-        TimelineItemPage(
+    static func unreturned(total: Int) -> LogEntryPage {
+        LogEntryPage(
             total: total,
             offset: 0,
             limit: 0,
@@ -268,7 +268,7 @@ private struct TimelineItemPage {
     }
 }
 
-private func boundedTimelineString(
+private func boundedLogString(
     _ value: String?,
     field: String,
     truncatedFields: inout [String]
@@ -276,15 +276,15 @@ private func boundedTimelineString(
     guard let value else {
         return .null
     }
-    return boundedTimelineString(value, field: field, truncatedFields: &truncatedFields)
+    return boundedLogString(value, field: field, truncatedFields: &truncatedFields)
 }
 
-private func boundedTimelineString(
+private func boundedLogString(
     _ value: String,
     field: String,
     truncatedFields: inout [String]
 ) -> Value {
-    let bounded = value.boundedTimelineString()
+    let bounded = value.boundedLogString()
     if bounded.wasTruncated {
         truncatedFields.append(field)
     }
@@ -292,7 +292,7 @@ private func boundedTimelineString(
 }
 
 private extension String {
-    func boundedTimelineString() -> (value: String, wasTruncated: Bool) {
+    func boundedLogString() -> (value: String, wasTruncated: Bool) {
         let limit = 4096
         guard count > limit else {
             return (self, false)

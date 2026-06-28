@@ -177,7 +177,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Chat snapshot")
         }
-        #expect(initialSnapshot.log.contains("Timeline fallback") == false)
+        #expect(initialSnapshot.log.contains("Legacy fallback") == false)
 
         try await runtime.transport.emitServerNotification(
             method: "item/updated",

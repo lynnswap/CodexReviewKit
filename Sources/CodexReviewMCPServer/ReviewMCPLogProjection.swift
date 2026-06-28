@@ -1,7 +1,7 @@
 import Foundation
 import CodexReviewKit
 
-struct ReviewMCPProjection: Sendable, Equatable {
+struct ReviewMCPLogProjection: Sendable, Equatable {
     struct Item: Sendable, Equatable {
         var id: String
         var kind: String
@@ -23,12 +23,12 @@ struct ReviewMCPProjection: Sendable, Equatable {
     }
 
     var revision: String
-    var orderedItemIDs: [String]
-    var activeItemIDs: [String]
-    var activeItemCount: Int
-    var latestActivityID: String?
-    var terminalSummary: String?
-    var terminalResult: String?
+    var orderedEntryIDs: [String]
+    var activeEntryIDs: [String]
+    var activeEntryCount: Int
+    var latestEntryID: String?
+    var finalSummary: String?
+    var finalResult: String?
     var items: [Item]
 
     init(result: CodexReviewAPI.Read.Result) {
@@ -51,11 +51,11 @@ struct ReviewMCPProjection: Sendable, Equatable {
         }
 
         self.items = items
-        self.orderedItemIDs = items.map(\.id)
-        self.activeItemIDs = status.isTerminal ? [] : items.map(\.id)
-        self.activeItemCount = activeItemIDs.count
-        self.latestActivityID = orderedItemIDs.last
-        self.terminalSummary = status.isTerminal ? output.summary : nil
-        self.terminalResult = status == .succeeded ? result.core.reviewText.nilIfEmpty : nil
+        self.orderedEntryIDs = items.map(\.id)
+        self.activeEntryIDs = status.isTerminal ? [] : items.map(\.id)
+        self.activeEntryCount = activeEntryIDs.count
+        self.latestEntryID = orderedEntryIDs.last
+        self.finalSummary = status.isTerminal ? output.summary : nil
+        self.finalResult = status == .succeeded ? result.core.reviewText.nilIfEmpty : nil
     }
 }
