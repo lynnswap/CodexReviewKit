@@ -47,7 +47,6 @@ struct ReviewMonitorLaunchContext: Sendable {
 
 enum ReviewMonitorLaunchEnvironment {
     static let reviewModeKey = CodexReviewStoreTestEnvironment.reviewModeKey
-    static let mockReviewRunsKey = CodexReviewStoreTestEnvironment.mockReviewRunsKey
     static let xctestConfigurationKey = "XCTestConfigurationFilePath"
     static let xctestBundlePathKey = "XCTestBundlePath"
     static let xcInjectBundleIntoKey = "XCInjectBundleInto"
@@ -58,7 +57,6 @@ enum ReviewMonitorLaunchEnvironment {
     static let testCodexCommandKey = CodexReviewStoreTestEnvironment.codexCommandKey
     static let testDiagnosticsPathKey = CodexReviewStoreTestEnvironment.diagnosticsPathKey
     static let reviewModeArgument = CodexReviewStoreTestEnvironment.reviewModeArgument
-    static let mockReviewRunsArgument = CodexReviewStoreTestEnvironment.mockReviewRunsArgument
     static let testPortArgument = CodexReviewStoreTestEnvironment.portArgument
     static let testCodexCommandArgument = CodexReviewStoreTestEnvironment.codexCommandArgument
     static let testDiagnosticsPathArgument = CodexReviewStoreTestEnvironment.diagnosticsPathArgument
@@ -103,8 +101,6 @@ enum ReviewMonitorLaunchEnvironment {
         }
         return isEnabledFlag(environment[reviewModeKey])
             || arguments.contains(reviewModeArgument)
-            || isEnabledFlag(environment[mockReviewRunsKey])
-            || arguments.contains(mockReviewRunsArgument)
     }
 
     static func isRunningUnderXCTest(
