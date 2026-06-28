@@ -722,7 +722,7 @@ public enum ReviewMonitorPreviewContent {
             workspaceCWD: job.cwd,
             updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
             recencyAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-            status: CodexThreadStatus(reviewJobState: job.core.lifecycle.status)
+            status: CodexThreadStatus(previewReviewJobState: job.core.lifecycle.status)
         )
         let turn = CodexChatTurnStateSnapshot(
             id: turnID,
@@ -1233,6 +1233,17 @@ public enum ReviewMonitorPreviewContent {
                 hasFinalReview: true
             ),
         ]
+    }
+}
+
+private extension CodexThreadStatus {
+    init(previewReviewJobState jobState: ReviewJobState) {
+        switch jobState {
+        case .queued, .running:
+            self = .active(activeFlags: [])
+        case .succeeded, .failed, .cancelled:
+            self = .idle
+        }
     }
 }
 

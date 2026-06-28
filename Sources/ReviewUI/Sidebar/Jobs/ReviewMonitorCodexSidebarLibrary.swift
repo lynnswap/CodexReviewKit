@@ -352,17 +352,6 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
     }
 }
 
-extension CodexThreadStatus {
-    init(reviewJobState: ReviewJobState) {
-        switch reviewJobState {
-        case .queued, .running:
-            self = .active(activeFlags: [])
-        case .succeeded, .failed, .cancelled:
-            self = .idle
-        }
-    }
-}
-
 package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
     case section(ReviewMonitorCodexSidebarSnapshot.Section)
     case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)

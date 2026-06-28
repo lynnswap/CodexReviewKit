@@ -28,8 +28,19 @@ extension CodexReviewJob {
             workspaceCWD: cwd,
             updatedAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
             recencyAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
-            status: CodexThreadStatus(reviewJobState: core.lifecycle.status)
+            status: CodexThreadStatus(reviewJobStateForTesting: core.lifecycle.status)
         )
+    }
+}
+
+private extension CodexThreadStatus {
+    init(reviewJobStateForTesting jobState: ReviewJobState) {
+        switch jobState {
+        case .queued, .running:
+            self = .active(activeFlags: [])
+        case .succeeded, .failed, .cancelled:
+            self = .idle
+        }
     }
 }
 
