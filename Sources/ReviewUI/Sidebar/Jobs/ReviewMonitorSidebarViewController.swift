@@ -705,30 +705,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let menu = NSMenu()
-        if let job = cancellableReviewRun(for: chat) {
+        if let runID = store.cancellableReviewRunID(forChatID: chat.id.rawValue) {
             let item = NSMenuItem(
                 title: "Cancel Review",
                 action: #selector(cancelReviewFromContextMenu(_:)),
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = job.id
+            item.representedObject = runID
             menu.addItem(item)
         }
         return menu.items.isEmpty ? nil : menu
-    }
-
-    private func cancellableReviewRun(
-        for chat: ReviewMonitorCodexSidebarSnapshot.Chat
-    ) -> ReviewRunRecord? {
-        store.orderedReviewRuns.first { job in
-            guard job.isTerminal == false,
-                let chatID = job.sidebarChatID
-            else {
-                return false
-            }
-            return chatID == chat.id
-        }
     }
 
     @objc
@@ -2027,26 +2014,6 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
         }
 
     #endif
-}
-
-private extension ReviewRunRecord {
-    var sidebarChatID: CodexThreadID? {
-        if let reviewThreadID = nonEmptySidebarChatID(core.run.reviewThreadID) {
-            return CodexThreadID(rawValue: reviewThreadID)
-        }
-        if let threadID = nonEmptySidebarChatID(core.run.threadID) {
-            return CodexThreadID(rawValue: threadID)
-        }
-        return nil
-    }
-
-    private func nonEmptySidebarChatID(_ value: String?) -> String? {
-        guard let value else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
 }
 
 @MainActor

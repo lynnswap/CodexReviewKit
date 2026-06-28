@@ -28,6 +28,15 @@ extension CodexReviewStore {
         reviewRuns.first(where: { $0.id == id })
     }
 
+    package func cancellableReviewRunID(forChatID chatID: String) -> String? {
+        orderedReviewRuns.first { runRecord in
+            guard runRecord.isTerminal == false else {
+                return false
+            }
+            return runRecord.matchesChatID(chatID)
+        }?.id
+    }
+
     package func reviewRuns(inWorkspace cwd: String) -> [ReviewRunRecord] {
         reviewRuns.filter { $0.cwd == cwd }
     }
@@ -71,6 +80,22 @@ extension CodexReviewStore {
         for workspace in workspaces {
             normalizeReviewRunSortOrders(inWorkspace: workspace.cwd)
         }
+    }
+}
+
+private extension ReviewRunRecord {
+    func matchesChatID(_ chatID: String) -> Bool {
+        matchesChatID(chatID, candidate: core.run.reviewThreadID)
+            || matchesChatID(chatID, candidate: core.run.threadID)
+    }
+
+    private func matchesChatID(_ chatID: String, candidate: String?) -> Bool {
+        guard let candidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+            candidate.isEmpty == false
+        else {
+            return false
+        }
+        return candidate == chatID
     }
 }
 
