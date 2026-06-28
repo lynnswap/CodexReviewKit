@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import OSLog
+import CodexKit
 import CodexAppServerKit
 import CodexReviewKit
 import CodexReviewAppServer
@@ -158,7 +159,8 @@ public extension CodexReviewStore {
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = defaultExternalURLOpener,
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
-            CodexReviewMCPHTTPServer.Configuration
+            CodexReviewMCPHTTPServer.Configuration,
+            ReviewMCPLogProjectionProvider?
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
@@ -198,12 +200,14 @@ public extension CodexReviewStore {
 private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     typealias MCPHTTPServerFactory = @MainActor @Sendable (
         CodexReviewStore,
-        CodexReviewMCPHTTPServer.Configuration
+        CodexReviewMCPHTTPServer.Configuration,
+        ReviewMCPLogProjectionProvider?
     ) -> any CodexReviewMCPHTTPServing
 
     let seed: CodexReviewStoreSeed
 
     private var appServer: CodexAppServer?
+    private var appServerModelContainer: CodexModelContainer?
     private var appServerBackend: AppServerCodexReviewBackend?
     private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
     private var loginChallenge: CodexReviewBackendModel.Login.Challenge?
@@ -236,9 +240,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         nativeAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration? = nil,
         webAuthenticationSessionFactory: @escaping CodexReviewNativeAuthentication.WebSessionFactory = CodexReviewNativeAuthentication.WebSessions.system,
         externalURLOpener: @escaping ExternalURLOpener = defaultExternalURLOpener,
-        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration in
+        mcpHTTPServerFactory: MCPHTTPServerFactory? = { store, configuration, logProjectionProvider in
             CodexReviewMCPHTTPServer(
-                adapter: CodexReviewMCPServer(store: store),
+                adapter: CodexReviewMCPServer(
+                    store: store,
+                    logProjectionProvider: logProjectionProvider
+                ),
                 configuration: configuration
             )
         },
@@ -440,13 +447,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let runtime = try await appServerRuntimeFactory(codexHomeURL)
             let appServer = runtime.appServer
             let backend = runtime.backend
+            let modelContainer = CodexModelContainer(appServer: appServer)
             startedAppServer = appServer
             self.appServer = appServer
+            self.appServerModelContainer = modelContainer
             self.appServerBackend = backend
             appServerLifecycleHandler?(appServer)
             observeAuthNotifications(appServer: appServer, backend: backend, store: store)
             if let mcpHTTPServerFactory {
-                let mcpHTTPServer = mcpHTTPServerFactory(store, mcpHTTPServerConfiguration)
+                let logProjectionProvider = CodexReviewMCPServer.chatLogProjectionProvider(
+                    modelContext: modelContainer.mainContext
+                )
+                let mcpHTTPServer = mcpHTTPServerFactory(
+                    store,
+                    mcpHTTPServerConfiguration,
+                    logProjectionProvider
+                )
                 try await mcpHTTPServer.start()
                 startedHTTPServer = mcpHTTPServer
                 self.mcpHTTPServer = mcpHTTPServer
@@ -462,6 +478,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await startedHTTPServer?.stop()
             await startedAppServer?.close()
             self.appServer = nil
+            self.appServerModelContainer = nil
             self.appServerBackend = nil
             self.mcpHTTPServer = nil
             appServerLifecycleHandler?(nil)
@@ -536,6 +553,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         self.appServer = nil
+        self.appServerModelContainer = nil
         self.mcpHTTPServer = nil
         appServerLifecycleHandler?(nil)
         authNotificationTask?.cancel()
@@ -1171,6 +1189,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let failedAppServer = appServer
         let failedMCPHTTPServer = mcpHTTPServer
         appServer = nil
+        appServerModelContainer = nil
         appServerBackend = nil
         mcpHTTPServer = nil
         authNotificationTask = nil

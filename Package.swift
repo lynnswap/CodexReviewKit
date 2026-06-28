@@ -56,6 +56,7 @@ let package = Package(
         .target(
             name: "CodexReviewMCPServer",
             dependencies: [
+                .product(name: "CodexKit", package: "CodexKit"),
                 "CodexReviewKit",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -69,6 +70,7 @@ let package = Package(
         .target(
             name: "CodexReviewHost",
             dependencies: [
+                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKit", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewAppServer",
@@ -130,6 +132,7 @@ let package = Package(
         .testTarget(
             name: "CodexReviewMCPServerTests",
             dependencies: [
+                .product(name: "CodexKit", package: "CodexKit"),
                 "CodexReviewMCPServer",
                 "CodexReviewTesting",
                 .product(name: "NIOCore", package: "swift-nio"),

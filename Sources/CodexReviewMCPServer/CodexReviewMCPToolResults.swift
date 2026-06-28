@@ -203,6 +203,17 @@ private extension ReviewMCPLogProjection.Content {
                 ),
                 "truncatedFields": .array(truncatedFields.map(Value.string)),
             ])
+        case .entry(let type, let text):
+            var truncatedFields: [String] = []
+            return .object([
+                "type": .string(type),
+                "text": boundedLogString(
+                    text,
+                    field: "text",
+                    truncatedFields: &truncatedFields
+                ),
+                "truncatedFields": .array(truncatedFields.map(Value.string)),
+            ])
         }
     }
 }

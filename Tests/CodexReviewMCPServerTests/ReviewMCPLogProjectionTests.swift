@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import CodexKit
 @testable import CodexReviewKit
 @testable import CodexReviewMCPServer
 
@@ -46,5 +47,48 @@ struct ReviewMCPLogProjectionTests {
         #expect(item.id == "job-2:message")
         #expect(item.kind == "agentMessage")
         #expect(item.content.type == "message")
+    }
+
+    @Test func turnItemsProjectAsOrderedLogItems() throws {
+        let projection = ReviewMCPLogProjection(
+            result: .init(
+                runID: "run-1",
+                core: .init(
+                    run: .init(threadID: "thread-1", turnID: "turn-1"),
+                    lifecycle: .init(status: .running),
+                    output: .init(summary: "Running.")
+                ),
+                cancellable: true
+            ),
+            turnID: "turn-1",
+            threadItems: [
+                .init(
+                    id: "assistant-1",
+                    kind: .agentMessage,
+                    content: .message(.init(id: "assistant-1", role: .assistant, text: "Inspecting files."))
+                ),
+                .init(
+                    id: "reasoning-1",
+                    kind: .reasoning,
+                    content: .reasoning(.init(summary: "Need focused tests."))
+                ),
+                .init(
+                    id: "command-1",
+                    kind: .commandExecution,
+                    content: .command(.init(command: "swift test", output: "passed"))
+                ),
+            ]
+        )
+
+        #expect(projection.orderedEntryIDs == [
+            "turn-1:assistant-1",
+            "turn-1:reasoning-1",
+            "turn-1:command-1",
+        ])
+        #expect(projection.activeEntryIDs == projection.orderedEntryIDs)
+        #expect(projection.activeEntryCount == 3)
+        #expect(projection.latestEntryID == "turn-1:command-1")
+        #expect(projection.items.map { $0.kind } == ["agentMessage", "reasoning", "commandExecution"])
+        #expect(projection.items.map { $0.content.type } == ["message", "reasoning", "command"])
     }
 }

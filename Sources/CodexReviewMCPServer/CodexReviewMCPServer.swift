@@ -1,9 +1,14 @@
 import Foundation
+import CodexKit
 import CodexReviewKit
 
 package enum CodexReviewMCP {
     package enum Tool {}
 }
+
+package typealias ReviewMCPLogProjectionProvider = @MainActor @Sendable (
+    CodexReviewAPI.Read.Result
+) async -> ReviewMCPLogProjection?
 
 package extension CodexReviewMCP.Tool {
     enum Name: String, Codable, Equatable, Sendable, CaseIterable {
@@ -62,9 +67,14 @@ package extension CodexReviewMCP.Tool {
 @MainActor
 package final class CodexReviewMCPServer {
     private let store: CodexReviewStore
+    private let logProjectionProvider: ReviewMCPLogProjectionProvider?
 
-    package init(store: CodexReviewStore) {
+    package init(
+        store: CodexReviewStore,
+        logProjectionProvider: ReviewMCPLogProjectionProvider? = nil
+    ) {
         self.store = store
+        self.logProjectionProvider = logProjectionProvider
     }
 
     package var tools: [CodexReviewMCP.Tool.Descriptor] {
@@ -90,13 +100,13 @@ package final class CodexReviewMCPServer {
             } else {
                 result = try await store.startReview(sessionID: sessionID, request: reviewRequest)
             }
-            let snapshot = try reviewSnapshot(
+            let snapshot = try await reviewSnapshot(
                 result,
                 sessionID: sessionID
             )
             return .reviewStart(snapshot)
         case .reviewAwait(let sessionID, let runID, let waitTimeout):
-            let snapshot = try reviewSnapshot(
+            let snapshot = try await reviewSnapshot(
                 try await store.awaitReview(
                     sessionID: sessionID,
                     runID: runID,
@@ -106,7 +116,7 @@ package final class CodexReviewMCPServer {
             )
             return .reviewAwait(snapshot)
         case .reviewRead(let sessionID, let runID):
-            let snapshot = try reviewSnapshot(
+            let snapshot = try await reviewSnapshot(
                 try store.readReview(
                     sessionID: sessionID,
                     runID: runID
@@ -136,11 +146,12 @@ package final class CodexReviewMCPServer {
     private func reviewSnapshot(
         _ result: CodexReviewAPI.Read.Result,
         sessionID: String?
-    ) throws -> CodexReviewMCP.Tool.ReviewSnapshot {
+    ) async throws -> CodexReviewMCP.Tool.ReviewSnapshot {
         if let sessionID {
             _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
         }
-        return .init(result: result, log: ReviewMCPLogProjection(result: result))
+        let log = await logProjectionProvider?(result) ?? ReviewMCPLogProjection(result: result)
+        return .init(result: result, log: log)
     }
 
     package func closeSession(_ sessionID: String) async {
@@ -149,6 +160,32 @@ package final class CodexReviewMCPServer {
 
     package func hasActiveReviews(in sessionID: String) -> Bool {
         store.activeReviewRunIDs(for: sessionID).isEmpty == false
+    }
+}
+
+package extension CodexReviewMCPServer {
+    static func chatLogProjectionProvider(
+        modelContext: CodexModelContext
+    ) -> ReviewMCPLogProjectionProvider {
+        { result in
+            guard let turnID = result.core.run.turnID?.nilIfEmpty else {
+                return nil
+            }
+            guard let threadID = (result.core.run.reviewThreadID ?? result.core.run.threadID)?.nilIfEmpty else {
+                return nil
+            }
+
+            let chat = modelContext.model(for: CodexThreadID(rawValue: threadID))
+            do {
+                try await chat.refresh(includeTurns: true)
+            } catch {
+                return nil
+            }
+            guard let snapshot = chat.turnSnapshot(for: CodexTurnID(rawValue: turnID)) else {
+                return nil
+            }
+            return ReviewMCPLogProjection(result: result, turnSnapshot: snapshot)
+        }
     }
 }
 

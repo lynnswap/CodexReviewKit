@@ -58,7 +58,8 @@ private extension CodexReviewStore {
         externalURLOpener: @escaping @MainActor @Sendable (URL) -> Void = { _ in },
         mcpHTTPServerFactory: (@MainActor @Sendable (
             CodexReviewStore,
-            CodexReviewMCPHTTPServer.Configuration
+            CodexReviewMCPHTTPServer.Configuration,
+            ReviewMCPLogProjectionProvider?
         ) -> any CodexReviewMCPHTTPServing)? = nil,
         mcpPortOwnerResolver: CodexReviewMCPPortOwnerResolver? = nil,
         mcpHTTPServerBindChecker: CodexReviewMCPHTTPServerBindChecker? = nil,
@@ -291,7 +292,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { _, configuration in
+            mcpHTTPServerFactory: { _, configuration, _ in
                 NoopMCPHTTPServer(endpoint: configuration.url())
             },
             mcpHTTPServerBindChecker: { _ in },
@@ -322,6 +323,7 @@ struct CodexReviewHostTests {
         )
         try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
         var capturedConfiguration: CodexReviewMCPHTTPServer.Configuration?
+        var capturedLogProjectionProvider: ReviewMCPLogProjectionProvider?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(
@@ -329,8 +331,9 @@ struct CodexReviewHostTests {
                 mcpPath: "custom-mcp"
             ),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { store, configuration in
+            mcpHTTPServerFactory: { store, configuration, logProjectionProvider in
                 capturedConfiguration = configuration
+                capturedLogProjectionProvider = logProjectionProvider
                 return CodexReviewMCPHTTPServer(
                     adapter: CodexReviewMCPServer(store: store),
                     configuration: .init(
@@ -348,6 +351,7 @@ struct CodexReviewHostTests {
         let serverURL = try #require(store.serverURL)
 
         #expect(capturedConfiguration?.port == 54321)
+        #expect(capturedLogProjectionProvider != nil)
         #expect(capturedConfiguration?.endpoint == "/custom-mcp")
         #expect(serverURL.path == "/custom-mcp")
         await store.stop()
@@ -362,7 +366,7 @@ struct CodexReviewHostTests {
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { _, configuration in
+            mcpHTTPServerFactory: { _, configuration, _ in
                 NoopMCPHTTPServer(endpoint: configuration.url())
             },
             mcpPortOwnerResolver: { configuration in
@@ -405,7 +409,7 @@ struct CodexReviewHostTests {
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { _, configuration in
+            mcpHTTPServerFactory: { _, configuration, _ in
                 NoopMCPHTTPServer(endpoint: configuration.url())
             },
             mcpPortOwnerResolver: { _ in nil },
@@ -1301,7 +1305,7 @@ struct CodexReviewHostTests {
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
-            mcpHTTPServerFactory: { store, _ in
+            mcpHTTPServerFactory: { store, _, _ in
                 CodexReviewMCPHTTPServer(
                     adapter: CodexReviewMCPServer(store: store),
                     configuration: .init(port: 0)
