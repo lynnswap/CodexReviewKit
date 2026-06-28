@@ -1344,7 +1344,7 @@ struct ReviewUITests {
             commandStatus: "completed"
         )
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-command-output-panel",
+            id: "chat-command-output-panel",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -1505,7 +1505,7 @@ struct ReviewUITests {
             .map { "second output line \($0)" }
             .joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-command-output-panel-isolation",
+            id: "chat-command-output-panel-isolation",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -1570,7 +1570,7 @@ struct ReviewUITests {
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-command-start-panel",
+            id: "chat-command-start-panel",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -1632,7 +1632,7 @@ struct ReviewUITests {
             .map { "output line \($0)" }
             .joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-command-output-find-refresh",
+            id: "chat-command-output-find-refresh",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -1698,14 +1698,14 @@ struct ReviewUITests {
 
     @Test func switchingSelectedReviewChatRebindsDetailPane() async throws {
         let activeChat = makeReviewChatFixtureForTesting(
-            id: "job-active",
+            id: "chat-active",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Active review in progress.",
             logText: "Active log\n"
         )
         let recentChat = makeReviewChatFixtureForTesting(
-            id: "job-recent",
+            id: "chat-recent",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Recent review completed.",
@@ -1759,7 +1759,7 @@ struct ReviewUITests {
     @Test func firstSelectionFromEmptyStatePinsUnvisitedReviewChatToBottom() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-first-bottom",
+            id: "chat-first-bottom",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -1789,14 +1789,14 @@ struct ReviewUITests {
         let longActiveLog = (0..<400).map { "active line \($0)" }.joined(separator: "\n")
         let longRecentLog = (0..<400).map { "recent line \($0)" }.joined(separator: "\n")
         let activeChat = makeReviewChatFixtureForTesting(
-            id: "job-active-scroll",
+            id: "chat-active-scroll",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Active review in progress.",
             logText: longActiveLog
         )
         let recentChat = makeReviewChatFixtureForTesting(
-            id: "job-recent-scroll",
+            id: "chat-recent-scroll",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Recent review completed.",
@@ -1849,14 +1849,14 @@ struct ReviewUITests {
         let longActiveLog = (0..<400).map { "active line \($0)" }.joined(separator: "\n")
         let longRecentLog = (0..<400).map { "recent line \($0)" }.joined(separator: "\n")
         let activeChat = makeReviewChatFixtureForTesting(
-            id: "job-active-bottom",
+            id: "chat-active-bottom",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Active review in progress.",
             logText: longActiveLog
         )
         let recentChat = makeReviewChatFixtureForTesting(
-            id: "job-recent-bottom",
+            id: "chat-recent-bottom",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Recent review completed.",
@@ -1912,7 +1912,7 @@ struct ReviewUITests {
     @Test func rehydratingSameSelectedReviewChatPreservesLogScrollPosition() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-rehydrated",
+            id: "chat-rehydrated",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -1940,7 +1940,7 @@ struct ReviewUITests {
         #expect(preservedOffset > 0)
 
         let replacement = makeReviewChatFixtureForTesting(
-            id: "job-rehydrated",
+            id: "chat-rehydrated",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -1955,14 +1955,14 @@ struct ReviewUITests {
     @Test func switchingReviewChatWithIdenticalLogTextStartsUnvisitedReviewChatAtBottom() async throws {
         let sharedLog = (0..<400).map { "shared line \($0)" }.joined(separator: "\n")
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-identical-1",
+            id: "chat-identical-1",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
             logText: sharedLog
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-identical-2",
+            id: "chat-identical-2",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Review completed.",
@@ -1997,20 +1997,20 @@ struct ReviewUITests {
         try await waitForLogPinnedToBottom(in: transport)
     }
 
-    @Test func switchingFromShortToLongJobMaterializesVisibleTextKit2Fragments() async throws {
+    @Test func switchingFromShortToLongChatMaterializesVisibleTextKit2Fragments() async throws {
         let shortLog = (0..<3).map { "short visible line \($0)" }.joined(separator: "\n")
         let longLog = (0..<700)
             .map { "long visible fragment line \($0) with enough text to exercise viewport surface reuse" }
             .joined(separator: "\n")
         let shortChat = makeReviewChatFixtureForTesting(
-            id: "job-fragment-short",
+            id: "chat-fragment-short",
             status: .running,
             targetSummary: "Short log",
             summary: "Short preview.",
             logText: shortLog
         )
         let longChat = makeReviewChatFixtureForTesting(
-            id: "job-fragment-long",
+            id: "chat-fragment-long",
             status: .succeeded,
             targetSummary: "Long log",
             summary: "Long review completed.",
@@ -2046,14 +2046,14 @@ struct ReviewUITests {
         let shortLog = (0..<3).map { "short line \($0)" }.joined(separator: "\n")
         let longLog = (0..<400).map { "long line \($0)" }.joined(separator: "\n")
         let shortChat = makeReviewChatFixtureForTesting(
-            id: "job-short-cache",
+            id: "chat-short-cache",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Short preview.",
             logText: shortLog
         )
         let recentChat = makeReviewChatFixtureForTesting(
-            id: "job-short-cache-recent",
+            id: "chat-short-cache-recent",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Recent review completed.",
@@ -2102,14 +2102,14 @@ struct ReviewUITests {
 
     @Test func previouslySelectedReviewChatUpdatesDoNotRepaintCurrentDetailPane() async throws {
         let activeChat = makeReviewChatFixtureForTesting(
-            id: "job-old-selection",
+            id: "chat-old-selection",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Active review.",
             logText: "Active log\n"
         )
         let recentChat = makeReviewChatFixtureForTesting(
-            id: "job-current-selection",
+            id: "chat-current-selection",
             status: .succeeded,
             targetSummary: "Commit: abc123",
             summary: "Recent review.",
@@ -2157,7 +2157,7 @@ struct ReviewUITests {
 
     @Test func clickingSidebarBlankAreaKeepsSelectionAndDetailPane() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-selected",
+            id: "chat-selected",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Review is still running.",
@@ -2191,7 +2191,7 @@ struct ReviewUITests {
 
     @Test func clickingWorkspaceHeaderSelectsWorkspacePlaceholder() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-selected",
+            id: "chat-selected",
             cwd: "/tmp/workspace-alpha",
             status: .running,
             targetSummary: "Uncommitted changes",
@@ -2230,7 +2230,7 @@ struct ReviewUITests {
         #expect(transport.isShowingNoFindingsStateForTesting)
     }
 
-    @Test func newJobsArrivingWhileUnselectedDoNotAutoSelect() {
+    @Test func newChatsArrivingWhileUnselectedDoNotAutoSelect() {
         let activeChat = makeReviewChatFixtureForTesting(status: .running, targetSummary: "Uncommitted changes")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, workspaces: [])
@@ -2321,7 +2321,7 @@ struct ReviewUITests {
 
     @Test func clearingSelectionShowsEmptyStateAndClearsDetailPane() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-1",
+            id: "chat-1",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -2372,7 +2372,7 @@ struct ReviewUITests {
 
     @Test func inPlaceReviewChatUpdateKeepsSelectionAndRefreshesDetailPane() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-1",
+            id: "chat-1",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -2411,7 +2411,7 @@ struct ReviewUITests {
 
     @Test func selectedReviewChatLogAppendUsesAppendPath() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-append",
+            id: "chat-append",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2457,7 +2457,7 @@ struct ReviewUITests {
 
     @Test func separatorPrefixedProgressAppendDoesNotUseGenericWordGlow() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-progress-separator-append",
+            id: "chat-progress-separator-append",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2500,7 +2500,7 @@ struct ReviewUITests {
         let decomposedPrefix = "Caf\u{0065}\u{0301}"
         let precomposedUpdate = "Caf\u{00E9} appended"
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-canonical-append",
+            id: "chat-canonical-append",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2533,7 +2533,7 @@ struct ReviewUITests {
 
     @Test func coalescedLogTextUpdateDisplaysCombinedSuffix() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-coalesced",
+            id: "chat-coalesced",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2571,7 +2571,7 @@ struct ReviewUITests {
 
     @Test func coalescedProgressSuffixDisplaysLatestProgress() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-coalesced-progress",
+            id: "chat-coalesced-progress",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2609,7 +2609,7 @@ struct ReviewUITests {
 
     @Test func coalescedMixedReasoningAndProgressSuffixAnimatesOnlyReasoningRange() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-coalesced-mixed-reasoning-progress",
+            id: "chat-coalesced-mixed-reasoning-progress",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2655,7 +2655,7 @@ struct ReviewUITests {
 
     @Test func shortLogAppendDoesNotGrowDocumentFrameBeforeContentIsScrollable() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-short-append-frame-stability",
+            id: "chat-short-append-frame-stability",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -2702,7 +2702,7 @@ struct ReviewUITests {
 
     @Test func selectedReviewChatGroupedReplacementUsesReplacementPath() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-reload",
+            id: "chat-reload",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2742,7 +2742,7 @@ struct ReviewUITests {
     @Test func coalescedCommandAppendAfterReasoningKeepsReasoningAndDoesNotReload() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-reasoning-command-append",
+            id: "chat-reasoning-command-append",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2808,7 +2808,7 @@ struct ReviewUITests {
 
     @Test func selectedReviewChatMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-markdown-append-fallback",
+            id: "chat-markdown-append-fallback",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2847,7 +2847,7 @@ struct ReviewUITests {
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-stale-replacement",
+            id: "chat-stale-replacement",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2902,7 +2902,7 @@ struct ReviewUITests {
 
     @Test func metadataOnlyUpdatesDoNotTouchLogView() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-metadata",
+            id: "chat-metadata",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -2940,7 +2940,7 @@ struct ReviewUITests {
 
     @Test func reasoningAppendUsesWordGlowAndReduceMotionDisablesGlow() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-reasoning-glow",
+            id: "chat-reasoning-glow",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -2996,7 +2996,7 @@ struct ReviewUITests {
 
     @Test func screenSwitchBacklogDoesNotAnimateButNextVisibleReasoningAppendDoes() async throws {
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-reasoning-switch-backlog",
+            id: "chat-reasoning-switch-backlog",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -3006,13 +3006,13 @@ struct ReviewUITests {
             ]
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-other-selected",
+            id: "chat-other-selected",
             cwd: "/tmp/workspace-beta",
             title: "Uncommitted changes",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 201),
             chatEntries: [
-                .init(kind: .agentMessage, groupID: "msg_1", text: "Other job")
+                .init(kind: .agentMessage, groupID: "msg_1", text: "Other chat")
             ]
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -3060,7 +3060,7 @@ struct ReviewUITests {
 
     @Test func reasoningWordGlowCompletesAndClearsRenderingAttributes() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-reasoning-glow-completion",
+            id: "chat-reasoning-glow-completion",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -3106,7 +3106,7 @@ struct ReviewUITests {
 
     @Test func delayedFirstWordGlowTickDoesNotImmediatelyClearAnimation() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-reasoning-glow-delayed-first-tick",
+            id: "chat-reasoning-glow-delayed-first-tick",
             cwd: "/tmp/workspace-alpha",
             title: "Uncommitted changes",
             status: .running,
@@ -3145,7 +3145,7 @@ struct ReviewUITests {
     @Test func logAutoFollowRunsOnlyWhenPinnedToBottom() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-autofollow",
+            id: "chat-autofollow",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3200,7 +3200,7 @@ struct ReviewUITests {
     @Test func logAutoFollowKeepsBottomAfterWrappedSingleLineAppend() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-autofollow-wrapped-append",
+            id: "chat-autofollow-wrapped-append",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3244,7 +3244,7 @@ struct ReviewUITests {
             .map { "scroll stability line \($0) with enough text to keep TextKit 2 viewport layout active" }
             .joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-append-near-bottom-scroll-stability",
+            id: "chat-append-near-bottom-scroll-stability",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3292,7 +3292,7 @@ struct ReviewUITests {
     @Test func programmaticLogAutoFollowRequestsOverlayScrollerHideWhenShown() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-overlay-hide",
+            id: "chat-overlay-hide",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3333,7 +3333,7 @@ struct ReviewUITests {
     @Test func legacyScrollerStyleDoesNotRequestOverlayScrollerHide() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-legacy-hide",
+            id: "chat-legacy-hide",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3372,7 +3372,7 @@ struct ReviewUITests {
 
     @Test func shortLogDoesNotRequestOverlayScrollerHideWhenNoScrollRange() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-overlay-short",
+            id: "chat-overlay-short",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3411,14 +3411,14 @@ struct ReviewUITests {
     @Test func selectingReviewChatRequestsOverlayScrollerHideWhenRestoringScrollPosition() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-restore-1",
+            id: "chat-restore-1",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
             logText: longLog
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-restore-2",
+            id: "chat-restore-2",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3469,7 +3469,7 @@ struct ReviewUITests {
     @Test func privateOverlayBridgeNoOpsWhenScrollerImpPairIsUnavailable() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-missing-pair",
+            id: "chat-missing-pair",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3509,7 +3509,7 @@ struct ReviewUITests {
     @Test func privateOverlayBridgeNoOpsWhenHideSelectorsAreUnavailable() async throws {
         let longLog = (0..<400).map { "line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-missing-hide",
+            id: "chat-missing-hide",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3548,7 +3548,7 @@ struct ReviewUITests {
 
     @Test func logViewUsesCustomTextKit2SurfaceAndDisablesEditingFeatures() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-config",
+            id: "chat-log-config",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3579,7 +3579,7 @@ struct ReviewUITests {
     @Test func logViewMaintainsVisibleTextKit2FragmentCoverageWhenScrolled() async throws {
         let longLog = (0..<1_000).map { "fragment coverage line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-fragments",
+            id: "chat-log-fragments",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3622,7 +3622,7 @@ struct ReviewUITests {
     @Test func logAppendDoesNotLeaveStaleTextKit2FragmentViews() async throws {
         let longLog = (0..<400).map { "append fragment line \($0)" }.joined(separator: "\n")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-fragment-append",
+            id: "chat-log-fragment-append",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3656,7 +3656,7 @@ struct ReviewUITests {
 
     @Test func logViewSupportsReadOnlySelectAllCopyFindValidationAndAccessibility() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-readonly",
+            id: "chat-log-readonly",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3738,7 +3738,7 @@ struct ReviewUITests {
             .map { "wrapped-segment-\($0)" }
             .joined(separator: " ")
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-soft-wrap-keyboard",
+            id: "chat-log-soft-wrap-keyboard",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3786,7 +3786,7 @@ struct ReviewUITests {
             .map { "needle \($0) with enough trailing text to wrap in the visible log surface" }
             .joined(separator: "\n") + "\n"
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-system-highlights",
+            id: "chat-log-find-system-highlights",
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
@@ -3936,16 +3936,16 @@ struct ReviewUITests {
 
     @Test func logFindClearsVisibleSnapshotWhenLogContentIsReused() async throws {
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-reuse-first",
+            id: "chat-log-find-reuse-first",
             status: .running,
-            targetSummary: "First job",
+            targetSummary: "First chat",
             summary: "Running review.",
             logText: "needle first job\n"
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-reuse-second",
+            id: "chat-log-find-reuse-second",
             status: .running,
-            targetSummary: "Second job",
+            targetSummary: "Second chat",
             summary: "Running review.",
             logText: "needle second job\n"
         )
@@ -4000,16 +4000,16 @@ struct ReviewUITests {
         let appendedLine = "needle appended"
         let reusedLog = initialLog + "\n\n" + appendedLine
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-same-text-reuse-first",
+            id: "chat-log-find-same-text-reuse-first",
             status: .running,
-            targetSummary: "First job",
+            targetSummary: "First chat",
             summary: "Running review.",
             logText: initialLog
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-same-text-reuse-second",
+            id: "chat-log-find-same-text-reuse-second",
             status: .running,
-            targetSummary: "Second job",
+            targetSummary: "Second chat",
             summary: "Running review.",
             logText: reusedLog
         )
@@ -4063,16 +4063,16 @@ struct ReviewUITests {
     @Test func logFindContentReuseClearsSnapshotForPrefixRelatedLogs() async throws {
         let firstLog = "needle shared prefix\n"
         let firstChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-prefix-reuse-first",
+            id: "chat-log-find-prefix-reuse-first",
             status: .running,
-            targetSummary: "First job",
+            targetSummary: "First chat",
             summary: "Running review.",
             logText: firstLog
         )
         let secondChat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-prefix-reuse-second",
+            id: "chat-log-find-prefix-reuse-second",
             status: .running,
-            targetSummary: "Second job",
+            targetSummary: "Second chat",
             summary: "Running review.",
             logText: firstLog + "needle second suffix\n"
         )
@@ -4118,7 +4118,7 @@ struct ReviewUITests {
 
     @Test func logFindHidingVisibleSnapshotReturnsClientToLiveString() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-hide-snapshot",
+            id: "chat-log-find-hide-snapshot",
             status: .running,
             targetSummary: "Hide snapshot",
             summary: "Running review.",
@@ -4163,7 +4163,7 @@ struct ReviewUITests {
 
     @Test func logFindClearedSelectionReturnsVisibleUpdatesToLiveString() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-cleared-selection",
+            id: "chat-log-find-cleared-selection",
             status: .running,
             targetSummary: "Cleared selection",
             summary: "Running review.",
@@ -4219,7 +4219,7 @@ struct ReviewUITests {
 
     @Test func logFindClearedQueryReturnsVisibleUpdatesToLiveString() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-cleared-query",
+            id: "chat-log-find-cleared-query",
             status: .running,
             targetSummary: "Cleared query",
             summary: "Running review.",
@@ -4277,7 +4277,7 @@ struct ReviewUITests {
 
     @Test func logFindDoesNotFreezeVisibleBarBeforeSearchQuery() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-visible-no-query",
+            id: "chat-log-find-visible-no-query",
             status: .running,
             targetSummary: "Visible find bar",
             summary: "Running review.",
@@ -4321,7 +4321,7 @@ struct ReviewUITests {
 
     @Test func logFindPreservesDirectFindBarQueryDuringLogUpdates() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-direct-query",
+            id: "chat-log-find-direct-query",
             status: .running,
             targetSummary: "Visible find bar direct query",
             summary: "Running review.",
@@ -4368,7 +4368,7 @@ struct ReviewUITests {
 
     @Test func logFindQueryChangeRefreshesVisibleSnapshotAfterLogUpdates() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-query-change",
+            id: "chat-log-find-query-change",
             status: .running,
             targetSummary: "Visible find bar query change",
             summary: "Running review.",
@@ -4417,7 +4417,7 @@ struct ReviewUITests {
 
     @Test func logFindVisibleBarNormalSelectionKeepsUpdatesLive() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-visible-normal-selection",
+            id: "chat-log-find-visible-normal-selection",
             status: .running,
             targetSummary: "Visible find bar normal selection",
             summary: "Running review.",
@@ -4465,7 +4465,7 @@ struct ReviewUITests {
 
     @Test func logFindPreservesNoResultSearchStateDuringLogUpdatesUntilHidden() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-visible-no-result",
+            id: "chat-log-find-visible-no-result",
             status: .running,
             targetSummary: "Visible find bar no result",
             summary: "Running review.",
@@ -4535,7 +4535,7 @@ struct ReviewUITests {
 
     @Test func logFindKeepsFirstAppendIntoEmptyVisibleLogLive() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-log-find-empty-append",
+            id: "chat-log-find-empty-append",
             status: .running,
             targetSummary: "Empty log",
             summary: "Running review.",
@@ -4574,9 +4574,9 @@ struct ReviewUITests {
         #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: chat) as NSString).length)
     }
 
-    @Test func authFailedJobShowsNormalFailureDetails() async throws {
+    @Test func authFailedChatShowsNormalFailureDetails() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-auth",
+            id: "chat-auth",
             status: .failed,
             targetSummary: "Uncommitted changes",
             summary: "Failed to start review.",
@@ -4603,9 +4603,9 @@ struct ReviewUITests {
         #expect(snapshot.log == reviewChatLogText(for: chat))
     }
 
-    @Test func authenticatedAuthFailedJobStillShowsNormalFailureDetails() async throws {
+    @Test func authenticatedAuthFailedChatStillShowsNormalFailureDetails() async throws {
         let chat = makeReviewChatFixtureForTesting(
-            id: "job-auth-restored",
+            id: "chat-auth-restored",
             status: .failed,
             targetSummary: "Uncommitted changes",
             summary: "Failed to start review.",

@@ -106,7 +106,7 @@ extension ReviewUITests {
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
     }
 
-    @Test func splitViewShowsEmptyStateWithoutJobs() {
+    @Test func splitViewShowsEmptyStateWithoutChats() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -1203,7 +1203,7 @@ extension ReviewUITests {
     @Test func detailLogViewExtendsBehindTitlebarWithoutOverlappingSidebar() async throws {
         let logText = "Safe area log\n"
         let chat = makeShellReviewChatForTesting(
-            id: "job-safe-area",
+            id: "chat-safe-area",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1241,7 +1241,7 @@ extension ReviewUITests {
     @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
         let logText = "Short log\n"
         let chat = makeShellReviewChatForTesting(
-            id: "job-short-log-layout",
+            id: "chat-short-log-layout",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1269,7 +1269,7 @@ extension ReviewUITests {
         let logText = Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
             .joined()
         let chat = makeShellReviewChatForTesting(
-            id: "job-sidebar-width-regression",
+            id: "chat-sidebar-width-regression",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1314,7 +1314,7 @@ extension ReviewUITests {
         let logText = Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
             .joined()
         let chat = makeShellReviewChatForTesting(
-            id: "job-sidebar-width-shrink-regression",
+            id: "chat-sidebar-width-shrink-regression",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1352,7 +1352,7 @@ extension ReviewUITests {
     @Test func detailLogTracksSimpleWindowResizeInBothDirections() async throws {
         let logText = Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
         let chat = makeShellReviewChatForTesting(
-            id: "job-window-resize-width-regression",
+            id: "chat-window-resize-width-regression",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1398,7 +1398,7 @@ extension ReviewUITests {
     @Test func detailLogRewrapsVisibleTextDuringLiveWindowResize() async throws {
         let logText = String(repeating: "wrap-sensitive text ", count: 600)
         let chat = makeShellReviewChatForTesting(
-            id: "job-window-live-resize-log",
+            id: "chat-window-live-resize-log",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1452,7 +1452,7 @@ extension ReviewUITests {
             }
             .joined(separator: "\n\n")
         let chat = makeShellReviewChatForTesting(
-            id: "job-window-live-resize-stream-log",
+            id: "chat-window-live-resize-stream-log",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
@@ -1496,7 +1496,7 @@ extension ReviewUITests {
             repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
         ).joined()
         let chat = makeShellReviewChatForTesting(
-            id: "job-toolbar-sidebar-toggle-textkit-width-regression",
+            id: "chat-toolbar-sidebar-toggle-textkit-width-regression",
             title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()

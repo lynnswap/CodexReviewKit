@@ -338,7 +338,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-job-store")]
+            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-chat-store")]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
@@ -394,8 +394,8 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 ]
             ))
 
-        let legacyJob = ReviewRunRecord.makeForTesting(
-            id: "legacy-job",
+        let legacyRun = ReviewRunRecord.makeForTesting(
+            id: "legacy-run",
             cwd: repo.path,
             targetSummary: "Legacy review row",
             threadID: "legacy-review-thread",
@@ -416,7 +416,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         store.loadReviewLifecycleForTesting(
             serverState: .running,
             workspaces: [CodexReviewWorkspace(cwd: repo.path)],
-            reviewRuns: [legacyJob]
+            reviewRuns: [legacyRun]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
@@ -460,7 +460,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-job-store")]
+            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-chat-store")]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
