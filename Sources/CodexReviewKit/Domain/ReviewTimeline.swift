@@ -3,7 +3,7 @@ import Observation
 
 @MainActor
 @Observable
-public final class ReviewTimeline {
+package final class ReviewTimeline {
     public struct Revision: RawRepresentable, Codable, Hashable, Sendable, Comparable {
         public var rawValue: UInt64
 

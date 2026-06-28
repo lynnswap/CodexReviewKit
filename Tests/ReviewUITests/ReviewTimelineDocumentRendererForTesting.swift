@@ -3,11 +3,11 @@ import CodexReviewKit
 
 // Kept in ReviewUITests while legacy job timeline fixtures still seed UI tests.
 // Runtime UI code should not depend on this renderer.
-public struct ReviewTimelineDocumentRenderer: Sendable {
-    public init() {}
+struct ReviewTimelineDocumentRenderer: Sendable {
+    init() {}
 
     @MainActor
-    public func document(from timeline: ReviewTimeline) -> ReviewTimelineDocument {
+    func document(from timeline: ReviewTimeline) -> ReviewTimelineDocument {
         let activeBlockIDs = timeline.orderedItemIDs
             .filter { timeline.activeItemIDs.contains($0) }
             .map(ReviewTimelineDocument.Block.ID.init(itemID:))
@@ -28,7 +28,7 @@ public struct ReviewTimelineDocumentRenderer: Sendable {
     }
 
     @MainActor
-    public func plainText(from timeline: ReviewTimeline) -> String {
+    func plainText(from timeline: ReviewTimeline) -> String {
         document(from: timeline).plainText
     }
 

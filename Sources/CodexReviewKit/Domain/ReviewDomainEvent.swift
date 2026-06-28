@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ReviewDomainEvent: Equatable, Sendable {
+package enum ReviewDomainEvent: Equatable, Sendable {
     case runStarted(turnID: ReviewTurn.ID, reviewThreadID: ReviewThread.ID?, model: String?)
     case itemStarted(ReviewTimelineItemSeed)
     case itemUpdated(ReviewTimelineItemSeed)
@@ -11,7 +11,7 @@ public enum ReviewDomainEvent: Equatable, Sendable {
     case reviewCancelled(String)
 }
 
-public struct ReviewTimelineItemSeed: Equatable, Sendable {
+package struct ReviewTimelineItemSeed: Equatable, Sendable {
     public var id: ReviewTimelineItem.ID
     public var kind: ReviewItemKind
     public var family: ReviewItemFamily

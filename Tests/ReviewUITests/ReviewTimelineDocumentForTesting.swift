@@ -3,44 +3,44 @@ import CodexReviewKit
 
 // Test-only bridge for legacy ReviewTimeline fixtures. Production detail rendering
 // uses CodexChatChange streams through ReviewMonitorSelectedCodexChat.
-public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
-    public struct Block: Identifiable, Codable, Equatable, Sendable {
-        public struct ID: RawRepresentable, Codable, Hashable, Sendable, ExpressibleByStringLiteral, CustomStringConvertible {
-            public var rawValue: String
+struct ReviewTimelineDocument: Codable, Equatable, Sendable {
+    struct Block: Identifiable, Codable, Equatable, Sendable {
+        struct ID: RawRepresentable, Codable, Hashable, Sendable, ExpressibleByStringLiteral, CustomStringConvertible {
+            var rawValue: String
 
-            public init(rawValue: String) {
+            init(rawValue: String) {
                 self.rawValue = rawValue
             }
 
-            public init(stringLiteral value: String) {
+            init(stringLiteral value: String) {
                 self.init(rawValue: value)
             }
 
-            public init(itemID: ReviewTimelineItem.ID) {
+            init(itemID: ReviewTimelineItem.ID) {
                 self.init(rawValue: itemID.rawValue)
             }
 
-            public var description: String {
+            var description: String {
                 rawValue
             }
         }
 
-        public var id: ID
-        public var sourceItemID: ReviewTimelineItem.ID
-        public var kind: ReviewItemKind
-        public var family: ReviewItemFamily
-        public var phase: ReviewItemPhase
-        public var isActive: Bool
-        public var primaryText: String
-        public var rawTranscriptText: String
-        public var content: Content
-        public var createdAt: Date
-        public var updatedAt: Date
-        public var startedAt: Date?
-        public var completedAt: Date?
-        public var durationMs: Int?
+        var id: ID
+        var sourceItemID: ReviewTimelineItem.ID
+        var kind: ReviewItemKind
+        var family: ReviewItemFamily
+        var phase: ReviewItemPhase
+        var isActive: Bool
+        var primaryText: String
+        var rawTranscriptText: String
+        var content: Content
+        var createdAt: Date
+        var updatedAt: Date
+        var startedAt: Date?
+        var completedAt: Date?
+        var durationMs: Int?
 
-        public init(
+        init(
             id: ID,
             sourceItemID: ReviewTimelineItem.ID,
             kind: ReviewItemKind,
@@ -73,7 +73,7 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public enum Content: Codable, Equatable, Sendable {
+    enum Content: Codable, Equatable, Sendable {
         case approval(Approval)
         case command(Command)
         case contextCompaction(ContextCompaction)
@@ -86,7 +86,7 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         case toolCall(ToolCall)
         case unknown(Unknown)
 
-        public var type: String {
+        var type: String {
             switch self {
             case .approval:
                 "approval"
@@ -114,15 +114,15 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Approval: Codable, Equatable, Sendable {
-        public var title: String
-        public var detail: String?
-        public var decision: ReviewApprovalDecision?
-        public var scope: ReviewApprovalScope?
-        public var risk: ReviewApprovalRisk?
-        public var status: ReviewApprovalStatus?
+    struct Approval: Codable, Equatable, Sendable {
+        var title: String
+        var detail: String?
+        var decision: ReviewApprovalDecision?
+        var scope: ReviewApprovalScope?
+        var risk: ReviewApprovalRisk?
+        var status: ReviewApprovalStatus?
 
-        public init(
+        init(
             title: String,
             detail: String? = nil,
             decision: ReviewApprovalDecision? = nil,
@@ -139,15 +139,15 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Command: Codable, Equatable, Sendable {
-        public struct Action: Codable, Equatable, Sendable {
-            public var kind: ReviewCommandActionKind
-            public var command: String?
-            public var name: String?
-            public var path: String?
-            public var query: String?
+    struct Command: Codable, Equatable, Sendable {
+        struct Action: Codable, Equatable, Sendable {
+            var kind: ReviewCommandActionKind
+            var command: String?
+            var name: String?
+            var path: String?
+            var query: String?
 
-            public init(
+            init(
                 kind: ReviewCommandActionKind,
                 command: String? = nil,
                 name: String? = nil,
@@ -162,18 +162,18 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
             }
         }
 
-        public var title: String
-        public var command: String
-        public var cwd: String?
-        public var output: String
-        public var exitCode: Int?
-        public var status: ReviewCommandStatus?
-        public var source: ReviewCommandSource?
-        public var processID: String?
-        public var actions: [Action]
-        public var durationMs: Int?
+        var title: String
+        var command: String
+        var cwd: String?
+        var output: String
+        var exitCode: Int?
+        var status: ReviewCommandStatus?
+        var source: ReviewCommandSource?
+        var processID: String?
+        var actions: [Action]
+        var durationMs: Int?
 
-        public init(
+        init(
             title: String,
             command: String,
             cwd: String? = nil,
@@ -198,13 +198,13 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct ContextCompaction: Codable, Equatable, Sendable {
-        public var title: String
-        public var status: ReviewContextCompactionStatus?
-        public var inputTokens: Int?
-        public var outputTokens: Int?
+    struct ContextCompaction: Codable, Equatable, Sendable {
+        var title: String
+        var status: ReviewContextCompactionStatus?
+        var inputTokens: Int?
+        var outputTokens: Int?
 
-        public init(
+        init(
             title: String,
             status: ReviewContextCompactionStatus? = nil,
             inputTokens: Int? = nil,
@@ -217,14 +217,14 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Diagnostic: Codable, Equatable, Sendable {
-        public struct Retry: Codable, Equatable, Sendable {
-            public var state: ReviewDiagnosticRetryState
-            public var attempt: Int?
-            public var maxAttempts: Int?
-            public var delayMs: Int?
+    struct Diagnostic: Codable, Equatable, Sendable {
+        struct Retry: Codable, Equatable, Sendable {
+            var state: ReviewDiagnosticRetryState
+            var attempt: Int?
+            var maxAttempts: Int?
+            var delayMs: Int?
 
-            public init(
+            init(
                 state: ReviewDiagnosticRetryState,
                 attempt: Int? = nil,
                 maxAttempts: Int? = nil,
@@ -237,11 +237,11 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
             }
         }
 
-        public var message: String
-        public var severity: ReviewDiagnosticSeverity?
-        public var retry: Retry?
+        var message: String
+        var severity: ReviewDiagnosticSeverity?
+        var retry: Retry?
 
-        public init(
+        init(
             message: String,
             severity: ReviewDiagnosticSeverity? = nil,
             retry: Retry? = nil
@@ -252,14 +252,14 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct FileChange: Codable, Equatable, Sendable {
-        public var title: String
-        public var output: String
-        public var paths: [String]
-        public var patch: String?
-        public var status: ReviewFileChangeStatus?
+    struct FileChange: Codable, Equatable, Sendable {
+        var title: String
+        var output: String
+        var paths: [String]
+        var patch: String?
+        var status: ReviewFileChangeStatus?
 
-        public init(
+        init(
             title: String,
             output: String = "",
             paths: [String] = [],
@@ -274,40 +274,40 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Message: Codable, Equatable, Sendable {
-        public var text: String
+    struct Message: Codable, Equatable, Sendable {
+        var text: String
 
-        public init(text: String) {
+        init(text: String) {
             self.text = text
         }
     }
 
-    public struct Plan: Codable, Equatable, Sendable {
-        public var markdown: String
+    struct Plan: Codable, Equatable, Sendable {
+        var markdown: String
 
-        public init(markdown: String) {
+        init(markdown: String) {
             self.markdown = markdown
         }
     }
 
-    public struct Reasoning: Codable, Equatable, Sendable {
-        public var text: String
-        public var style: ReviewTimelineItem.Reasoning.Style
+    struct Reasoning: Codable, Equatable, Sendable {
+        var text: String
+        var style: ReviewTimelineItem.Reasoning.Style
 
-        public init(text: String, style: ReviewTimelineItem.Reasoning.Style) {
+        init(text: String, style: ReviewTimelineItem.Reasoning.Style) {
             self.text = text
             self.style = style
         }
     }
 
-    public struct Search: Codable, Equatable, Sendable {
-        public var query: String
-        public var result: String?
-        public var status: ReviewSearchStatus?
-        public var resultCount: Int?
-        public var durationMs: Int?
+    struct Search: Codable, Equatable, Sendable {
+        var query: String
+        var result: String?
+        var status: ReviewSearchStatus?
+        var resultCount: Int?
+        var durationMs: Int?
 
-        public init(
+        init(
             query: String,
             result: String? = nil,
             status: ReviewSearchStatus? = nil,
@@ -322,21 +322,21 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct ToolCall: Codable, Equatable, Sendable {
-        public var namespace: String?
-        public var server: String?
-        public var name: String?
-        public var arguments: String?
-        public var result: String?
-        public var error: String?
-        public var status: ReviewToolCallStatus?
-        public var durationMs: Int?
-        public var appContext: ReviewAppContext?
-        public var pluginID: ReviewPluginID?
-        public var callID: ReviewToolCall.ID?
-        public var progress: String?
+    struct ToolCall: Codable, Equatable, Sendable {
+        var namespace: String?
+        var server: String?
+        var name: String?
+        var arguments: String?
+        var result: String?
+        var error: String?
+        var status: ReviewToolCallStatus?
+        var durationMs: Int?
+        var appContext: ReviewAppContext?
+        var pluginID: ReviewPluginID?
+        var callID: ReviewToolCall.ID?
+        var progress: String?
 
-        public init(
+        init(
             namespace: String? = nil,
             server: String? = nil,
             name: String? = nil,
@@ -365,26 +365,26 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public struct Unknown: Codable, Equatable, Sendable {
-        public struct RawReference: Codable, Equatable, Sendable {
-            public var kind: ReviewRawReferenceKind
-            public var value: String
-            public var label: String?
+    struct Unknown: Codable, Equatable, Sendable {
+        struct RawReference: Codable, Equatable, Sendable {
+            var kind: ReviewRawReferenceKind
+            var value: String
+            var label: String?
 
-            public init(kind: ReviewRawReferenceKind, value: String, label: String? = nil) {
+            init(kind: ReviewRawReferenceKind, value: String, label: String? = nil) {
                 self.kind = kind
                 self.value = value
                 self.label = label
             }
         }
 
-        public var title: String
-        public var detail: String?
-        public var rawKind: ReviewItemKind?
-        public var rawStatus: String?
-        public var references: [RawReference]
+        var title: String
+        var detail: String?
+        var rawKind: ReviewItemKind?
+        var rawStatus: String?
+        var references: [RawReference]
 
-        public init(
+        init(
             title: String,
             detail: String? = nil,
             rawKind: ReviewItemKind? = nil,
@@ -399,17 +399,17 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         }
     }
 
-    public var timelineRevision: ReviewTimeline.Revision
-    public var orderedBlockIDs: [Block.ID]
-    public var activeBlockIDs: [Block.ID]
-    public var activeBlockCount: Int
-    public var latestActivityBlockID: Block.ID?
-    public var terminalStatus: ReviewLifecycleStatus?
-    public var terminalSummary: String?
-    public var terminalResult: String?
-    public var blocks: [Block]
+    var timelineRevision: ReviewTimeline.Revision
+    var orderedBlockIDs: [Block.ID]
+    var activeBlockIDs: [Block.ID]
+    var activeBlockCount: Int
+    var latestActivityBlockID: Block.ID?
+    var terminalStatus: ReviewLifecycleStatus?
+    var terminalSummary: String?
+    var terminalResult: String?
+    var blocks: [Block]
 
-    public init(
+    init(
         timelineRevision: ReviewTimeline.Revision,
         orderedBlockIDs: [Block.ID],
         activeBlockIDs: [Block.ID],
@@ -431,7 +431,7 @@ public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
         self.blocks = blocks
     }
 
-    public var plainText: String {
+    var plainText: String {
         blocks.map(\.rawTranscriptText).filter { $0.isEmpty == false }.joined(separator: "\n\n")
     }
 }

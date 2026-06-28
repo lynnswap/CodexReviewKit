@@ -3,7 +3,7 @@ import Observation
 
 @MainActor
 @Observable
-public final class ReviewTimelineItem: Identifiable, Hashable {
+package final class ReviewTimelineItem: Identifiable, Hashable {
     public typealias ID = ReviewTimelineItemID
 
     public enum Content: Equatable, Codable, Sendable {

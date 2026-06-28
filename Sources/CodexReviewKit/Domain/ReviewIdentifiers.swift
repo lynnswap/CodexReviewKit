@@ -34,7 +34,7 @@ public struct ReviewTurnID: ReviewStringIdentifier, CustomStringConvertible {
     }
 }
 
-public struct ReviewTimelineItemID: ReviewStringIdentifier, CustomStringConvertible {
+package struct ReviewTimelineItemID: ReviewStringIdentifier, CustomStringConvertible {
     public var rawValue: String
 
     public init(rawValue: String) {
