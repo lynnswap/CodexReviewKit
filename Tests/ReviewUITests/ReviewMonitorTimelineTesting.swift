@@ -273,7 +273,7 @@ func awaitTimelineRenderForTesting(
 
 @MainActor
 private func timelineRenderTarget(for job: CodexReviewJob) throws -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
-    let chatID = try #require(job.reviewChatID)
+    let chatID = try #require(job.legacyReviewChatID)
     return .chat(chatID.rawValue)
 }
 

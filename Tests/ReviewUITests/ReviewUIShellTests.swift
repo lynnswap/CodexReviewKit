@@ -1796,7 +1796,7 @@ private func renderDetailLogForShellLayoutTesting(
     job: CodexReviewJob
 ) async throws {
     viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-    let chatID = try #require(job.reviewChatID)
+    let chatID = try #require(job.legacyReviewChatID)
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {
         transport.renderedStateForTesting.selection == expectedSelection

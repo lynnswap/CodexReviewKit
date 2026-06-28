@@ -3,7 +3,7 @@ import CodexReviewKit
 
 extension CodexReviewJob {
     @MainActor
-    var reviewChatIdentity: CodexReviewIdentity? {
+    var legacyReviewChatIdentity: CodexReviewIdentity? {
         guard let sourceThreadID = core.run.threadID?.nilIfEmpty,
               let turnID = core.run.turnID?.nilIfEmpty
         else {
@@ -18,7 +18,7 @@ extension CodexReviewJob {
     }
 
     @MainActor
-    var reviewChatID: CodexThreadID? {
+    var legacyReviewChatID: CodexThreadID? {
         if let reviewThreadID = core.run.reviewThreadID?.nilIfEmpty {
             return CodexThreadID(rawValue: reviewThreadID)
         }
@@ -29,8 +29,8 @@ extension CodexReviewJob {
     }
 
     @MainActor
-    var reviewChatSelection: ReviewMonitorCodexSidebarSnapshot.Chat? {
-        guard let chatID = reviewChatID else {
+    var legacyReviewChatSelection: ReviewMonitorCodexSidebarSnapshot.Chat? {
+        guard let chatID = legacyReviewChatID else {
             return nil
         }
         return ReviewMonitorCodexSidebarSnapshot.Chat(
@@ -40,19 +40,19 @@ extension CodexReviewJob {
             preview: core.output.lastAgentMessage?.nilIfEmpty ?? core.output.summary.nilIfEmpty,
             workspaceCWD: cwd,
             updatedAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
-            reviewIdentity: reviewChatIdentity
+            reviewIdentity: legacyReviewChatIdentity
         )
     }
 }
 
 extension CodexReviewStore {
     @MainActor
-    func reviewJob(
+    func legacyReviewJob(
         forChatID chatID: CodexThreadID,
         in workspaces: [CodexReviewWorkspace]? = nil
     ) -> CodexReviewJob? {
         orderedJobs.first { job in
-            job.reviewChatID == chatID
+            job.legacyReviewChatID == chatID
                 && (workspaces?.contains { $0.cwd == job.cwd } ?? true)
         }
     }

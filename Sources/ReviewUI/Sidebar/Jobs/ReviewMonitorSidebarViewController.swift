@@ -959,7 +959,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         switch uiState.selection {
         case .chat(let chat):
-            return store.reviewJob(forChatID: chat.id, in: workspaces())
+            return store.legacyReviewJob(forChatID: chat.id, in: workspaces())
         case .workspaceSection, .workspace, nil:
             return nil
         }

@@ -165,7 +165,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         }
     }
 
-    @Test func reviewChatSelectionCanStartAfterRunIdentifiersArrive() async throws {
+    @Test func legacyReviewChatSelectionCanStartAfterRunIdentifiersArrive() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -206,7 +206,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             reviewThreadID: nil,
             turnID: nil
         )
-        #expect(job.reviewChatSelection == nil)
+        #expect(job.legacyReviewChatSelection == nil)
 
         job.core.run.threadID = "source-thread"
         job.core.run.reviewThreadID = "review-thread"
@@ -464,7 +464,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         _ job: CodexReviewJob,
         in uiState: ReviewMonitorUIState
     ) throws {
-        let chat = try #require(job.reviewChatSelection)
+        let chat = try #require(job.legacyReviewChatSelection)
         uiState.selection = .chat(chat)
     }
 }

@@ -23,7 +23,7 @@ private extension CodexReviewAuthModel {
 
 @MainActor
 func chatIDForTesting(_ job: CodexReviewJob) -> CodexThreadID {
-    guard let chatID = job.reviewChatID else {
+    guard let chatID = job.legacyReviewChatID else {
         Issue.record("Expected review job \(job.id) to have a chat id.")
         return CodexThreadID(rawValue: job.id)
     }
@@ -437,7 +437,7 @@ struct ReviewUITests {
             ))
         await Task.yield()
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-2", "job-1"])
-        #expect(sidebar.selectedReviewChatIDForTesting == firstJob.reviewChatID)
+        #expect(sidebar.selectedReviewChatIDForTesting == firstJob.legacyReviewChatID)
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeDrop)
         #expect(sidebar.sidebarWorkspaceReloadCountForTesting == workspaceReloadCountBeforeDrop)
         #expect(sidebar.sidebarIncrementalMoveCountForTesting == incrementalMoveCountBeforeDrop + 1)
@@ -568,7 +568,7 @@ struct ReviewUITests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         sidebar.selectReviewChatForTesting(id: chatIDForTesting(completedJob))
-        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.reviewChatID)
+        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.legacyReviewChatID)
 
         uiState.sidebarReviewChatFilter = .running
         try await waitForObservedValueFromCurrentObservation(
@@ -579,7 +579,7 @@ struct ReviewUITests {
         }
 
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: workspace) == ["job-filter-running"])
-        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.reviewChatID)
+        #expect(sidebar.selectedReviewChatIDForTesting == completedJob.legacyReviewChatID)
     }
 
     @Test func sidebarLatestFinishedFilterKeepsWorkspacesAndShowsLatestTerminalJob() async throws {
@@ -673,7 +673,7 @@ struct ReviewUITests {
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: alphaWorkspace) == ["job-alpha-failed"])
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: betaWorkspace) == ["job-beta-cancelled"])
         #expect(sidebar.displayedReviewChatJobIDsForTesting(in: gammaWorkspace) == [])
-        #expect(sidebar.selectedReviewChatIDForTesting == alphaRunningJob.reviewChatID)
+        #expect(sidebar.selectedReviewChatIDForTesting == alphaRunningJob.legacyReviewChatID)
     }
 
     @Test func sidebarLatestFinishedFilterFollowsTerminalDateChanges() async throws {
@@ -1431,7 +1431,7 @@ struct ReviewUITests {
         let updatedHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
 
         #expect(initialHostedRowID == placeholderJob.id)
-        #expect(updatedHostedRowID == loadedJob.reviewChatID?.rawValue)
+        #expect(updatedHostedRowID == loadedJob.legacyReviewChatID?.rawValue)
         #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
         #expect((cellView.objectValue as? ReviewMonitorSidebarReviewChatRow)?.operation.jobID == loadedJob.id)
         #expect(cellView.toolTip == loadedJob.cwd)
@@ -1803,7 +1803,7 @@ struct ReviewUITests {
         try await waitForCondition {
             sidebar.workspaceIsExpandedForTesting(storedWorkspace)
                 && sidebar.workspaceOutlineIsExpandedForTesting(storedWorkspace)
-                && sidebar.selectedReviewChatIDForTesting == job.reviewChatID
+                && sidebar.selectedReviewChatIDForTesting == job.legacyReviewChatID
         }
     }
 
@@ -4898,7 +4898,7 @@ struct ReviewUITests {
         )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatID)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.legacyReviewChatID)
         #expect(transport.renderSnapshotForTesting == selectedSnapshot)
     }
 
@@ -5103,7 +5103,7 @@ struct ReviewUITests {
         replaceTimelineLogTextForTesting(job, "Updated log")
 
         let updatedSnapshot = try await awaitTimelineRenderForTesting(job, in: transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatID)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.legacyReviewChatID)
         #expect(updatedSnapshot.summary == nil)
         #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
     }
@@ -5138,7 +5138,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.reviewChatID)
+        let chatID = try #require(job.legacyReviewChatID)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         transport.setLogReduceMotionForTesting(false)
@@ -5192,7 +5192,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.reviewChatID)
+        let chatID = try #require(job.legacyReviewChatID)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting

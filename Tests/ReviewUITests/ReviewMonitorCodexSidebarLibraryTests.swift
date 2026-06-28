@@ -261,7 +261,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             startedAt: Date(timeIntervalSince1970: 4_000),
             summary: "Running legacy review."
         )
-        let legacyChat = try #require(legacyJob.reviewChatSelection)
+        let legacyChat = try #require(legacyJob.legacyReviewChatSelection)
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,

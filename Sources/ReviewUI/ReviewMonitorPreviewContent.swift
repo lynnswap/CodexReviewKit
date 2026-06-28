@@ -165,7 +165,7 @@ public enum ReviewMonitorPreviewContent {
         from jobs: [CodexReviewJob]
     ) -> [ReviewMonitorPreviewChatLogFixture] {
         jobs.compactMap { job in
-            guard let chat = job.reviewChatSelection else {
+            guard let chat = job.legacyReviewChatSelection else {
                 return nil
             }
             let turn = CodexChatTurnStateSnapshot(

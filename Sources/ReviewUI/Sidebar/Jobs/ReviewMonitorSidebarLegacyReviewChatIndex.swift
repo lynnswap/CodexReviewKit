@@ -46,7 +46,7 @@ extension ReviewMonitorSidebarReviewChatRow {
     @MainActor
     convenience init(job: CodexReviewJob) {
         self.init(
-            chat: job.reviewChatSelection,
+            chat: job.legacyReviewChatSelection,
             runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
         )
     }
@@ -54,7 +54,7 @@ extension ReviewMonitorSidebarReviewChatRow {
     @MainActor
     func update(job: CodexReviewJob) {
         update(
-            chat: job.reviewChatSelection,
+            chat: job.legacyReviewChatSelection,
             runtime: ReviewMonitorSidebarReviewChatRuntime(job: job)
         )
     }
