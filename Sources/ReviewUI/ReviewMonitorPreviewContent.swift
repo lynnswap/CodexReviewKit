@@ -235,24 +235,24 @@ public enum ReviewMonitorPreviewContent {
     }
 
     package static func streamFrame(
-        forJobAt jobIndex: Int,
+        forRunningChatAt runningChatIndex: Int,
         tick: Int
     ) -> PreviewStreamFrame? {
         guard previewStreamTimeline.isEmpty == false else {
             return nil
         }
-        let jobTick = tick - jobIndex * previewJobTickOffset
-        guard jobTick > 0 else {
+        let chatTick = tick - runningChatIndex * previewChatTickOffset
+        guard chatTick > 0 else {
             return nil
         }
 
-        let offset = (jobTick - 1) % previewStreamTimeline.count
+        let offset = (chatTick - 1) % previewStreamTimeline.count
         guard let step = previewStreamTimeline[offset] else {
             return nil
         }
         return PreviewStreamFrame(
             step: step,
-            cycle: (jobTick - 1) / previewStreamTimeline.count
+            cycle: (chatTick - 1) / previewStreamTimeline.count
         )
     }
 
@@ -322,7 +322,7 @@ public enum ReviewMonitorPreviewContent {
     private static let interItemDelayFrameCount = 39
     private static let commandCompletionDelayFrameCount = 60
     private static let compactionCompletionDelayFrameCount = 15
-    private static let previewJobTickOffset = 21
+    private static let previewChatTickOffset = 21
 
     private static let previewStreamTemplates: [PreviewStreamTemplate] = [
         .init(

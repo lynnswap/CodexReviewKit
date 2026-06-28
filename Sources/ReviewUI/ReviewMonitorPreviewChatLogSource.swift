@@ -122,7 +122,7 @@ final class ReviewMonitorPreviewChatLogSource {
         let nextTick = currentTick + 1
         for (index, previewChat) in runningChats.enumerated() {
             guard let frame = ReviewMonitorPreviewContent.streamFrame(
-                forJobAt: index,
+                forRunningChatAt: index,
                 tick: nextTick
             ) else {
                 continue
