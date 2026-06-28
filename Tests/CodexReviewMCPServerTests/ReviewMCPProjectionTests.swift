@@ -7,7 +7,7 @@ import Testing
 struct ReviewMCPProjectionTests {
     @Test func runningResultProjectsSummaryAsActiveDiagnosticItem() throws {
         let projection = ReviewMCPProjection(result: .init(
-            jobID: "job-1",
+            runID: "job-1",
             core: .init(
                 lifecycle: .init(status: .running),
                 output: .init(summary: "Review started.")
@@ -26,7 +26,7 @@ struct ReviewMCPProjectionTests {
 
     @Test func terminalResultProjectsFinalReviewText() throws {
         let projection = ReviewMCPProjection(result: .init(
-            jobID: "job-2",
+            runID: "job-2",
             core: .init(
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
                 output: .init(

@@ -159,10 +159,10 @@ struct AppServerClientTests {
         await runtime.transport.waitForNotificationStreamCount(1)
         let backend = AppServerCodexReviewBackend(appServer: runtime.server)
 
-        let firstAttempt = try await backend.startReview(makeReviewStart(jobID: "job-1", sessionID: "session-1"))
+        let firstAttempt = try await backend.startReview(makeReviewStart(runID: "job-1", sessionID: "session-1"))
         try await runtime.transport.enqueueThreadStart(threadID: "thread-2", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-2", reviewThreadID: "review-thread-2")
-        let secondAttempt = try await backend.startReview(makeReviewStart(jobID: "job-2", sessionID: "session-2"))
+        let secondAttempt = try await backend.startReview(makeReviewStart(runID: "job-2", sessionID: "session-2"))
 
         try await runtime.transport.emitServerNotification(
             method: "item/commandExecution/outputDelta",
@@ -562,12 +562,12 @@ private func eventSequence(
 }
 
 private func makeReviewStart(
-    jobID: String = "job-1",
+    runID: String = "job-1",
     sessionID: String = "session-1",
     target: CodexReviewAPI.Target = .uncommittedChanges
 ) -> CodexReviewBackendModel.Review.Start {
     .init(
-        jobID: jobID,
+        runID: runID,
         sessionID: sessionID,
         request: .init(cwd: "/tmp/project", target: target),
         model: "gpt-5"

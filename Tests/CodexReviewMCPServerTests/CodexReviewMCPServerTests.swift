@@ -44,7 +44,7 @@ struct CodexReviewMCPServerTests {
         }
         let read = snapshot.result
         let timeline = snapshot.timeline
-        #expect(read.jobID == "job-1")
+        #expect(read.runID == "job-1")
         #expect(read.core.lifecycle.status == .succeeded)
         #expect(timeline.terminalSummary == "Done")
         #expect(timeline.terminalResult == "review")

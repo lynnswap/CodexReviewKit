@@ -196,22 +196,22 @@ package extension CodexReviewBackendModel.Login {
 
 package extension CodexReviewBackendModel.Review {
     struct Start: Equatable, Sendable {
-        package var jobID: String
+        package var runID: String
         package var sessionID: String
         package var request: CodexReviewAPI.Start.Request
         package var model: String?
 
-        package init(jobID: String, sessionID: String, request: CodexReviewAPI.Start.Request) {
-            self.init(jobID: jobID, sessionID: sessionID, request: request, model: nil)
+        package init(runID: String, sessionID: String, request: CodexReviewAPI.Start.Request) {
+            self.init(runID: runID, sessionID: sessionID, request: request, model: nil)
         }
 
         package init(
-            jobID: String,
+            runID: String,
             sessionID: String,
             request: CodexReviewAPI.Start.Request,
             model: String?
         ) {
-            self.jobID = jobID
+            self.runID = runID
             self.sessionID = sessionID
             self.request = request
             self.model = model

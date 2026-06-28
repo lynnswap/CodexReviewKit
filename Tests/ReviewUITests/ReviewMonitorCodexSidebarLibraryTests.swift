@@ -375,7 +375,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(selectedChat.title == "App review")
     }
 
-    @Test func codexSidebarSelectionDoesNotFallBackToReviewJobRows() async throws {
+    @Test func codexSidebarSelectionDoesNotFallBackToReviewRunRows() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()

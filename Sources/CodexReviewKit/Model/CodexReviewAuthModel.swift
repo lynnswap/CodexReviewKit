@@ -21,7 +21,7 @@ public final class CodexReviewAuthModel {
         }
 
         package var confirmationMessage: LocalizedStringResource {
-            "Running review jobs may stop after the account change is applied."
+            "Running review runs may stop after the account change is applied."
         }
 
         package var confirmationButtonTitle: LocalizedStringResource {

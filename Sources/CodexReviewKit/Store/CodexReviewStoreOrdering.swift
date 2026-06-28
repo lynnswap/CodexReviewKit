@@ -52,12 +52,12 @@ extension CodexReviewStore {
     }
 
     @discardableResult
-    package func reorderJob(
+    package func reorderReviewRun(
         id: String,
         inWorkspace cwd: String,
-        beforeJobID: String?
+        beforeRunID: String?
     ) -> Bool {
-        guard beforeJobID != id,
+        guard beforeRunID != id,
               workspace(cwd: cwd) != nil
         else {
             return false
@@ -70,19 +70,19 @@ extension CodexReviewStore {
 
         let remaining = ordered.filter { $0 !== job }
         let destinationIndex: Int
-        if let beforeJobID {
-            guard let beforeIndex = remaining.firstIndex(where: { $0.id == beforeJobID }) else {
+        if let beforeRunID {
+            guard let beforeIndex = remaining.firstIndex(where: { $0.id == beforeRunID }) else {
                 return false
             }
             destinationIndex = beforeIndex
         } else {
             destinationIndex = remaining.count
         }
-        return reorderJob(id: id, inWorkspace: cwd, toIndex: destinationIndex)
+        return reorderReviewRun(id: id, inWorkspace: cwd, toIndex: destinationIndex)
     }
 
     @discardableResult
-    package func reorderJob(
+    package func reorderReviewRun(
         id: String,
         inWorkspace cwd: String,
         toIndex: Int

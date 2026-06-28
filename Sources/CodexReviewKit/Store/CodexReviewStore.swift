@@ -131,7 +131,7 @@ public final class CodexReviewStore {
         await backend.stop(store: self)
         let remainingLocallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
         cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledReviewRunIDs + remainingLocallyCancelledReviewRunIDs))
+            runIDs: Array(Set(locallyCancelledReviewRunIDs + remainingLocallyCancelledReviewRunIDs))
         )
         transitionToStopped()
     }
@@ -224,8 +224,8 @@ public final class CodexReviewStore {
     package func requestSwitchAccountFromUserAction(_ account: CodexReviewAccount) {
         requestSwitchAccount(
             account,
-            requiresConfirmation: hasRunningJobs
-                && switchActionRequiresRunningJobsConfirmation(for: account)
+            requiresConfirmation: hasRunningReviewRuns
+                && switchActionRequiresRunningReviewRunsConfirmation(for: account)
         )
     }
 
@@ -304,7 +304,7 @@ public final class CodexReviewStore {
         canSwitchAccount(account) == false
     }
 
-    package func switchActionRequiresRunningJobsConfirmation(for account: CodexReviewAccount) -> Bool {
+    package func switchActionRequiresRunningReviewRunsConfirmation(for account: CodexReviewAccount) -> Bool {
         guard canSwitchAccount(account) else {
             return false
         }
@@ -341,18 +341,18 @@ public final class CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    package func transitionToFailed(_ message: String, resetJobs: Bool = false) {
+    package func transitionToFailed(_ message: String, resetReviewRuns: Bool = false) {
         serverURL = nil
-        if resetJobs {
+        if resetReviewRuns {
             resetReviews()
         }
         serverState = .failed(message)
         writeDiagnosticsIfNeeded()
     }
 
-    package func transitionToStopped(resetJobs: Bool = false) {
+    package func transitionToStopped(resetReviewRuns: Bool = false) {
         serverURL = nil
-        if resetJobs {
+        if resetReviewRuns {
             resetReviews()
         }
         serverState = .stopped
@@ -390,15 +390,15 @@ public final class CodexReviewStore {
         } catch {}
     }
 
-    package func noteJobMutation() {
+    package func noteReviewRunMutation() {
         writeDiagnosticsIfNeeded()
     }
 
-    public var hasRunningJobs: Bool {
+    public var hasRunningReviewRuns: Bool {
         reviewRuns.contains(where: { $0.isTerminal == false })
     }
 
-    public var runningJobCount: Int {
+    public var runningReviewRunCount: Int {
         reviewRuns.filter { $0.isTerminal == false }.count
     }
 

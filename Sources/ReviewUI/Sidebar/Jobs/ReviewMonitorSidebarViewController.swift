@@ -705,7 +705,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let menu = NSMenu()
-        if let job = cancellableReviewJob(for: chat) {
+        if let job = cancellableReviewRun(for: chat) {
             let item = NSMenuItem(
                 title: "Cancel Review",
                 action: #selector(cancelReviewFromContextMenu(_:)),
@@ -718,7 +718,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return menu.items.isEmpty ? nil : menu
     }
 
-    private func cancellableReviewJob(
+    private func cancellableReviewRun(
         for chat: ReviewMonitorCodexSidebarSnapshot.Chat
     ) -> ReviewRunRecord? {
         store.orderedReviewRuns.first { job in
@@ -733,7 +733,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     @objc
     private func cancelReviewFromContextMenu(_ sender: NSMenuItem) {
-        guard let jobID = sender.representedObject as? String else {
+        guard let runID = sender.representedObject as? String else {
             return
         }
         Task { @MainActor [weak self] in
@@ -742,15 +742,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             do {
                 _ = try await self.store.cancelReview(
-                    jobID: jobID,
+                    runID: runID,
                     cancellation: .userInterface()
                 )
             } catch {
-                guard let job = self.store.reviewRun(id: jobID) else {
+                guard let job = self.store.reviewRun(id: runID) else {
                     return
                 }
                 try? self.store.recordCancellationFailure(
-                    jobID: jobID,
+                    runID: runID,
                     sessionID: job.sessionID,
                     message: error.localizedDescription
                 )

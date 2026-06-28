@@ -30,10 +30,10 @@ package extension CodexReviewMCP.Tool {
 package extension CodexReviewMCP.Tool {
     enum Request: Equatable, Sendable {
         case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
-        case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
-        case reviewRead(sessionID: String?, jobID: String)
+        case reviewAwait(sessionID: String?, runID: String, waitTimeout: Duration)
+        case reviewRead(sessionID: String?, runID: String)
         case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewRunState]?, limit: Int?)
-        case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
+        case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Run.Selector, reason: ReviewCancellation)
     }
 }
 
@@ -70,10 +70,10 @@ package final class CodexReviewMCPServer {
     package var tools: [CodexReviewMCP.Tool.Descriptor] {
         [
             .init(name: .reviewStart, description: "Start a Codex review."),
-            .init(name: .reviewAwait, description: "Wait for a running Codex review job."),
-            .init(name: .reviewRead, description: "Read a Codex review job."),
-            .init(name: .reviewList, description: "List Codex review jobs."),
-            .init(name: .reviewCancel, description: "Cancel a Codex review job."),
+            .init(name: .reviewAwait, description: "Wait for a running Codex review run."),
+            .init(name: .reviewRead, description: "Read a Codex review run."),
+            .init(name: .reviewList, description: "List Codex review runs."),
+            .init(name: .reviewCancel, description: "Cancel a Codex review run."),
         ]
     }
 
@@ -95,21 +95,21 @@ package final class CodexReviewMCPServer {
                 sessionID: sessionID
             )
             return .reviewStart(snapshot)
-        case .reviewAwait(let sessionID, let jobID, let waitTimeout):
+        case .reviewAwait(let sessionID, let runID, let waitTimeout):
             let snapshot = try reviewSnapshot(
                 try await store.awaitReview(
                     sessionID: sessionID,
-                    jobID: jobID,
+                    runID: runID,
                     timeout: waitTimeout
                 ),
                 sessionID: sessionID
             )
             return .reviewAwait(snapshot)
-        case .reviewRead(let sessionID, let jobID):
+        case .reviewRead(let sessionID, let runID):
             let snapshot = try reviewSnapshot(
                 try store.readReview(
                     sessionID: sessionID,
-                    jobID: jobID
+                    runID: runID
                 ),
                 sessionID: sessionID
             )
@@ -122,12 +122,12 @@ package final class CodexReviewMCPServer {
                 limit: limit
             ))
         case .reviewCancel(let sessionID, let selector, let reason):
-            let job = try store.resolveJob(
+            let job = try store.resolveRun(
                 sessionID: sessionID,
                 selector: selector.defaultingToActiveStatusesForCancellation()
             )
             return .reviewCancel(try await store.cancelReview(
-                jobID: job.id,
+                runID: job.id,
                 cancellation: reason
             ))
         }
@@ -138,7 +138,7 @@ package final class CodexReviewMCPServer {
         sessionID: String?
     ) throws -> CodexReviewMCP.Tool.ReviewSnapshot {
         if let sessionID {
-            _ = try store.resolveJob(sessionID: sessionID, selector: .init(jobID: result.jobID))
+            _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
         }
         return .init(result: result, timeline: ReviewMCPProjection(result: result))
     }
@@ -152,11 +152,11 @@ package final class CodexReviewMCPServer {
     }
 }
 
-private extension CodexReviewAPI.Job.Selector {
-    func defaultingToActiveStatusesForCancellation() -> CodexReviewAPI.Job.Selector {
-        guard jobID == nil, statuses == nil else {
+private extension CodexReviewAPI.Run.Selector {
+    func defaultingToActiveStatusesForCancellation() -> CodexReviewAPI.Run.Selector {
+        guard runID == nil, statuses == nil else {
             return self
         }
-        return .init(jobID: jobID, cwd: cwd, statuses: [.queued, .running])
+        return .init(runID: runID, cwd: cwd, statuses: [.queued, .running])
     }
 }

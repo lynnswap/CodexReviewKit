@@ -29,17 +29,17 @@ private actor RuntimeStopDetachedReviewWorkerDrainRace {
 
 extension CodexReviewStore {
     package func completeCancellationLocally(
-        jobID: String,
+        runID: String,
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) throws {
-        guard let job = reviewRun(id: jobID)
+        guard let job = reviewRun(id: runID)
         else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         guard job.sessionID == sessionID
         else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         guard job.isTerminal == false else {
             return
@@ -55,21 +55,21 @@ extension CodexReviewStore {
             cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
-        noteJobMutation()
+        noteReviewRunMutation()
     }
 
     package func recordCancellationFailure(
-        jobID: String,
+        runID: String,
         sessionID: String,
         message: String
     ) throws {
-        guard let job = reviewRun(id: jobID)
+        guard let job = reviewRun(id: runID)
         else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         guard job.sessionID == sessionID
         else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
 
         job.cancellationRequested = false
@@ -87,7 +87,7 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    public func cancelAllRunningJobs(
+    public func cancelAllRunningReviewRuns(
         reason: String = "Cancellation requested."
     ) async throws {
         let cancellation = ReviewCancellation.system(
@@ -98,14 +98,14 @@ extension CodexReviewStore {
         for job in cancellableReviewRuns {
             do {
                 _ = try await cancelReview(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
             } catch {
                 let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
                 try? recordCancellationFailure(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     message: message.isEmpty ? "Failed to cancel review." : message
                 )
@@ -126,8 +126,8 @@ extension CodexReviewStore {
             orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
-        for jobID in activeReviewRunIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+        for runID in activeReviewRunIDs {
+            _ = try? await cancelReview(runID: runID, cancellation: reason)
         }
         return activeReviewRunIDs
     }
@@ -146,7 +146,7 @@ extension CodexReviewStore {
             reason: reason,
             cancelWorkers: false
         )
-        cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
+        cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
         let didDrainReviewWorkers = await drainReviewWorkersForRuntimeStop(
             timeout: workerDrainTimeout
         )
@@ -178,25 +178,25 @@ extension CodexReviewStore {
             return []
         }
 
-        for jobID in activeReviewRunIDs {
-            if let job = reviewRun(id: jobID), job.isTerminal == false {
+        for runID in activeReviewRunIDs {
+            if let job = reviewRun(id: runID), job.isTerminal == false {
                 try? completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: reason
                 )
             }
             if cancelWorkers {
-                runtimeState.cancelActiveWorker(for: jobID)
+                runtimeState.cancelActiveWorker(for: runID)
             }
         }
         return activeReviewRunIDs
     }
 
-    package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
-        for jobID in jobIDs {
-            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(runID: jobID)
-            runtimeState.clearRuntimeStopState(for: jobID)
+    package func cancelAndDetachReviewWorkersForRuntimeStop(runIDs: [String]) {
+        for runID in runIDs {
+            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(runID: runID)
+            runtimeState.clearRuntimeStopState(for: runID)
         }
     }
 
@@ -243,7 +243,7 @@ extension CodexReviewStore {
         return didDrain
     }
 
-    package func terminateAllRunningJobsLocally(
+    package func terminateAllRunningReviewRunsLocally(
         reason: String = "Cancellation requested.",
         failureMessage: String
     ) {
@@ -264,6 +264,6 @@ extension CodexReviewStore {
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
         }
-        noteJobMutation()
+        noteReviewRunMutation()
     }
 }

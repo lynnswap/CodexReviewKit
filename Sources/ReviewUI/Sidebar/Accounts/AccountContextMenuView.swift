@@ -11,7 +11,7 @@ struct AccountContextMenuView: View {
 
     private func requestDestructiveAccountAction() {
         if auth.selectedAccount == account {
-            store.requestSignOutActiveAccount(requiresConfirmation: store.hasRunningJobs)
+            store.requestSignOutActiveAccount(requiresConfirmation: store.hasRunningReviewRuns)
         } else {
             store.requestRemoveAccount(account, requiresConfirmation: false)
         }

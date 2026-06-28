@@ -36,7 +36,7 @@ struct ReviewMCPProjection: Sendable, Equatable {
         let output = result.core.output
         let status = lifecycle.status
         self.revision = [
-            result.jobID,
+            result.runID,
             status.rawValue,
             lifecycle.endedAt?.timeIntervalSince1970.description ?? "running",
             output.summary,
@@ -45,9 +45,9 @@ struct ReviewMCPProjection: Sendable, Equatable {
 
         var items: [Item] = []
         if let text = output.lastAgentMessage?.nilIfEmpty {
-            items.append(.init(id: "\(result.jobID):message", kind: "agentMessage", content: .message(text)))
+            items.append(.init(id: "\(result.runID):message", kind: "agentMessage", content: .message(text)))
         } else if let summary = output.summary.nilIfEmpty {
-            items.append(.init(id: "\(result.jobID):summary", kind: "diagnostic", content: .diagnostic(summary)))
+            items.append(.init(id: "\(result.runID):summary", kind: "diagnostic", content: .diagnostic(summary)))
         }
 
         self.items = items

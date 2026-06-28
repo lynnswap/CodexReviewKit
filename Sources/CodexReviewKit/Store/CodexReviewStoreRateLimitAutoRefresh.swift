@@ -36,7 +36,7 @@ package struct CodexReviewStoreRateLimitAutoRefreshTarget: Equatable, Sendable {
 
 private struct CodexReviewStoreRateLimitAutoRefreshContext {
     var selectedAccountKey: String?
-    var hasRunningJobs: Bool
+    var hasRunningReviewRuns: Bool
     var serverState: CodexReviewServerState
     var now: Date
 }
@@ -92,7 +92,7 @@ private struct CodexReviewStoreRateLimitAutoRefreshPolicy {
         let interval: TimeInterval
         switch role(for: account, context: context) {
         case .selected:
-            if context.hasRunningJobs {
+            if context.hasRunningReviewRuns {
                 kind = .selectedRunningInterval
                 interval = selectedRunningInterval
             } else {
@@ -233,7 +233,7 @@ extension CodexReviewStore {
         CodexReviewStoreRateLimitAutoRefreshDriver.targets(
             accounts: auth.accounts,
             selectedAccountKey: auth.selectedAccount?.accountKey,
-            hasRunningJobs: hasRunningJobs,
+            hasRunningReviewRuns: hasRunningReviewRuns,
             serverState: serverState,
             now: now
         )
@@ -275,7 +275,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
     package static func targets(
         accounts: [CodexReviewAccount],
         selectedAccountKey: String?,
-        hasRunningJobs: Bool,
+        hasRunningReviewRuns: Bool,
         serverState: CodexReviewServerState,
         now: Date
     ) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
@@ -283,7 +283,7 @@ package final class CodexReviewStoreRateLimitAutoRefreshDriver {
             accounts: accounts,
             context: .init(
                 selectedAccountKey: selectedAccountKey,
-                hasRunningJobs: hasRunningJobs,
+                hasRunningReviewRuns: hasRunningReviewRuns,
                 serverState: serverState,
                 now: now
             )

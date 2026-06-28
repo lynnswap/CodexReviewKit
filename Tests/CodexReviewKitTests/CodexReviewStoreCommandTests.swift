@@ -22,10 +22,10 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
 
-            #expect(read.jobID == "job-1")
+            #expect(read.runID == "job-1")
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.output.lastAgentMessage == "review text")
-            #expect(store.listReviews(sessionID: nil).items.map(\.jobID) == ["job-1"])
+            #expect(store.listReviews(sessionID: nil).items.map(\.runID) == ["job-1"])
 
             let commands = await backend.recordedCommands()
             #expect(
@@ -53,14 +53,14 @@ struct CodexReviewStoreCommandTests {
             )
             let running = try await result
 
-            #expect(running.jobID == "job-1")
+            #expect(running.runID == "job-1")
             #expect(running.core.lifecycle.status == .running)
             #expect(running.core.output.hasFinalReview == false)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let final = try await store.awaitReview(
                 sessionID: "session-1",
-                jobID: "job-1",
+                runID: "job-1",
                 timeout: .seconds(1)
             )
 
@@ -85,7 +85,7 @@ struct CodexReviewStoreCommandTests {
 
             async let awaited = store.awaitReview(
                 sessionID: "session-1",
-                jobID: "job-1",
+                runID: "job-1",
                 timeout: .seconds(1)
             )
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
@@ -112,11 +112,11 @@ struct CodexReviewStoreCommandTests {
 
             async let awaited = store.awaitReview(
                 sessionID: "session-1",
-                jobID: "job-1",
+                runID: "job-1",
                 timeout: .seconds(1)
             )
             _ = try await store.cancelReview(
-                jobID: "job-1",
+                runID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
             let final = try await awaited
@@ -142,7 +142,7 @@ struct CodexReviewStoreCommandTests {
 
             let snapshot = try await store.awaitReview(
                 sessionID: "session-1",
-                jobID: "job-1",
+                runID: "job-1",
                 timeout: .milliseconds(10)
             )
 
@@ -167,11 +167,11 @@ struct CodexReviewStoreCommandTests {
 
             async let awaited = store.awaitReview(
                 sessionID: "session-1",
-                jobID: "job-1",
+                runID: "job-1",
                 timeout: .seconds(1)
             )
             await Task.yield()
-            store.terminateAllRunningJobsLocally(
+            store.terminateAllRunningReviewRunsLocally(
                 failureMessage: "Review runtime stopped."
             )
             let final = try await awaited
@@ -362,10 +362,10 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             clock.current = Date(timeIntervalSince1970: 13)
 
-            #expect(try store.readReview(jobID: "job-1").elapsedSeconds == 12)
+            #expect(try store.readReview(runID: "job-1").elapsedSeconds == 12)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             _ = try await result
@@ -465,10 +465,10 @@ struct CodexReviewStoreCommandTests {
             reviewRuns: [firstJob, secondJob, thirdJob]
         )
 
-        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: thirdJob.id))
+        #expect(store.reorderReviewRun(id: firstJob.id, inWorkspace: workspace.cwd, beforeRunID: thirdJob.id))
         #expect(store.orderedReviewRuns(in: workspace).map(\.id) == ["job-second", "job-first", "job-third"])
-        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: firstJob.id) == false)
-        #expect(store.reorderJob(id: firstJob.id, inWorkspace: workspace.cwd, beforeJobID: "job-missing") == false)
+        #expect(store.reorderReviewRun(id: firstJob.id, inWorkspace: workspace.cwd, beforeRunID: firstJob.id) == false)
+        #expect(store.reorderReviewRun(id: firstJob.id, inWorkspace: workspace.cwd, beforeRunID: "job-missing") == false)
     }
 
     @Test func cancelRunningReviewUsesBackendInterruptAndPublicState() async throws {
@@ -482,16 +482,16 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             let cancel = try await store.cancelReview(
-                jobID: "job-1",
+                runID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
             await backend.yield(.cancelled("Stop"))
             _ = try await result
 
             #expect(cancel.cancelled)
-            #expect(try store.readReview(jobID: "job-1").core.lifecycle.status == .cancelled)
+            #expect(try store.readReview(runID: "job-1").core.lifecycle.status == .cancelled)
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -571,10 +571,10 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
 
-            let running = try store.readReview(jobID: "job-1")
+            let running = try store.readReview(runID: "job-1")
             #expect(running.core.lifecycle.status == .running)
             #expect(running.core.output.summary == "Network unavailable; waiting to reconnect.")
-            _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            _ = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             await backend.yield(.cancelled("Stop"))
             _ = try await result
         }
@@ -882,7 +882,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
 
-            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let cancel = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             #expect(cancel.cancelled)
             await recoverGate.open()
 
@@ -1006,12 +1006,12 @@ struct CodexReviewStoreCommandTests {
             _ = try await running
             await backend.finishEvents(for: initialRun)
 
-            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let cancel = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             let cleanedUp = await waitUntil {
                 let runtimeState = store.runtimeReviewRunState(runID: "job-1")
                 return runtimeState.hasActiveWorker == false && runtimeState.activeRun == nil
             }
-            let read = try store.readReview(jobID: "job-1")
+            let read = try store.readReview(runID: "job-1")
 
             #expect(cancel.cancelled)
             #expect(cleanedUp)
@@ -1044,7 +1044,7 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            let cancelled = try store.readReview(jobID: "job-1")
+            let cancelled = try store.readReview(runID: "job-1")
 
             #expect(locallyCancelledReviewRunIDs == ["job-1"])
             #expect(cancelled.core.lifecycle.status == .cancelled)
@@ -1052,7 +1052,7 @@ struct CodexReviewStoreCommandTests {
             #expect(runtimeStateBeforeDetach.hasActiveWorker)
             #expect(runtimeStateBeforeDetach.activeRun == run)
 
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
+            store.cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
 
             let runtimeStateAfterDetach = store.runtimeReviewRunState(runID: "job-1")
             #expect(runtimeStateAfterDetach.hasActiveWorker == false)
@@ -1087,13 +1087,13 @@ struct CodexReviewStoreCommandTests {
                 await store.stop()
             }
             try await backend.waitForInterruptReview(timeout: .seconds(2))
-            let inFlight = try store.readReview(jobID: "job-1")
+            let inFlight = try store.readReview(runID: "job-1")
 
             #expect(inFlight.core.lifecycle.status == .running)
             await interruptGate.open()
             await stopTask.value
 
-            let stopped = try store.readReview(jobID: "job-1")
+            let stopped = try store.readReview(runID: "job-1")
             let commands = await backend.recordedCommands()
             #expect(commands.contains(.interruptReview(run, .init(message: "Review runtime stopped."))))
             #expect(stopped.core.lifecycle.status == .cancelled)
@@ -1133,7 +1133,7 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
+            store.cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
 
             let runtimeState = store.runtimeReviewRunState(runID: "job-1")
             #expect(runtimeState.hasActiveWorker == false)
@@ -1177,7 +1177,7 @@ struct CodexReviewStoreCommandTests {
                 return true
             }
             let request = try #require(await recorder.onlyRequest())
-            let read = try store.readReview(jobID: "job-1")
+            let read = try store.readReview(runID: "job-1")
 
             #expect(result.didComplete)
             #expect(request.reason.message == "Review runtime stopped.")
@@ -1214,7 +1214,7 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
+            store.cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
 
             #expect(await store.drainRuntimeStopDetachedReviewWorkers(timeout: .seconds(2)))
             #expect(store.runtimeReviewRunState(runID: "job-1").hasDetachedWorker == false)
@@ -1243,7 +1243,7 @@ struct CodexReviewStoreCommandTests {
                 reason: .system(message: "Review runtime stopped."),
                 cancelWorkers: false
             )
-            store.cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
+            store.cancelAndDetachReviewWorkersForRuntimeStop(runIDs: locallyCancelledReviewRunIDs)
             let resultBeforeStartReviewUnblocked = try await waitForTaskValue(running, timeout: .seconds(1))
             await startReviewGate.open()
             let result = try #require(resultBeforeStartReviewUnblocked)
@@ -1279,7 +1279,7 @@ struct CodexReviewStoreCommandTests {
 
             networkMonitor.yield(.init(status: .unsatisfied))
             try await backend.waitForPrepareReviewRestart(timeout: .seconds(2))
-            _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            _ = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             await backend.finishEvents(for: initialRun)
 
             let read = try await result
@@ -1303,10 +1303,10 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
-            _ = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            _ = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             await debounceGate.open()
             await backend.yield(.cancelled("Stop"))
             let read = try await result
@@ -1346,12 +1346,12 @@ struct CodexReviewStoreCommandTests {
 
             await #expect(throws: (any Error).self) {
                 try await store.cancelReview(
-                    jobID: "job-1",
+                    runID: "job-1",
                     sessionID: "session-2",
                     cancellation: .mcpClient(message: "Stop")
                 )
             }
-            #expect(try store.readReview(jobID: "job-1").cancellable)
+            #expect(try store.readReview(runID: "job-1").cancellable)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             _ = try await result
@@ -1378,9 +1378,9 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             _ = try await store.cancelReview(
-                jobID: "job-1",
+                runID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
             await backend.finishEvents(throwing: StreamClosedError())
@@ -1402,7 +1402,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             await backend.yield(.message("partial review"))
             await backend.finishEvents(throwing: StreamClosedError())
             let read = try await result
@@ -1449,7 +1449,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
 
             networkMonitor.yield(.init(status: .unsatisfied))
             await outageSleepStarted.wait()
@@ -1457,7 +1457,7 @@ struct CodexReviewStoreCommandTests {
 
             let failedBeforeOutageConfirmed =
                 await StoreSnapshotProbe(store: store)
-                .waitUntilJobStatus(.failed, jobID: "job-1", timeout: .milliseconds(100)) != nil
+                .waitUntilRunStatus(.failed, runID: "job-1", timeout: .milliseconds(100)) != nil
             #expect(failedBeforeOutageConfirmed == false)
 
             await debounceGate.open()
@@ -1485,7 +1485,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             await backend.finishEvents(throwing: CancellationError())
             let read = try await result
 
@@ -1539,14 +1539,14 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             await #expect(throws: FakeCodexReviewBackendError.self) {
                 try await store.cancelReview(
-                    jobID: "job-1",
+                    runID: "job-1",
                     cancellation: .mcpClient(message: "Stop")
                 )
             }
-            let readAfterFailure = try store.readReview(jobID: "job-1")
+            let readAfterFailure = try store.readReview(runID: "job-1")
 
             #expect(readAfterFailure.cancellable)
             #expect(readAfterFailure.core.lifecycle.cancellation == nil)
@@ -1568,9 +1568,9 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            try #require(await StoreSnapshotProbe(store: store).waitUntilJobStatus(.running, jobID: "job-1") != nil)
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "job-1") != nil)
             _ = try await store.cancelReview(
-                jobID: "job-1",
+                runID: "job-1",
                 cancellation: .mcpClient(message: "Stop")
             )
             await backend.yield(.completed(summary: "Succeeded.", result: "late result"))
@@ -1595,7 +1595,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            async let cancel = store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            async let cancel = store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             try await backend.waitForInterruptReview(timeout: .seconds(2))
             await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
             await interruptGate.open()
@@ -1622,7 +1622,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             try await backend.waitForStartReview(timeout: .seconds(2))
-            let cancel = try await store.cancelReview(jobID: "job-1", cancellation: .mcpClient(message: "Stop"))
+            let cancel = try await store.cancelReview(runID: "job-1", cancellation: .mcpClient(message: "Stop"))
             let cancelledDuringStartup = try #require(store.reviewRuns.first)
             #expect(cancel.core.lifecycle.status == .cancelled)
             #expect(cancelledDuringStartup.core.lifecycle.status == .cancelled)
@@ -1697,7 +1697,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let read = try await result
 
-            #expect(read.jobID == "job-1")
+            #expect(read.runID == "job-1")
             #expect(read.core.lifecycle.status == .succeeded)
         }
     }
@@ -1754,9 +1754,9 @@ struct CodexReviewStoreCommandTests {
         )
 
         #expect(store.switchActionIsDisabled(for: displayedSelectedAccount))
-        #expect(store.switchActionRequiresRunningJobsConfirmation(for: displayedSelectedAccount) == false)
+        #expect(store.switchActionRequiresRunningReviewRunsConfirmation(for: displayedSelectedAccount) == false)
         #expect(store.switchActionIsDisabled(for: displayedOtherAccount) == false)
-        #expect(store.switchActionRequiresRunningJobsConfirmation(for: displayedOtherAccount))
+        #expect(store.switchActionRequiresRunningReviewRunsConfirmation(for: displayedOtherAccount))
 
         store.requestSwitchAccountFromUserAction(displayedSelectedAccount)
         await Task.yield()

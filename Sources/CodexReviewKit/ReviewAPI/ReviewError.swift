@@ -3,7 +3,7 @@ import Foundation
 package extension CodexReviewAPI {
     enum Error: Swift.Error, LocalizedError, Sendable {
         case invalidArguments(String)
-        case jobNotFound(String)
+        case runNotFound(String)
         case accessDenied(String)
         case spawnFailed(String)
         case bootstrapFailed(String)
@@ -12,7 +12,7 @@ package extension CodexReviewAPI {
         package var errorDescription: String? {
             switch self {
             case .invalidArguments(let message),
-                 .jobNotFound(let message),
+                 .runNotFound(let message),
                  .accessDenied(let message),
                  .spawnFailed(let message),
                  .bootstrapFailed(let message),

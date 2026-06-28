@@ -18,7 +18,7 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
-        text = "Listed \(result.items.count) review job(s)."
+        text = "Listed \(result.items.count) review run(s)."
         isError = false
     case .reviewCancel(let result):
         value = result.structuredContent()
@@ -46,7 +46,7 @@ private extension CodexReviewAPI.Read.Result {
         if let elapsedSeconds {
             status += " for \(elapsedSeconds)s"
         }
-        return "\(status). jobId: \(jobID). Call `review_await` with this jobId to continue waiting."
+        return "\(status). runId: \(runID). Call `review_await` with this runId to continue waiting."
     }
 
     func textContentForRead() -> String {
@@ -83,7 +83,7 @@ private extension CodexReviewAPI.Read.Result {
         timeline: ReviewMCPProjection
     ) -> Value {
         var object: [String: Value] = [
-            "jobId": .string(jobID),
+            "runId": .string(runID),
             "run": core.run.structuredContent(),
             "lifecycle": core.lifecycle.structuredContent(
                 elapsedSeconds: elapsedSeconds,
@@ -98,7 +98,7 @@ private extension CodexReviewAPI.Read.Result {
         if includeNextAction {
             object["nextAction"] = .object([
                 "tool": .string(CodexReviewMCP.Tool.Name.reviewAwait.rawValue),
-                "jobId": .string(jobID),
+                "runId": .string(runID),
             ])
         }
         return .object(object)
@@ -302,10 +302,10 @@ private extension String {
     }
 }
 
-private extension CodexReviewAPI.Job.ListItem {
+private extension CodexReviewAPI.Run.ListItem {
     func structuredContent() -> Value {
         .object([
-            "jobId": .string(jobID),
+            "runId": .string(runID),
             "cwd": .string(cwd),
             "targetSummary": .string(targetSummary),
             "run": core.run.structuredContent(),
@@ -337,7 +337,7 @@ private extension CodexReviewAPI.Cancel.Outcome {
 
     func structuredContent() -> Value {
         .object([
-            "jobId": .string(jobID),
+            "runId": .string(runID),
             "cancelled": .bool(cancelled),
             "run": core.run.structuredContent(),
             "lifecycle": core.lifecycle.structuredContent(

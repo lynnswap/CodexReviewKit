@@ -11,7 +11,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     @Test func selectedRunningAccountRefreshesAfterOneMinute() {
         let account = makeAccount(lastFetchAt: now)
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: true)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: true)
 
         #expect(targets == [
             .init(accountKey: account.accountKey, kind: .selectedRunningInterval, dueAt: now.addingTimeInterval(60)),
@@ -21,7 +21,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     @Test func selectedIdleAccountRefreshesAfterFifteenMinutes() {
         let account = makeAccount(lastFetchAt: now)
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: false)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: false)
 
         #expect(targets == [
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
@@ -35,7 +35,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         let targets = targets(
             accounts: [selectedAccount, otherAccount],
             selectedAccount: selectedAccount,
-            hasRunningJobs: false
+            hasRunningReviewRuns: false
         )
 
         #expect(targets == [
@@ -63,7 +63,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         let targets = targets(
             accounts: [selectedAccount, otherAccount],
             selectedAccount: selectedAccount,
-            hasRunningJobs: true
+            hasRunningReviewRuns: true
         )
 
         #expect(targets == [
@@ -82,7 +82,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         let targets = targets(
             accounts: [selectedAccount, otherAccount],
             selectedAccount: selectedAccount,
-            hasRunningJobs: true
+            hasRunningReviewRuns: true
         )
 
         #expect(targets == [
@@ -108,7 +108,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             ]
         )
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: false)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: false)
 
         #expect(targets == [
             .init(accountKey: account.accountKey, kind: .resetWindow, dueAt: resetAt.addingTimeInterval(60)),
@@ -125,7 +125,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             ]
         )
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: false)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: false)
 
         #expect(targets == [
             .init(
@@ -139,7 +139,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     @Test func nilLastFetchUsesNowUnlessResetIsUnconsumed() {
         let account = makeAccount(lastFetchAt: nil)
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: false)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: false)
 
         #expect(targets == [
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
@@ -155,7 +155,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             ]
         )
 
-        let targets = targets(accounts: [account], selectedAccount: account, hasRunningJobs: false)
+        let targets = targets(accounts: [account], selectedAccount: account, hasRunningReviewRuns: false)
 
         #expect(targets == [
             .init(accountKey: account.accountKey, kind: .resetWindow, dueAt: resetAt.addingTimeInterval(60)),
@@ -289,13 +289,13 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     private func targets(
         accounts: [CodexReviewAccount],
         selectedAccount: CodexReviewAccount?,
-        hasRunningJobs: Bool,
+        hasRunningReviewRuns: Bool,
         serverState: CodexReviewServerState = .running
     ) -> [CodexReviewStoreRateLimitAutoRefreshTarget] {
         CodexReviewStoreRateLimitAutoRefreshDriver.targets(
             accounts: accounts,
             selectedAccountKey: selectedAccount?.accountKey,
-            hasRunningJobs: hasRunningJobs,
+            hasRunningReviewRuns: hasRunningReviewRuns,
             serverState: serverState,
             now: now
         )

@@ -16,7 +16,7 @@ struct CodexReviewMonitorCITests {
             arguments: []
         )
 
-        #expect(environment[ReviewMonitorLaunchEnvironment.mockJobsKey] == "1")
+        #expect(environment[ReviewMonitorLaunchEnvironment.mockReviewRunsKey] == "1")
         #expect(context.requestsPreviewContent)
         #expect(context.shouldStartEmbeddedServer == false)
     }
@@ -104,7 +104,7 @@ struct CodexReviewMonitorCITests {
             launchContextProvider: {
                 ReviewMonitorLaunchContext(
                     environment: [
-                        ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+                        ReviewMonitorLaunchEnvironment.mockReviewRunsKey: "1",
                     ],
                     arguments: [],
                     launchMode: .application
@@ -231,7 +231,7 @@ struct CodexReviewMonitorCITests {
         )
         let context = ReviewMonitorLaunchContext(
             environment: [
-                ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+                ReviewMonitorLaunchEnvironment.mockReviewRunsKey: "1",
             ],
             arguments: [],
             launchMode: .application
@@ -262,7 +262,7 @@ struct CodexReviewMonitorCITests {
         )
         let context = ReviewMonitorLaunchContext(
             environment: [
-                ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+                ReviewMonitorLaunchEnvironment.mockReviewRunsKey: "1",
             ],
             arguments: [],
             launchMode: .application

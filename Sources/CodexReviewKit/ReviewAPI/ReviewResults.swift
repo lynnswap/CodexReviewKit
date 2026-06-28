@@ -2,18 +2,18 @@ import Foundation
 
 package extension CodexReviewAPI.Read {
 struct Result: Codable, Sendable, Hashable {
-    package var jobID: String
+    package var runID: String
     package var core: ReviewRunCore
     package var elapsedSeconds: Int?
     package var cancellable: Bool
 
     package init(
-        jobID: String,
+        runID: String,
         core: ReviewRunCore,
         elapsedSeconds: Int? = nil,
         cancellable: Bool
     ) {
-        self.jobID = jobID
+        self.runID = runID
         self.core = core
         self.elapsedSeconds = elapsedSeconds
         self.cancellable = cancellable
@@ -22,9 +22,9 @@ struct Result: Codable, Sendable, Hashable {
 }
 
 
-package extension CodexReviewAPI.Job {
+package extension CodexReviewAPI.Run {
 struct ListItem: Codable, Sendable, Hashable {
-    package var jobID: String
+    package var runID: String
     package var cwd: String
     package var targetSummary: String
     package var core: ReviewRunCore
@@ -32,14 +32,14 @@ struct ListItem: Codable, Sendable, Hashable {
     package var cancellable: Bool
 
     package init(
-        jobID: String,
+        runID: String,
         cwd: String,
         targetSummary: String,
         core: ReviewRunCore,
         elapsedSeconds: Int?,
         cancellable: Bool
     ) {
-        self.jobID = jobID
+        self.runID = runID
         self.cwd = cwd
         self.targetSummary = targetSummary
         self.core = core
@@ -52,27 +52,27 @@ struct ListItem: Codable, Sendable, Hashable {
 
 package extension CodexReviewAPI.List {
 struct Result: Codable, Sendable, Hashable {
-    package var items: [CodexReviewAPI.Job.ListItem]
+    package var items: [CodexReviewAPI.Run.ListItem]
 
-    package init(items: [CodexReviewAPI.Job.ListItem]) {
+    package init(items: [CodexReviewAPI.Run.ListItem]) {
         self.items = items
     }
 }
 }
 
 
-package extension CodexReviewAPI.Job {
+package extension CodexReviewAPI.Run {
 struct Selector: Sendable, Hashable {
-    package var jobID: String?
+    package var runID: String?
     package var cwd: String?
     package var statuses: [ReviewRunState]?
 
     package init(
-        jobID: String? = nil,
+        runID: String? = nil,
         cwd: String? = nil,
         statuses: [ReviewRunState]? = nil
     ) {
-        self.jobID = jobID
+        self.runID = runID
         self.cwd = cwd?.nilIfEmpty
         self.statuses = statuses
     }
@@ -80,24 +80,24 @@ struct Selector: Sendable, Hashable {
 }
 
 
-package extension CodexReviewAPI.Job {
+package extension CodexReviewAPI.Run {
 enum SelectionError: Swift.Error, Sendable {
-    case ambiguous([CodexReviewAPI.Job.ListItem])
+    case ambiguous([CodexReviewAPI.Run.ListItem])
 }
 }
 
 
-extension CodexReviewAPI.Job.SelectionError: LocalizedError {
+extension CodexReviewAPI.Run.SelectionError: LocalizedError {
     package var errorDescription: String? {
         switch self {
         case .ambiguous(let reviewRuns):
             let candidates = reviewRuns
-                .map { "- \($0.jobID) [\($0.core.lifecycle.status.rawValue)] \($0.cwd) \($0.targetSummary)" }
+                .map { "- \($0.runID) [\($0.core.lifecycle.status.rawValue)] \($0.cwd) \($0.targetSummary)" }
                 .joined(separator: "\n")
             return """
-            Review job selector matched multiple review jobs:
+            Review run selector matched multiple review runs:
             \(candidates)
-            Specify jobID or narrow cwd/statuses.
+            Specify runID or narrow cwd/statuses.
             """
         }
     }
@@ -106,16 +106,16 @@ extension CodexReviewAPI.Job.SelectionError: LocalizedError {
 
 package extension CodexReviewAPI.Cancel {
 struct Outcome: Codable, Sendable, Hashable {
-    package var jobID: String
+    package var runID: String
     package var cancelled: Bool
     package var core: ReviewRunCore
 
     package init(
-        jobID: String,
+        runID: String,
         cancelled: Bool,
         core: ReviewRunCore
     ) {
-        self.jobID = jobID
+        self.runID = runID
         self.cancelled = cancelled
         self.core = core
     }

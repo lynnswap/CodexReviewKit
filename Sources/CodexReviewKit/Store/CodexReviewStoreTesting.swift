@@ -61,22 +61,22 @@ extension CodexReviewStore {
         }
 
         self.workspaces = Set(resolvedWorkspaces)
-        var jobsByCWD: [String: [ReviewRunRecord]] = [:]
-        let resolvedJobs = reviewRuns.filter { job in
+        var runsByCWD: [String: [ReviewRunRecord]] = [:]
+        let resolvedRuns = reviewRuns.filter { job in
             resolvedWorkspaces.contains(where: { $0.cwd == job.cwd })
         }
-        for job in resolvedJobs {
-            jobsByCWD[job.cwd, default: []].append(job)
+        for job in resolvedRuns {
+            runsByCWD[job.cwd, default: []].append(job)
         }
-        for job in resolvedJobs {
-            guard let workspaceJobs = jobsByCWD[job.cwd],
-                  let index = workspaceJobs.firstIndex(where: { $0 === job })
+        for job in resolvedRuns {
+            guard let workspaceRuns = runsByCWD[job.cwd],
+                  let index = workspaceRuns.firstIndex(where: { $0 === job })
             else {
                 continue
             }
-            job.sortOrder = Double(workspaceJobs.count - index - 1)
+            job.sortOrder = Double(workspaceRuns.count - index - 1)
         }
-        self.reviewRuns = Set(resolvedJobs)
+        self.reviewRuns = Set(resolvedRuns)
         if let settingsSnapshot {
             settings.loadForTesting(snapshot: settingsSnapshot)
         }

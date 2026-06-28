@@ -15,14 +15,14 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> CodexReviewAPI.Read.Result {
-        let jobID = try beginReview(sessionID: sessionID, request: request)
+        let runID = try beginReview(sessionID: sessionID, request: request)
         return try await withTaskCancellationHandler {
-            _ = try await awaitReview(sessionID: sessionID, jobID: jobID)
-            await runtimeState.awaitActiveWorker(for: jobID)
-            return try readReview(sessionID: sessionID, jobID: jobID)
+            _ = try await awaitReview(sessionID: sessionID, runID: runID)
+            await runtimeState.awaitActiveWorker(for: runID)
+            return try readReview(sessionID: sessionID, runID: runID)
         } onCancel: {
             Task { @MainActor [weak self] in
-                self?.runtimeState.cancelActiveWorker(for: jobID)
+                self?.runtimeState.cancelActiveWorker(for: runID)
             }
         }
     }
@@ -33,23 +33,23 @@ extension CodexReviewStore {
         request: CodexReviewAPI.Start.Request,
         waitTimeout: Duration
     ) async throws -> CodexReviewAPI.Read.Result {
-        let jobID = try beginReview(sessionID: sessionID, request: request)
-        return try await awaitReview(sessionID: sessionID, jobID: jobID, timeout: waitTimeout)
+        let runID = try beginReview(sessionID: sessionID, request: request)
+        return try await awaitReview(sessionID: sessionID, runID: runID, timeout: waitTimeout)
     }
 
     package func awaitReview(
         sessionID: String?,
-        jobID: String,
+        runID: String,
         timeout: Duration? = nil
     ) async throws -> CodexReviewAPI.Read.Result {
-        let job = try job(jobID: jobID)
+        let job = try job(runID: runID)
         if let sessionID, job.sessionID != sessionID {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         if job.isTerminal == false {
-            await waitForReviewTerminal(jobID: jobID, timeout: timeout)
+            await waitForReviewTerminal(runID: runID, timeout: timeout)
         }
-        return try readReview(sessionID: sessionID, jobID: jobID)
+        return try readReview(sessionID: sessionID, runID: runID)
     }
 
     @discardableResult
@@ -62,10 +62,10 @@ extension CodexReviewStore {
         }
 
         let validatedRequest = try request.validated()
-        let jobID = idGenerator.next()
+        let runID = idGenerator.next()
         let createdAt = clock.now()
         let job = ReviewRunRecord(
-            id: jobID,
+            id: runID,
             sessionID: sessionID,
             cwd: validatedRequest.cwd,
             sortOrder: nextReviewRunSortOrder(inWorkspace: validatedRequest.cwd),
@@ -77,35 +77,35 @@ extension CodexReviewStore {
         )
         insertReviewRun(job)
         markReviewRunning(job, startedAt: createdAt)
-        runtimeState.markStarting(jobID)
-        launchReviewWorker(jobID: jobID, sessionID: sessionID, request: validatedRequest)
-        return jobID
+        runtimeState.markStarting(runID)
+        launchReviewWorker(runID: runID, sessionID: sessionID, request: validatedRequest)
+        return runID
     }
 
     private func launchReviewWorker(
-        jobID: String,
+        runID: String,
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) {
-        runtimeState.cancelActiveWorker(for: jobID)
+        runtimeState.cancelActiveWorker(for: runID)
         runtimeState.setActiveWorker(
             Task { [weak self] in
-                await self?.runReviewWorker(jobID: jobID, sessionID: sessionID, request: request)
-            }, for: jobID)
+                await self?.runReviewWorker(runID: runID, sessionID: sessionID, request: request)
+            }, for: runID)
     }
 
     private func runReviewWorker(
-        jobID: String,
+        runID: String,
         sessionID: String,
         request validatedRequest: CodexReviewAPI.Start.Request
     ) async {
-        guard let job = reviewRun(id: jobID) else {
-            runtimeState.clearStarting(jobID)
-            runtimeState.removeActiveWorker(for: jobID)
+        guard let job = reviewRun(id: runID) else {
+            runtimeState.clearStarting(runID)
+            runtimeState.removeActiveWorker(for: runID)
             return
         }
         let startRequest = CodexReviewBackendModel.Review.Start(
-            jobID: jobID,
+            runID: runID,
             sessionID: sessionID,
             request: validatedRequest,
             model: settings.effectiveModel
@@ -114,20 +114,20 @@ extension CodexReviewStore {
         do {
             let backendAttempt = try await backend.startReview(startRequest)
             let backendRun = backendAttempt.run
-            runtimeState.clearStarting(jobID)
+            runtimeState.clearStarting(runID)
             run = backendRun
             if Task.isCancelled {
                 throw CancellationError()
             }
             applyBackendRun(backendRun, to: job)
-            if let startupCancellation = runtimeState.takeStartupCancellation(for: jobID) {
+            if let startupCancellation = runtimeState.takeStartupCancellation(for: runID) {
                 try? await backend.interruptReview(
                     backendRun,
                     reason: .init(message: startupCancellation.message)
                 )
                 if job.isTerminal == false {
                     try completeCancellationLocally(
-                        jobID: job.id,
+                        runID: job.id,
                         sessionID: job.sessionID,
                         cancellation: startupCancellation
                     )
@@ -138,7 +138,7 @@ extension CodexReviewStore {
                     reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
                 )
                 try completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: job.core.lifecycle.cancellation ?? .system()
                 )
@@ -146,7 +146,7 @@ extension CodexReviewStore {
 
             if job.isTerminal {
                 await backend.cleanupReview(backendRun)
-                runtimeState.clearReviewRunState(for: jobID)
+                runtimeState.clearReviewRunState(for: runID)
             } else {
                 let currentRun = try await consumeReviewEvents(
                     for: backendAttempt,
@@ -155,32 +155,32 @@ extension CodexReviewStore {
                 )
                 run = currentRun
                 await backend.cleanupReview(currentRun)
-                runtimeState.clearReviewRunState(for: jobID)
+                runtimeState.clearReviewRunState(for: runID)
             }
         } catch let error where error is CancellationError || Task.isCancelled {
-            runtimeState.clearStarting(jobID)
-            let startupCancellation = runtimeState.takeStartupCancellation(for: jobID)
-            if let cleanupRun = runtimeState.activeRun(for: jobID) ?? run {
+            runtimeState.clearStarting(runID)
+            let startupCancellation = runtimeState.takeStartupCancellation(for: runID)
+            if let cleanupRun = runtimeState.activeRun(for: runID) ?? run {
                 await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
                 await backend.cleanupReview(cleanupRun)
             } else if job.isTerminal == false || startupCancellation != nil {
                 try? completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
                 )
             }
-            runtimeState.clearReviewRunState(for: jobID)
+            runtimeState.clearReviewRunState(for: runID)
         } catch {
-            runtimeState.clearStarting(jobID)
-            let startupCancellation = runtimeState.takeStartupCancellation(for: jobID)
-            if let cleanupRun = runtimeState.activeRun(for: jobID) ?? run {
+            runtimeState.clearStarting(runID)
+            let startupCancellation = runtimeState.takeStartupCancellation(for: runID)
+            if let cleanupRun = runtimeState.activeRun(for: runID) ?? run {
                 await backend.cleanupReview(cleanupRun)
             }
-            runtimeState.clearReviewRunState(for: jobID)
+            runtimeState.clearReviewRunState(for: runID)
             if job.isTerminal == false, let startupCancellation {
                 try? completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: startupCancellation
                 )
@@ -188,8 +188,8 @@ extension CodexReviewStore {
                 markReviewFailed(job, message: error.localizedDescription)
             }
         }
-        runtimeState.removeActiveWorker(for: jobID)
-        runtimeState.removeDetachedWorker(for: jobID)
+        runtimeState.removeActiveWorker(for: runID)
+        runtimeState.removeDetachedWorker(for: runID)
     }
 
     private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: ReviewRunRecord)
@@ -209,13 +209,13 @@ extension CodexReviewStore {
                 reason: .init(message: cancellation.message)
             )
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
         } catch {
             try? recordCancellationFailure(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 message: error.localizedDescription
             )
@@ -373,20 +373,20 @@ extension CodexReviewStore {
         )
     }
 
-    package func readReview(jobID: String) throws -> CodexReviewAPI.Read.Result {
-        try readReview(sessionID: nil, jobID: jobID)
+    package func readReview(runID: String) throws -> CodexReviewAPI.Read.Result {
+        try readReview(sessionID: nil, runID: runID)
     }
 
     package func readReview(
         sessionID: String?,
-        jobID: String
+        runID: String
     ) throws -> CodexReviewAPI.Read.Result {
-        let job = try job(jobID: jobID)
+        let job = try job(runID: runID)
         if let sessionID, job.sessionID != sessionID {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         return CodexReviewAPI.Read.Result(
-            jobID: job.id,
+            runID: job.id,
             core: job.core,
             elapsedSeconds: elapsedSeconds(for: job),
             cancellable: job.isTerminal == false && job.cancellationRequested == false
@@ -426,11 +426,11 @@ extension CodexReviewStore {
         return CodexReviewAPI.List.Result(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
     }
 
-    package func resolveJob(selector: CodexReviewAPI.Job.Selector) throws -> ReviewRunRecord {
-        try resolveJob(sessionID: nil, selector: selector)
+    package func resolveRun(selector: CodexReviewAPI.Run.Selector) throws -> ReviewRunRecord {
+        try resolveRun(sessionID: nil, selector: selector)
     }
 
-    package func resolveJob(sessionID: String?, selector: CodexReviewAPI.Job.Selector) throws -> ReviewRunRecord {
+    package func resolveRun(sessionID: String?, selector: CodexReviewAPI.Run.Selector) throws -> ReviewRunRecord {
         let statusSet = selector.statuses.map(Set.init)
         let matches = orderedReviewRuns.filter { job in
             if let sessionID, job.sessionID != sessionID {
@@ -442,7 +442,7 @@ extension CodexReviewStore {
             if let statusSet, statusSet.contains(job.core.lifecycle.status) == false {
                 return false
             }
-            if let jobID = selector.jobID, jobID != job.id {
+            if let runID = selector.runID, runID != job.id {
                 return false
             }
             return true
@@ -451,30 +451,30 @@ extension CodexReviewStore {
             return job
         }
         if matches.isEmpty {
-            throw CodexReviewAPI.Error.jobNotFound("No review job matched the selector.")
+            throw CodexReviewAPI.Error.runNotFound("No review run matched the selector.")
         }
-        throw CodexReviewAPI.Job.SelectionError.ambiguous(matches.map(makeListItem))
+        throw CodexReviewAPI.Run.SelectionError.ambiguous(matches.map(makeListItem))
     }
 
     package func cancelReview(
-        jobID: String,
+        runID: String,
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        guard let job = reviewRun(id: jobID), job.sessionID == sessionID else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+        guard let job = reviewRun(id: runID), job.sessionID == sessionID else {
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        return try await cancelReview(jobID: jobID, cancellation: cancellation)
+        return try await cancelReview(runID: runID, cancellation: cancellation)
     }
 
     @discardableResult
     package func cancelReview(
-        jobID: String,
+        runID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        let job = try job(jobID: jobID)
+        let job = try job(runID: runID)
         guard job.isTerminal == false else {
-            return .init(jobID: job.id, cancelled: false, core: job.core)
+            return .init(runID: job.id, cancelled: false, core: job.core)
         }
 
         job.cancellationRequested = true
@@ -484,38 +484,38 @@ extension CodexReviewStore {
 
         if job.core.lifecycle.status == .queued {
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
-            return .init(jobID: job.id, cancelled: true, core: job.core)
+            return .init(runID: job.id, cancelled: true, core: job.core)
         }
 
-        if runtimeState.isWaitingForNetworkRecovery(jobID) {
+        if runtimeState.isWaitingForNetworkRecovery(runID) {
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
-            runtimeState.cancelActiveWorker(for: jobID)
-            return .init(jobID: job.id, cancelled: true, core: job.core)
+            runtimeState.cancelActiveWorker(for: runID)
+            return .init(runID: job.id, cancelled: true, core: job.core)
         }
 
-        if let run = runtimeState.activeRun(for: jobID) {
+        if let run = runtimeState.activeRun(for: runID) {
             do {
                 try await backend.interruptReview(
                     run,
                     reason: .init(message: cancellation.message)
                 )
                 try completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
-                runtimeState.cancelActiveWorker(for: jobID)
+                runtimeState.cancelActiveWorker(for: runID)
             } catch {
                 try recordCancellationFailure(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     message: error.localizedDescription
                 )
@@ -528,35 +528,35 @@ extension CodexReviewStore {
                     reason: .init(message: cancellation.message)
                 )
                 try completeCancellationLocally(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     cancellation: cancellation
                 )
-                runtimeState.cancelActiveWorker(for: jobID)
+                runtimeState.cancelActiveWorker(for: runID)
             } catch {
                 try recordCancellationFailure(
-                    jobID: job.id,
+                    runID: job.id,
                     sessionID: job.sessionID,
                     message: error.localizedDescription
                 )
                 throw error
             }
-        } else if runtimeState.isStarting(jobID) {
-            runtimeState.setStartupCancellation(cancellation, for: jobID)
+        } else if runtimeState.isStarting(runID) {
+            runtimeState.setStartupCancellation(cancellation, for: runID)
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
-            return .init(jobID: job.id, cancelled: true, core: job.core)
+            return .init(runID: job.id, cancelled: true, core: job.core)
         } else {
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
         }
-        return .init(jobID: job.id, cancelled: true, core: job.core)
+        return .init(runID: job.id, cancelled: true, core: job.core)
     }
 
     package func closeSession(
@@ -564,24 +564,24 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .sessionClosed()
     ) async {
         closedSessions.insert(sessionID)
-        for jobID in activeReviewRunIDs(for: sessionID) {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+        for runID in activeReviewRunIDs(for: sessionID) {
+            _ = try? await cancelReview(runID: runID, cancellation: reason)
         }
     }
 
     package func closeActiveReviewSessions(reason: ReviewCancellation) async {
-        let jobIDs =
+        let runIDs =
             orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
-        for jobID in jobIDs {
-            _ = try? await cancelReview(jobID: jobID, cancellation: reason)
+        for runID in runIDs {
+            _ = try? await cancelReview(runID: runID, cancellation: reason)
         }
     }
 
-    private func job(jobID: String) throws -> ReviewRunRecord {
-        guard let job = reviewRun(id: jobID) else {
-            throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
+    private func job(runID: String) throws -> ReviewRunRecord {
+        guard let job = reviewRun(id: runID) else {
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         return job
     }
@@ -599,9 +599,9 @@ extension CodexReviewStore {
         }
     }
 
-    private func makeListItem(_ job: ReviewRunRecord) -> CodexReviewAPI.Job.ListItem {
-        CodexReviewAPI.Job.ListItem(
-            jobID: job.id,
+    private func makeListItem(_ job: ReviewRunRecord) -> CodexReviewAPI.Run.ListItem {
+        CodexReviewAPI.Run.ListItem(
+            runID: job.id,
             cwd: job.cwd,
             targetSummary: job.targetSummary,
             core: job.core,
@@ -879,14 +879,14 @@ extension CodexReviewStore {
         do {
             try await backend.interruptReview(recoveredRun, reason: .init(message: cancellation.message))
             try completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
         } catch {
             await backend.cleanupReview(recoveredRun)
             try? recordCancellationFailure(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 message: error.localizedDescription
             )
@@ -939,7 +939,7 @@ extension CodexReviewStore {
         case .cancelled(let message):
             let cancellation = job.core.lifecycle.cancellation ?? .system(message: message)
             try? completeCancellationLocally(
-                jobID: job.id,
+                runID: job.id,
                 sessionID: job.sessionID,
                 cancellation: cancellation
             )
@@ -954,7 +954,7 @@ extension CodexReviewStore {
         }
         let cancellation = job.core.lifecycle.cancellation ?? .system()
         try? completeCancellationLocally(
-            jobID: job.id,
+            runID: job.id,
             sessionID: job.sessionID,
             cancellation: cancellation
         )
@@ -991,8 +991,8 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard let job = reviewRun(id: jobID),
+    private func waitForReviewTerminal(runID: String, timeout: Duration?) async {
+        guard let job = reviewRun(id: runID),
             job.isTerminal == false
         else {
             return

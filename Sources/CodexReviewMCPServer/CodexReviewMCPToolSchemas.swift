@@ -28,12 +28,12 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
             "type": .string("object"),
             "properties": .object([
                 "sessionID": .object(["type": .string("string")]),
-                "jobID": .object(["type": .string("string")]),
-                "jobId": .object(["type": .string("string")]),
+                "runID": .object(["type": .string("string")]),
+                "runId": .object(["type": .string("string")]),
             ]),
             "anyOf": .array([
-                .object(["required": .array([.string("jobId")])]),
-                .object(["required": .array([.string("jobID")])]),
+                .object(["required": .array([.string("runId")])]),
+                .object(["required": .array([.string("runID")])]),
             ]),
         ])
     case .reviewRead:
@@ -41,8 +41,8 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
             "type": .string("object"),
             "properties": .object([
                 "sessionID": .object(["type": .string("string")]),
-                "jobID": .object(["type": .string("string")]),
-                "jobId": .object(["type": .string("string")]),
+                "runID": .object(["type": .string("string")]),
+                "runId": .object(["type": .string("string")]),
             ]),
         ])
     case .reviewList:
@@ -60,8 +60,8 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
             "type": .string("object"),
             "properties": .object([
                 "sessionID": .object(["type": .string("string")]),
-                "jobID": .object(["type": .string("string")]),
-                "jobId": .object(["type": .string("string")]),
+                "runID": .object(["type": .string("string")]),
+                "runId": .object(["type": .string("string")]),
                 "cwd": .object(["type": .string("string")]),
                 "statuses": .object(["type": .string("array")]),
                 "reason": .object(["type": .string("string")]),

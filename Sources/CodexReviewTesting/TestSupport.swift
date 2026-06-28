@@ -544,8 +544,8 @@ package final class StoreSnapshotProbe {
             }
             .map { job in
                 let runtimeState = store.runtimeReviewRunState(runID: job.id)
-                return StoreJobSnapshot(
-                    jobID: job.id,
+                return StoreRunSnapshot(
+                    runID: job.id,
                     status: job.core.lifecycle.status,
                     summary: job.core.output.summary,
                     lastAgentMessage: job.core.output.lastAgentMessage,
@@ -557,23 +557,23 @@ package final class StoreSnapshotProbe {
         return StoreSnapshot(reviewRuns: reviewRuns)
     }
 
-    package func waitUntilJobStatus(
+    package func waitUntilRunStatus(
         _ status: ReviewRunState,
-        jobID: String? = nil,
+        runID: String? = nil,
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.job(jobID)?.status == status
+            snapshot.job(runID)?.status == status
         }
     }
 
     package func waitUntilRunAttempt(
         _ attemptID: String,
-        jobID: String? = nil,
+        runID: String? = nil,
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.job(jobID)?.activeRun?.attemptID == attemptID
+            snapshot.job(runID)?.activeRun?.attemptID == attemptID
         }
     }
 
@@ -597,18 +597,18 @@ package final class StoreSnapshotProbe {
 }
 
 package struct StoreSnapshot: Sendable {
-    package var reviewRuns: [StoreJobSnapshot]
+    package var reviewRuns: [StoreRunSnapshot]
 
-    package func job(_ jobID: String? = nil) -> StoreJobSnapshot? {
-        guard let jobID else {
+    package func job(_ runID: String? = nil) -> StoreRunSnapshot? {
+        guard let runID else {
             return reviewRuns.first
         }
-        return reviewRuns.first { $0.jobID == jobID }
+        return reviewRuns.first { $0.runID == runID }
     }
 }
 
-package struct StoreJobSnapshot: Sendable {
-    package var jobID: String
+package struct StoreRunSnapshot: Sendable {
+    package var runID: String
     package var status: ReviewRunState
     package var summary: String
     package var lastAgentMessage: String?

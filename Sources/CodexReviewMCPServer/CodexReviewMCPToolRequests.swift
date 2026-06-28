@@ -21,13 +21,13 @@ func toolRequest(
     case .reviewAwait:
         return .reviewAwait(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
-            jobID: try requiredJobID(in: arguments),
+            runID: try requiredRunID(in: arguments),
             waitTimeout: boundedReviewWaitDuration
         )
     case .reviewRead:
         return .reviewRead(
             sessionID: sessionID(in: arguments, defaultSessionID: defaultSessionID),
-            jobID: try requiredJobID(in: arguments)
+            runID: try requiredRunID(in: arguments)
         )
     case .reviewList:
         return .reviewList(
@@ -37,16 +37,16 @@ func toolRequest(
             limit: arguments["limit"]?.intValue
         )
     case .reviewCancel:
-        let jobID = optionalJobID(in: arguments)
+        let runID = optionalRunID(in: arguments)
         let sessionID = sessionID(
             in: arguments,
             defaultSessionID: defaultSessionID,
-            fallback: jobID == nil ? "default" : nil
+            fallback: runID == nil ? "default" : nil
         )
         return .reviewCancel(
             sessionID: sessionID,
             selector: .init(
-                jobID: jobID,
+                runID: runID,
                 cwd: arguments["cwd"]?.stringValue,
                 statuses: try statuses(from: arguments["statuses"])
             ),
@@ -63,15 +63,15 @@ func sessionID(
     defaultSessionID ?? arguments["sessionID"]?.stringValue ?? fallback
 }
 
-func optionalJobID(in arguments: [String: Value]) -> String? {
-    arguments["jobID"]?.stringValue?.nilIfEmpty ?? arguments["jobId"]?.stringValue?.nilIfEmpty
+func optionalRunID(in arguments: [String: Value]) -> String? {
+    arguments["runID"]?.stringValue?.nilIfEmpty ?? arguments["runId"]?.stringValue?.nilIfEmpty
 }
 
-func requiredJobID(in arguments: [String: Value]) throws -> String {
-    guard let jobID = optionalJobID(in: arguments) else {
-        throw MCPProtocolServerError.missingArgument("jobID/jobId")
+func requiredRunID(in arguments: [String: Value]) throws -> String {
+    guard let runID = optionalRunID(in: arguments) else {
+        throw MCPProtocolServerError.missingArgument("runID/runId")
     }
-    return jobID
+    return runID
 }
 
 func reviewTarget(from object: [String: Value]) throws -> CodexReviewAPI.Target {

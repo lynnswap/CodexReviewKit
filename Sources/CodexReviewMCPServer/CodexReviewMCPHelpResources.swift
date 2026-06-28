@@ -24,7 +24,7 @@ let helpResources: [HelpResource] = [
         content: """
         # Codex Review MCP
 
-        Use `review_start` to run a review, `review_await` to continue waiting for long-running jobs, then `review_read`, `review_list`, or `review_cancel` to inspect or control review jobs.
+        Use `review_start` to run a review, `review_await` to continue waiting for long-running runs, then `review_read`, `review_list`, or `review_cancel` to inspect or control review runs.
         """
     ),
     .init(
@@ -42,13 +42,13 @@ let helpResources: [HelpResource] = [
     .init(
         uri: "codex-review://help/tools/review_await",
         name: "review_await",
-        description: "Wait for a running Codex review job.",
+        description: "Wait for a running Codex review run.",
         content: """
         # review_await
 
-        Required argument: `jobId`.
+        Required argument: `runId`.
 
-        Use this after `review_start` returns a running job. The tool waits for the job to finish and returns the final review when available.
+        Use this after `review_start` returns a running run. The tool waits for the run to finish and returns the final review when available.
         """
     ),
     .init(
