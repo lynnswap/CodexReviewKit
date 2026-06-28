@@ -347,8 +347,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             uiState: uiState,
             modelContext: context
         )
-        let window = NSWindow(contentViewController: viewController)
-        defer { window.close() }
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -471,6 +469,8 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             uiState: uiState,
             modelContext: context
         )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -482,6 +482,20 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition(timeout: .milliseconds(500)) {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
         }
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: threadID,
+                workspace: repo,
+                name: "App review",
+                updatedAt: Date(timeIntervalSince1970: 5_000)
+            ))
+        try await runtime.transport.enqueueThreadRead(
+            .init(
+                id: threadID,
+                workspace: repo,
+                name: "App review",
+                updatedAt: Date(timeIntervalSince1970: 5_000)
+            ))
         sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
         #expect(uiState.selectionID == .chat(threadID))
         try await waitForCondition {
@@ -498,19 +512,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 name: "App review renamed",
                 updatedAt: Date(timeIntervalSince1970: 6_000)
             ))
-        try await runtime.transport.enqueueThreadList(
-            .init(
-                threads: [
-                    .init(
-                        id: threadID,
-                        workspace: repo,
-                        name: "App review renamed",
-                        updatedAt: Date(timeIntervalSince1970: 6_000)
-                    )
-                ]
-            ))
         try await chat.refresh(includeTurns: false)
-        #expect(await runtime.transport.recordedRequests(method: "thread/list").count == 2)
 
         try await waitForCondition {
             sidebar.codexSidebarSnapshotForTesting?
