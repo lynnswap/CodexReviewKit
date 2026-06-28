@@ -414,7 +414,6 @@ struct CodexReviewMCPHTTPServerTests {
                 targetSummary: "Included",
                 status: .succeeded,
                 summary: "Done",
-                hasFinalReview: true,
                 lastAgentMessage: "No correctness issues found."
             )
             store.loadForTesting(
@@ -488,7 +487,6 @@ struct CodexReviewMCPHTTPServerTests {
                 targetSummary: "Included",
                 status: .succeeded,
                 summary: "Done",
-                hasFinalReview: true,
                 lastAgentMessage: longOutput
             )
             store.loadForTesting(

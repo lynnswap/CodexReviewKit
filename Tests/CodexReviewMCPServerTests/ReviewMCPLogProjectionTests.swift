@@ -32,7 +32,6 @@ struct ReviewMCPLogProjectionTests {
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
                 output: .init(
                     summary: "Done.",
-                    hasFinalReview: true,
                     lastAgentMessage: "No findings."
                 )
             ),
@@ -101,7 +100,6 @@ struct ReviewMCPLogProjectionTests {
                     lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
                     output: .init(
                         summary: "Done.",
-                        hasFinalReview: true,
                         lastAgentMessage: "stale fallback"
                     )
                 ),

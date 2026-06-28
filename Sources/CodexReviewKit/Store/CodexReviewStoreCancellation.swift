@@ -50,7 +50,6 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.cancellation = cancellation
         runRecord.core.lifecycle.status = .cancelled
         runRecord.core.output.summary = cancellation.message
-        runRecord.core.output.hasFinalReview = false
         runRecord.core.lifecycle.errorMessage =
             cancellation.message.nilIfEmpty
             ?? runRecord.core.lifecycle.errorMessage
@@ -272,7 +271,6 @@ extension CodexReviewStore {
             } else {
                 runRecord.core.output.summary = "Failed to cancel review."
             }
-            runRecord.core.output.hasFinalReview = false
             runRecord.core.lifecycle.errorMessage =
                 resolvedError
                 ?? reason.nilIfEmpty

@@ -891,8 +891,6 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.output.summary = summary
         runRecord.core.output.lastAgentMessage = finalReviewText ?? summary
-        runRecord.core.output.hasFinalReview = finalReviewText != nil
-        runRecord.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalReviewText)
         if let result = resultText,
             result != previousAgentMessage
         {
@@ -981,8 +979,6 @@ private extension ReviewRunRecord {
 
     func resetReviewAttemptOutputForRecovery() {
         core.output.lastAgentMessage = nil
-        core.output.hasFinalReview = false
-        core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
         latestAgentMessageItemID = nil
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)

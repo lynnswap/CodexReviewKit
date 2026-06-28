@@ -55,7 +55,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(running.runID == "run-1")
             #expect(running.core.lifecycle.status == .running)
-            #expect(running.core.output.hasFinalReview == false)
+            #expect(running.core.output.lastAgentMessage == nil)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let final = try await store.awaitReview(
@@ -147,7 +147,7 @@ struct CodexReviewStoreCommandTests {
             )
 
             #expect(snapshot.core.lifecycle.status == .running)
-            #expect(snapshot.core.output.hasFinalReview == false)
+            #expect(snapshot.core.output.lastAgentMessage == nil)
         }
     }
 
@@ -273,10 +273,10 @@ struct CodexReviewStoreCommandTests {
                         """))
             let read = try await result
 
-            #expect(read.core.output.hasFinalReview)
-            #expect(read.core.output.reviewResult?.state == .hasFindings)
-            #expect(read.core.output.reviewResult?.findingCount == 1)
-            #expect(read.core.output.reviewResult?.findings.first?.title == "[P2] Add parser tests")
+            let parsedResult = ParsedReviewResult.parse(finalReviewText: read.core.reviewText)
+            #expect(parsedResult.state == .hasFindings)
+            #expect(parsedResult.findingCount == 1)
+            #expect(parsedResult.findings.first?.title == "[P2] Add parser tests")
         }
     }
 
@@ -1524,7 +1524,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.output.summary == "Stop")
-            #expect(read.core.output.hasFinalReview == false)
+            #expect(read.core.output.lastAgentMessage == nil)
         }
     }
 

@@ -90,7 +90,8 @@ private extension CodexReviewAPI.Read.Result {
                 cancellable: cancellable
             ),
             "output": core.output.structuredContent(
-                review: log.finalResult?.nilIfEmpty ?? core.reviewText
+                review: log.finalResult?.nilIfEmpty ?? core.reviewText,
+                finalReview: log.finalResult?.nilIfEmpty
             ),
         ]
         object["log"] =
@@ -326,7 +327,10 @@ private extension CodexReviewAPI.Run.ListItem {
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "output": core.output.structuredContent(review: core.reviewText),
+            "output": core.output.structuredContent(
+                review: core.reviewText,
+                finalReview: core.finalReviewText
+            ),
         ])
     }
 }
@@ -357,7 +361,10 @@ private extension CodexReviewAPI.Cancel.Outcome {
                 elapsedSeconds: nil,
                 cancellable: false
             ),
-            "output": core.output.structuredContent(review: core.reviewText),
+            "output": core.output.structuredContent(
+                review: core.reviewText,
+                finalReview: core.finalReviewText
+            ),
         ])
     }
 }
@@ -391,14 +398,24 @@ private extension ReviewRunCore.Lifecycle {
     }
 }
 
+private extension ReviewRunCore {
+    var finalReviewText: String? {
+        guard lifecycle.status == .succeeded else {
+            return nil
+        }
+        return reviewText.nilIfEmpty
+    }
+}
+
 private extension ReviewRunCore.Output {
-    func structuredContent(review: String) -> Value {
-        .object([
+    func structuredContent(review: String, finalReview: String?) -> Value {
+        let finalReview = finalReview?.nilIfEmpty
+        return .object([
             "summary": .string(summary),
             "review": .string(review),
-            "hasFinalReview": .bool(hasFinalReview),
-            "lastAgentMessage": lastAgentMessage.map(Value.string) ?? .null,
-            "reviewResult": reviewResult.map { $0.structuredContent() } ?? .null,
+            "hasFinalReview": .bool(finalReview != nil),
+            "lastAgentMessage": finalReview.map(Value.string) ?? .null,
+            "reviewResult": ParsedReviewResult.parse(finalReviewText: finalReview).structuredContent(),
         ])
     }
 }

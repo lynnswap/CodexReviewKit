@@ -50,20 +50,14 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
 
     public struct Output: Codable, Sendable, Hashable {
         public internal(set) var summary: String
-        public internal(set) var hasFinalReview: Bool
         public internal(set) var lastAgentMessage: String?
-        public internal(set) var reviewResult: ParsedReviewResult?
 
         public init(
             summary: String,
-            hasFinalReview: Bool = false,
-            lastAgentMessage: String? = nil,
-            reviewResult: ParsedReviewResult? = nil
+            lastAgentMessage: String? = nil
         ) {
             self.summary = summary
-            self.hasFinalReview = hasFinalReview
             self.lastAgentMessage = lastAgentMessage
-            self.reviewResult = reviewResult
         }
     }
 
@@ -87,11 +81,6 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
 
     public var reviewText: String {
         if lifecycle.status == .cancelled {
-            if output.hasFinalReview,
-               let lastAgentMessage = output.lastAgentMessage?.nilIfEmpty
-            {
-                return lastAgentMessage
-            }
             if let errorMessage = lifecycle.errorMessage?.nilIfEmpty {
                 return errorMessage
             }

@@ -12,7 +12,6 @@ struct ReviewRunRecordTests {
             targetSummary: "Uncommitted changes",
             status: .succeeded,
             summary: "Succeeded.",
-            hasFinalReview: true,
             lastAgentMessage: "No findings."
         )
         #expect(succeeded.core.lifecycle.status == .succeeded)
@@ -25,7 +24,6 @@ struct ReviewRunRecordTests {
             targetSummary: "Uncommitted changes",
             status: .succeeded,
             summary: "Succeeded.",
-            hasFinalReview: false,
             lastAgentMessage: "Succeeded."
         )
         #expect(succeededWithoutFinalReview.core.lifecycle.status == .succeeded)
