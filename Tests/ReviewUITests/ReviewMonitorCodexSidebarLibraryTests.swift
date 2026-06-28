@@ -413,7 +413,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             updatedAt: Date(timeIntervalSince1970: 4_000)
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
+        store.loadReviewLifecycleForTesting(
             serverState: .running,
             workspaces: [CodexReviewWorkspace(cwd: repo.path)],
             reviewRuns: [legacyJob]

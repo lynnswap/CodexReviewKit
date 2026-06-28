@@ -851,7 +851,7 @@ struct ReviewUITests {
             summary: "Review complete."
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
+        store.loadReviewLifecycleForTesting(
             serverState: .running,
             workspaces: [CodexReviewWorkspace(cwd: activeChat.cwd)],
             reviewRuns: [activeRun, recentRun]
@@ -5320,7 +5320,6 @@ extension CodexReviewStore {
             authState: authState,
             serverURL: serverURL,
             workspaces: [],
-            reviewRuns: [],
             settingsSnapshot: settingsSnapshot
         )
         installPreviewChatLogSourceForTesting(on: self, fixtures: fixtures)
@@ -5331,7 +5330,38 @@ extension CodexReviewStore {
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
-        reviewRuns: [ReviewRunRecord] = [],
+        settingsSnapshot: CodexReviewSettings.Snapshot? = nil
+    ) {
+        loadForTesting(
+            serverState: serverState,
+            authPhase: authState.phase,
+            account: authState.accountEmail.map {
+                CodexReviewAccount(
+                    email: $0,
+                    planType: authState.accountPlanType ?? "pro"
+                )
+            },
+            persistedAccounts: authState.accountEmail.map {
+                [
+                    CodexReviewAccount(
+                        email: $0,
+                        planType: authState.accountPlanType ?? "pro"
+                    )
+                ]
+            } ?? [],
+            serverURL: serverURL,
+            workspaces: workspaces,
+            reviewRuns: [],
+            settingsSnapshot: settingsSnapshot
+        )
+    }
+
+    func loadReviewLifecycleForTesting(
+        serverState: CodexReviewServerState,
+        authState: TestAuthState = .signedOut,
+        serverURL: URL? = nil,
+        workspaces: [CodexReviewWorkspace],
+        reviewRuns: [ReviewRunRecord],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(
