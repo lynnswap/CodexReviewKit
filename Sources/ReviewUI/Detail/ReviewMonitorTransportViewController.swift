@@ -1,6 +1,5 @@
 import AppKit
 import CodexKit
-import CodexReviewKit
 import ObservationBridge
 
 @MainActor
@@ -12,18 +11,14 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private let codexModelSource: ReviewMonitorCodexModelSource?
     private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let uiState: ReviewMonitorUIState
-    private let store: CodexReviewStore
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
     private var logRenderer = ReviewMonitorLogRenderer()
-    private let workspaceFindingsView = ReviewMonitorWorkspaceFindingsView()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
-    private var selectedWorkspaceFindingsObservation: PortableObservationTracking.Token?
     private var selectedChatLogTask: Task<Void, Never>?
     private var boundChatID: CodexThreadID?
-    private var boundWorkspaceSection: ReviewMonitorWorkspaceSectionSelection?
     private var displayedSelection: ReviewMonitorSelectionID?
     private var logScrollTargetsByChatID: [CodexThreadID: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
     private var logRenderTask: Task<Void, Never>?
@@ -32,13 +27,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private var hasAppliedBoundLog = false
 
     convenience init(
-        store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         modelContext: CodexModelContext,
         previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
     ) {
         self.init(
-            store: store,
             uiState: uiState,
             codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
             previewChatLogSource: previewChatLogSource
@@ -46,14 +39,12 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     init(
-        store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
     ) {
         self.codexModelSource = codexModelSource
         self.previewChatLogSource = previewChatLogSource
-        self.store = store
         self.uiState = uiState
         self.selectedCodexChat = ReviewMonitorSelectedCodexChat(modelSource: codexModelSource)
         super.init(nibName: nil, bundle: nil)
@@ -66,7 +57,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     isolated deinit {
         selectionObservation?.cancel()
-        selectedWorkspaceFindingsObservation?.cancel()
         selectedChatLogTask?.cancel()
         logRenderTask?.cancel()
     }
@@ -95,7 +85,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         placeholderView.translatesAutoresizingMaskIntoConstraints = false
 
         view.addSubview(logScrollView)
-        view.addSubview(workspaceFindingsView)
         view.addSubview(placeholderView)
 
         displayedContentConstraints = [
@@ -108,11 +97,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         NSLayoutConstraint.activate(
             displayedContentConstraints
                 + [
-                    workspaceFindingsView.topAnchor.constraint(equalTo: view.topAnchor),
-                    workspaceFindingsView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
-                    workspaceFindingsView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
-                    workspaceFindingsView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
                     placeholderView.topAnchor.constraint(equalTo: view.topAnchor),
                     placeholderView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
                     placeholderView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
@@ -137,8 +121,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
         switch selection {
-        case .workspaceSection(let selectedSection):
-            return boundWorkspaceSection != selectedSection || displayedSelection != selection?.id
+        case .workspaceSection:
+            return displayedSelection != selection?.id
         case .workspace:
             return displayedSelection != selection?.id
         case .chat(let selectedChat):
@@ -151,36 +135,30 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func updatePresentation(selection: ReviewMonitorSelection?) {
         switch selection {
-        case .workspaceSection(let selectedSection):
+        case .workspaceSection:
             clearDisplayedLogSelection()
-            displayWorkspaceSection(selectedSection)
+            displayPlaceholder(.noFindings)
             logScrollView.isHidden = true
             displayedSelection = selection?.id
 
         case .workspace:
             clearDisplayedLogSelection()
-            clearDisplayedWorkspace()
             displayPlaceholder(.noFindings)
             logScrollView.isHidden = true
-            workspaceFindingsView.isHidden = true
             displayedSelection = selection?.id
 
         case .chat:
-            clearDisplayedWorkspace()
             if case .chat(let selectedChat) = selection {
                 displayChat(selectedChat)
             }
             hidePlaceholder()
             logScrollView.isHidden = false
-            workspaceFindingsView.isHidden = true
             displayedSelection = selection?.id
 
         case nil:
             clearDisplayedLogSelection()
-            clearDisplayedWorkspace()
             displayPlaceholder(.noSelection)
             logScrollView.isHidden = true
-            workspaceFindingsView.isHidden = true
             displayedSelection = nil
         }
     }
@@ -221,58 +199,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         resetLogRenderer()
         logScrollView.resetFindStateForContentReuse()
         logScrollView.clear()
-    }
-
-    private func displayWorkspaceSection(_ section: ReviewMonitorWorkspaceSectionSelection) {
-        if boundWorkspaceSection != section {
-            selectedWorkspaceFindingsObservation?.cancel()
-            selectedWorkspaceFindingsObservation = nil
-            boundWorkspaceSection = section
-            bindWorkspaceSectionObservation(section)
-        }
-    }
-
-    private func clearDisplayedWorkspace() {
-        selectedWorkspaceFindingsObservation?.cancel()
-        selectedWorkspaceFindingsObservation = nil
-        boundWorkspaceSection = nil
-        workspaceFindingsView.clear()
-        workspaceFindingsView.isHidden = true
-    }
-
-    private func bindWorkspaceSectionObservation(_ section: ReviewMonitorWorkspaceSectionSelection) {
-        selectedWorkspaceFindingsObservation = withPortableContinuousObservation { [weak self] _ in
-            guard let self,
-                self.boundWorkspaceSection?.id == section.id
-            else {
-                return
-            }
-            let entries = CodexReviewWorkspaceFindingsIndex(store: self.store)
-                .entries(forWorkspaceCWDs: section.workspaceCWDs)
-                .map(ReviewMonitorWorkspaceFindingsView.Entry.init)
-            self.renderWorkspaceFindings(entries: entries)
-        }
-    }
-
-    @discardableResult
-    private func renderWorkspaceFindings(entries: [ReviewMonitorWorkspaceFindingsView.Entry]) -> Bool {
-        let rendered = workspaceFindingsView.render(entries: entries)
-        let presentationChanged = updateWorkspaceFindingsPresentation(hasFindings: entries.isEmpty == false)
-        return rendered || presentationChanged
-    }
-
-    @discardableResult
-    private func updateWorkspaceFindingsPresentation(hasFindings: Bool) -> Bool {
-        if hasFindings {
-            let placeholderChanged = hidePlaceholder()
-            let findingsChanged = workspaceFindingsView.isHidden
-            workspaceFindingsView.isHidden = false
-            return placeholderChanged || findingsChanged
-        }
-
-        let findingsChanged = workspaceFindingsView.isHidden == false
-        workspaceFindingsView.isHidden = true
-        return displayPlaceholder(.noFindings) || findingsChanged
     }
 
     @discardableResult
@@ -453,38 +379,22 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @discardableResult
     func performDisplayedTextFinderAction(_ sender: Any?) -> Bool {
         switch displayedSelection {
-        case .workspaceSection:
-            return workspaceFindingsView.performDisplayedTextFinderAction(sender)
         case .chat:
             return logScrollView.performDisplayedTextFinderAction(sender)
-        case .workspace, nil:
+        case .workspaceSection, .workspace, nil:
             return false
         }
     }
 
     func validateDisplayedTextFinderAction(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch displayedSelection {
-        case .workspaceSection:
-            return workspaceFindingsView.validateDisplayedTextFinderAction(item)
         case .chat:
             return logScrollView.validateDisplayedTextFinderAction(item)
-        case .workspace, nil:
+        case .workspaceSection, .workspace, nil:
             return false
         }
     }
 
-}
-private extension ReviewMonitorWorkspaceFindingsView.Entry {
-    init(_ entry: CodexReviewWorkspaceFindingEntry) {
-        self.init(
-            threadID: entry.threadID,
-            targetSummary: entry.targetSummary,
-            priority: entry.priority,
-            title: entry.title,
-            body: entry.body,
-            locationText: entry.locationText
-        )
-    }
 }
 
 #if DEBUG
@@ -495,12 +405,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
             let summary: String?
             let log: String
             let isShowingEmptyState: Bool
-        }
-
-        struct WorkspaceFindingSnapshotForTesting: Sendable, Equatable {
-            let text: String
-            let isShowingNoFindingsState: Bool
-            let isShowingFindingsList: Bool
         }
 
         enum DisplayedSelectionForTesting: Sendable, Equatable {
@@ -522,10 +426,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
             selectedChatLogTask
         }
 
-        var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
-            selectedWorkspaceFindingsObservation
-        }
-
         var selectedCodexChatIDForTesting: String? {
             selectedCodexChat.chat?.id.rawValue
         }
@@ -544,9 +444,7 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
                 return selectionObservation
             }
             switch expectedSelection {
-            case .workspaceSection:
-                return selectedWorkspaceFindingsObservation ?? selectionObservation
-            case .workspace, .chat:
+            case .workspaceSection, .workspace, .chat:
                 return selectionObservation
             case nil:
                 return selectionObservation
@@ -559,10 +457,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
 
         var displayedLogForTesting: String {
             logScrollView.displayedTextForTesting
-        }
-
-        var displayedWorkspaceFindingsForTesting: String {
-            workspaceFindingsView.displayedTextForTesting
         }
 
         var displayedSummaryForTesting: String? {
@@ -579,10 +473,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
 
         var isShowingNoFindingsStateForTesting: Bool {
             placeholderViewController.view.isHidden == false && placeholderViewController.content == .noFindings
-        }
-
-        var isShowingWorkspaceFindingsListForTesting: Bool {
-            workspaceFindingsView.isShowingFindingsListForTesting
         }
 
         var logAppendCountForTesting: Int {
@@ -970,100 +860,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
             }
         }
 
-        var workspaceFindingSnapshotForTesting: WorkspaceFindingSnapshotForTesting {
-            .init(
-                text: displayedWorkspaceFindingsForTesting,
-                isShowingNoFindingsState: isShowingNoFindingsStateForTesting,
-                isShowingFindingsList: isShowingWorkspaceFindingsListForTesting
-            )
-        }
-
-        var workspaceFindingsContentWidthForTesting: CGFloat {
-            view.layoutSubtreeIfNeeded()
-            return workspaceFindingsView.contentWidthForTesting
-        }
-
-        var workspaceFindingsFrameForTesting: NSRect {
-            workspaceFindingsView.frame
-        }
-
-        var workspaceFindingsTextContainerWidthForTesting: CGFloat {
-            view.layoutSubtreeIfNeeded()
-            return workspaceFindingsView.textContainerWidthForTesting
-        }
-
-        var workspaceFindingsScrollFrameForTesting: NSRect {
-            workspaceFindingsView.scrollFrameForTesting
-        }
-
-        var workspaceFindingsDocumentFrameForTesting: NSRect {
-            workspaceFindingsView.documentFrameForTesting
-        }
-
-        var workspaceFindingsNoFindingsFrameForTesting: NSRect {
-            placeholderViewController.view.frame
-        }
-
-        var workspaceFindingsContentInsetsForTesting: NSEdgeInsets {
-            workspaceFindingsView.contentInsetsForTesting
-        }
-
-        var workspaceFindingsVerticalScrollOffsetForTesting: CGFloat {
-            workspaceFindingsView.verticalScrollOffsetForTesting
-        }
-
-        var workspaceFindingsMinimumVerticalScrollOffsetForTesting: CGFloat {
-            workspaceFindingsView.minimumVerticalScrollOffsetForTesting
-        }
-
-        var workspaceFindingsMaximumVerticalScrollOffsetForTesting: CGFloat {
-            workspaceFindingsView.maximumVerticalScrollOffsetForTesting
-        }
-
-        var workspaceFindingsAutomaticallyAdjustsContentInsetsForTesting: Bool {
-            workspaceFindingsView.automaticallyAdjustsContentInsetsForTesting
-        }
-
-        var workspaceFindingsTextIsSelectableForTesting: Bool {
-            workspaceFindingsView.isTextSelectableForTesting
-        }
-
-        var workspaceFindingsTextIsEditableForTesting: Bool {
-            workspaceFindingsView.isTextEditableForTesting
-        }
-
-        var workspaceFindingsUsesFindBarForTesting: Bool {
-            workspaceFindingsView.usesFindBarForTesting
-        }
-
-        var workspaceFindingsIsIncrementalSearchingEnabledForTesting: Bool {
-            workspaceFindingsView.isIncrementalSearchingEnabledForTesting
-        }
-
-        var workspaceFindingsFindBarVisibleForTesting: Bool {
-            workspaceFindingsView.isFindBarVisibleForTesting
-        }
-
-        var workspaceFindingsPriorityPrefixCountForTesting: Int {
-            workspaceFindingsView.priorityPrefixCountForTesting
-        }
-
-        var workspaceFindingsTextAttachmentCountForTesting: Int {
-            workspaceFindingsView.textAttachmentCountForTesting
-        }
-
-        var workspaceFindingsThreadBackgroundRangeCountForTesting: Int {
-            workspaceFindingsView.threadBackgroundRangeCountForTesting
-        }
-
-        var workspaceFindingsAccessibilityValueForTesting: String? {
-            workspaceFindingsView.accessibilityValueForTesting
-        }
-
-        var workspaceFindingsRenderedStorageStringForTesting: String {
-            workspaceFindingsView.renderedStorageStringForTesting
-        }
-
         func scrollLogToTopForTesting() {
             logScrollView.scrollToTopForTesting()
         }
@@ -1237,10 +1033,8 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
                     resetLogRenderer()
                     boundChatID = chatID
                 }
-                clearDisplayedWorkspace()
                 hidePlaceholder()
                 logScrollView.isHidden = false
-                workspaceFindingsView.isHidden = true
                 displayedSelection = .chat(chatID)
             case .workspaceSection, .workspace:
                 break

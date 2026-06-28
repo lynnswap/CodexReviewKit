@@ -88,7 +88,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             previewChatLogSource: previewChatLogSource
         )
         let transportViewController = ReviewMonitorTransportViewController(
-            store: store,
             uiState: uiState,
             codexModelSource: codexModelSource,
             previewChatLogSource: previewChatLogSource

@@ -1714,22 +1714,6 @@ extension ReviewUITests {
         #expect(snapshot.items.last?.kind.rawValue == "commandExecution")
     }
 
-    @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
-        let firstWorkspace = try #require(store.workspaces.sorted { $0.cwd < $1.cwd }.first)
-        let harness = makeWindowHarness(store: store)
-        let viewController = harness.viewController
-        let window = harness.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectWorkspaceForTesting(firstWorkspace)
-
-        _ = try await awaitTransportRender(transport)
-        let accessibilityValue = try #require(transport.workspaceFindingsAccessibilityValueForTesting)
-        #expect(transport.workspaceFindingSnapshotForTesting.isShowingFindingsList)
-        #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
-        #expect(accessibilityValue.isEmpty == false)
-    }
 }
 
 @MainActor
