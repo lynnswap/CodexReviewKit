@@ -385,7 +385,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            let existing = CodexReviewJob.makeForTesting(
+            let existing = ReviewRunRecord.makeForTesting(
                 id: "job-existing",
                 cwd: "/tmp/project",
                 targetSummary: "Existing",
@@ -445,21 +445,21 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
         )
         let workspace = CodexReviewWorkspace(cwd: "/tmp/project")
-        let firstJob = CodexReviewJob.makeForTesting(
+        let firstJob = ReviewRunRecord.makeForTesting(
             id: "job-first",
             cwd: workspace.cwd,
             targetSummary: "First",
             status: .running,
             summary: "Running"
         )
-        let secondJob = CodexReviewJob.makeForTesting(
+        let secondJob = ReviewRunRecord.makeForTesting(
             id: "job-second",
             cwd: workspace.cwd,
             targetSummary: "Second",
             status: .running,
             summary: "Running"
         )
-        let thirdJob = CodexReviewJob.makeForTesting(
+        let thirdJob = ReviewRunRecord.makeForTesting(
             id: "job-third",
             cwd: workspace.cwd,
             targetSummary: "Third",
@@ -1680,7 +1680,7 @@ struct CodexReviewStoreCommandTests {
             idGenerator: .init(next: { "job-1" })
         )
         try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            let running = CodexReviewJob.makeForTesting(
+            let running = ReviewRunRecord.makeForTesting(
                 id: "running-job",
                 sessionID: "session-1",
                 cwd: "/tmp/project",

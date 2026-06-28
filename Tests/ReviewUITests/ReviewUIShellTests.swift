@@ -1738,7 +1738,7 @@ private func renderDetailLogForShellLayoutTesting(
     _ text: String,
     in transport: ReviewMonitorTransportViewController,
     viewController: ReviewMonitorSplitViewController,
-    job: CodexReviewJob
+    job: ReviewRunRecord
 ) async throws {
     viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
     let chatID = try #require(job.reviewChatIDForTesting)

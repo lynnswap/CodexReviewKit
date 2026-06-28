@@ -1,6 +1,6 @@
 import Foundation
 
-extension CodexReviewJob {
+extension ReviewRunRecord {
     package static func makeForTesting(
         id: String = UUID().uuidString,
         sessionID: String = "session-1",
@@ -20,8 +20,8 @@ extension CodexReviewJob {
         lastAgentMessage: String? = "",
         errorMessage: String? = nil,
         exitCode: Int? = nil
-    ) -> CodexReviewJob {
-        CodexReviewJob(
+    ) -> ReviewRunRecord {
+        ReviewRunRecord(
             id: id,
             sessionID: sessionID,
             cwd: cwd,

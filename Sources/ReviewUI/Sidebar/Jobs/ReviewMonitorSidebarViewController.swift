@@ -720,7 +720,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func cancellableReviewJob(
         for chat: ReviewMonitorCodexSidebarSnapshot.Chat
-    ) -> CodexReviewJob? {
+    ) -> ReviewRunRecord? {
         store.orderedJobs.first { job in
             guard job.isTerminal == false,
                 let chatID = job.sidebarChatID
@@ -2029,7 +2029,7 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
     #endif
 }
 
-private extension CodexReviewJob {
+private extension ReviewRunRecord {
     var sidebarChatID: CodexThreadID? {
         if let reviewThreadID = nonEmptySidebarChatID(core.run.reviewThreadID) {
             return CodexThreadID(rawValue: reviewThreadID)

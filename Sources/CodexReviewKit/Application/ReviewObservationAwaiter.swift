@@ -4,7 +4,7 @@ import ObservationBridge
 @MainActor
 public enum ReviewObservationAwaiter {
     public static func waitUntilTerminal(
-        job: CodexReviewJob,
+        job: ReviewRunRecord,
         timeout: Duration? = nil
     ) async -> Bool {
         if job.isTerminal {
@@ -36,7 +36,7 @@ private final class ReviewTerminalObservationWaiter {
     private var isResolved = false
 
     func begin(
-        job: CodexReviewJob,
+        job: ReviewRunRecord,
         timeout: Duration?,
         continuation: CheckedContinuation<Bool, Never>
     ) {

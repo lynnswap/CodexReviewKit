@@ -20,7 +20,7 @@ extension CodexReviewStore {
         persistedAccounts: [CodexReviewAccount]? = nil,
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
-        jobs: [CodexReviewJob] = [],
+        jobs: [ReviewRunRecord] = [],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         precondition(
@@ -61,7 +61,7 @@ extension CodexReviewStore {
         }
 
         self.workspaces = Set(resolvedWorkspaces)
-        var jobsByCWD: [String: [CodexReviewJob]] = [:]
+        var jobsByCWD: [String: [ReviewRunRecord]] = [:]
         let resolvedJobs = jobs.filter { job in
             resolvedWorkspaces.contains(where: { $0.cwd == job.cwd })
         }

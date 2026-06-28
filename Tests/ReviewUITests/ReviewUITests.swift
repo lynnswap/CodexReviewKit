@@ -22,7 +22,7 @@ private extension CodexReviewAuthModel {
 }
 
 @MainActor
-func chatIDForTesting(_ job: CodexReviewJob) -> CodexThreadID {
+func chatIDForTesting(_ job: ReviewRunRecord) -> CodexThreadID {
     guard let chatID = job.reviewChatIDForTesting else {
         Issue.record("Expected review job \(job.id) to have a chat id.")
         return CodexThreadID(rawValue: job.id)
@@ -917,7 +917,7 @@ struct ReviewUITests {
     }
 
     @Test func detailPaneRendersSelectedReviewChatLogProjection() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-monitor-log",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -995,7 +995,7 @@ struct ReviewUITests {
     }
 
     @Test func detailPaneRendersSelectedChatStreamUpdates() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-selected-chat-stream-detail",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1071,7 +1071,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedChatFailedCommandPreservesFailedPanelStatus() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-selected-chat-failed-command",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1127,7 +1127,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedChatRunningCommandOutputStaysActive() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-selected-chat-running-command",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1185,7 +1185,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedChatFileChangePreservesPanelTitle() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-selected-chat-file-change",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1247,7 +1247,7 @@ struct ReviewUITests {
     }
 
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-context-compaction-marker",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1327,7 +1327,7 @@ struct ReviewUITests {
             exitCode: 0,
             commandStatus: "completed"
         )
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-command-output-panel",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1483,7 +1483,7 @@ struct ReviewUITests {
         let secondOutput = (1...80)
             .map { "second output line \($0)" }
             .joined(separator: "\n")
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-command-output-panel-isolation",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1551,7 +1551,7 @@ struct ReviewUITests {
     }
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-command-start-panel",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -1614,7 +1614,7 @@ struct ReviewUITests {
         let outputText = (1...5)
             .map { "output line \($0)" }
             .joined(separator: "\n")
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-command-output-find-refresh",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2372,7 +2372,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedReviewChatLogAppendUsesAppendPath() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-append",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2420,7 +2420,7 @@ struct ReviewUITests {
     }
 
     @Test func separatorPrefixedProgressAppendDoesNotUseGenericWordGlow() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-progress-separator-append",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2465,7 +2465,7 @@ struct ReviewUITests {
     @Test func logCanonicalEquivalentPrefixReloadsWhenUTF16LengthChanges() async throws {
         let decomposedPrefix = "Caf\u{0065}\u{0301}"
         let precomposedUpdate = "Caf\u{00E9} appended"
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-canonical-append",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2501,7 +2501,7 @@ struct ReviewUITests {
     }
 
     @Test func coalescedLogTextUpdateDisplaysCombinedSuffix() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-coalesced",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2534,7 +2534,7 @@ struct ReviewUITests {
     }
 
     @Test func coalescedProgressSuffixDisplaysLatestProgress() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-coalesced-progress",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2567,7 +2567,7 @@ struct ReviewUITests {
     }
 
     @Test func coalescedMixedReasoningAndProgressSuffixAnimatesOnlyReasoningRange() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-coalesced-mixed-reasoning-progress",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2655,7 +2655,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedReviewChatGroupedReplacementUsesReplacementPath() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-reload",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2695,7 +2695,7 @@ struct ReviewUITests {
 
     @Test func coalescedCommandAppendAfterReasoningKeepsReasoningAndDoesNotReload() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-reasoning-command-append",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2760,7 +2760,7 @@ struct ReviewUITests {
     }
 
     @Test func selectedReviewChatMarkdownAppendReplacesTailBlockWithoutReload() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-markdown-append-fallback",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2798,7 +2798,7 @@ struct ReviewUITests {
     }
 
     @Test func staleGroupedReplacementIsNotReplayedAfterHiddenCommandOutput() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-stale-replacement",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2879,7 +2879,7 @@ struct ReviewUITests {
     }
 
     @Test func reasoningAppendUsesWordGlowAndReduceMotionDisablesGlow() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-reasoning-glow",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2928,7 +2928,7 @@ struct ReviewUITests {
     }
 
     @Test func screenSwitchBacklogDoesNotAnimateButNextVisibleReasoningAppendDoes() async throws {
-        let firstJob = CodexReviewJob.makeForTesting(
+        let firstJob = ReviewRunRecord.makeForTesting(
             id: "job-reasoning-switch-backlog",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -2941,7 +2941,7 @@ struct ReviewUITests {
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
-        let secondJob = CodexReviewJob.makeForTesting(
+        let secondJob = ReviewRunRecord.makeForTesting(
             id: "job-other-selected",
             cwd: "/tmp/workspace-beta",
             targetSummary: "Uncommitted changes",
@@ -2991,7 +2991,7 @@ struct ReviewUITests {
     }
 
     @Test func reasoningWordGlowCompletesAndClearsRenderingAttributes() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-reasoning-glow-completion",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -3037,7 +3037,7 @@ struct ReviewUITests {
     }
 
     @Test func delayedFirstWordGlowTickDoesNotImmediatelyClearAnimation() async throws {
-        let job = CodexReviewJob.makeForTesting(
+        let job = ReviewRunRecord.makeForTesting(
             id: "job-reasoning-glow-delayed-first-tick",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
@@ -4941,8 +4941,8 @@ func makeJob(
     reviewResult: ParsedReviewResult? = nil,
     logText: String = "",
     rawLogText: String = ""
-) -> CodexReviewJob {
-    let job = CodexReviewJob.makeForTesting(
+) -> ReviewRunRecord {
+    let job = ReviewRunRecord.makeForTesting(
         id: id,
         cwd: cwd,
         targetSummary: targetSummary,
@@ -4980,7 +4980,7 @@ func reviewChatCellTestChat(
 }
 
 @MainActor
-func makeWorkspaces(from jobs: [CodexReviewJob]) -> [CodexReviewWorkspace] {
+func makeWorkspaces(from jobs: [ReviewRunRecord]) -> [CodexReviewWorkspace] {
     var seenCWDs: Set<String> = []
     var order: [String] = []
     for job in jobs {
@@ -4993,7 +4993,7 @@ func makeWorkspaces(from jobs: [CodexReviewJob]) -> [CodexReviewWorkspace] {
 }
 
 @MainActor
-func makeSidebarContent(from jobs: [CodexReviewJob]) -> (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]) {
+func makeSidebarContent(from jobs: [ReviewRunRecord]) -> (workspaces: [CodexReviewWorkspace], jobs: [ReviewRunRecord]) {
     return (makeWorkspaces(from: jobs), Array(jobs.reversed()))
 }
 
@@ -5173,7 +5173,7 @@ extension CodexReviewStore {
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
-        jobs: [CodexReviewJob] = [],
+        jobs: [ReviewRunRecord] = [],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         installPreviewChatLogSourceForTesting(on: self, jobs: jobs)
@@ -5205,7 +5205,7 @@ extension CodexReviewStore {
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
-        content: (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]),
+        content: (workspaces: [CodexReviewWorkspace], jobs: [ReviewRunRecord]),
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(

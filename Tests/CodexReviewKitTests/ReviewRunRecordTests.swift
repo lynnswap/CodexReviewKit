@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import CodexReviewKit
 
-@Suite("Codex review job")
+@Suite("Review run record")
 @MainActor
-struct CodexReviewJobTests {
+struct ReviewRunRecordTests {
     @Test func prebuiltTerminalJobsInitializeTimelineTerminalState() {
-        let succeeded = CodexReviewJob.makeForTesting(
+        let succeeded = ReviewRunRecord.makeForTesting(
             id: "job-terminal-succeeded",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
@@ -19,7 +19,7 @@ struct CodexReviewJobTests {
         #expect(succeeded.timeline.terminalSummary == "Succeeded.")
         #expect(succeeded.timeline.terminalResult == "No findings.")
 
-        let succeededWithoutFinalReview = CodexReviewJob.makeForTesting(
+        let succeededWithoutFinalReview = ReviewRunRecord.makeForTesting(
             id: "job-terminal-succeeded-no-review",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
@@ -32,7 +32,7 @@ struct CodexReviewJobTests {
         #expect(succeededWithoutFinalReview.timeline.terminalSummary == "Succeeded.")
         #expect(succeededWithoutFinalReview.timeline.terminalResult == nil)
 
-        let failed = CodexReviewJob.makeForTesting(
+        let failed = ReviewRunRecord.makeForTesting(
             id: "job-terminal-failed",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
@@ -44,7 +44,7 @@ struct CodexReviewJobTests {
         #expect(failed.timeline.terminalSummary == "Backend failed.")
         #expect(failed.timeline.terminalResult == nil)
 
-        let cancelled = CodexReviewJob.makeForTesting(
+        let cancelled = ReviewRunRecord.makeForTesting(
             id: "job-terminal-cancelled",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",

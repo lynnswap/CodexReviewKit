@@ -347,7 +347,7 @@ struct CodexReviewMCPHTTPServerTests {
         )
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let included = CodexReviewJob.makeForTesting(
+            let included = ReviewRunRecord.makeForTesting(
                 id: "job-included",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -355,7 +355,7 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .succeeded,
                 summary: "Done"
             )
-            let otherSession = CodexReviewJob.makeForTesting(
+            let otherSession = ReviewRunRecord.makeForTesting(
                 id: "job-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
@@ -363,7 +363,7 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .succeeded,
                 summary: "Done"
             )
-            let otherWorkspace = CodexReviewJob.makeForTesting(
+            let otherWorkspace = ReviewRunRecord.makeForTesting(
                 id: "job-other-workspace",
                 sessionID: sessionID,
                 cwd: "/tmp/other",
@@ -410,7 +410,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let includedJob = CodexReviewJob.makeForTesting(
+            let includedJob = ReviewRunRecord.makeForTesting(
                 id: "job-in-session",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -436,7 +436,7 @@ struct CodexReviewMCPHTTPServerTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [
                     includedJob,
-                    CodexReviewJob.makeForTesting(
+                    ReviewRunRecord.makeForTesting(
                         id: "job-other-session",
                         sessionID: "other-session",
                         cwd: "/tmp/project",
@@ -498,7 +498,7 @@ struct CodexReviewMCPHTTPServerTests {
             let startedAt = Date(timeIntervalSince1970: 20)
             let completedAt = Date(timeIntervalSince1970: 23)
             let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
-            let job = CodexReviewJob.makeForTesting(
+            let job = ReviewRunRecord.makeForTesting(
                 id: "job-semantic",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -596,7 +596,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let job = CodexReviewJob.makeForTesting(
+            let job = ReviewRunRecord.makeForTesting(
                 id: "job-tool-progress",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -666,7 +666,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
+            let running = ReviewRunRecord.makeForTesting(
                 id: "job-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -676,7 +676,7 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .running,
                 summary: "Running"
             )
-            let otherSession = CodexReviewJob.makeForTesting(
+            let otherSession = ReviewRunRecord.makeForTesting(
                 id: "job-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
@@ -733,7 +733,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let completed = CodexReviewJob.makeForTesting(
+            let completed = ReviewRunRecord.makeForTesting(
                 id: "job-completed",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -743,7 +743,7 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .succeeded,
                 summary: "Done"
             )
-            let running = CodexReviewJob.makeForTesting(
+            let running = ReviewRunRecord.makeForTesting(
                 id: "job-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -795,7 +795,7 @@ struct CodexReviewMCPHTTPServerTests {
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
                 jobs: [
-                    CodexReviewJob.makeForTesting(
+                    ReviewRunRecord.makeForTesting(
                         id: "job-running-1",
                         sessionID: sessionID,
                         cwd: "/tmp/project",
@@ -805,7 +805,7 @@ struct CodexReviewMCPHTTPServerTests {
                         status: .running,
                         summary: "Running"
                     ),
-                    CodexReviewJob.makeForTesting(
+                    ReviewRunRecord.makeForTesting(
                         id: "job-running-2",
                         sessionID: sessionID,
                         cwd: "/tmp/project",
@@ -851,7 +851,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
+            let running = ReviewRunRecord.makeForTesting(
                 id: "job-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
@@ -1021,7 +1021,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let other = CodexReviewJob.makeForTesting(
+            let other = ReviewRunRecord.makeForTesting(
                 id: "job-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
@@ -1067,7 +1067,7 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let running = CodexReviewJob.makeForTesting(
+            let running = ReviewRunRecord.makeForTesting(
                 id: "job-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",

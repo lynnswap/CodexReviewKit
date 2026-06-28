@@ -164,7 +164,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
 
     @Test func storeTargetsFollowRunningJobState() {
         let account = makeAccount(lastFetchAt: now)
-        let runningJob = CodexReviewJob.makeForTesting(
+        let runningJob = ReviewRunRecord.makeForTesting(
             targetSummary: "Review changes",
             status: .running,
             startedAt: now,
@@ -304,7 +304,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     private func loadStore(
         _ store: CodexReviewStore,
         account: CodexReviewAccount,
-        jobs: [CodexReviewJob]
+        jobs: [ReviewRunRecord]
     ) {
         store.loadForTesting(
             serverState: .running,

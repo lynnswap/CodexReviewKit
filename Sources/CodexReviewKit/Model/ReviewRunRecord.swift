@@ -3,7 +3,7 @@ import Observation
 
 @MainActor
 @Observable
-public final class CodexReviewJob: Identifiable, Hashable {
+public final class ReviewRunRecord: Identifiable, Hashable {
     public nonisolated let id: String
     package let timeline: ReviewTimeline
     public let sessionID: String
@@ -55,7 +55,7 @@ public final class CodexReviewJob: Identifiable, Hashable {
         syncTimelineTerminalStateFromCore()
     }
 
-    public nonisolated static func == (lhs: CodexReviewJob, rhs: CodexReviewJob) -> Bool {
+    public nonisolated static func == (lhs: ReviewRunRecord, rhs: ReviewRunRecord) -> Bool {
         lhs.id == rhs.id
     }
 

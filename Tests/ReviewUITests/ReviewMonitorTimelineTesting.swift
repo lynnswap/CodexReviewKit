@@ -87,7 +87,7 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
     }
 }
 
-extension CodexReviewJob {
+extension ReviewRunRecord {
     @MainActor
     static func makeForTesting(
         id: String = UUID().uuidString,
@@ -109,8 +109,8 @@ extension CodexReviewJob {
         chatEntries: [ReviewChatLogEntryForTesting] = [],
         errorMessage: String? = nil,
         exitCode: Int? = nil
-    ) -> CodexReviewJob {
-        let job = CodexReviewJob.makeForTesting(
+    ) -> ReviewRunRecord {
+        let job = ReviewRunRecord.makeForTesting(
             id: id,
             sessionID: sessionID,
             cwd: cwd,
@@ -137,7 +137,7 @@ extension CodexReviewJob {
 
 @MainActor
 func seedChatLogForTesting(
-    _ job: CodexReviewJob,
+    _ job: ReviewRunRecord,
     logText: String = "",
     rawLogText: String = ""
 ) {
@@ -158,12 +158,12 @@ func seedChatLogForTesting(
 }
 
 @MainActor
-func appendChatLogEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewChatLogEntryForTesting) {
+func appendChatLogEntryForTesting(_ job: ReviewRunRecord, _ entry: ReviewChatLogEntryForTesting) {
     ReviewChatLogFixtureStore.append(entry, to: job)
 }
 
 @MainActor
-func replaceChatLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
+func replaceChatLogTextForTesting(_ job: ReviewRunRecord, _ text: String) {
     ReviewChatLogFixtureStore.replaceEntries(
         [.init(kind: .agentMessage, groupID: "fixture-log-\(job.id)", text: text.trimmingCharacters(in: .newlines))],
         for: job
@@ -171,7 +171,7 @@ func replaceChatLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
 }
 
 @MainActor
-func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, jobs: [CodexReviewJob]) {
+func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, jobs: [ReviewRunRecord]) {
     let fixtures = jobs.compactMap { try? makePreviewChatLogFixtureForTesting(job: $0) }
     let source = ReviewMonitorPreviewChatLogSource(fixtures: fixtures)
     store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
@@ -183,13 +183,13 @@ func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, jobs: [Co
 }
 
 @MainActor
-func reviewChatLogText(for job: CodexReviewJob) -> String {
+func reviewChatLogText(for job: ReviewRunRecord) -> String {
     ReviewChatLogFixtureStore.logText(for: job)
 }
 
 @MainActor
 func awaitChatRenderForTesting(
-    _ job: CodexReviewJob,
+    _ job: ReviewRunRecord,
     in transport: ReviewMonitorTransportViewController,
     allowIncrementalUpdate: Bool = true,
     timeout: Duration = .seconds(2),
@@ -245,7 +245,7 @@ func reviewChatRenderedLogMatches(_ actual: String, _ expected: String) -> Bool 
 
 @MainActor
 func makePreviewChatLogSourceForTesting(
-    job: CodexReviewJob,
+    job: ReviewRunRecord,
     items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
 ) throws -> ReviewMonitorPreviewChatLogSource {
     ReviewMonitorPreviewChatLogSource(
@@ -269,14 +269,14 @@ func makePreviewMessageItemForTesting(
 
 @MainActor
 func chatCommandOutputBlockIDForTesting(
-    _ job: CodexReviewJob,
+    _ job: ReviewRunRecord,
     itemID: String
 ) -> ReviewMonitorLog.BlockID {
     ReviewMonitorLog.BlockID("commandOutput:\(job.previewTurnIDForTesting.rawValue):\(itemID)")
 }
 
 @MainActor
-private func makePreviewChatLogFixtureForTesting(job: CodexReviewJob) throws -> ReviewMonitorPreviewChatLogFixture {
+private func makePreviewChatLogFixtureForTesting(job: ReviewRunRecord) throws -> ReviewMonitorPreviewChatLogFixture {
     try makePreviewChatLogFixtureForTesting(job: job) { _ in
         ReviewChatLogFixtureStore.items(for: job)
     }
@@ -284,7 +284,7 @@ private func makePreviewChatLogFixtureForTesting(job: CodexReviewJob) throws -> 
 
 @MainActor
 private func makePreviewChatLogFixtureForTesting(
-    job: CodexReviewJob,
+    job: ReviewRunRecord,
     items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
 ) throws -> ReviewMonitorPreviewChatLogFixture {
     let chat = try #require(job.reviewChatSelectionForTesting)
@@ -316,25 +316,25 @@ private func makePreviewChatLogFixtureForTesting(
 private enum ReviewChatLogFixtureStore {
     private static var entriesByJobID: [String: [ReviewChatLogEntryForTesting]] = [:]
 
-    static func setEntries(_ entries: [ReviewChatLogEntryForTesting], for job: CodexReviewJob) {
+    static func setEntries(_ entries: [ReviewChatLogEntryForTesting], for job: ReviewRunRecord) {
         entriesByJobID[job.id] = entries
     }
 
-    static func replaceEntries(_ entries: [ReviewChatLogEntryForTesting], for job: CodexReviewJob) {
+    static func replaceEntries(_ entries: [ReviewChatLogEntryForTesting], for job: ReviewRunRecord) {
         setEntries(entries, for: job)
         updateRetainedPreviewSource(for: job)
     }
 
-    static func append(_ entry: ReviewChatLogEntryForTesting, to job: CodexReviewJob) {
+    static func append(_ entry: ReviewChatLogEntryForTesting, to job: ReviewRunRecord) {
         entriesByJobID[job.id, default: []].append(entry)
         updateRetainedPreviewSource(for: job)
     }
 
-    static func items(for job: CodexReviewJob) -> [CodexChatItemSnapshot] {
+    static func items(for job: ReviewRunRecord) -> [CodexChatItemSnapshot] {
         makeChatItems(from: entriesByJobID[job.id, default: []], turnID: job.previewTurnIDForTesting)
     }
 
-    static func logText(for job: CodexReviewJob) -> String {
+    static func logText(for job: ReviewRunRecord) -> String {
         var projection = ReviewMonitorSelectedCodexChatLogProjection()
         var document: ReviewMonitorLog.Document?
         let snapshot = CodexChatSnapshot(
@@ -362,7 +362,7 @@ private enum ReviewChatLogFixtureStore {
         return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
     }
 
-    private static func updateRetainedPreviewSource(for job: CodexReviewJob) {
+    private static func updateRetainedPreviewSource(for job: ReviewRunRecord) {
         for support in jobStorePreviewSupportRetainers where support.contains(jobID: job.id) {
             support.upsert(job: job, items: items(for: job))
         }
@@ -383,7 +383,7 @@ private final class ReviewChatLogFixtureRetainer {
         jobIDs.contains(jobID)
     }
 
-    func upsert(job: CodexReviewJob, items: [CodexChatItemSnapshot]) {
+    func upsert(job: ReviewRunRecord, items: [CodexChatItemSnapshot]) {
         guard let chatID = job.reviewChatIDForTesting else {
             return
         }
@@ -576,7 +576,7 @@ private struct ReviewChatLogAccumulatedItem {
     }
 }
 
-extension CodexReviewJob {
+extension ReviewRunRecord {
     var reviewChatIDForTesting: CodexThreadID? {
         if let reviewThreadID = nonEmptyReviewChatProjectionStringForTesting(core.run.reviewThreadID) {
             return CodexThreadID(rawValue: reviewThreadID)

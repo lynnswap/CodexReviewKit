@@ -9,7 +9,7 @@ public final class CodexReviewStore {
     package let settings: SettingsStore
     public package(set) var serverURL: URL?
     public package(set) var workspaces: Set<CodexReviewWorkspace> = []
-    public package(set) var jobs: Set<CodexReviewJob> = []
+    public package(set) var jobs: Set<ReviewRunRecord> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
     }

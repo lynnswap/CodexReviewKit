@@ -50,8 +50,8 @@ struct ReviewObservationAwaiterTests {
         #expect(result == false)
     }
 
-    private func makeRunningJob() -> CodexReviewJob {
-        CodexReviewJob.makeForTesting(
+    private func makeRunningJob() -> ReviewRunRecord {
+        ReviewRunRecord.makeForTesting(
             id: "job-awaiter",
             targetSummary: "Uncommitted changes",
             status: .running,

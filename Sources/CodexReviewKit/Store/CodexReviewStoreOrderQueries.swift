@@ -8,7 +8,7 @@ extension CodexReviewStore {
         }
     }
 
-    package var orderedJobs: [CodexReviewJob] {
+    package var orderedJobs: [ReviewRunRecord] {
         orderedWorkspaces.flatMap { orderedJobs(in: $0) }
     }
 
@@ -20,23 +20,23 @@ extension CodexReviewStore {
         workspaces.first(where: { $0.cwd == cwd })
     }
 
-    package func workspace(containing job: CodexReviewJob) -> CodexReviewWorkspace? {
+    package func workspace(containing job: ReviewRunRecord) -> CodexReviewWorkspace? {
         workspace(cwd: job.cwd)
     }
 
-    package func job(id: String) -> CodexReviewJob? {
+    package func job(id: String) -> ReviewRunRecord? {
         jobs.first(where: { $0.id == id })
     }
 
-    package func jobs(inWorkspace cwd: String) -> [CodexReviewJob] {
+    package func jobs(inWorkspace cwd: String) -> [ReviewRunRecord] {
         jobs.filter { $0.cwd == cwd }
     }
 
-    package func orderedJobs(in workspace: CodexReviewWorkspace) -> [CodexReviewJob] {
+    package func orderedJobs(in workspace: CodexReviewWorkspace) -> [ReviewRunRecord] {
         orderedJobs(inWorkspace: workspace.cwd)
     }
 
-    package func orderedJobs(inWorkspace cwd: String) -> [CodexReviewJob] {
+    package func orderedJobs(inWorkspace cwd: String) -> [ReviewRunRecord] {
         jobs(inWorkspace: cwd).sorted {
             if $0.sortOrder == $1.sortOrder {
                 return $0.id < $1.id

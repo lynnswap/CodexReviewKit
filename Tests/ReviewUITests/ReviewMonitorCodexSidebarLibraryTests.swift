@@ -394,7 +394,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 ]
             ))
 
-        let legacyJob = CodexReviewJob.makeForTesting(
+        let legacyJob = ReviewRunRecord.makeForTesting(
             id: "legacy-job",
             cwd: repo.path,
             targetSummary: "Legacy review row",
