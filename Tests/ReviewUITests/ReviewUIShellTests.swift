@@ -699,7 +699,7 @@ extension ReviewUITests {
 
         store.loadForTesting(
             serverState: .failed("Embedded server is unavailable in preview mode."),
-            content: makeSidebarContent(from: [])
+            workspaces: []
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -710,7 +710,7 @@ extension ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             serverURL: URL(string: "http://localhost:9417/mcp"),
-            content: makeSidebarContent(from: [])
+            workspaces: []
         )
         try await waitForSidebarPresentation(
             viewController,
