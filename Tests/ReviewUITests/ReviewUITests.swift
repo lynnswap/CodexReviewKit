@@ -21,15 +21,6 @@ private extension CodexReviewAuthModel {
     }
 }
 
-@MainActor
-func chatIDForTesting(_ job: ReviewRunRecord) -> CodexThreadID {
-    guard let chatID = job.reviewChatIDForTesting else {
-        Issue.record("Expected review run \(job.id) to have a chat id.")
-        return CodexThreadID(rawValue: job.id)
-    }
-    return chatID
-}
-
 @Suite(.serialized)
 @MainActor
 struct ReviewUITests {
@@ -850,8 +841,8 @@ struct ReviewUITests {
         defer { backend.window.close() }
         let sidebar = viewController.sidebarViewControllerForTesting
 
-        let activeChatID = try #require(activeJob.reviewChatIDForTesting)
-        let recentChatID = try #require(recentJob.reviewChatIDForTesting)
+        let activeChatID = activeJob.previewChatIDForTesting
+        let recentChatID = recentJob.previewChatIDForTesting
 
         #expect(sidebar.reviewChatContextMenuTitlesForTesting(activeChatID) == ["Cancel Review"])
         #expect(sidebar.reviewChatContextMenuTitlesForTesting(recentChatID).isEmpty)
@@ -876,7 +867,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(recentJob.reviewChatSelectionForTesting)
+            chat: recentJob.reviewChatSelectionForTesting
         )
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
@@ -968,7 +959,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(job.reviewChatSelectionForTesting)
+            chat: job.reviewChatSelectionForTesting
         )
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
@@ -1019,7 +1010,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1095,7 +1086,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1151,7 +1142,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1209,7 +1200,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1283,7 +1274,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         _ = try await awaitChatRenderForTesting(
             job,
@@ -1360,7 +1351,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         _ = try await awaitChatRenderForTesting(
             job,
@@ -1522,7 +1513,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         _ = try await awaitChatRenderForTesting(
             job,
@@ -1577,7 +1568,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         _ = try await awaitChatRenderForTesting(
             job,
@@ -1641,7 +1632,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1705,7 +1696,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(activeJob.reviewChatSelectionForTesting)
+            chat: activeJob.reviewChatSelectionForTesting
         )
 
         let activeSnapshot = try await awaitChatRenderForTesting(
@@ -1718,7 +1709,7 @@ struct ReviewUITests {
         #expect(window.title == activeJob.targetSummary)
         #expect(window.subtitle == activeJob.cwd)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(recentJob.reviewChatSelectionForTesting)
+            chat: recentJob.reviewChatSelectionForTesting
         )
 
         let recentSnapshot = try await awaitChatRenderForTesting(
@@ -1757,7 +1748,7 @@ struct ReviewUITests {
         window.setContentSize(NSSize(width: 900, height: 600))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1798,7 +1789,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
@@ -1809,7 +1800,7 @@ struct ReviewUITests {
         let activeOffset = transport.logVerticalScrollOffsetForTesting
         #expect(activeOffset > 0)
         #expect(transport.isLogPinnedToBottomForTesting == false)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
@@ -1817,7 +1808,7 @@ struct ReviewUITests {
         )
 
         #expect(transport.isLogPinnedToBottomForTesting)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
@@ -1858,7 +1849,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
@@ -1867,7 +1858,7 @@ struct ReviewUITests {
 
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
@@ -1877,7 +1868,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting)
 
         appendChatLogEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeJob.previewChatIDForTesting)
         let snapshot = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
@@ -1907,7 +1898,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -1957,7 +1948,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -1966,7 +1957,7 @@ struct ReviewUITests {
 
         transport.scrollLogToOffsetForTesting(120)
         #expect(transport.logVerticalScrollOffsetForTesting > 0)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -2002,14 +1993,14 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: shortJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(longJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: longJob.previewChatIDForTesting)
         let longSnapshot = try await awaitChatRenderForTesting(
             longJob,
             in: transport,
@@ -2048,13 +2039,13 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: shortJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
@@ -2063,7 +2054,7 @@ struct ReviewUITests {
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
         replaceChatLogTextForTesting(shortJob, longLog)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: shortJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
@@ -2099,13 +2090,13 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
@@ -2142,7 +2133,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
@@ -2151,7 +2142,7 @@ struct ReviewUITests {
         )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatIDForTesting)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.previewChatIDForTesting)
         #expect(transport.renderSnapshotForTesting == selectedSnapshot)
     }
 
@@ -2179,7 +2170,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         _ = try await awaitChatRenderForTesting(
             job,
@@ -2306,7 +2297,7 @@ struct ReviewUITests {
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(job.reviewChatSelectionForTesting)
+            chat: job.reviewChatSelectionForTesting
         )
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
@@ -2350,7 +2341,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
@@ -2366,7 +2357,7 @@ struct ReviewUITests {
         replaceChatLogTextForTesting(job, "Updated log")
 
         let updatedSnapshot = try await awaitChatRenderForTesting(job, in: transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatIDForTesting)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.previewChatIDForTesting)
         #expect(updatedSnapshot.summary == nil)
         #expect(reviewChatRenderedLogMatches(updatedSnapshot.log, reviewChatLogText(for: job)))
     }
@@ -2398,7 +2389,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.reviewChatIDForTesting)
+        let chatID = job.previewChatIDForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         transport.setLogReduceMotionForTesting(false)
@@ -2446,7 +2437,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.reviewChatIDForTesting)
+        let chatID = job.previewChatIDForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
@@ -2484,7 +2475,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2520,7 +2511,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2553,7 +2544,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2586,7 +2577,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2624,7 +2615,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2674,7 +2665,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2719,7 +2710,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2779,7 +2770,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2817,7 +2808,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2863,7 +2854,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2898,7 +2889,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -2962,13 +2953,13 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         transport.setLogReduceMotionForTesting(false)
 
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -2977,7 +2968,7 @@ struct ReviewUITests {
         appendChatLogEntryForTesting(
             firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3011,7 +3002,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3057,7 +3048,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3092,7 +3083,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3136,7 +3127,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3179,7 +3170,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3225,7 +3216,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3262,7 +3253,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3297,7 +3288,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3339,7 +3330,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3349,7 +3340,7 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToOffsetForTesting(120)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -3358,7 +3349,7 @@ struct ReviewUITests {
 
         let hideCountBeforeRestore = transport.logOverlayScrollerHideRequestCountForTesting
         transport.setLogOverlayScrollersShownForTesting(true)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3390,7 +3381,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3426,7 +3417,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3457,7 +3448,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3489,7 +3480,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3532,7 +3523,7 @@ struct ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3561,7 +3552,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3646,7 +3637,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3695,7 +3686,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -3845,7 +3836,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3865,7 +3856,7 @@ struct ReviewUITests {
         _ = try await awaitTransportRender(transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -3905,7 +3896,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3926,7 +3917,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -3964,7 +3955,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: firstJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
@@ -3981,7 +3972,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
 
         let finderIdentifierBeforeSwitch = transport.logTextFinderIdentifierForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondJob.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
@@ -4012,7 +4003,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4053,7 +4044,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4101,7 +4092,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4151,7 +4142,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4191,7 +4182,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4234,7 +4225,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4279,7 +4270,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4324,7 +4315,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4391,7 +4382,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
         _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
@@ -4428,7 +4419,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         let snapshot = try await awaitChatRenderForTesting(
             job,
@@ -4457,7 +4448,7 @@ struct ReviewUITests {
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
 
         let snapshot = try await awaitChatRenderForTesting(
             job,

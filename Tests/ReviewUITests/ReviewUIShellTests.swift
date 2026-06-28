@@ -1740,8 +1740,8 @@ private func renderDetailLogForShellLayoutTesting(
     viewController: ReviewMonitorSplitViewController,
     job: ReviewRunRecord
 ) async throws {
-    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-    let chatID = try #require(job.reviewChatIDForTesting)
+    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+    let chatID = job.previewChatIDForTesting
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {
         transport.renderedStateForTesting.selection == expectedSelection
