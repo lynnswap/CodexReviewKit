@@ -88,6 +88,55 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ])
     }
 
+    @Test func filteringAndPresentationOrderPreserveCodexWorkspaceSource() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let runningThreadID = CodexThreadID(rawValue: "thread-running")
+        let idleThreadID = CodexThreadID(rawValue: "thread-idle")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: runningThreadID,
+                        workspace: repo,
+                        name: "Running review",
+                        updatedAt: Date(timeIntervalSince1970: 3_000),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: idleThreadID,
+                        workspace: repo,
+                        name: "Idle review",
+                        updatedAt: Date(timeIntervalSince1970: 2_000),
+                        status: .idle
+                    ),
+                ]
+            ))
+
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
+        try await library.performFetch()
+        let snapshot = library.snapshot
+        let originalWorkspace = try #require(snapshot.sections.first?.workspaces.first)
+        let originalCodexWorkspace = try #require(originalWorkspace.codexWorkspace)
+
+        let filteredWorkspace = try #require(snapshot.filtered(by: .running).sections.first?.workspaces.first)
+        #expect(filteredWorkspace.codexWorkspace === originalCodexWorkspace)
+        #expect(filteredWorkspace.chats.map(\.id) == [runningThreadID])
+
+        var order = ReviewMonitorCodexSidebarPresentationOrder()
+        _ = order.reorderChat(
+            id: idleThreadID,
+            in: originalWorkspace.rowID,
+            currentOrder: [runningThreadID, idleThreadID],
+            before: runningThreadID
+        )
+        let orderedWorkspace = try #require(order.applying(to: snapshot).sections.first?.workspaces.first)
+        #expect(orderedWorkspace.codexWorkspace === originalCodexWorkspace)
+        #expect(orderedWorkspace.chats.map(\.id) == [idleThreadID, runningThreadID])
+    }
+
     @Test func defaultRequestFetchesReviewThreadsOnly() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext

@@ -91,6 +91,15 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             [rowID] + chats.map(\.rowID)
         }
 
+        package var codexWorkspace: CodexWorkspace? {
+            switch source {
+            case .codex(let workspace):
+                workspace
+            case .fixture:
+                nil
+            }
+        }
+
         package var cwd: String {
             switch source {
             case .codex(let workspace):
@@ -107,6 +116,12 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             case .fixture(let fixture):
                 fixture.title
             }
+        }
+
+        func replacingChats(_ chats: [Chat]) -> Self {
+            var copy = self
+            copy.chats = chats
+            return copy
         }
 
         package init(
@@ -336,25 +351,18 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
                     filter.contains(.latestFinished)
                     ? Self.latestFinishedChat(in: section.allChats)?.id
                     : nil
-                return Section(
-                    rowID: section.rowID,
-                    id: section.id,
-                    title: section.title,
-                    workspaces: section.workspaces.map { workspace in
-                        Workspace(
-                            rowID: workspace.rowID,
-                            id: workspace.id,
-                            cwd: workspace.cwd,
-                            title: workspace.title,
-                            chats: workspace.chats.filter {
-                                Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
-                            }
-                        )
-                    },
-                    uncategorizedChats: section.uncategorizedChats.filter {
-                        Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
-                    }
-                )
+                var filteredSection = section
+                filteredSection.workspaces = section.workspaces.map { workspace in
+                    workspace.replacingChats(
+                        workspace.chats.filter {
+                            Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
+                        }
+                    )
+                }
+                filteredSection.uncategorizedChats = section.uncategorizedChats.filter {
+                    Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
+                }
+                return filteredSection
             }
         )
     }
@@ -404,29 +412,22 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
     func applying(to snapshot: ReviewMonitorCodexSidebarSnapshot) -> ReviewMonitorCodexSidebarSnapshot {
         ReviewMonitorCodexSidebarSnapshot(
             sections: ordered(snapshot.sections, by: sectionIDs, id: \.id).map { section in
-                ReviewMonitorCodexSidebarSnapshot.Section(
-                    rowID: section.rowID,
-                    id: section.id,
-                    title: section.title,
-                    workspaces: section.workspaces.map { workspace in
-                        ReviewMonitorCodexSidebarSnapshot.Workspace(
-                            rowID: workspace.rowID,
-                            id: workspace.id,
-                            cwd: workspace.cwd,
-                            title: workspace.title,
-                            chats: ordered(
-                                workspace.chats,
-                                by: chatIDsByContainer[workspace.rowID] ?? [],
-                                id: \.id
-                            )
+                var orderedSection = section
+                orderedSection.workspaces = section.workspaces.map { workspace in
+                    workspace.replacingChats(
+                        ordered(
+                            workspace.chats,
+                            by: chatIDsByContainer[workspace.rowID] ?? [],
+                            id: \.id
                         )
-                    },
-                    uncategorizedChats: ordered(
-                        section.uncategorizedChats,
-                        by: chatIDsByContainer[section.rowID] ?? [],
-                        id: \.id
                     )
+                }
+                orderedSection.uncategorizedChats = ordered(
+                    section.uncategorizedChats,
+                    by: chatIDsByContainer[section.rowID] ?? [],
+                    id: \.id
                 )
+                return orderedSection
             }
         )
     }
