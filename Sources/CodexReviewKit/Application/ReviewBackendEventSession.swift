@@ -167,9 +167,6 @@ package actor ReviewBackendEventSession {
                     typedReviewResultText = text
                 }
                 return event
-            case .domainEvents(let events):
-                recordTypedMessageText(from: events)
-                return event
             case .completed(let summary, nil):
                 return .completed(summary: summary, result: typedReviewResultText)
             case .started,
@@ -179,41 +176,6 @@ package actor ReviewBackendEventSession {
                 .cancelled:
                 return event
             }
-        }
-    }
-
-    private func recordTypedMessageText(from events: [ReviewDomainEvent]) {
-        for event in events {
-            switch event {
-            case .itemStarted(let seed),
-                .itemUpdated(let seed),
-                .itemCompleted(let seed):
-                recordTypedMessageText(from: seed)
-            case .textDelta(let itemID, _, let family, _, let delta) where family == .message:
-                let text = (typedMessageTextByItemID[itemID.rawValue] ?? "") + delta
-                typedMessageTextByItemID[itemID.rawValue] = text
-                if let text = text.nilIfEmpty {
-                    typedReviewResultText = text
-                }
-            case .runStarted,
-                .textDelta,
-                .reviewCompleted,
-                .reviewFailed,
-                .reviewCancelled:
-                break
-            }
-        }
-    }
-
-    private func recordTypedMessageText(from seed: ReviewEventItemSeed) {
-        guard seed.family == .message,
-            case .message(let message) = seed.content
-        else {
-            return
-        }
-        typedMessageTextByItemID[seed.id.rawValue] = message.text
-        if let text = message.text.nilIfEmpty {
-            typedReviewResultText = text
         }
     }
 
@@ -276,8 +238,7 @@ package actor ReviewBackendEventSession {
             await callbacks.recordTurnStarted(turnID)
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
-        case .domainEvents,
-            .message,
+        case .message,
             .messageDelta,
             .log:
             break
@@ -308,8 +269,7 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .domainEvents,
-            .started,
+        case .started,
             .message,
             .messageDelta,
             .log:

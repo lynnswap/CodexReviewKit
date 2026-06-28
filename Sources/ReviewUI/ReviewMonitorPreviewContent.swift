@@ -747,8 +747,7 @@ public enum ReviewMonitorPreviewContent {
 
     private static func contextCompactionItem(
         _ itemName: String,
-        title: String,
-        status: ReviewContextCompactionStatus
+        title: String
     ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
@@ -778,7 +777,7 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         output: String,
         exitCode: Int,
-        status: ReviewCommandStatus
+        status: CodexTurnStatus
     ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
@@ -788,7 +787,7 @@ public enum ReviewMonitorPreviewContent {
                     command: "",
                     output: output,
                     exitCode: exitCode,
-                    status: CodexTurnStatus(status)
+                    status: status
                 ))
         )
     }
@@ -796,12 +795,12 @@ public enum ReviewMonitorPreviewContent {
     private static func toolCallItem(
         _ itemName: String,
         result: String,
-        status: ReviewToolCallStatus
+        status: CodexTurnStatus
     ) -> PreviewChatLogItemTemplate {
         return PreviewChatLogItemTemplate(
             itemName: itemName,
             kind: .mcpToolCall,
-            content: .toolCall(.init(result: result, status: CodexTurnStatus(status)))
+            content: .toolCall(.init(result: result, status: status))
         )
     }
 
@@ -923,8 +922,7 @@ public enum ReviewMonitorPreviewContent {
             ),
             contextCompactionItem(
                 "preview-initial-context-compaction-\(workspaceName)-\(definition.targetSummary)",
-                title: "Context automatically compacted",
-                status: .completed
+                title: "Context automatically compacted"
             ),
             planItem(
                 "preview-initial-plan-\(workspaceName)-\(definition.targetSummary)",
@@ -958,7 +956,7 @@ public enum ReviewMonitorPreviewContent {
             toolCallItem(
                 "running-tool-\(workspaceName)-\(definition.targetSummary)",
                 result: "MCP codex_review.review_start started.",
-                status: .started
+                status: .running
             ),
             reasoningItem(
                 "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
@@ -1062,10 +1060,6 @@ private extension CodexTurnStatus {
         case .cancelled:
             self = .cancelled
         }
-    }
-
-    init(_ status: some ReviewOpenStringValue) {
-        self.init(rawValue: status.rawValue)
     }
 }
 

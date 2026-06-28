@@ -51,31 +51,16 @@ struct ReviewBackendEventSessionTests {
         #expect(await recorder.finishedMetrics() == metrics)
     }
 
-    @Test func emitsDomainEventsWithoutDelayingLaterUpdates() async throws {
+    @Test func emitsLogsWithoutDelayingLaterUpdates() async throws {
         let session = ReviewBackendEventSession(run: makeRun())
         let attempt = await session.attempt()
 
-        await session.receive([commandDomainEvent(output: "first")], controlThreadID: "review-thread")
-        await session.receive([commandDomainEvent(output: "firstsecond")], controlThreadID: "review-thread")
+        await session.receive([.log("first")], controlThreadID: "review-thread")
+        await session.receive([.log("second")], controlThreadID: "review-thread")
         await session.finish(throwing: nil)
 
-        guard case .domainEvents(let firstDomainEvents) = try await nextEvent(from: attempt.events),
-            case .itemUpdated(let firstSeed) = try #require(firstDomainEvents.first),
-            case .command(let firstCommand) = firstSeed.content
-        else {
-            Issue.record("expected first domain event")
-            return
-        }
-        #expect(firstCommand.output == "first")
-
-        guard case .domainEvents(let secondDomainEvents) = try await nextEvent(from: attempt.events),
-            case .itemUpdated(let secondSeed) = try #require(secondDomainEvents.first),
-            case .command(let secondCommand) = secondSeed.content
-        else {
-            Issue.record("expected second domain event")
-            return
-        }
-        #expect(secondCommand.output == "firstsecond")
+        #expect(try await nextEvent(from: attempt.events) == .log("first"))
+        #expect(try await nextEvent(from: attempt.events) == .log("second"))
         #expect(try await nextEvent(from: attempt.events) == nil)
     }
 
@@ -160,32 +145,9 @@ private func makeRun() -> CodexReviewBackendModel.Review.Run {
     )
 }
 
-private func commandDomainEvent(output: String) -> CodexReviewBackendModel.Review.Event {
-    .domainEvents(
-        [
-            .itemUpdated(
-                .init(
-                    id: "cmd-1",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    content: .command(.init(command: "swift test", output: output))
-                ))
-        ])
-}
-
 private func messageTextDelta(
     _ delta: String,
     itemID: String
 ) -> CodexReviewBackendModel.Review.Event {
-    .domainEvents(
-        [
-            .textDelta(
-                itemID: .init(rawValue: itemID),
-                kind: .agentMessage,
-                family: .message,
-                content: .message(.init(text: "")),
-                delta: delta
-            )
-        ])
+    .messageDelta(delta, itemID: itemID)
 }

@@ -8,35 +8,16 @@ import CodexReviewKit
 private struct BackendReviewEventSequence: AsyncSequence {
     struct AsyncIterator: AsyncIteratorProtocol {
         var mailbox: BackendReviewEventMailbox
-        var includesDomainEvents: Bool
 
         mutating func next() async throws -> CodexReviewBackendModel.Review.Event? {
-            while let event = try await mailbox.next() {
-                if includesDomainEvents == false {
-                    switch event {
-                    case .domainEvents:
-                        continue
-                    case .started,
-                        .message,
-                        .messageDelta,
-                        .log,
-                        .completed,
-                        .failed,
-                        .cancelled:
-                        break
-                    }
-                }
-                return event
-            }
-            return nil
+            try await mailbox.next()
         }
     }
 
     var mailbox: BackendReviewEventMailbox
-    var includesDomainEvents: Bool
 
     func makeAsyncIterator() -> AsyncIterator {
-        AsyncIterator(mailbox: mailbox, includesDomainEvents: includesDomainEvents)
+        AsyncIterator(mailbox: mailbox)
     }
 }
 
@@ -83,7 +64,7 @@ struct AppServerClientTests {
         let backend = AppServerCodexReviewBackend(appServer: runtime.server)
 
         let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt, includingDomainEvents: true).makeAsyncIterator()
+        var iterator = eventSequence(attempt).makeAsyncIterator()
 
         try await runtime.transport.emitServerNotification(
             method: "item/completed",
@@ -118,41 +99,11 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        guard case .domainEvents(let commandDomainEvents) = try await iterator.next()
-        else {
-            Issue.record("expected typed command domain event")
-            return
-        }
-        guard case .itemCompleted(let commandSeed) = try #require(commandDomainEvents.first) else {
-            Issue.record("expected completed command seed")
-            return
-        }
-        #expect(commandSeed.id.rawValue == "cmd-1")
-        guard case .command(let command) = commandSeed.content else {
-            Issue.record("expected command content")
-            return
-        }
-        #expect(command.command == "swift test")
-        #expect(command.output == "passed")
-        guard case .domainEvents(let messageDomainEvents) = try await iterator.next()
-        else {
-            Issue.record("expected typed message delta domain event")
-            return
-        }
-        guard
-            case .textDelta(let itemID, kind: _, family: let family, content: _, delta: let delta) =
-                try #require(messageDomainEvents.first)
-        else {
-            Issue.record("expected message text delta")
-            return
-        }
-        #expect(itemID.rawValue == "msg-1")
-        #expect(family == .message)
-        #expect(delta == "Looks good.")
+        #expect(try await iterator.next() == .messageDelta("Looks good.", itemID: "msg-1"))
         #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
     }
 
-    @Test func backendScopesCommandOutputDeltasByReviewThread() async throws {
+    @Test func backendScopesMessageDeltasByReviewThread() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread-1")
@@ -165,52 +116,38 @@ struct AppServerClientTests {
         let secondAttempt = try await backend.startReview(makeReviewStart(runID: "run-2", sessionID: "session-2"))
 
         try await runtime.transport.emitServerNotification(
-            method: "item/commandExecution/outputDelta",
+            method: "item/agentMessage/delta",
             params: TestDeltaNotification(
                 threadID: "review-thread-1",
                 turnID: "turn-1",
-                itemID: "cmd-1",
+                itemID: "msg-1",
                 delta: "first"
             )
         )
         try await runtime.transport.emitServerNotification(
-            method: "item/commandExecution/outputDelta",
+            method: "item/agentMessage/delta",
             params: TestDeltaNotification(
                 threadID: "review-thread-2",
                 turnID: "turn-2",
-                itemID: "cmd-1",
+                itemID: "msg-1",
                 delta: "second"
             )
         )
 
-        var firstIterator = eventSequence(firstAttempt, includingDomainEvents: true).makeAsyncIterator()
+        var firstIterator = eventSequence(firstAttempt).makeAsyncIterator()
         #expect(
             try await firstIterator.next()
                 == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        guard case .domainEvents(let firstDomainEvents) = try await firstIterator.next(),
-            case .itemUpdated(let firstSeed) = try #require(firstDomainEvents.first),
-            case .command(let firstCommand) = firstSeed.content
-        else {
-            Issue.record("expected first command output domain event")
-            return
-        }
-        #expect(firstCommand.output == "first")
+        #expect(try await firstIterator.next() == .messageDelta("first", itemID: "msg-1"))
 
-        var secondIterator = eventSequence(secondAttempt, includingDomainEvents: true).makeAsyncIterator()
+        var secondIterator = eventSequence(secondAttempt).makeAsyncIterator()
         #expect(
             try await secondIterator.next()
                 == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        guard case .domainEvents(let secondDomainEvents) = try await secondIterator.next(),
-            case .itemUpdated(let secondSeed) = try #require(secondDomainEvents.first),
-            case .command(let secondCommand) = secondSeed.content
-        else {
-            Issue.record("expected second command output domain event")
-            return
-        }
-        #expect(secondCommand.output == "second")
+        #expect(try await secondIterator.next() == .messageDelta("second", itemID: "msg-1"))
     }
 
-    @Test func backendEmitsTypedCommandOutputDeltasAsDomainEvents() async throws {
+    @Test func backendKeepsCommandOutputDeltasInCodexChat() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
@@ -244,13 +181,15 @@ struct AppServerClientTests {
                 delta: "second"
             )
         )
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
 
-        guard case .domainEvents = try await nextEvent(from: attempt.events),
-            case .domainEvents = try await nextEvent(from: attempt.events)
-        else {
-            Issue.record("expected direct log updates")
-            return
-        }
+        #expect(try await nextEvent(from: attempt.events) == .completed(summary: "Succeeded.", result: nil))
     }
 
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {
@@ -555,10 +494,9 @@ private func nextEvent(
 }
 
 private func eventSequence(
-    _ attempt: BackendReviewAttempt,
-    includingDomainEvents: Bool = false
+    _ attempt: BackendReviewAttempt
 ) -> BackendReviewEventSequence {
-    BackendReviewEventSequence(mailbox: attempt.events, includesDomainEvents: includingDomainEvents)
+    BackendReviewEventSequence(mailbox: attempt.events)
 }
 
 private func makeReviewStart(

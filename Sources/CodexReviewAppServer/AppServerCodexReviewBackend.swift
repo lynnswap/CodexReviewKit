@@ -493,10 +493,10 @@ private enum AppServerTypedReviewEventAdapter {
             .init(events: messageEvents(message), controlThreadID: controlThreadID)
         case .messageDelta(let delta, _):
             .init(events: messageDeltaEvents(delta), controlThreadID: controlThreadID)
-        case .reasoningSummaryPartAdded(let part, _):
-            .init(events: reasoningPartEvents(part), controlThreadID: controlThreadID)
-        case .reasoningDelta(let delta, _):
-            .init(events: reasoningDeltaEvents(delta), controlThreadID: controlThreadID)
+        case .reasoningSummaryPartAdded:
+            .init(events: [], controlThreadID: controlThreadID)
+        case .reasoningDelta:
+            .init(events: [], controlThreadID: controlThreadID)
         case .tokenUsageUpdated:
             .init(events: [], controlThreadID: controlThreadID)
         case .statusChanged(.idle), .statusChanged(.active(activeFlags: _)):
@@ -543,14 +543,7 @@ private enum AppServerTypedReviewEventAdapter {
         _ status: String,
         turnID: String
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let seed = ReviewEventItemSeed(
-            id: .init(rawValue: "\(turnID):status"),
-            kind: .init(rawValue: "reviewThreadStatus"),
-            family: .diagnostic,
-            phase: .completed,
-            content: .diagnostic(.init(message: "Review thread status changed: \(status)."))
-        )
-        return [.domainEvents([.itemCompleted(seed)])]
+        [.log("Review thread \(turnID) status changed: \(status).")]
     }
 
     private static func terminalFailureEvents(
@@ -580,23 +573,12 @@ private enum AppServerTypedReviewEventAdapter {
                 )
             ]
         }
-        guard item.kind != .userMessage,
-            let seed = eventItemSeed(for: item, phase: phase)
+        guard item.kind == .agentMessage,
+            let text = item.text?.nilIfEmpty
         else {
             return []
         }
-        let domainEvent: ReviewDomainEvent =
-            switch phase {
-            case .started:
-                .itemStarted(seed)
-            case .updated:
-                .itemUpdated(seed)
-            case .completed:
-                .itemCompleted(seed)
-            }
-        return [
-            .domainEvents([domainEvent])
-        ]
+        return [.message(text)]
     }
 
     private static func messageEvents(
@@ -607,12 +589,7 @@ private enum AppServerTypedReviewEventAdapter {
         else {
             return []
         }
-        let item = CodexThreadItem(
-            id: message.id,
-            kind: .agentMessage,
-            content: .message(message)
-        )
-        return itemEvents(item, phase: .completed)
+        return [.message(message.text)]
     }
 
     private static func messageDeltaEvents(
@@ -622,252 +599,13 @@ private enum AppServerTypedReviewEventAdapter {
             return []
         }
         let itemID = delta.itemID?.nilIfEmpty ?? "agent-message-delta"
-        let domainEvent = ReviewDomainEvent.textDelta(
-            itemID: .init(rawValue: itemID),
-            kind: .agentMessage,
-            family: .message,
-            content: .message(.init(text: "")),
-            delta: delta.text
-        )
-        return [
-            .domainEvents([domainEvent])
-        ]
-    }
-
-    private static func reasoningPartEvents(
-        _ part: CodexReasoningPart
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        let style: ReviewEventItem.Reasoning.Style =
-            switch part.kind {
-            case .summary:
-                .summary
-            case .text:
-                .raw
-            }
-        let seed = ReviewEventItemSeed(
-            id: .init(rawValue: part.id),
-            kind: .reasoning,
-            family: .reasoning,
-            phase: .running,
-            content: .reasoning(.init(text: "", style: style))
-        )
-        return [.domainEvents([.itemStarted(seed)])]
-    }
-
-    private static func reasoningDeltaEvents(
-        _ delta: CodexReasoningDelta
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        guard delta.delta.isEmpty == false else {
-            return []
-        }
-        let style: ReviewEventItem.Reasoning.Style =
-            switch delta.part.kind {
-            case .summary:
-                .summary
-            case .text:
-                .raw
-            }
-        let domainEvent = ReviewDomainEvent.textDelta(
-            itemID: .init(rawValue: delta.id),
-            kind: .reasoning,
-            family: .reasoning,
-            content: .reasoning(.init(text: "", style: style)),
-            delta: delta.delta
-        )
-        return [.domainEvents([domainEvent])]
+        return [.messageDelta(delta.text, itemID: itemID)]
     }
 
     private static func unknownEvents(
         _ raw: CodexRawNotification
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let itemID =
-            raw.turnID?.rawValue
-            ?? raw.threadID?.rawValue
-            ?? raw.method
-        let detail = String(data: raw.params, encoding: .utf8)
-        let seed = ReviewEventItemSeed(
-            id: .init(rawValue: "\(itemID):\(raw.method)"),
-            kind: .init(rawValue: raw.method),
-            family: .unknown,
-            phase: .running,
-            content: .unknown(
-                .init(
-                    title: raw.method,
-                    detail: detail,
-                    rawKind: .init(rawValue: raw.method)
-                ))
-        )
-        return [.domainEvents([.itemUpdated(seed)])]
-    }
-
-    private static func eventItemSeed(
-        for item: CodexThreadItem,
-        phase: AppServerTypedItemPhase
-    ) -> ReviewEventItemSeed? {
-        ReviewEventItemSeed(
-            id: .init(rawValue: item.id),
-            kind: .init(rawValue: item.kind.rawValue),
-            family: item.reviewItemFamily,
-            phase: item.reviewItemPhase(defaultingTo: phase),
-            content: item.reviewEventContent
-        )
-    }
-
-    private static func contextCompactionText(
-        phase: AppServerTypedItemPhase,
-        status: String?
-    ) -> String {
-        switch phase {
-        case .started, .updated:
-            return appServerContextCompactionStartedText
-        case .completed:
-            let normalized = status?
-                .lowercased()
-                .replacingOccurrences(of: "_", with: "")
-                .replacingOccurrences(of: "-", with: "")
-            switch normalized {
-            case "failed", "failure", "errored", "error":
-                return appServerContextCompactionFailedText
-            case "cancelled", "canceled":
-                return appServerContextCompactionCancelledText
-            default:
-                return appServerContextCompactionCompletedText
-            }
-        }
-    }
-}
-
-private extension CodexThreadItem {
-    var reviewItemFamily: ReviewItemFamily {
-        switch kind {
-        case .agentMessage:
-            .message
-        case .plan:
-            .plan
-        case .reasoning:
-            .reasoning
-        case .commandExecution:
-            .command
-        case .fileChange:
-            .fileChange
-        case .mcpToolCall, .dynamicToolCall, .collabAgentToolCall, .imageView, .imageGeneration, .sleep:
-            .tool
-        case .webSearch:
-            .search
-        case .contextCompaction:
-            .contextCompaction
-        case .diagnostic, .error:
-            .diagnostic
-        case .userMessage, .subAgentActivity, .unknown:
-            .unknown
-        }
-    }
-
-    var reviewEventContent: ReviewEventItem.Content {
-        switch content {
-        case .message(let message):
-            .message(.init(text: message.text))
-        case .plan(let text):
-            .plan(.init(markdown: text))
-        case .reasoning(let reasoning):
-            .reasoning(
-                .init(
-                    text: reasoning.text,
-                    style: reasoning.summary.isEmpty ? .raw : .summary
-                ))
-        case .command(let command):
-            .command(
-                .init(
-                    command: command.command,
-                    cwd: command.cwd,
-                    output: command.output ?? "",
-                    exitCode: command.exitCode,
-                    status: command.status.map { .init(rawValue: $0.rawValue) }
-                ))
-        case .fileChange(let fileChange):
-            .fileChange(
-                .init(
-                    title: "File changes",
-                    output: fileChange.output ?? "",
-                    paths: fileChange.path.map { [$0] } ?? [],
-                    status: fileChange.status.map { .init(rawValue: $0.rawValue) }
-                ))
-        case .toolCall(let toolCall):
-            .toolCall(
-                .init(
-                    namespace: toolCall.namespace,
-                    server: toolCall.server,
-                    tool: toolCall.name,
-                    arguments: toolCall.arguments,
-                    result: toolCall.result,
-                    error: toolCall.error,
-                    status: toolCall.status.map { .init(rawValue: $0.rawValue) }
-                ))
-        case .contextCompaction(let text):
-            .contextCompaction(
-                .init(
-                    title: text?.nilIfEmpty ?? appServerContextCompactionStartedText,
-                    status: logStatus(phase: .updated).map { .init(rawValue: $0) }
-                ))
-        case .diagnostic(let text):
-            .diagnostic(
-                .init(
-                    message: text,
-                    severity: kind == .error ? .error : nil
-                ))
-        case .log(let text):
-            .unknown(.init(title: kind.rawValue, detail: text, rawKind: .init(rawValue: kind.rawValue)))
-        case .unknown(let raw):
-            .unknown(
-                .init(
-                    title: raw.rawType,
-                    detail: raw.text,
-                    rawKind: .init(rawValue: raw.rawType)
-                ))
-        }
-    }
-
-    func reviewItemPhase(defaultingTo phase: AppServerTypedItemPhase) -> ReviewItemPhase {
-        if let status = statusRaw?.nilIfEmpty {
-            let normalized = ReviewItemPhase.normalized(status)
-            if phase == .completed, normalized == .running {
-                return .completed
-            }
-            return normalized
-        }
-        return switch phase {
-        case .started, .updated:
-            .running
-        case .completed:
-            .completed
-        }
-    }
-
-    var statusRaw: String? {
-        switch content {
-        case .command(let command):
-            command.status?.rawValue
-        case .fileChange(let fileChange):
-            fileChange.status?.rawValue
-        case .toolCall(let toolCall):
-            toolCall.status?.rawValue
-        case .contextCompaction, .diagnostic, .log, .message, .plan, .reasoning, .unknown:
-            nil
-        }
-    }
-
-    func logStatus(phase: AppServerTypedItemPhase) -> String? {
-        if let status = statusRaw?.nilIfEmpty {
-            return status
-        }
-        return switch phase {
-        case .started:
-            "inProgress"
-        case .updated:
-            nil
-        case .completed:
-            "completed"
-        }
+        [.log("Unhandled app-server notification: \(raw.method)")]
     }
 }
 
@@ -1090,10 +828,6 @@ private extension CodexLoginHandle {
     }
 }
 
-private let appServerContextCompactionStartedText = "Automatically compacting context"
-private let appServerContextCompactionCompletedText = "Context automatically compacted"
-private let appServerContextCompactionFailedText = "Context compaction failed"
-private let appServerContextCompactionCancelledText = "Context compaction cancelled"
 
 private func reasoningSummaryGroupID(itemID: String, summaryIndex: Int) -> String {
     "\(itemID):summary:\(summaryIndex)"

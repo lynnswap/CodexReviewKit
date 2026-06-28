@@ -244,73 +244,6 @@ extension CodexReviewStore {
         appendRecoveryProgress(networkRecoveryUnavailableMessage, to: runRecord)
     }
 
-    private func applyDomainEvents(
-        _ events: [ReviewDomainEvent],
-        to runRecord: ReviewRunRecord,
-        at timestamp: Date
-    ) {
-        for event in events {
-            guard shouldApplyDomainEvent(event, to: runRecord) else {
-                continue
-            }
-            updateCoreOutput(from: event, for: runRecord)
-        }
-    }
-
-    private func shouldApplyDomainEvent(_ event: ReviewDomainEvent, to runRecord: ReviewRunRecord) -> Bool {
-        switch event {
-        case .textDelta(let itemID, _, let family, _, _)
-        where family == .message && runRecord.completedAgentMessageItemIDs.contains(itemID.rawValue):
-            false
-        default:
-            true
-        }
-    }
-
-    private func updateCoreOutput(from event: ReviewDomainEvent, for runRecord: ReviewRunRecord) {
-        switch event {
-        case .itemStarted(let seed),
-            .itemUpdated(let seed):
-            updateCoreOutput(from: seed, isCompleted: false, for: runRecord)
-        case .itemCompleted(let seed):
-            updateCoreOutput(from: seed, isCompleted: true, for: runRecord)
-        case .textDelta(let itemID, _, let family, _, let delta) where family == .message:
-            guard let updatedMessage = runRecord.appendAgentMessageDelta(itemID: itemID.rawValue, delta: delta) else {
-                return
-            }
-            runRecord.core.output.lastAgentMessage = updatedMessage
-            runRecord.core.output.summary = updatedMessage
-        case .runStarted,
-            .textDelta,
-            .reviewCompleted,
-            .reviewFailed,
-            .reviewCancelled:
-            break
-        }
-    }
-
-    private func updateCoreOutput(
-        from seed: ReviewEventItemSeed,
-        isCompleted: Bool,
-        for runRecord: ReviewRunRecord
-    ) {
-        guard seed.family == .message,
-            case .message(let message) = seed.content
-        else {
-            return
-        }
-        runRecord.noteAgentMessageSnapshot(
-            itemID: seed.id.rawValue,
-            text: message.text,
-            isCompleted: isCompleted
-        )
-        guard let text = message.text.nilIfEmpty else {
-            return
-        }
-        runRecord.core.output.lastAgentMessage = text
-        runRecord.core.output.summary = text
-    }
-
     private func applyMessageSnapshot(
         _ text: String,
         itemID: String?,
@@ -910,8 +843,6 @@ extension CodexReviewStore {
         }
         var updatedRun = currentRun
         switch event {
-        case .domainEvents(let events):
-            applyDomainEvents(events, to: runRecord, at: clock.now())
         case .started(let turnID, let reviewThreadID, let model):
             runRecord.core.run.turnID = turnID
             runRecord.core.run.reviewThreadID = reviewThreadID ?? runRecord.core.run.reviewThreadID
@@ -1017,8 +948,7 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .domainEvents,
-            .started,
+        case .started,
             .message,
             .messageDelta,
             .log:
