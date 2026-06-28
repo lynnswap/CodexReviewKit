@@ -125,8 +125,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return displayedSelection != selection?.id
         case .workspace:
             return displayedSelection != selection?.id
-        case .chat(let selectedChat):
-            return boundChatID != selectedChat.id
+        case .chat(let selectedChatID):
+            return boundChatID != selectedChatID
                 || displayedSelection != selection?.id
         case nil:
             return displayedSelection != nil
@@ -148,8 +148,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             displayedSelection = selection?.id
 
         case .chat:
-            if case .chat(let selectedChat) = selection {
-                displayChat(selectedChat)
+            if case .chat(let selectedChatID) = selection {
+                displayChat(selectedChatID)
             }
             hidePlaceholder()
             logScrollView.isHidden = false
@@ -163,8 +163,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
     }
 
-    private func displayChat(_ selectedChat: ReviewMonitorCodexSidebarSnapshot.Chat) {
-        let isSwitchingRenderedChat = boundChatID != nil && boundChatID != selectedChat.id
+    private func displayChat(_ selectedChatID: CodexThreadID) {
+        let isSwitchingRenderedChat = boundChatID != nil && boundChatID != selectedChatID
         cacheBoundLogScrollTarget()
         if isSwitchingRenderedChat {
             logScrollView.resetFindStateForContentReuse()
@@ -172,20 +172,20 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectedChatLogTask?.cancel()
         selectedChatLogTask = nil
         resetLogRenderer()
-        boundChatID = selectedChat.id
-        let restorationTarget = restorationTarget(chatID: selectedChat.id)
-        selectedCodexChat.bind(toChatID: selectedChat.id)
-        if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChat.id) {
+        boundChatID = selectedChatID
+        let restorationTarget = restorationTarget(chatID: selectedChatID)
+        selectedCodexChat.bind(toChatID: selectedChatID)
+        if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChatID) {
             startPreviewChatChangeStream(
                 previewStream,
-                chatUpdatedAt: selectedChat.updatedAt,
-                target: .chat(selectedChat.id),
+                chatUpdatedAt: previewChatLogSource?.snapshot.chat(id: selectedChatID)?.updatedAt,
+                target: .chat(selectedChatID),
                 initialRestorationTarget: restorationTarget
             )
             return
         }
         startSelectedCodexChatLogStream(
-            target: .chat(selectedChat.id),
+            target: .chat(selectedChatID),
             initialRestorationTarget: restorationTarget
         )
     }
@@ -847,8 +847,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 .workspaceSection(section.id)
             case .workspace(let workspace):
                 .workspace(workspace.id.rawValue)
-            case .chat(let chat):
-                .chat(chat.id.rawValue)
+            case .chat(let id):
+                .chat(id.rawValue)
             case nil:
                 nil
             }

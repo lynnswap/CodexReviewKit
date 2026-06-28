@@ -161,6 +161,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
     func attach(to window: NSWindow) {
         loadViewIfNeeded()
+        sidebarViewController?.loadViewIfNeeded()
         let isNewWindow = attachedWindow !== window
         attachedWindow = window
 
@@ -256,10 +257,13 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
                 title: workspace.title,
                 subtitle: workspace.cwd
             )
-        case .chat(let chat):
+        case .chat(let id):
+            guard let presentation = sidebarViewController?.codexChatTitlePresentation(id: id) else {
+                return WindowTitlePresentation(title: "", subtitle: "")
+            }
             return WindowTitlePresentation(
-                title: chat.title,
-                subtitle: chat.workspaceCWD ?? ""
+                title: presentation.title,
+                subtitle: presentation.subtitle
             )
         case nil:
             return WindowTitlePresentation(title: "", subtitle: "")

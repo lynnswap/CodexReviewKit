@@ -1,3 +1,4 @@
+import AppKit
 import CodexKit
 import CodexAppServerKitTesting
 import Foundation
@@ -346,6 +347,8 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             uiState: uiState,
             modelContext: context
         )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
@@ -367,12 +370,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(sidebar.codexSidebarChatRowUsesReviewMonitorChatRowViewForTesting(threadID))
 
         sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
-        guard case .chat(let selectedChat) = uiState.selection else {
+        guard case .chat(let selectedChatID) = uiState.selection else {
             Issue.record("Expected selecting a Codex sidebar chat row to select the chat.")
             return
         }
-        #expect(selectedChat.id == threadID)
-        #expect(selectedChat.title == "App review")
+        #expect(selectedChatID == threadID)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review")
     }
 
     @Test func codexSidebarSelectionDoesNotFallBackToReviewRunRows() async throws {
@@ -432,7 +435,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         }
         #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(legacyChat.id)) == nil)
 
-        uiState.selection = .chat(legacyChat)
+        uiState.selection = .chat(legacyChat.id)
 
         try await waitForCondition {
             uiState.selection == nil && sidebar.selectedReviewChatIDForTesting == nil
@@ -479,6 +482,11 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition(timeout: .milliseconds(500)) {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
         }
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
+        #expect(uiState.selectionID == .chat(threadID))
+        try await waitForCondition {
+            window.title == "App review"
+        }
         let fullReloadCountBeforeContentUpdate = sidebar.sidebarFullReloadCountForTesting
 
         let chat = context.model(for: threadID)
@@ -511,6 +519,10 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         }
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review renamed"
+        }
+        #expect(uiState.selectionID == .chat(threadID))
+        try await waitForCondition {
+            window.title == "App review renamed"
         }
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeContentUpdate)
         #expect(

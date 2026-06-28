@@ -43,15 +43,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        uiState.selection = .chat(
-            .init(
-                rowID: .chat(CodexThreadID(rawValue: "review-thread")),
-                id: CodexThreadID(rawValue: "review-thread"),
-                title: "Review",
-                preview: nil,
-                workspaceCWD: "/tmp/project",
-                updatedAt: nil
-            ))
+        uiState.selection = .chat(CodexThreadID(rawValue: "review-thread"))
 
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
@@ -303,15 +295,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        uiState.selection = .chat(
-            .init(
-                rowID: .chat(CodexThreadID(rawValue: "chat-thread")),
-                id: CodexThreadID(rawValue: "chat-thread"),
-                title: "Generic chat",
-                preview: nil,
-                workspaceCWD: "/tmp/project",
-                updatedAt: nil
-            ))
+        uiState.selection = .chat(CodexThreadID(rawValue: "chat-thread"))
 
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Generic chat snapshot")
@@ -342,18 +326,10 @@ struct ReviewMonitorSelectedCodexChatTests {
 
     private func selectChat(
         id: String,
-        title: String = "Review",
         in uiState: ReviewMonitorUIState
     ) {
         let chatID = CodexThreadID(rawValue: id)
-        uiState.selection = .chat(.init(
-            rowID: .chat(chatID),
-            id: chatID,
-            title: title,
-            preview: nil,
-            workspaceCWD: "/tmp/project",
-            updatedAt: nil
-        ))
+        uiState.selection = .chat(chatID)
     }
 }
 

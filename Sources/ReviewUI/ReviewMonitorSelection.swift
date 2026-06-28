@@ -11,7 +11,7 @@ enum ReviewMonitorSelectionID: Hashable, Sendable {
 enum ReviewMonitorSelection {
     case workspaceSection(ReviewMonitorWorkspaceSectionSelection)
     case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)
-    case chat(ReviewMonitorCodexSidebarSnapshot.Chat)
+    case chat(CodexThreadID)
 
     var id: ReviewMonitorSelectionID {
         switch self {
@@ -19,8 +19,8 @@ enum ReviewMonitorSelection {
             return .workspaceSection(section.id)
         case .workspace(let workspace):
             return .workspace(workspace.id)
-        case .chat(let chat):
-            return .chat(chat.id)
+        case .chat(let id):
+            return .chat(id)
         }
     }
 }

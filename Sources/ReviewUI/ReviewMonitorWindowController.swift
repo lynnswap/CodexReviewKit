@@ -100,7 +100,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
             sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
         )
         if let initialChat = previewChatLogSource?.initialChat {
-            uiState.selection = .chat(initialChat)
+            uiState.selection = .chat(initialChat.id)
         }
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
