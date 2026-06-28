@@ -1,14 +1,14 @@
 import Foundation
 
-public struct ReviewRunCore: Codable, Sendable, Hashable {
-    public struct Run: Codable, Sendable, Hashable {
-        public internal(set) var attemptID: String?
-        public internal(set) var reviewThreadID: String?
-        public internal(set) var threadID: String?
-        public internal(set) var turnID: String?
-        public internal(set) var model: String?
+package struct ReviewRunCore: Codable, Sendable, Hashable {
+    package struct Run: Codable, Sendable, Hashable {
+        package var attemptID: String?
+        package var reviewThreadID: String?
+        package var threadID: String?
+        package var turnID: String?
+        package var model: String?
 
-        public init(
+        package init(
             attemptID: String? = nil,
             reviewThreadID: String? = nil,
             threadID: String? = nil,
@@ -23,15 +23,15 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
         }
     }
 
-    public struct Lifecycle: Codable, Sendable, Hashable {
-        public internal(set) var status: ReviewRunState
-        public internal(set) var exitCode: Int?
-        public internal(set) var startedAt: Date?
-        public internal(set) var endedAt: Date?
-        public internal(set) var cancellation: ReviewCancellation?
-        public internal(set) var errorMessage: String?
+    package struct Lifecycle: Codable, Sendable, Hashable {
+        package var status: ReviewRunState
+        package var exitCode: Int?
+        package var startedAt: Date?
+        package var endedAt: Date?
+        package var cancellation: ReviewCancellation?
+        package var errorMessage: String?
 
-        public init(
+        package init(
             status: ReviewRunState,
             exitCode: Int? = nil,
             startedAt: Date? = nil,
@@ -48,11 +48,11 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
         }
     }
 
-    public internal(set) var run: Run
-    public internal(set) var lifecycle: Lifecycle
-    public internal(set) var summary: String
+    package var run: Run
+    package var lifecycle: Lifecycle
+    package var summary: String
 
-    public init(
+    package init(
         run: Run = .init(),
         lifecycle: Lifecycle,
         summary: String
@@ -62,7 +62,7 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
         self.summary = summary
     }
 
-    public var isTerminal: Bool {
+    package var isTerminal: Bool {
         lifecycle.status.isTerminal
     }
 }

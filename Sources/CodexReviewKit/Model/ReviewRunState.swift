@@ -1,11 +1,11 @@
-public enum ReviewRunState: String, Codable, Sendable, Hashable {
+package enum ReviewRunState: String, Codable, Sendable, Hashable {
     case queued
     case running
     case succeeded
     case failed
     case cancelled
 
-    public var isTerminal: Bool {
+    package var isTerminal: Bool {
         switch self {
         case .queued, .running:
             false
@@ -14,7 +14,7 @@ public enum ReviewRunState: String, Codable, Sendable, Hashable {
         }
     }
 
-    public var displayText: String {
+    package var displayText: String {
         switch self {
         case .queued:
             "Queued"
