@@ -542,16 +542,16 @@ package final class StoreSnapshotProbe {
                 }
                 return lhs.sortOrder > rhs.sortOrder
             }
-            .map { job in
-                let runtimeState = store.runtimeReviewRunState(runID: job.id)
+            .map { runRecord in
+                let runtimeState = store.runtimeReviewRunState(runID: runRecord.id)
                 return StoreRunSnapshot(
-                    runID: job.id,
-                    status: job.core.lifecycle.status,
-                    summary: job.core.output.summary,
-                    lastAgentMessage: job.core.output.lastAgentMessage,
-                    run: job.core.run,
+                    runID: runRecord.id,
+                    status: runRecord.core.lifecycle.status,
+                    summary: runRecord.core.output.summary,
+                    lastAgentMessage: runRecord.core.output.lastAgentMessage,
+                    run: runRecord.core.run,
                     activeRun: runtimeState.activeRun,
-                    cancellationRequested: job.cancellationRequested
+                    cancellationRequested: runRecord.cancellationRequested
                 )
             }
         return StoreSnapshot(reviewRuns: reviewRuns)
@@ -563,7 +563,7 @@ package final class StoreSnapshotProbe {
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.job(runID)?.status == status
+            snapshot.run(runID)?.status == status
         }
     }
 
@@ -573,7 +573,7 @@ package final class StoreSnapshotProbe {
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
         await waitUntil(timeout: timeout) { snapshot in
-            snapshot.job(runID)?.activeRun?.attemptID == attemptID
+            snapshot.run(runID)?.activeRun?.attemptID == attemptID
         }
     }
 
@@ -599,7 +599,7 @@ package final class StoreSnapshotProbe {
 package struct StoreSnapshot: Sendable {
     package var reviewRuns: [StoreRunSnapshot]
 
-    package func job(_ runID: String? = nil) -> StoreRunSnapshot? {
+    package func run(_ runID: String? = nil) -> StoreRunSnapshot? {
         guard let runID else {
             return reviewRuns.first
         }
