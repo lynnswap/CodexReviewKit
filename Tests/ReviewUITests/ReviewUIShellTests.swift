@@ -1268,13 +1268,12 @@ extension ReviewUITests {
     @Test func detailLogExpandsAfterSidebarReopensFromCompactWidth() async throws {
         let logText = Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
             .joined()
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-sidebar-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 520, height: 420)
@@ -1285,7 +1284,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         window.setContentSize(NSSize(width: 360, height: 420))
         sidebarItem.isCollapsed = true
@@ -1314,13 +1313,12 @@ extension ReviewUITests {
     @Test func detailLogShrinksAfterSidebarReopensIntoNarrowWidth() async throws {
         let logText = Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
             .joined()
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-sidebar-width-shrink-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1331,7 +1329,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1353,13 +1351,12 @@ extension ReviewUITests {
 
     @Test func detailLogTracksSimpleWindowResizeInBothDirections() async throws {
         let logText = Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-window-resize-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1368,7 +1365,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1400,14 +1397,12 @@ extension ReviewUITests {
 
     @Test func detailLogRewrapsVisibleTextDuringLiveWindowResize() async throws {
         let logText = String(repeating: "wrap-sensitive text ", count: 600)
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-window-live-resize-log",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review."
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1422,7 +1417,7 @@ extension ReviewUITests {
             }
             window.close()
         }
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         let wideDocumentHeight = transport.logDocumentViewFrameForTesting.height
         let wideFragmentHeight = transport.logVisibleFragmentBoundsForTesting.height
@@ -1456,14 +1451,12 @@ extension ReviewUITests {
                 "stream.tick \(String(format: "%03d", index)) delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh"
             }
             .joined(separator: "\n\n")
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-window-live-resize-stream-log",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review."
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 1_060, height: 600)
@@ -1479,7 +1472,7 @@ extension ReviewUITests {
             window.close()
         }
         try await renderDetailLogForShellLayoutTesting(
-            streamLog, in: transport, viewController: viewController, job: job)
+            streamLog, in: transport, viewController: viewController, chat: chat)
         #expect(transport.isLogPinnedToBottomForTesting)
 
         transport.beginLogLiveResizeForTesting()
@@ -1502,13 +1495,12 @@ extension ReviewUITests {
         let logText = Array(
             repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
         ).joined()
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-toolbar-sidebar-toggle-textkit-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 520, height: 420)
@@ -1523,7 +1515,7 @@ extension ReviewUITests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         viewController.toggleSidebar(nil)
         await awaitNativeLayoutTurn()
@@ -1753,29 +1745,6 @@ private func renderDetailLogForShellLayoutTesting(
 ) async throws {
     viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chat.chatID.rawValue)
-    try await waitForCondition {
-        transport.renderedStateForTesting.selection == expectedSelection
-            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
-    }
-    #expect(transport.renderLogForTesting(text: text, allowIncrementalUpdate: false))
-    transport.scrollLogToBottomForTesting()
-    if let window = viewController.view.window {
-        window.layoutIfNeeded()
-    }
-    viewController.view.layoutSubtreeIfNeeded()
-    transport.view.layoutSubtreeIfNeeded()
-}
-
-@MainActor
-private func renderDetailLogForShellLayoutTesting(
-    _ text: String,
-    in transport: ReviewMonitorTransportViewController,
-    viewController: ReviewMonitorSplitViewController,
-    job: ReviewRunRecord
-) async throws {
-    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
-    let chatID = job.previewChatIDForTesting
-    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {
         transport.renderedStateForTesting.selection == expectedSelection
             && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
