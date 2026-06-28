@@ -40,22 +40,13 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     }
 
     private init(result: CodexReviewAPI.Read.Result) {
-        let lifecycle = result.core.lifecycle
-        let lifecycleMessage = result.core.lifecycleMessage
-        let status = lifecycle.status
-        self.revision = [
-            result.runID,
-            status.rawValue,
-            lifecycle.endedAt?.timeIntervalSince1970.description ?? "running",
-            lifecycleMessage,
-        ].joined(separator: ":")
-
+        self.revision = "\(result.runID):unavailable"
         self.items = []
         self.orderedEntryIDs = []
         self.activeEntryIDs = []
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
-        self.finalLifecycleMessage = status.isTerminal ? lifecycleMessage : nil
+        self.finalLifecycleMessage = nil
         self.finalResult = nil
     }
 

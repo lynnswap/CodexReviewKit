@@ -258,7 +258,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(awaited.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
             #expect(
                 awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
-                    == "Review completed.")
+                    == nil)
             #expect(awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) is NSNull)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }

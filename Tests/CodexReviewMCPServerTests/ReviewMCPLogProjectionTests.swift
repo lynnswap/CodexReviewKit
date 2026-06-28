@@ -24,7 +24,7 @@ struct ReviewMCPLogProjectionTests {
         #expect(projection.finalResult == nil)
     }
 
-    @Test func unavailableTerminalProjectionKeepsSummaryButNoFinalResult() throws {
+    @Test func unavailableTerminalProjectionDoesNotMirrorLifecycleAsLog() throws {
         let projection = ReviewMCPLogProjection.unavailable(result: .init(
             runID: "run-2",
             core: .init(
@@ -36,7 +36,7 @@ struct ReviewMCPLogProjectionTests {
 
         #expect(projection.activeEntryIDs == [])
         #expect(projection.activeEntryCount == 0)
-        #expect(projection.finalLifecycleMessage == "Done.")
+        #expect(projection.finalLifecycleMessage == nil)
         #expect(projection.finalResult == nil)
         #expect(projection.items.isEmpty)
     }
