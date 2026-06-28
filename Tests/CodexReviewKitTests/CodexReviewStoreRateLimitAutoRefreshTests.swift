@@ -75,7 +75,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         ])
     }
 
-    @Test func runningJobsOnlyAccelerateSelectedAccount() {
+    @Test func runningRunsOnlyAccelerateSelectedAccount() {
         let selectedAccount = makeAccount(email: "selected@example.com", lastFetchAt: now)
         let otherAccount = makeAccount(email: "other@example.com", lastFetchAt: now)
 
@@ -162,9 +162,9 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         ])
     }
 
-    @Test func storeTargetsFollowRunningJobState() {
+    @Test func storeTargetsFollowRunningRunState() {
         let account = makeAccount(lastFetchAt: now)
-        let runningJob = ReviewRunRecord.makeForTesting(
+        let runningRun = ReviewRunRecord.makeForTesting(
             targetSummary: "Review changes",
             status: .running,
             startedAt: now,
@@ -177,7 +177,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
         ])
 
-        loadStore(store, account: account, reviewRuns: [runningJob])
+        loadStore(store, account: account, reviewRuns: [runningRun])
         #expect(store.accountRateLimitAutoRefreshTargets(now: now) == [
             .init(accountKey: account.accountKey, kind: .selectedRunningInterval, dueAt: now.addingTimeInterval(60)),
         ])

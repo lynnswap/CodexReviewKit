@@ -7,7 +7,7 @@ import Testing
 struct ReviewRunRecordTests {
     @Test func prebuiltTerminalRunsKeepCoreTerminalState() {
         let succeeded = ReviewRunRecord.makeForTesting(
-            id: "job-terminal-succeeded",
+            id: "run-terminal-succeeded",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
             status: .succeeded,
@@ -20,7 +20,7 @@ struct ReviewRunRecordTests {
         #expect(succeeded.core.reviewText == "No findings.")
 
         let succeededWithoutFinalReview = ReviewRunRecord.makeForTesting(
-            id: "job-terminal-succeeded-no-review",
+            id: "run-terminal-succeeded-no-review",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
             status: .succeeded,
@@ -33,7 +33,7 @@ struct ReviewRunRecordTests {
         #expect(succeededWithoutFinalReview.core.reviewText == "Succeeded.")
 
         let failed = ReviewRunRecord.makeForTesting(
-            id: "job-terminal-failed",
+            id: "run-terminal-failed",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
             status: .failed,
@@ -45,7 +45,7 @@ struct ReviewRunRecordTests {
         #expect(failed.core.reviewText == "Backend failed.")
 
         let cancelled = ReviewRunRecord.makeForTesting(
-            id: "job-terminal-cancelled",
+            id: "run-terminal-cancelled",
             cwd: "/tmp/workspace",
             targetSummary: "Uncommitted changes",
             status: .cancelled,

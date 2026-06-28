@@ -52,7 +52,7 @@ struct ReviewObservationAwaiterTests {
 
     private func makeRunningRun() -> ReviewRunRecord {
         ReviewRunRecord.makeForTesting(
-            id: "job-awaiter",
+            id: "run-awaiter",
             targetSummary: "Uncommitted changes",
             status: .running,
             summary: "Running review."
