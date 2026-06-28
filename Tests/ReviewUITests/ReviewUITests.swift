@@ -3,7 +3,6 @@ import Foundation
 import ObservationBridge
 import CodexKit
 import CodexReviewKit
-import ReviewMonitorRendering
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReviewKit

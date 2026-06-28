@@ -1,6 +1,8 @@
 import Foundation
 import CodexReviewKit
 
+// Kept in ReviewUITests while legacy job timeline fixtures still seed UI tests.
+// Runtime UI code should not depend on this renderer.
 public struct ReviewTimelineDocumentRenderer: Sendable {
     public init() {}
 

@@ -102,15 +102,6 @@ let package = Package(
             ]
         ),
         .target(
-            name: "ReviewMonitorRendering",
-            dependencies: [
-                "CodexReviewKit",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .target(
             name: "TextTransitions",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -167,18 +158,7 @@ let package = Package(
                 .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewTesting",
-                "ReviewMonitorRendering",
                 "ReviewUI",
-            ],
-            swiftSettings: [
-                .swiftLanguageMode(.v6),
-            ]
-        ),
-        .testTarget(
-            name: "ReviewMonitorRenderingTests",
-            dependencies: [
-                "CodexReviewKit",
-                "ReviewMonitorRendering",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

@@ -1,6 +1,8 @@
 import Foundation
 import CodexReviewKit
 
+// Test-only bridge for legacy ReviewTimeline fixtures. Production detail rendering
+// uses CodexChatChange streams through ReviewMonitorSelectedCodexChat.
 public struct ReviewTimelineDocument: Codable, Equatable, Sendable {
     public struct Block: Identifiable, Codable, Equatable, Sendable {
         public struct ID: RawRepresentable, Codable, Hashable, Sendable, ExpressibleByStringLiteral, CustomStringConvertible {

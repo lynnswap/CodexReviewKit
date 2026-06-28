@@ -1,7 +1,6 @@
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
-import ReviewMonitorRendering
 @_spi(PreviewSupport) @testable import ReviewUI
 
 struct ReviewTimelineEntryForTesting: Sendable, Hashable {
