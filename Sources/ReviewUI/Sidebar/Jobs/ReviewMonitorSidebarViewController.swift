@@ -696,8 +696,66 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func makeContextMenu(at point: NSPoint) -> NSMenu? {
-        _ = point
-        return nil
+        let row = outlineView.row(at: point)
+        guard row >= 0,
+            let node = codexSidebarNode(from: outlineView.item(atRow: row)),
+            case .chat(let chat) = node.item
+        else {
+            return nil
+        }
+
+        let menu = NSMenu()
+        if let job = cancellableReviewJob(for: chat) {
+            let item = NSMenuItem(
+                title: "Cancel Review",
+                action: #selector(cancelReviewFromContextMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = job.id
+            menu.addItem(item)
+        }
+        return menu.items.isEmpty ? nil : menu
+    }
+
+    private func cancellableReviewJob(
+        for chat: ReviewMonitorCodexSidebarSnapshot.Chat
+    ) -> CodexReviewJob? {
+        store.orderedJobs.first { job in
+            guard job.isTerminal == false,
+                let chatID = job.sidebarChatID
+            else {
+                return false
+            }
+            return chatID == chat.id
+        }
+    }
+
+    @objc
+    private func cancelReviewFromContextMenu(_ sender: NSMenuItem) {
+        guard let jobID = sender.representedObject as? String else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                _ = try await self.store.cancelReview(
+                    jobID: jobID,
+                    cancellation: .userInterface()
+                )
+            } catch {
+                guard let job = self.store.job(id: jobID) else {
+                    return
+                }
+                try? self.store.recordCancellationFailure(
+                    jobID: jobID,
+                    sessionID: job.sessionID,
+                    message: error.localizedDescription
+                )
+            }
+        }
     }
 
     private func codexSidebarNode(from item: Any?) -> ReviewMonitorCodexSidebarOutlineNode? {
@@ -1595,6 +1653,28 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return cellView.isHostingReviewMonitorChatRowViewForTesting
         }
 
+        func reviewChatContextMenuTitlesForTesting(_ chatID: CodexThreadID) -> [String] {
+            var titles: [String] = []
+            presentReviewChatContextMenuForTesting(chatID) { menu in
+                titles = menu.items.map(\.title)
+            }
+            return titles
+        }
+
+        private func presentReviewChatContextMenuForTesting(
+            _ chatID: CodexThreadID,
+            presenter: @escaping (NSMenu) -> Void
+        ) {
+            guard let row = row(for: chatID) else {
+                return
+            }
+            view.layoutSubtreeIfNeeded()
+            outlineView.layoutSubtreeIfNeeded()
+            let rowRect = outlineView.rect(ofRow: row)
+            let point = NSPoint(x: rowRect.midX, y: rowRect.midY)
+            outlineView.presentContextMenuForTesting(at: point, presenter: presenter)
+        }
+
         func clickBlankAreaForTesting() {
             view.layoutSubtreeIfNeeded()
             guard outlineView.numberOfRows > 0 else {
@@ -1947,6 +2027,26 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
         }
 
     #endif
+}
+
+private extension CodexReviewJob {
+    var sidebarChatID: CodexThreadID? {
+        if let reviewThreadID = nonEmptySidebarChatID(core.run.reviewThreadID) {
+            return CodexThreadID(rawValue: reviewThreadID)
+        }
+        if let threadID = nonEmptySidebarChatID(core.run.threadID) {
+            return CodexThreadID(rawValue: threadID)
+        }
+        return nil
+    }
+
+    private func nonEmptySidebarChatID(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 @MainActor

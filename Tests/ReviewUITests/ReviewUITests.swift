@@ -837,6 +837,26 @@ struct ReviewUITests {
         #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
 
+    @Test func reviewChatContextMenuOffersCancellationForRunningChatOnly() throws {
+        let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes")
+        let recentJob = makeJob(status: .succeeded, targetSummary: "Commit: abc123")
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(
+            serverState: .running,
+            content: makeSidebarContent(from: [activeJob, recentJob])
+        )
+        let backend = makeWindowHarness(store: store)
+        let viewController = backend.viewController
+        defer { backend.window.close() }
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        let activeChatID = try #require(activeJob.reviewChatIDForTesting)
+        let recentChatID = try #require(recentJob.reviewChatIDForTesting)
+
+        #expect(sidebar.reviewChatContextMenuTitlesForTesting(activeChatID) == ["Cancel Review"])
+        #expect(sidebar.reviewChatContextMenuTitlesForTesting(recentChatID).isEmpty)
+    }
+
     @Test func selectingReviewChatUpdatesDetailPane() async throws {
         let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes", logText: "Running review\n")
         let recentJob = makeJob(
