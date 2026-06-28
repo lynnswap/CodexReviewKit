@@ -692,14 +692,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let menu = NSMenu()
-        if let runID = store.cancellableReviewRunID(forChatID: chat.id.rawValue) {
+        if store.hasCancellableReview(forChatID: chat.id.rawValue) {
             let item = NSMenuItem(
                 title: "Cancel Review",
                 action: #selector(cancelReviewFromContextMenu(_:)),
                 keyEquivalent: ""
             )
             item.target = self
-            item.representedObject = runID
+            item.representedObject = chat.id.rawValue
             menu.addItem(item)
         }
         return menu.items.isEmpty ? nil : menu
@@ -707,24 +707,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     @objc
     private func cancelReviewFromContextMenu(_ sender: NSMenuItem) {
-        guard let runID = sender.representedObject as? String else {
+        guard let chatID = sender.representedObject as? String else {
             return
         }
         Task { @MainActor [weak self] in
             guard let self else {
                 return
             }
-            do {
-                _ = try await self.store.cancelReview(
-                    runID: runID,
-                    cancellation: .userInterface()
-                )
-            } catch {
-                try? self.store.recordCancellationFailure(
-                    runID: runID,
-                    message: error.localizedDescription
-                )
-            }
+            _ = try? await self.store.cancelReview(
+                chatID: chatID,
+                cancellation: .userInterface()
+            )
         }
     }
 

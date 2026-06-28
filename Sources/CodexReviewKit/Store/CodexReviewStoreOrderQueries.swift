@@ -16,13 +16,17 @@ extension CodexReviewStore {
         reviewRuns.first(where: { $0.id == id })
     }
 
-    package func cancellableReviewRunID(forChatID chatID: String) -> String? {
+    package func hasCancellableReview(forChatID chatID: String) -> Bool {
+        cancellableReviewRun(forChatID: chatID) != nil
+    }
+
+    package func cancellableReviewRun(forChatID chatID: String) -> ReviewRunRecord? {
         orderedReviewRuns.first { runRecord in
             guard runRecord.isTerminal == false else {
                 return false
             }
             return runRecord.matchesChatID(chatID)
-        }?.id
+        }
     }
 
     package func reviewRuns(inWorkspace cwd: String) -> [ReviewRunRecord] {

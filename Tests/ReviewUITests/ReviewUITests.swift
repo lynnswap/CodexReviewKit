@@ -835,7 +835,7 @@ struct ReviewUITests {
             summary: "Review complete."
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadReviewLifecycleForTesting(
+        store.loadReviewCancellationStateForTesting(
             serverState: .running,
             reviewRuns: [activeRun, recentRun]
         )
@@ -5335,7 +5335,7 @@ extension CodexReviewStore {
         )
     }
 
-    func loadReviewLifecycleForTesting(
+    func loadReviewCancellationStateForTesting(
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,

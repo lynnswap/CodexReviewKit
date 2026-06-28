@@ -484,6 +484,17 @@ extension CodexReviewStore {
         return .init(runID: runRecord.id, cancelled: true, core: runRecord.core)
     }
 
+    @discardableResult
+    package func cancelReview(
+        chatID: String,
+        cancellation: ReviewCancellation = .system()
+    ) async throws -> CodexReviewAPI.Cancel.Outcome? {
+        guard let runRecord = cancellableReviewRun(forChatID: chatID) else {
+            return nil
+        }
+        return try await cancelReview(runID: runRecord.id, cancellation: cancellation)
+    }
+
     package func closeSession(
         _ sessionID: String,
         reason: ReviewCancellation = .sessionClosed()

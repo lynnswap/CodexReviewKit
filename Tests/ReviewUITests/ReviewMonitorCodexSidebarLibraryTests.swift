@@ -380,7 +380,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
         let visibleThreadID = CodexThreadID(rawValue: "thread-app")
-        let hiddenLegacyThreadID = CodexThreadID(rawValue: "legacy-review-thread")
+        let hiddenRunThreadID = CodexThreadID(rawValue: "run-backed-review-thread")
 
         try await runtime.transport.enqueueThreadList(
             .init(
@@ -394,28 +394,28 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 ]
             ))
 
-        let legacyRun = ReviewRunRecord.makeForTesting(
-            id: "legacy-run",
+        let runBackedRecord = ReviewRunRecord.makeForTesting(
+            id: "run-backed-record",
             cwd: repo.path,
-            targetSummary: "Legacy review row",
-            threadID: "legacy-review-thread",
-            turnID: "legacy-turn",
+            targetSummary: "Run-backed review row",
+            threadID: hiddenRunThreadID.rawValue,
+            turnID: "run-backed-turn",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 4_000),
-            summary: "Running legacy review."
+            summary: "Running review."
         )
-        let legacyChat = ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(hiddenLegacyThreadID),
-            id: hiddenLegacyThreadID,
-            title: "Legacy review row",
-            preview: "Running legacy review.",
+        let runBackedChat = ReviewMonitorCodexSidebarSnapshot.Chat(
+            rowID: .chat(hiddenRunThreadID),
+            id: hiddenRunThreadID,
+            title: "Run-backed review row",
+            preview: "Running review.",
             workspaceCWD: repo.path,
             updatedAt: Date(timeIntervalSince1970: 4_000)
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadReviewLifecycleForTesting(
+        store.loadReviewCancellationStateForTesting(
             serverState: .running,
-            reviewRuns: [legacyRun]
+            reviewRuns: [runBackedRecord]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
@@ -429,9 +429,9 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(visibleThreadID)) == "App review"
         }
-        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(legacyChat.id)) == nil)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(runBackedChat.id)) == nil)
 
-        uiState.selection = .chat(legacyChat.id)
+        uiState.selection = .chat(runBackedChat.id)
 
         try await waitForCondition {
             uiState.selection == nil && sidebar.selectedReviewChatIDForTesting == nil
