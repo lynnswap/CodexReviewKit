@@ -141,32 +141,62 @@ func seedChatLogForTesting(
     logText: String = "",
     rawLogText: String = ""
 ) {
-    var entries: [ReviewChatLogEntryForTesting] = []
-    let trimmedLogText = logText.trimmingCharacters(in: .newlines)
-    if trimmedLogText.isEmpty == false {
-        entries.append(.init(kind: .agentMessage, groupID: "fixture-log-\(run.id)", text: trimmedLogText))
-    }
-    for (index, line) in rawLogText.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-        entries.append(
-            .init(
-                kind: .diagnostic,
-                groupID: "fixture-diagnostic-\(run.id)-\(index)",
-                text: String(line)
-            ))
-    }
-    ReviewChatLogFixtureStore.setEntries(entries, for: run)
+    seedChatLogForTesting(
+        chatID: run.previewChatIDForTesting,
+        fixtureID: run.id,
+        logText: logText,
+        rawLogText: rawLogText
+    )
+}
+
+@MainActor
+func seedChatLogForTesting(
+    chatID: CodexThreadID,
+    fixtureID: String,
+    logText: String = "",
+    rawLogText: String = ""
+) {
+    ReviewChatLogFixtureStore.setEntries(
+        makeChatLogEntriesForTesting(fixtureID: fixtureID, logText: logText, rawLogText: rawLogText),
+        for: chatID
+    )
 }
 
 @MainActor
 func appendChatLogEntryForTesting(_ run: ReviewRunRecord, _ entry: ReviewChatLogEntryForTesting) {
-    ReviewChatLogFixtureStore.append(entry, to: run)
+    appendChatLogEntryForTesting(entry, to: run.previewChatIDForTesting, turnID: run.previewTurnIDForTesting)
+}
+
+@MainActor
+func appendChatLogEntryForTesting(
+    _ entry: ReviewChatLogEntryForTesting,
+    to chatID: CodexThreadID,
+    turnID: CodexTurnID
+) {
+    ReviewChatLogFixtureStore.append(entry, to: chatID, turnID: turnID)
 }
 
 @MainActor
 func replaceChatLogTextForTesting(_ run: ReviewRunRecord, _ text: String) {
+    replaceChatLogTextForTesting(
+        text,
+        for: run.previewChatIDForTesting,
+        fixtureID: run.id,
+        turnID: run.previewTurnIDForTesting
+    )
+}
+
+@MainActor
+func replaceChatLogTextForTesting(
+    _ text: String,
+    for chatID: CodexThreadID,
+    fixtureID: String,
+    turnID: CodexTurnID
+) {
     ReviewChatLogFixtureStore.replaceEntries(
-        [.init(kind: .agentMessage, groupID: "fixture-log-\(run.id)", text: text.trimmingCharacters(in: .newlines))],
-        for: run
+        [.init(kind: .agentMessage, groupID: "fixture-log-\(fixtureID)", text: text.trimmingCharacters(in: .newlines))],
+        for: chatID,
+        turnID: turnID
     )
 }
 
@@ -178,13 +208,32 @@ func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, reviewRun
     runStorePreviewSupportRetainers.append(
         ReviewChatLogFixtureRetainer(
             source: source,
-            runIDs: Set(reviewRuns.map(\.id))
+            chatIDs: Set(reviewRuns.map(\.previewChatIDForTesting))
         ))
 }
 
 @MainActor
 func reviewChatLogText(for run: ReviewRunRecord) -> String {
-    ReviewChatLogFixtureStore.logText(for: run)
+    reviewChatLogText(
+        for: makeCodexChatSnapshotForTesting(
+            chatID: run.previewChatIDForTesting,
+            turnID: run.previewTurnIDForTesting,
+            turnStatus: CodexTurnStatus(reviewRunStateForTesting: run.core.lifecycle.status),
+            items: ReviewChatLogFixtureStore.items(
+                for: run.previewChatIDForTesting,
+                turnID: run.previewTurnIDForTesting
+            )
+        ),
+        chatUpdatedAt: run.core.lifecycle.endedAt
+    )
+}
+
+@MainActor
+func reviewChatLogText(
+    for snapshot: CodexChatSnapshot,
+    chatUpdatedAt: Date? = nil
+) -> String {
+    ReviewChatLogFixtureStore.logText(for: snapshot, chatUpdatedAt: chatUpdatedAt)
 }
 
 @MainActor
@@ -195,10 +244,46 @@ func awaitChatRenderForTesting(
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    try await awaitChatRenderForTesting(
+        chatID: run.previewChatIDForTesting,
+        expectedLog: reviewChatLogText(for: run),
+        in: transport,
+        allowIncrementalUpdate: allowIncrementalUpdate,
+        timeout: timeout,
+        matching: predicate
+    )
+}
+
+@MainActor
+func awaitChatRenderForTesting(
+    snapshot: CodexChatSnapshot,
+    in transport: ReviewMonitorTransportViewController,
+    allowIncrementalUpdate: Bool = true,
+    timeout: Duration = .seconds(2),
+    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    try await awaitChatRenderForTesting(
+        chatID: snapshot.chatID,
+        expectedLog: reviewChatLogText(for: snapshot),
+        in: transport,
+        allowIncrementalUpdate: allowIncrementalUpdate,
+        timeout: timeout,
+        matching: predicate
+    )
+}
+
+@MainActor
+func awaitChatRenderForTesting(
+    chatID: CodexThreadID,
+    expectedLog: String,
+    in transport: ReviewMonitorTransportViewController,
+    allowIncrementalUpdate: Bool = true,
+    timeout: Duration = .seconds(2),
+    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     _ = allowIncrementalUpdate
-    let expectedLog = reviewChatLogText(for: run)
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting =
-        .chat(chatIDForTesting(run).rawValue)
+        .chat(chatID.rawValue)
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
     repeat {
@@ -254,6 +339,27 @@ func makePreviewChatLogSourceForTesting(
 }
 
 @MainActor
+func makePreviewChatLogSourceForTesting(
+    chat: ReviewMonitorCodexSidebarSnapshot.Chat,
+    cwd: String,
+    streamID: String,
+    isRunning: Bool,
+    initialSnapshot: CodexChatSnapshot
+) -> ReviewMonitorPreviewChatLogSource {
+    ReviewMonitorPreviewChatLogSource(
+        fixtures: [
+            makePreviewChatLogFixtureForTesting(
+                chat: chat,
+                cwd: cwd,
+                streamID: streamID,
+                isRunning: isRunning,
+                initialSnapshot: initialSnapshot
+            )
+        ]
+    )
+}
+
+@MainActor
 func makePreviewMessageItemForTesting(
     id: String,
     text: String,
@@ -272,7 +378,15 @@ func chatCommandOutputBlockIDForTesting(
     _ run: ReviewRunRecord,
     itemID: String
 ) -> ReviewMonitorLog.BlockID {
-    ReviewMonitorLog.BlockID("commandOutput:\(run.previewTurnIDForTesting.rawValue):\(itemID)")
+    chatCommandOutputBlockIDForTesting(turnID: run.previewTurnIDForTesting, itemID: itemID)
+}
+
+@MainActor
+func chatCommandOutputBlockIDForTesting(
+    turnID: CodexTurnID,
+    itemID: String
+) -> ReviewMonitorLog.BlockID {
+    ReviewMonitorLog.BlockID("commandOutput:\(turnID.rawValue):\(itemID)")
 }
 
 @MainActor
@@ -294,7 +408,7 @@ private func makePreviewChatLogFixtureForTesting(
         errorDescription: run.core.lifecycle.errorMessage,
         usage: nil
     )
-    let initialSnapshot = CodexChatSnapshot(
+    let initialSnapshot = makeCodexChatSnapshotForTesting(
         chatID: chat.id,
         phase: CodexDataPhase(
             reviewRunStateForTesting: run.core.lifecycle.status,
@@ -303,7 +417,7 @@ private func makePreviewChatLogFixtureForTesting(
         turns: [turn],
         items: makeItems(turn.id)
     )
-    return ReviewMonitorPreviewChatLogFixture(
+    return makePreviewChatLogFixtureForTesting(
         chat: chat,
         cwd: run.cwd,
         streamID: run.id,
@@ -313,46 +427,111 @@ private func makePreviewChatLogFixtureForTesting(
 }
 
 @MainActor
+func makeCodexChatSnapshotForTesting(
+    chatID: CodexThreadID,
+    turnID: CodexTurnID,
+    phase: CodexDataPhase = .loaded,
+    turnStatus: CodexTurnStatus = .completed,
+    turnErrorDescription: String? = nil,
+    items: [CodexChatItemSnapshot] = []
+) -> CodexChatSnapshot {
+    makeCodexChatSnapshotForTesting(
+        chatID: chatID,
+        phase: phase,
+        turns: [
+            .init(
+                id: turnID,
+                status: turnStatus,
+                errorDescription: turnErrorDescription,
+                usage: nil
+            )
+        ],
+        items: items
+    )
+}
+
+@MainActor
+func makeCodexChatSnapshotForTesting(
+    chatID: CodexThreadID,
+    phase: CodexDataPhase = .loaded,
+    turns: [CodexChatTurnStateSnapshot],
+    items: [CodexChatItemSnapshot] = []
+) -> CodexChatSnapshot {
+    CodexChatSnapshot(
+        chatID: chatID,
+        phase: phase,
+        turns: turns,
+        items: items
+    )
+}
+
+@MainActor
+func makePreviewChatLogFixtureForTesting(
+    chat: ReviewMonitorCodexSidebarSnapshot.Chat,
+    cwd: String,
+    streamID: String,
+    isRunning: Bool,
+    initialSnapshot: CodexChatSnapshot
+) -> ReviewMonitorPreviewChatLogFixture {
+    ReviewMonitorPreviewChatLogFixture(
+        chat: chat,
+        cwd: cwd,
+        streamID: streamID,
+        isRunning: isRunning,
+        initialSnapshot: initialSnapshot
+    )
+}
+
+@MainActor
 private enum ReviewChatLogFixtureStore {
-    private static var entriesByRunID: [String: [ReviewChatLogEntryForTesting]] = [:]
+    private static var entriesByChatID: [CodexThreadID: [ReviewChatLogEntryForTesting]] = [:]
 
     static func setEntries(_ entries: [ReviewChatLogEntryForTesting], for run: ReviewRunRecord) {
-        entriesByRunID[run.id] = entries
+        setEntries(entries, for: run.previewChatIDForTesting)
+    }
+
+    static func setEntries(_ entries: [ReviewChatLogEntryForTesting], for chatID: CodexThreadID) {
+        entriesByChatID[chatID] = entries
     }
 
     static func replaceEntries(_ entries: [ReviewChatLogEntryForTesting], for run: ReviewRunRecord) {
-        setEntries(entries, for: run)
-        updateRetainedPreviewSource(for: run)
+        replaceEntries(entries, for: run.previewChatIDForTesting, turnID: run.previewTurnIDForTesting)
+    }
+
+    static func replaceEntries(
+        _ entries: [ReviewChatLogEntryForTesting],
+        for chatID: CodexThreadID,
+        turnID: CodexTurnID
+    ) {
+        setEntries(entries, for: chatID)
+        updateRetainedPreviewSource(for: chatID, turnID: turnID)
     }
 
     static func append(_ entry: ReviewChatLogEntryForTesting, to run: ReviewRunRecord) {
-        entriesByRunID[run.id, default: []].append(entry)
-        updateRetainedPreviewSource(for: run)
+        append(entry, to: run.previewChatIDForTesting, turnID: run.previewTurnIDForTesting)
+    }
+
+    static func append(_ entry: ReviewChatLogEntryForTesting, to chatID: CodexThreadID, turnID: CodexTurnID) {
+        entriesByChatID[chatID, default: []].append(entry)
+        updateRetainedPreviewSource(for: chatID, turnID: turnID)
     }
 
     static func items(for run: ReviewRunRecord) -> [CodexChatItemSnapshot] {
-        makeChatItems(from: entriesByRunID[run.id, default: []], turnID: run.previewTurnIDForTesting)
+        items(for: run.previewChatIDForTesting, turnID: run.previewTurnIDForTesting)
     }
 
-    static func logText(for run: ReviewRunRecord) -> String {
+    static func items(for chatID: CodexThreadID, turnID: CodexTurnID) -> [CodexChatItemSnapshot] {
+        makeChatItems(from: entriesByChatID[chatID, default: []], turnID: turnID)
+    }
+
+    static func logText(for snapshot: CodexChatSnapshot, chatUpdatedAt: Date?) -> String {
         var projection = ReviewMonitorSelectedCodexChatLogProjection()
         var document: ReviewMonitorLog.Document?
-        let snapshot = CodexChatSnapshot(
-            chatID: chatIDForTesting(run),
-            phase: .loaded,
-            turns: [
-                .init(
-                    id: run.previewTurnIDForTesting,
-                    status: CodexTurnStatus(reviewRunStateForTesting: run.core.lifecycle.status)
-                )
-            ],
-            items: items(for: run)
-        )
         for change in CodexChatChange.previewChangesForTesting(from: nil, to: snapshot) {
             document = projection.apply(
                 change,
                 chatCreatedAt: nil,
-                chatUpdatedAt: run.core.lifecycle.endedAt
+                chatUpdatedAt: chatUpdatedAt
             )?.sourceDocument ?? document
         }
         guard let document else {
@@ -362,9 +541,9 @@ private enum ReviewChatLogFixtureStore {
         return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
     }
 
-    private static func updateRetainedPreviewSource(for run: ReviewRunRecord) {
-        for support in runStorePreviewSupportRetainers where support.contains(runID: run.id) {
-            support.upsert(run: run, items: items(for: run))
+    private static func updateRetainedPreviewSource(for chatID: CodexThreadID, turnID: CodexTurnID) {
+        for support in runStorePreviewSupportRetainers where support.contains(chatID: chatID) {
+            support.upsert(chatID: chatID, items: items(for: chatID, turnID: turnID))
         }
     }
 }
@@ -372,21 +551,18 @@ private enum ReviewChatLogFixtureStore {
 @MainActor
 private final class ReviewChatLogFixtureRetainer {
     let source: ReviewMonitorPreviewChatLogSource
-    private var runIDs: Set<String>
+    private var chatIDs: Set<CodexThreadID>
 
-    init(source: ReviewMonitorPreviewChatLogSource, runIDs: Set<String>) {
+    init(source: ReviewMonitorPreviewChatLogSource, chatIDs: Set<CodexThreadID>) {
         self.source = source
-        self.runIDs = runIDs
+        self.chatIDs = chatIDs
     }
 
-    func contains(runID: String) -> Bool {
-        runIDs.contains(runID)
+    func contains(chatID: CodexThreadID) -> Bool {
+        chatIDs.contains(chatID)
     }
 
-    func upsert(run: ReviewRunRecord, items: [CodexChatItemSnapshot]) {
-        guard let chatID = run.reviewChatIDForTesting else {
-            return
-        }
+    func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) {
         for item in items {
             source.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
         }
@@ -395,6 +571,27 @@ private final class ReviewChatLogFixtureRetainer {
 
 @MainActor
 private var runStorePreviewSupportRetainers: [ReviewChatLogFixtureRetainer] = []
+
+private func makeChatLogEntriesForTesting(
+    fixtureID: String,
+    logText: String,
+    rawLogText: String
+) -> [ReviewChatLogEntryForTesting] {
+    var entries: [ReviewChatLogEntryForTesting] = []
+    let trimmedLogText = logText.trimmingCharacters(in: .newlines)
+    if trimmedLogText.isEmpty == false {
+        entries.append(.init(kind: .agentMessage, groupID: "fixture-log-\(fixtureID)", text: trimmedLogText))
+    }
+    for (index, line) in rawLogText.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        entries.append(
+            .init(
+                kind: .diagnostic,
+                groupID: "fixture-diagnostic-\(fixtureID)-\(index)",
+                text: String(line)
+            ))
+    }
+    return entries
+}
 
 @MainActor
 private func makeChatItems(
@@ -577,6 +774,10 @@ private struct ReviewChatLogAccumulatedItem {
 }
 
 extension ReviewRunRecord {
+    var previewChatIDForTesting: CodexThreadID {
+        reviewChatIDForTesting ?? CodexThreadID(rawValue: id)
+    }
+
     var reviewChatIDForTesting: CodexThreadID? {
         if let reviewThreadID = nonEmptyReviewChatProjectionStringForTesting(core.run.reviewThreadID) {
             return CodexThreadID(rawValue: reviewThreadID)
