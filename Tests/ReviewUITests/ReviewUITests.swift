@@ -399,6 +399,48 @@ struct ReviewUITests {
         #expect(cellView.toolTip == loadedChat.workspaceCWD)
     }
 
+    @Test func reviewChatCellViewSkipsSameNodeConfigureWithoutRebindingHostedContent() throws {
+        let chat = reviewChatCellTestChat(
+            id: "chat-stable",
+            title: "Stable review",
+            workspaceCWD: "/tmp/stable"
+        )
+        let node = ReviewMonitorCodexSidebarOutlineNode(item: .chat(chat))
+
+        let cellView = makeReviewMonitorReviewChatCellViewForTesting(node: node)
+        let initialHostingViewIdentity = try #require(
+            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
+        )
+        let initialHostedNodeIdentity = try #require(
+            reviewMonitorReviewChatCellHostedNodeIdentityForTesting(cellView)
+        )
+        let initialObservation = try #require(
+            reviewMonitorReviewChatCellNodeObservationForTesting(cellView)
+        )
+        let initialBindingGeneration = try #require(
+            reviewMonitorReviewChatCellBindingGenerationForTesting(cellView)
+        )
+
+        configureReviewMonitorReviewChatCellViewForTesting(cellView, node: node)
+
+        let objectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
+        #expect(objectNode === node)
+        #expect(
+            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
+                == initialHostingViewIdentity
+        )
+        #expect(
+            reviewMonitorReviewChatCellHostedNodeIdentityForTesting(cellView)
+                == initialHostedNodeIdentity
+        )
+        #expect(
+            reviewMonitorReviewChatCellBindingGenerationForTesting(cellView)
+                == initialBindingGeneration
+        )
+        #expect(initialObservation.isActive)
+        #expect(reviewMonitorReviewChatCellNodeObservationForTesting(cellView)?.isActive == true)
+    }
+
     @Test func accountContextMenuPresentationRestoresResponderStateAfterClosing() throws {
         let activeAccount = CodexReviewAccount(email: "active@example.com", planType: "pro")
         let otherAccount = CodexReviewAccount(email: "other@example.com", planType: "plus")

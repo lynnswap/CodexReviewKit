@@ -1300,7 +1300,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                         as? ReviewMonitorReviewChatCellView)
                     ?? ReviewMonitorReviewChatCellView()
                 view.identifier = Identifier.reviewChatCell
-                view.objectValue = node
                 view.configure(with: node)
                 return view
             }
@@ -1310,7 +1309,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                     as? ReviewMonitorWorkspaceCellView)
                 ?? ReviewMonitorWorkspaceCellView()
             view.identifier = Identifier.workspaceCell
-            view.objectValue = node
             view.configure(with: node)
             return view
         }
@@ -1972,6 +1970,9 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
     private weak var boundNode: ReviewMonitorCodexSidebarOutlineNode?
     private var nodeObservation: PortableObservationTracking.Token?
+    #if DEBUG
+        private var bindingGenerationForTesting = 0
+    #endif
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1988,11 +1989,14 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     }
 
     func configure(with node: ReviewMonitorCodexSidebarOutlineNode) {
-        objectValue = node
         guard boundNode !== node else {
             return
         }
+        objectValue = node
         boundNode = node
+        #if DEBUG
+            bindingGenerationForTesting += 1
+        #endif
         nodeObservation?.cancel()
         nodeObservation = withPortableContinuousObservation { [weak self, node] _ in
             guard let self,
@@ -2038,6 +2042,18 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
             hostingView.map(ObjectIdentifier.init)
         }
 
+        var hostedNodeIdentityForTesting: ObjectIdentifier? {
+            hostingView.map { ObjectIdentifier($0.rootView.node) }
+        }
+
+        var nodeObservationForTesting: PortableObservationTracking.Token? {
+            nodeObservation
+        }
+
+        var bindingGenerationValueForTesting: Int {
+            bindingGenerationForTesting
+        }
+
         func contentMinXForTesting(relativeTo view: NSView) -> CGFloat? {
             guard let hostingView else {
                 return nil
@@ -2062,6 +2078,15 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     }
 
     @MainActor
+    func makeReviewMonitorReviewChatCellViewForTesting(
+        node: ReviewMonitorCodexSidebarOutlineNode
+    ) -> NSTableCellView {
+        let cellView = ReviewMonitorReviewChatCellView()
+        cellView.configure(with: node)
+        return cellView
+    }
+
+    @MainActor
     func configureReviewMonitorReviewChatCellViewForTesting(
         _ cellView: NSTableCellView,
         chat: ReviewMonitorCodexSidebarSnapshot.Chat
@@ -2073,6 +2098,17 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
             with: ReviewMonitorCodexSidebarOutlineNode(
                 item: .chat(chat)
             ))
+    }
+
+    @MainActor
+    func configureReviewMonitorReviewChatCellViewForTesting(
+        _ cellView: NSTableCellView,
+        node: ReviewMonitorCodexSidebarOutlineNode
+    ) {
+        guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
+            fatalError("Expected ReviewMonitorReviewChatCellView.")
+        }
+        cellView.configure(with: node)
     }
 
     @MainActor
@@ -2091,6 +2127,36 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
             return nil
         }
         return cellView.hostingViewIdentityForTesting
+    }
+
+    @MainActor
+    func reviewMonitorReviewChatCellHostedNodeIdentityForTesting(
+        _ cellView: NSTableCellView
+    ) -> ObjectIdentifier? {
+        guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
+            return nil
+        }
+        return cellView.hostedNodeIdentityForTesting
+    }
+
+    @MainActor
+    func reviewMonitorReviewChatCellNodeObservationForTesting(
+        _ cellView: NSTableCellView
+    ) -> PortableObservationTracking.Token? {
+        guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
+            return nil
+        }
+        return cellView.nodeObservationForTesting
+    }
+
+    @MainActor
+    func reviewMonitorReviewChatCellBindingGenerationForTesting(
+        _ cellView: NSTableCellView
+    ) -> Int? {
+        guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
+            return nil
+        }
+        return cellView.bindingGenerationValueForTesting
     }
 #endif
 
@@ -2122,10 +2188,10 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     }
 
     func configure(with node: ReviewMonitorCodexSidebarOutlineNode) {
-        objectValue = node
         guard boundNode !== node else {
             return
         }
+        objectValue = node
         boundNode = node
         nodeObservation?.cancel()
         nodeObservation = withPortableContinuousObservation { [weak self, node] _ in
