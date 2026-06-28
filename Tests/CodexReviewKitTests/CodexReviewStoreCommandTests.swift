@@ -327,7 +327,7 @@ struct CodexReviewStoreCommandTests {
             _ = try await second
 
             #expect(
-                store.orderedReviewRuns(inWorkspace: "/tmp/project").map(\.targetSummary) == [
+                store.listReviews(cwd: "/tmp/project").items.map(\.targetSummary) == [
                     "Uncommitted changes",
                     "Base branch: main",
                 ])
@@ -383,7 +383,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: "new"))
             _ = try await result
 
-            #expect(store.orderedReviewRuns(inWorkspace: "/tmp/project").map(\.targetSummary).first == "Uncommitted changes")
+            #expect(store.listReviews(cwd: "/tmp/project").items.map(\.targetSummary).first == "Uncommitted changes")
         }
     }
 
