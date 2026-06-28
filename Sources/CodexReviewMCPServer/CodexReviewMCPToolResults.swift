@@ -34,7 +34,7 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
 
 private extension CodexReviewAPI.Read.Result {
     func textContent(log: ReviewMCPLogProjection) -> String {
-        log.finalResult?.nilIfEmpty ?? core.lifecycleText
+        log.finalResult?.nilIfEmpty ?? core.displayLifecycleMessage
     }
 
     func textContentForStartOrAwait(log: ReviewMCPLogProjection) -> String {
@@ -85,14 +85,11 @@ private extension CodexReviewAPI.Read.Result {
         var object: [String: Value] = [
             "runId": .string(runID),
             "run": core.run.structuredContent(),
-            "lifecycle": core.lifecycle.structuredContent(
+            "lifecycle": core.structuredLifecycleContent(
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "output": core.structuredOutputContent(
-                review: log.finalResult?.nilIfEmpty ?? core.lifecycleText,
-                finalReview: log.finalResult?.nilIfEmpty
-            ),
+            "review": core.structuredReviewContent(finalReview: log.finalResult),
         ]
         object["log"] =
             includeDetails
@@ -117,9 +114,9 @@ private extension ReviewMCPLogProjection {
             "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
             "activeEntryCount": .int(activeEntryCount),
             "latestEntryId": latestEntryID.map(Value.string) ?? .null,
-            "finalSummary": boundedLogString(
-                finalSummary,
-                field: "finalSummary",
+            "finalLifecycleMessage": boundedLogString(
+                finalLifecycleMessage,
+                field: "finalLifecycleMessage",
                 truncatedFields: &truncatedFields
             ),
             "finalResult": boundedLogString(
@@ -143,9 +140,9 @@ private extension ReviewMCPLogProjection {
             "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
             "activeEntryCount": .int(activeEntryCount),
             "latestEntryId": latestEntryID.map(Value.string) ?? .null,
-            "finalSummary": boundedLogString(
-                finalSummary,
-                field: "finalSummary",
+            "finalLifecycleMessage": boundedLogString(
+                finalLifecycleMessage,
+                field: "finalLifecycleMessage",
                 truncatedFields: &truncatedFields
             ),
             "finalResult": boundedLogString(
@@ -323,14 +320,11 @@ private extension CodexReviewAPI.Run.ListItem {
             "cwd": .string(cwd),
             "targetSummary": .string(targetSummary),
             "run": core.run.structuredContent(),
-            "lifecycle": core.lifecycle.structuredContent(
+            "lifecycle": core.structuredLifecycleContent(
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "output": core.structuredOutputContent(
-                review: core.lifecycleText,
-                finalReview: nil
-            ),
+            "review": core.structuredReviewContent(finalReview: nil),
         ])
     }
 }
@@ -357,14 +351,11 @@ private extension CodexReviewAPI.Cancel.Outcome {
             "runId": .string(runID),
             "cancelled": .bool(cancelled),
             "run": core.run.structuredContent(),
-            "lifecycle": core.lifecycle.structuredContent(
+            "lifecycle": core.structuredLifecycleContent(
                 elapsedSeconds: nil,
                 cancellable: false
             ),
-            "output": core.structuredOutputContent(
-                review: core.lifecycleText,
-                finalReview: nil
-            ),
+            "review": core.structuredReviewContent(finalReview: nil),
         ])
     }
 }
@@ -383,10 +374,12 @@ private extension ReviewRunCore.Run {
 private extension ReviewRunCore.Lifecycle {
     func structuredContent(
         elapsedSeconds: Int?,
-        cancellable: Bool
+        cancellable: Bool,
+        message: String
     ) -> Value {
         .object([
             "status": .string(status.rawValue),
+            "message": .string(message),
             "exitCode": exitCode.map(Value.int) ?? .null,
             "startedAt": startedAt.map { .string($0.ISO8601Format()) } ?? .null,
             "endedAt": endedAt.map { .string($0.ISO8601Format()) } ?? .null,
@@ -399,15 +392,24 @@ private extension ReviewRunCore.Lifecycle {
 }
 
 private extension ReviewRunCore {
-    var lifecycleText: String {
-        lifecycle.errorMessage?.nilIfEmpty ?? summary.nilIfEmpty ?? lifecycle.status.rawValue
+    var displayLifecycleMessage: String {
+        lifecycle.errorMessage?.nilIfEmpty ?? lifecycleMessage.nilIfEmpty ?? lifecycle.status.rawValue
     }
 
-    func structuredOutputContent(review: String, finalReview: String?) -> Value {
+    func structuredLifecycleContent(
+        elapsedSeconds: Int?,
+        cancellable: Bool
+    ) -> Value {
+        lifecycle.structuredContent(
+            elapsedSeconds: elapsedSeconds,
+            cancellable: cancellable,
+            message: displayLifecycleMessage
+        )
+    }
+
+    func structuredReviewContent(finalReview: String?) -> Value {
         let finalReview = finalReview?.nilIfEmpty
         return .object([
-            "summary": .string(summary),
-            "review": .string(review),
             "hasFinalReview": .bool(finalReview != nil),
             "finalReview": finalReview.map(Value.string) ?? .null,
             "reviewResult": ParsedReviewResult.parse(finalReviewText: finalReview).structuredContent(),

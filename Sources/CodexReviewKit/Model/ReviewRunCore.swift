@@ -50,16 +50,16 @@ package struct ReviewRunCore: Codable, Sendable, Hashable {
 
     package var run: Run
     package var lifecycle: Lifecycle
-    package var summary: String
+    package var lifecycleMessage: String
 
     package init(
         run: Run = .init(),
         lifecycle: Lifecycle,
-        summary: String
+        lifecycleMessage: String
     ) {
         self.run = run
         self.lifecycle = lifecycle
-        self.summary = summary
+        self.lifecycleMessage = lifecycleMessage
     }
 
     package var isTerminal: Bool {

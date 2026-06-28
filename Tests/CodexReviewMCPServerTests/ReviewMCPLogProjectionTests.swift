@@ -11,7 +11,7 @@ struct ReviewMCPLogProjectionTests {
             runID: "run-1",
             core: .init(
                 lifecycle: .init(status: .running),
-                summary: "Review started."
+                lifecycleMessage: "Review started."
             ),
             cancellable: true
         ))
@@ -29,14 +29,14 @@ struct ReviewMCPLogProjectionTests {
             runID: "run-2",
             core: .init(
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                summary: "Done."
+                lifecycleMessage: "Done."
             ),
             cancellable: false
         ))
 
         #expect(projection.activeEntryIDs == [])
         #expect(projection.activeEntryCount == 0)
-        #expect(projection.finalSummary == "Done.")
+        #expect(projection.finalLifecycleMessage == "Done.")
         #expect(projection.finalResult == nil)
         #expect(projection.items.isEmpty)
     }
@@ -48,7 +48,7 @@ struct ReviewMCPLogProjectionTests {
                 core: .init(
                     run: .init(threadID: "thread-1", turnID: "turn-1"),
                     lifecycle: .init(status: .running),
-                    summary: "Running."
+                    lifecycleMessage: "Running."
                 ),
                 cancellable: true
             ),
@@ -91,7 +91,7 @@ struct ReviewMCPLogProjectionTests {
                 core: .init(
                     run: .init(threadID: "thread-1", turnID: "turn-1"),
                     lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                    summary: "Done."
+                    lifecycleMessage: "Done."
                 ),
                 cancellable: false
             ),
@@ -105,7 +105,7 @@ struct ReviewMCPLogProjectionTests {
             ]
         )
 
-        #expect(projection.finalSummary == "Done.")
+        #expect(projection.finalLifecycleMessage == "Done.")
         #expect(projection.finalResult == "CodexChat final")
     }
 }

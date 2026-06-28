@@ -170,7 +170,10 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "Done")
+                resolved.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String == "Done")
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
+            #expect(resolved.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -247,9 +250,12 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "Done")
+                awaited.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String == "Done")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "log", "finalSummary"]) as? String
+                awaited.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
+            #expect(awaited.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
                     == "Done")
             #expect(awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) is NSNull)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
@@ -511,7 +517,12 @@ struct CodexReviewMCPHTTPServerTests {
                 defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String
                     == "succeeded")
             #expect(
-                defaultResponse.value(for: ["result", "structuredContent", "output", "summary"]) as? String == "Done")
+                defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
+                    == "Done")
+            #expect(
+                defaultResponse.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool
+                    == false)
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             #expect(defaultResponse.value(for: ["result", "structuredContent", "rawLogText"]) == nil)

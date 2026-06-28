@@ -547,7 +547,7 @@ package final class StoreSnapshotProbe {
                 return StoreRunSnapshot(
                     runID: runRecord.id,
                     status: runRecord.core.lifecycle.status,
-                    summary: runRecord.core.summary,
+                    summary: runRecord.core.lifecycleMessage,
                     run: runRecord.core.run,
                     activeRun: runtimeState.activeRun,
                     cancellationRequested: runRecord.cancellationRequested

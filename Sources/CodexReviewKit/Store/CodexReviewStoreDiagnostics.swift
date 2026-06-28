@@ -14,7 +14,7 @@ public enum CodexReviewStoreTestEnvironment {
 struct CodexReviewStoreDiagnosticsSnapshot: Encodable {
     struct Run: Encodable {
         var status: String
-        var summary: String
+        var lifecycleMessage: String
     }
 
     var serverState: String

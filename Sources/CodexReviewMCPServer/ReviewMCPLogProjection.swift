@@ -31,7 +31,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     var activeEntryIDs: [String]
     var activeEntryCount: Int
     var latestEntryID: String?
-    var finalSummary: String?
+    var finalLifecycleMessage: String?
     var finalResult: String?
     var items: [Item]
 
@@ -41,13 +41,13 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
 
     private init(result: CodexReviewAPI.Read.Result) {
         let lifecycle = result.core.lifecycle
-        let summary = result.core.summary
+        let lifecycleMessage = result.core.lifecycleMessage
         let status = lifecycle.status
         self.revision = [
             result.runID,
             status.rawValue,
             lifecycle.endedAt?.timeIntervalSince1970.description ?? "running",
-            summary,
+            lifecycleMessage,
         ].joined(separator: ":")
 
         self.items = []
@@ -55,7 +55,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.activeEntryIDs = []
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
-        self.finalSummary = status.isTerminal ? summary : nil
+        self.finalLifecycleMessage = status.isTerminal ? lifecycleMessage : nil
         self.finalResult = nil
     }
 
@@ -74,7 +74,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         threadItems: [CodexThreadItem]
     ) {
         let lifecycle = result.core.lifecycle
-        let summary = result.core.summary
+        let lifecycleMessage = result.core.lifecycleMessage
         let status = lifecycle.status
         let projectedItems = threadItems.compactMap { item -> Item? in
             guard let content = Content(threadItem: item) else {
@@ -103,7 +103,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.activeEntryIDs = status.isTerminal ? [] : projectedItems.map(\.id)
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
-        self.finalSummary = status.isTerminal ? summary : nil
+        self.finalLifecycleMessage = status.isTerminal ? lifecycleMessage : nil
         self.finalResult =
             status == .succeeded
             ? projectedItems.lastAssistantMessageText

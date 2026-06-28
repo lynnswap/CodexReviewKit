@@ -118,7 +118,7 @@ struct CodexReviewStoreCommandTests {
             let final = try await awaited
 
             #expect(final.core.lifecycle.status == .cancelled)
-            #expect(final.core.summary == "Stop")
+            #expect(final.core.lifecycleMessage == "Stop")
         }
     }
 
@@ -172,7 +172,7 @@ struct CodexReviewStoreCommandTests {
             let final = try await awaited
 
             #expect(final.core.lifecycle.status == .failed)
-            #expect(final.core.summary == "Failed to cancel review: Review runtime stopped.")
+            #expect(final.core.lifecycleMessage == "Failed to cancel review: Review runtime stopped.")
         }
     }
 
@@ -231,11 +231,11 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
             let running = try #require(store.reviewRun(id: "run-1"))
-            #expect(running.core.summary == "Review started.")
+            #expect(running.core.lifecycleMessage == "Review started.")
 
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
-            #expect(read.core.summary == "Succeeded.")
+            #expect(read.core.lifecycleMessage == "Succeeded.")
         }
     }
 
@@ -448,7 +448,7 @@ struct CodexReviewStoreCommandTests {
 
             let running = try store.readReview(runID: "run-1")
             #expect(running.core.lifecycle.status == .running)
-            #expect(running.core.summary == "Network unavailable; waiting to reconnect.")
+            #expect(running.core.lifecycleMessage == "Network unavailable; waiting to reconnect.")
             _ = try await store.cancelReview(runID: "run-1", cancellation: .mcpClient(message: "Stop"))
             await backend.yield(.cancelled("Stop"))
             _ = try await result
@@ -496,7 +496,7 @@ struct CodexReviewStoreCommandTests {
             networkMonitor.yield(.satisfied())
             #expect(
                 await waitUntil {
-                    store.reviewRun(id: "run-1")?.core.summary == "Network restored; restarting review."
+                    store.reviewRun(id: "run-1")?.core.lifecycleMessage == "Network restored; restarting review."
                 })
             networkMonitor.yield(.satisfied())
             await settleGate.open()
@@ -1258,7 +1258,7 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
 
             #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.summary == "Stop")
+            #expect(read.core.lifecycleMessage == "Stop")
         }
     }
 
@@ -1419,7 +1419,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(readAfterFailure.cancellable)
             #expect(readAfterFailure.core.lifecycle.cancellation == nil)
-            #expect(readAfterFailure.core.summary == "Failed to cancel review: Interrupt failed")
+            #expect(readAfterFailure.core.lifecycleMessage == "Failed to cancel review: Interrupt failed")
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             _ = try await result
@@ -1446,7 +1446,7 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
 
             #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.summary == "Stop")
+            #expect(read.core.lifecycleMessage == "Stop")
         }
     }
 
@@ -1471,7 +1471,7 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
 
             #expect(read.core.lifecycle.status == .cancelled)
-            #expect(read.core.summary == "Stop")
+            #expect(read.core.lifecycleMessage == "Stop")
         }
     }
 
