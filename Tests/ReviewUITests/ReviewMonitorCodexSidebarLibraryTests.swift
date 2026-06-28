@@ -181,6 +181,120 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(workspace.children.isEmpty)
     }
 
+    @Test func sidebarSnapshotRunningFilterUsesThreadStatus() throws {
+        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+        let runningThreadID = CodexThreadID(rawValue: "thread-running")
+        let idleThreadID = CodexThreadID(rawValue: "thread-idle")
+        let snapshot = sidebarSnapshot(
+            workspaceID: workspaceID,
+            chats: [
+                sidebarChat(
+                    id: runningThreadID,
+                    title: "Running review",
+                    workspaceID: workspaceID,
+                    updatedAt: Date(timeIntervalSince1970: 20),
+                    status: .active(activeFlags: [])
+                ),
+                sidebarChat(
+                    id: idleThreadID,
+                    title: "Idle review",
+                    workspaceID: workspaceID,
+                    updatedAt: Date(timeIntervalSince1970: 30),
+                    status: .idle
+                ),
+            ]
+        )
+
+        let filtered = snapshot.filtered(by: .running)
+        let workspace = try #require(filtered.sections.first?.workspaces.first)
+        #expect(workspace.chats.map(\.id) == [runningThreadID])
+        #expect(filtered.chat(id: idleThreadID) == nil)
+    }
+
+    @Test func sidebarSnapshotLatestFinishedFilterUsesSectionActivityDate() throws {
+        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+        let olderFinishedID = CodexThreadID(rawValue: "thread-older-finished")
+        let newerFinishedID = CodexThreadID(rawValue: "thread-newer-finished")
+        let runningThreadID = CodexThreadID(rawValue: "thread-running")
+        let snapshot = sidebarSnapshot(
+            workspaceID: workspaceID,
+            chats: [
+                sidebarChat(
+                    id: olderFinishedID,
+                    title: "Older finished",
+                    workspaceID: workspaceID,
+                    updatedAt: Date(timeIntervalSince1970: 100),
+                    status: .idle
+                ),
+                sidebarChat(
+                    id: newerFinishedID,
+                    title: "Newer finished",
+                    workspaceID: workspaceID,
+                    updatedAt: Date(timeIntervalSince1970: 300),
+                    status: .idle
+                ),
+                sidebarChat(
+                    id: runningThreadID,
+                    title: "Running review",
+                    workspaceID: workspaceID,
+                    updatedAt: Date(timeIntervalSince1970: 400),
+                    status: .active(activeFlags: [])
+                ),
+            ]
+        )
+
+        let latestFinished = snapshot.filtered(by: .latestFinished)
+        let combined: SidebarReviewChatFilter = [.running, .latestFinished]
+        let combinedFiltered = snapshot.filtered(by: combined)
+
+        #expect(latestFinished.sections.first?.workspaces.first?.chats.map(\.id) == [newerFinishedID])
+        #expect(combinedFiltered.sections.first?.workspaces.first?.chats.map(\.id) == [
+            newerFinishedID,
+            runningThreadID,
+        ])
+    }
+
+    @Test func sidebarPresentationOrderReordersSectionsAndChatsLocally() throws {
+        let alphaWorkspaceID = CodexWorkspaceID(rawValue: "/tmp/Alpha")
+        let betaWorkspaceID = CodexWorkspaceID(rawValue: "/tmp/Beta")
+        let alphaFirstID = CodexThreadID(rawValue: "thread-alpha-first")
+        let alphaSecondID = CodexThreadID(rawValue: "thread-alpha-second")
+        let betaThreadID = CodexThreadID(rawValue: "thread-beta")
+        let alpha = sidebarSection(
+            id: "alpha",
+            title: "Alpha",
+            workspaceID: alphaWorkspaceID,
+            chats: [
+                sidebarChat(id: alphaFirstID, title: "Alpha first", workspaceID: alphaWorkspaceID),
+                sidebarChat(id: alphaSecondID, title: "Alpha second", workspaceID: alphaWorkspaceID),
+            ]
+        )
+        let beta = sidebarSection(
+            id: "beta",
+            title: "Beta",
+            workspaceID: betaWorkspaceID,
+            chats: [
+                sidebarChat(id: betaThreadID, title: "Beta", workspaceID: betaWorkspaceID),
+            ]
+        )
+        var order = ReviewMonitorCodexSidebarPresentationOrder()
+
+        let didReorderSection = order.reorderSection(id: "beta", before: "alpha")
+        let didReorderChat = order.reorderChat(id: alphaSecondID, in: .workspace(alphaWorkspaceID), before: alphaFirstID)
+
+        #expect(didReorderSection)
+        #expect(didReorderChat)
+
+        let ordered = order.applying(to: ReviewMonitorCodexSidebarSnapshot(sections: [alpha, beta]))
+
+        #expect(ordered.sections.map(\.id) == ["beta", "alpha"])
+        #expect(ordered.sections[1].workspaces.first?.chats.map(\.id) == [
+            alphaSecondID,
+            alphaFirstID,
+        ])
+        #expect(ordered.sections[0].workspaces.first?.chats.map(\.id) == [betaThreadID])
+    }
+
     @Test func sidebarViewControllerInstallsCodexSidebarLibraryFromModelContext() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
@@ -387,32 +501,67 @@ private func sidebarSnapshot(
     chatTitle: String,
     includesChat: Bool
 ) -> ReviewMonitorCodexSidebarSnapshot {
-    let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
-        rowID: .chat(threadID),
+    let chat = sidebarChat(
         id: threadID,
         title: chatTitle,
-        preview: nil,
-        workspaceCWD: workspaceID.rawValue,
-        updatedAt: nil
+        workspaceID: workspaceID
     )
+    return sidebarSnapshot(
+        workspaceID: workspaceID,
+        chats: includesChat ? [chat] : []
+    )
+}
+
+private func sidebarSnapshot(
+    workspaceID: CodexWorkspaceID,
+    chats: [ReviewMonitorCodexSidebarSnapshot.Chat]
+) -> ReviewMonitorCodexSidebarSnapshot {
     return ReviewMonitorCodexSidebarSnapshot(
         sections: [
-            ReviewMonitorCodexSidebarSnapshot.Section(
-                rowID: .section("repo"),
-                id: "repo",
-                title: "Repo",
-                workspaces: [
-                    ReviewMonitorCodexSidebarSnapshot.Workspace(
-                        rowID: .workspace(workspaceID),
-                        id: workspaceID,
-                        cwd: workspaceID.rawValue,
-                        title: "App",
-                        chats: includesChat ? [chat] : []
-                    ),
-                ],
-                uncategorizedChats: []
-            ),
+            sidebarSection(id: "repo", title: "Repo", workspaceID: workspaceID, chats: chats),
         ]
+    )
+}
+
+private func sidebarSection(
+    id: String,
+    title: String,
+    workspaceID: CodexWorkspaceID,
+    chats: [ReviewMonitorCodexSidebarSnapshot.Chat]
+) -> ReviewMonitorCodexSidebarSnapshot.Section {
+    ReviewMonitorCodexSidebarSnapshot.Section(
+        rowID: .section(id),
+        id: id,
+        title: title,
+        workspaces: [
+            ReviewMonitorCodexSidebarSnapshot.Workspace(
+                rowID: .workspace(workspaceID),
+                id: workspaceID,
+                cwd: workspaceID.rawValue,
+                title: URL(fileURLWithPath: workspaceID.rawValue).lastPathComponent,
+                chats: chats
+            ),
+        ],
+        uncategorizedChats: []
+    )
+}
+
+private func sidebarChat(
+    id: CodexThreadID,
+    title: String,
+    workspaceID: CodexWorkspaceID,
+    updatedAt: Date? = nil,
+    status: CodexThreadStatus? = nil
+) -> ReviewMonitorCodexSidebarSnapshot.Chat {
+    ReviewMonitorCodexSidebarSnapshot.Chat(
+        rowID: .chat(id),
+        id: id,
+        title: title,
+        preview: nil,
+        workspaceCWD: workspaceID.rawValue,
+        updatedAt: updatedAt,
+        recencyAt: updatedAt,
+        status: status
     )
 }
 

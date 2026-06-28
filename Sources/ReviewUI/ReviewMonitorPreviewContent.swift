@@ -720,7 +720,9 @@ public enum ReviewMonitorPreviewContent {
             preview: job.core.output.lastAgentMessage?.nilIfEmpty ?? job.core.output.summary.nilIfEmpty,
             model: job.core.run.model,
             workspaceCWD: job.cwd,
-            updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt
+            updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
+            recencyAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
+            status: CodexThreadStatus(reviewJobState: job.core.lifecycle.status)
         )
         let turn = CodexChatTurnStateSnapshot(
             id: turnID,

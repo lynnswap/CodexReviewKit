@@ -1,4 +1,5 @@
 import CodexKit
+import CodexReviewKit
 import Foundation
 
 package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringConvertible {
@@ -38,10 +39,19 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         }
 
         var selection: ReviewMonitorWorkspaceSectionSelection {
-            ReviewMonitorWorkspaceSectionSelection(
+            var workspaceCWDs = workspaces.map(\.cwd)
+            for chat in uncategorizedChats {
+                guard let cwd = chat.workspaceCWD,
+                      workspaceCWDs.contains(cwd) == false
+                else {
+                    continue
+                }
+                workspaceCWDs.append(cwd)
+            }
+            return ReviewMonitorWorkspaceSectionSelection(
                 id: id,
                 title: title,
-                workspaceCWDs: workspaces.map(\.cwd)
+                workspaceCWDs: workspaceCWDs
             )
         }
     }
@@ -66,6 +76,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         package var model: String?
         package var workspaceCWD: String?
         package var updatedAt: Date?
+        package var recencyAt: Date?
+        package var status: CodexThreadStatus?
 
         package init(
             rowID: ReviewMonitorCodexSidebarRowID,
@@ -74,7 +86,9 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             preview: String?,
             model: String? = nil,
             workspaceCWD: String?,
-            updatedAt: Date?
+            updatedAt: Date?,
+            recencyAt: Date? = nil,
+            status: CodexThreadStatus? = nil
         ) {
             self.rowID = rowID
             self.id = id
@@ -83,6 +97,20 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             self.model = model
             self.workspaceCWD = workspaceCWD
             self.updatedAt = updatedAt
+            self.recencyAt = recencyAt
+            self.status = status
+        }
+
+        var activityDate: Date? {
+            recencyAt ?? updatedAt
+        }
+
+        var isRunning: Bool {
+            status?.isActive == true
+        }
+
+        var isFinished: Bool {
+            status.map { $0.isActive == false } ?? false
         }
     }
 
@@ -128,6 +156,174 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    func filtered(by filter: SidebarReviewChatFilter) -> ReviewMonitorCodexSidebarSnapshot {
+        guard filter.isActive else {
+            return self
+        }
+
+        return ReviewMonitorCodexSidebarSnapshot(
+            sections: sections.map { section in
+                let latestFinishedChatID = filter.contains(.latestFinished)
+                    ? Self.latestFinishedChat(in: section.allChats)?.id
+                    : nil
+                return Section(
+                    rowID: section.rowID,
+                    id: section.id,
+                    title: section.title,
+                    workspaces: section.workspaces.map { workspace in
+                        Workspace(
+                            rowID: workspace.rowID,
+                            id: workspace.id,
+                            cwd: workspace.cwd,
+                            title: workspace.title,
+                            chats: workspace.chats.filter {
+                                Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
+                            }
+                        )
+                    },
+                    uncategorizedChats: section.uncategorizedChats.filter {
+                        Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
+                    }
+                )
+            }
+        )
+    }
+
+    private static func includes(
+        _ chat: Chat,
+        filter: SidebarReviewChatFilter,
+        latestFinishedChatID: CodexThreadID?
+    ) -> Bool {
+        if filter.contains(.running), chat.isRunning {
+            return true
+        }
+        if filter.contains(.latestFinished), chat.id == latestFinishedChatID {
+            return true
+        }
+        return false
+    }
+
+    private static func latestFinishedChat(in chats: [Chat]) -> Chat? {
+        var latestChat: Chat?
+        var latestDate = Date.distantPast
+        for chat in chats {
+            guard chat.isFinished else {
+                continue
+            }
+            let finishedAt = chat.activityDate ?? .distantPast
+            if latestChat == nil || finishedAt > latestDate {
+                latestChat = chat
+                latestDate = finishedAt
+            }
+        }
+        return latestChat
+    }
+}
+
+private extension ReviewMonitorCodexSidebarSnapshot.Section {
+    var allChats: [ReviewMonitorCodexSidebarSnapshot.Chat] {
+        workspaces.flatMap(\.chats) + uncategorizedChats
+    }
+}
+
+struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
+    private var sectionIDs: [String] = []
+    private var chatIDsByContainer: [ReviewMonitorCodexSidebarRowID: [CodexThreadID]] = [:]
+
+    func applying(to snapshot: ReviewMonitorCodexSidebarSnapshot) -> ReviewMonitorCodexSidebarSnapshot {
+        ReviewMonitorCodexSidebarSnapshot(
+            sections: ordered(snapshot.sections, by: sectionIDs, id: \.id).map { section in
+                ReviewMonitorCodexSidebarSnapshot.Section(
+                    rowID: section.rowID,
+                    id: section.id,
+                    title: section.title,
+                    workspaces: section.workspaces.map { workspace in
+                        ReviewMonitorCodexSidebarSnapshot.Workspace(
+                            rowID: workspace.rowID,
+                            id: workspace.id,
+                            cwd: workspace.cwd,
+                            title: workspace.title,
+                            chats: ordered(
+                                workspace.chats,
+                                by: chatIDsByContainer[workspace.rowID] ?? [],
+                                id: \.id
+                            )
+                        )
+                    },
+                    uncategorizedChats: ordered(
+                        section.uncategorizedChats,
+                        by: chatIDsByContainer[section.rowID] ?? [],
+                        id: \.id
+                    )
+                )
+            }
+        )
+    }
+
+    mutating func reorderSection(id: String, before targetID: String?) -> Bool {
+        Self.reorder(id: id, before: targetID, in: &sectionIDs)
+    }
+
+    mutating func reorderChat(
+        id: CodexThreadID,
+        in container: ReviewMonitorCodexSidebarRowID,
+        before targetID: CodexThreadID?
+    ) -> Bool {
+        var ids = chatIDsByContainer[container] ?? []
+        let didChange = Self.reorder(id: id, before: targetID, in: &ids)
+        chatIDsByContainer[container] = ids
+        return didChange
+    }
+
+    private func ordered<Element, ID: Hashable>(
+        _ elements: [Element],
+        by preferredIDs: [ID],
+        id: (Element) -> ID
+    ) -> [Element] {
+        guard preferredIDs.isEmpty == false else {
+            return elements
+        }
+        let rankByID = Dictionary(uniqueKeysWithValues: preferredIDs.enumerated().map { ($0.element, $0.offset) })
+        return elements.enumerated().sorted { lhs, rhs in
+            let lhsRank = rankByID[id(lhs.element)] ?? Int.max
+            let rhsRank = rankByID[id(rhs.element)] ?? Int.max
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private static func reorder<ID: Hashable>(
+        id: ID,
+        before targetID: ID?,
+        in ids: inout [ID]
+    ) -> Bool {
+        let originalIDs = ids
+        ids.removeAll { $0 == id }
+        let insertionIndex: Int
+        if let targetID,
+           let targetIndex = ids.firstIndex(of: targetID)
+        {
+            insertionIndex = targetIndex
+        } else {
+            insertionIndex = ids.count
+        }
+        ids.insert(id, at: insertionIndex)
+        return ids != originalIDs
+    }
+}
+
+extension CodexThreadStatus {
+    init(reviewJobState: ReviewJobState) {
+        switch reviewJobState {
+        case .queued, .running:
+            self = .active(activeFlags: [])
+        case .succeeded, .failed, .cancelled:
+            self = .idle
+        }
     }
 }
 
@@ -401,7 +597,9 @@ package final class ReviewMonitorCodexSidebarLibrary {
             preview: chat.preview,
             model: chat.modelProvider,
             workspaceCWD: chat.workspace?.url.path,
-            updatedAt: chat.updatedAt
+            updatedAt: chat.updatedAt,
+            recencyAt: chat.recencyAt,
+            status: chat.status
         )
     }
 }

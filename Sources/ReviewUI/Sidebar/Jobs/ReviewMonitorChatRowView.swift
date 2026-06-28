@@ -67,9 +67,9 @@ struct ReviewMonitorSidebarChatRow: Equatable {
             title: chat.title,
             model: chat.model,
             subtitle: chat.preview?.trimmedNonEmpty,
-            startedAt: nil,
-            endedAt: chat.updatedAt,
-            isRunning: false
+            startedAt: chat.isRunning ? chat.activityDate : nil,
+            endedAt: chat.isRunning ? nil : chat.activityDate,
+            isRunning: chat.isRunning
         )
     }
 }
