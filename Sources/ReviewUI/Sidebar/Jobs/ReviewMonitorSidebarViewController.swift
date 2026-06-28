@@ -2069,7 +2069,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        if codexSidebarNode(from: item) != nil {
+        if let node = codexSidebarNode(from: item) {
+            if case .chat = node.item {
+                return rowHeights.reviewChat
+            }
             return rowHeights.workspace
         }
         if workspaceSection(from: item) != nil {
@@ -2174,7 +2177,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        if codexSidebarNode(from: item) != nil {
+        if let node = codexSidebarNode(from: item) {
+            if case .chat = node.item {
+                return ReviewMonitorReviewChatTableRowView()
+            }
             return ReviewMonitorWorkspaceRowView()
         }
         if workspaceSection(from: item) != nil {
@@ -2192,6 +2198,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         item: Any
     ) -> NSView? {
         if let node = codexSidebarNode(from: item) {
+            if case .chat(let chat) = node.item {
+                let view = (outlineView.makeView(withIdentifier: Identifier.reviewChatCell, owner: self) as? ReviewMonitorReviewChatCellView)
+                    ?? ReviewMonitorReviewChatCellView()
+                view.identifier = Identifier.reviewChatCell
+                view.objectValue = node
+                view.configure(with: chat)
+                return view
+            }
+
             let view = (outlineView.makeView(withIdentifier: Identifier.workspaceCell, owner: self) as? ReviewMonitorWorkspaceCellView)
                 ?? ReviewMonitorWorkspaceCellView()
             view.identifier = Identifier.workspaceCell
@@ -2284,6 +2299,19 @@ extension ReviewMonitorSidebarViewController {
 
     func codexSidebarNodeTitleForTesting(rowID: ReviewMonitorCodexSidebarRowID) -> String? {
         codexSidebarOutlineTree.node(rowID: rowID)?.title
+    }
+
+    func codexSidebarChatRowUsesReviewMonitorChatRowViewForTesting(_ id: CodexThreadID) -> Bool {
+        guard let row = row(forCodexSidebarSelectionID: .chat(id)),
+              let cellView = outlineView.view(
+                  atColumn: 0,
+                  row: row,
+                  makeIfNecessary: true
+              ) as? ReviewMonitorReviewChatCellView
+        else {
+            return false
+        }
+        return cellView.isHostingReviewMonitorChatRowViewForTesting
     }
 
     func selectCodexSidebarRowForTesting(rowID: ReviewMonitorCodexSidebarRowID) {
@@ -3069,6 +3097,12 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         objectValue = row
         toolTip = row.operation.cwd
         configureRow(row.presentation)
+    }
+
+    func configure(with chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
+        objectValue = chat
+        toolTip = chat.workspaceCWD ?? chat.preview ?? chat.title
+        configureRow(ReviewMonitorSidebarChatRow(chat: chat))
     }
 
     private func configureRow(_ row: ReviewMonitorSidebarChatRow) {

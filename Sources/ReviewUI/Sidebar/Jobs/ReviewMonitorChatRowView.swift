@@ -60,6 +60,18 @@ struct ReviewMonitorSidebarChatRow: Equatable {
             isRunning: runtime.isRunning
         )
     }
+
+    init(chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
+        self.init(
+            id: chat.id.rawValue,
+            title: chat.title,
+            model: chat.model,
+            subtitle: chat.preview?.trimmedNonEmpty,
+            startedAt: nil,
+            endedAt: chat.updatedAt,
+            isRunning: false
+        )
+    }
 }
 
 @MainActor

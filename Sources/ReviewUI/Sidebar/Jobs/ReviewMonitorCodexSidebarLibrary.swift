@@ -63,6 +63,7 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         package var id: CodexThreadID
         package var title: String
         package var preview: String?
+        package var model: String?
         package var workspaceCWD: String?
         package var updatedAt: Date?
 
@@ -71,6 +72,7 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             id: CodexThreadID,
             title: String,
             preview: String?,
+            model: String? = nil,
             workspaceCWD: String?,
             updatedAt: Date?
         ) {
@@ -78,6 +80,7 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             self.id = id
             self.title = title
             self.preview = preview
+            self.model = model
             self.workspaceCWD = workspaceCWD
             self.updatedAt = updatedAt
         }
@@ -396,6 +399,7 @@ package final class ReviewMonitorCodexSidebarLibrary {
             id: chat.id,
             title: chat.title,
             preview: chat.preview,
+            model: chat.modelProvider,
             workspaceCWD: chat.workspace?.url.path,
             updatedAt: chat.updatedAt
         )

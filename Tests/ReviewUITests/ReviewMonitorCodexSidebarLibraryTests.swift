@@ -185,11 +185,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
+        let threadID = CodexThreadID(rawValue: "thread-app")
 
         try await runtime.transport.enqueueThreadList(.init(
             threads: [
                 .init(
-                    id: "thread-app",
+                    id: threadID,
                     workspace: repo,
                     name: "App review",
                     updatedAt: Date(timeIntervalSince1970: 5_000)
@@ -213,24 +214,26 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let sidebar = viewController.sidebarViewControllerForTesting
         try await waitForCondition {
             sidebar.codexSidebarSnapshotForTesting?
-                .chat(id: CodexThreadID(rawValue: "thread-app"))?
+                .chat(id: threadID)?
                 .title == "App review"
         }
         try await waitForCondition {
             sidebar.codexSidebarRootTitlesForTesting == [repo.lastPathComponent]
-                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == "App review"
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
         }
         #expect(sidebar.displayedCodexSidebarTitlesForTesting == [
             repo.lastPathComponent,
             repo.lastPathComponent,
             "App review",
         ])
-        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(CodexThreadID(rawValue: "thread-app")))
+        #expect(sidebar.codexSidebarChatRowUsesReviewMonitorChatRowViewForTesting(threadID))
+
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
         guard case .chat(let selectedChat) = uiState.selection else {
             Issue.record("Expected selecting a Codex sidebar chat row to select the chat.")
             return
         }
-        #expect(selectedChat.id == CodexThreadID(rawValue: "thread-app"))
+        #expect(selectedChat.id == threadID)
         #expect(selectedChat.title == "App review")
     }
 
