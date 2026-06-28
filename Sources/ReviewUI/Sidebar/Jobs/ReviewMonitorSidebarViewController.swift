@@ -115,6 +115,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarUnfilteredSnapshot = ReviewMonitorCodexSidebarSnapshot(sections: [])
     private var codexSidebarPresentationOrder = ReviewMonitorCodexSidebarPresentationOrder()
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
+    private var appliedSidebarKind: SidebarKind?
     private var isReconcilingSelection = false
     #if DEBUG
         private var fullReloadCountForTesting = 0
@@ -570,6 +571,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func applySidebarKind(_ kind: SidebarKind) {
+        guard appliedSidebarKind != kind else {
+            return
+        }
+        appliedSidebarKind = kind
         switch kind {
         case .unavailable:
             unavailableView.isHidden = false
