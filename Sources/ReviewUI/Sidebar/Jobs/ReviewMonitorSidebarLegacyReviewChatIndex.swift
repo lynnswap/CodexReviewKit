@@ -2,7 +2,7 @@ import CodexKit
 import CodexReviewKit
 
 @MainActor
-final class ReviewMonitorSidebarReviewChatIndex {
+final class ReviewMonitorSidebarLegacyReviewChatIndex {
     private var rowsByJobID: [String: ReviewMonitorSidebarReviewChatRow] = [:]
 
     func rows(for jobs: [CodexReviewJob]) -> [ReviewMonitorSidebarReviewChatRow] {

@@ -209,7 +209,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
     private var codexSidebarModelContext: CodexModelContext?
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
-    private let reviewChatIndex = ReviewMonitorSidebarReviewChatIndex()
+    private let legacyReviewChatIndex = ReviewMonitorSidebarLegacyReviewChatIndex()
     private var workspaceSectionIdentitiesByCWD: [String: ReviewMonitorWorkspaceSectionIdentity] = [:]
     private var workspaceSectionsByID: [String: SidebarWorkspaceSection] = [:]
     private var currentRootTopologies: [SidebarRootTopology] = []
@@ -572,10 +572,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let topologies = workspaceJobs.map { workspace, jobs in
             SidebarWorkspaceTopology(
                 workspace: workspace,
-                reviewRows: reviewChatIndex.rows(for: jobs)
+                reviewRows: legacyReviewChatIndex.rows(for: jobs)
             )
         }
-        reviewChatIndex.prune(keeping: activeJobIDs)
+        legacyReviewChatIndex.prune(keeping: activeJobIDs)
         return topologies
     }
 
@@ -1362,7 +1362,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func row(forJobID jobID: String) -> Int? {
-        guard let rowItem = reviewChatIndex.row(jobID: jobID) else {
+        guard let rowItem = legacyReviewChatIndex.row(jobID: jobID) else {
             return nil
         }
         let row = outlineView.row(forItem: rowItem)
@@ -1370,7 +1370,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func row(forReviewChatID chatID: CodexThreadID) -> Int? {
-        guard let rowItem = reviewChatIndex.row(chatID: chatID) else {
+        guard let rowItem = legacyReviewChatIndex.row(chatID: chatID) else {
             return nil
         }
         let row = outlineView.row(forItem: rowItem)
@@ -1446,11 +1446,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return job
     }
 
-    private func reviewChatSelection(
+    private func legacyReviewChatSelection(
         id: CodexThreadID,
         in workspaces: [CodexReviewWorkspace]
     ) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
-        reviewChatIndex.chat(id: id, in: workspaces)
+        legacyReviewChatIndex.chat(id: id, in: workspaces)
     }
 
     private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
@@ -1464,7 +1464,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if isUsingCodexSidebarOutline {
             return codexChatSelection(id: id)
         }
-        return reviewChatSelection(id: id, in: workspaces)
+        return legacyReviewChatSelection(id: id, in: workspaces)
     }
 
     private func codexWorkspaceSelection(
@@ -2464,7 +2464,7 @@ extension ReviewMonitorSidebarViewController {
     }
 
     func cancelReviewChatForTesting(_ job: CodexReviewJob) async {
-        guard let row = reviewChatIndex.row(jobID: job.id) else {
+        guard let row = legacyReviewChatIndex.row(jobID: job.id) else {
             return
         }
         await performCancellation(for: row)
@@ -2656,7 +2656,7 @@ extension ReviewMonitorSidebarViewController {
         proposedJob targetJob: CodexReviewJob
     ) -> Bool {
         guard let section = workspaceSection(containing: workspace),
-              let targetRow = reviewChatIndex.row(jobID: targetJob.id)
+              let targetRow = legacyReviewChatIndex.row(jobID: targetJob.id)
         else {
             return true
         }
@@ -2674,7 +2674,7 @@ extension ReviewMonitorSidebarViewController {
         hoveringBelowMidpoint: Bool
     ) -> Bool {
         guard let section = workspaceSection(containing: workspace),
-              let targetRowItem = reviewChatIndex.row(jobID: targetJob.id),
+              let targetRowItem = legacyReviewChatIndex.row(jobID: targetJob.id),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return false
@@ -2776,7 +2776,7 @@ extension ReviewMonitorSidebarViewController {
         proposedJob targetJob: CodexReviewJob,
         hoveringBelowMidpoint: Bool
     ) -> Bool {
-        guard let targetRowItem = reviewChatIndex.row(jobID: targetJob.id),
+        guard let targetRowItem = legacyReviewChatIndex.row(jobID: targetJob.id),
               let targetRow = row(forJobID: targetJob.id)
         else {
             return false
