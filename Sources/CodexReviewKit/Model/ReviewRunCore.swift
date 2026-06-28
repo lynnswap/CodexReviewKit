@@ -73,17 +73,4 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
     public var isTerminal: Bool {
         lifecycle.status.isTerminal
     }
-
-    public var reviewText: String {
-        if lifecycle.status == .cancelled {
-            if let errorMessage = lifecycle.errorMessage?.nilIfEmpty {
-                return errorMessage
-            }
-            return output.summary
-        }
-        if let errorMessage = lifecycle.errorMessage?.nilIfEmpty {
-            return errorMessage
-        }
-        return output.summary
-    }
 }

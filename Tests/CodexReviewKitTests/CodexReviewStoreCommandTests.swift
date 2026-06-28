@@ -231,11 +231,11 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
             let running = try #require(store.reviewRun(id: "run-1"))
-            #expect(running.core.reviewText == "Review started.")
+            #expect(running.core.output.summary == "Review started.")
 
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
-            #expect(read.core.reviewText == "Succeeded.")
+            #expect(read.core.output.summary == "Succeeded.")
         }
     }
 

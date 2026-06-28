@@ -5,14 +5,13 @@ import Testing
 @Suite("Review run core")
 @MainActor
 struct ReviewRunCoreTests {
-    @Test func reviewTextReflectsTerminalCoreState() {
+    @Test func coreKeepsLifecycleAndSummaryOnly() {
         let succeeded = ReviewRunCore(
             lifecycle: .init(status: .succeeded),
             output: .init(summary: "Succeeded.")
         )
         #expect(succeeded.lifecycle.status == .succeeded)
         #expect(succeeded.output.summary == "Succeeded.")
-        #expect(succeeded.reviewText == "Succeeded.")
 
         let failed = ReviewRunCore(
             lifecycle: .init(
@@ -23,7 +22,7 @@ struct ReviewRunCoreTests {
         )
         #expect(failed.lifecycle.status == .failed)
         #expect(failed.lifecycle.errorMessage == "Backend failed.")
-        #expect(failed.reviewText == "Backend failed.")
+        #expect(failed.output.summary == "Failed.")
 
         let cancelled = ReviewRunCore(
             lifecycle: .init(
@@ -34,6 +33,6 @@ struct ReviewRunCoreTests {
         )
         #expect(cancelled.lifecycle.status == .cancelled)
         #expect(cancelled.lifecycle.cancellation?.message == "Session closed.")
-        #expect(cancelled.reviewText == "Cancelled.")
+        #expect(cancelled.output.summary == "Cancelled.")
     }
 }
