@@ -349,7 +349,7 @@ private extension CodexReviewAPI.Cancel.Outcome {
     }
 }
 
-private extension ReviewJobCore.Run {
+private extension ReviewRunCore.Run {
     func structuredContent() -> Value {
         .object([
             "reviewThreadId": reviewThreadID.map(Value.string) ?? .null,
@@ -360,7 +360,7 @@ private extension ReviewJobCore.Run {
     }
 }
 
-private extension ReviewJobCore.Lifecycle {
+private extension ReviewRunCore.Lifecycle {
     func structuredContent(
         elapsedSeconds: Int?,
         cancellable: Bool
@@ -378,7 +378,7 @@ private extension ReviewJobCore.Lifecycle {
     }
 }
 
-private extension ReviewJobCore.Output {
+private extension ReviewRunCore.Output {
     func structuredContent(review: String) -> Value {
         .object([
             "summary": .string(summary),

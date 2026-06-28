@@ -543,7 +543,7 @@ package final class StoreSnapshotProbe {
                 return lhs.sortOrder > rhs.sortOrder
             }
             .map { job in
-                let runtimeState = store.runtimeReviewRunState(jobID: job.id)
+                let runtimeState = store.runtimeReviewRunState(runID: job.id)
                 return StoreJobSnapshot(
                     jobID: job.id,
                     status: job.core.lifecycle.status,
@@ -558,7 +558,7 @@ package final class StoreSnapshotProbe {
     }
 
     package func waitUntilJobStatus(
-        _ status: ReviewJobState,
+        _ status: ReviewRunState,
         jobID: String? = nil,
         timeout: Duration = .seconds(2)
     ) async -> StoreSnapshot? {
@@ -609,10 +609,10 @@ package struct StoreSnapshot: Sendable {
 
 package struct StoreJobSnapshot: Sendable {
     package var jobID: String
-    package var status: ReviewJobState
+    package var status: ReviewRunState
     package var summary: String
     package var lastAgentMessage: String?
-    package var run: ReviewJobCore.Run
+    package var run: ReviewRunCore.Run
     package var activeRun: CodexReviewBackendModel.Review.Run?
     package var cancellationRequested: Bool
 }

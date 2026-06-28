@@ -9,7 +9,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
     public let cwd: String
     public internal(set) var sortOrder: Double
     public internal(set) var targetSummary: String
-    public internal(set) var core: ReviewJobCore
+    public internal(set) var core: ReviewRunCore
     public internal(set) var cancellationRequested: Bool
 
     @ObservationIgnored
@@ -37,7 +37,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         cwd: String,
         sortOrder: Double = 0,
         targetSummary: String,
-        core: ReviewJobCore,
+        core: ReviewRunCore,
         cancellationRequested: Bool = false
     ) {
         self.id = id

@@ -195,7 +195,7 @@ extension CodexReviewStore {
 
     package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
         for jobID in jobIDs {
-            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(jobID: jobID)
+            runtimeState.cancelAndDetachActiveWorkerForRuntimeStop(runID: jobID)
             runtimeState.clearRuntimeStopState(for: jobID)
         }
     }

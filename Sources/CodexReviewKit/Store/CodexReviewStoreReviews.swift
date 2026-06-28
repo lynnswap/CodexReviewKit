@@ -395,7 +395,7 @@ extension CodexReviewStore {
 
     package func listReviews(
         cwd: String? = nil,
-        statuses: [ReviewJobState]? = nil,
+        statuses: [ReviewRunState]? = nil,
         limit: Int? = nil
     ) -> CodexReviewAPI.List.Result {
         let filtered = filteredReviewRuns(cwd: cwd, statuses: statuses)
@@ -406,7 +406,7 @@ extension CodexReviewStore {
     package func listReviews(
         sessionID: String?,
         cwd: String? = nil,
-        statuses: [ReviewJobState]? = nil,
+        statuses: [ReviewRunState]? = nil,
         limit: Int? = nil
     ) -> CodexReviewAPI.List.Result {
         let statusSet = statuses.map(Set.init)
@@ -586,7 +586,7 @@ extension CodexReviewStore {
         return job
     }
 
-    private func filteredReviewRuns(cwd: String?, statuses: [ReviewJobState]?) -> [ReviewRunRecord] {
+    private func filteredReviewRuns(cwd: String?, statuses: [ReviewRunState]?) -> [ReviewRunRecord] {
         let statusSet = statuses.map(Set.init)
         return orderedReviewRuns.filter { job in
             if let cwd, job.cwd != cwd {

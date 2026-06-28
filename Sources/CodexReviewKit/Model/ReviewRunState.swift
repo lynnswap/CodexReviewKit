@@ -1,4 +1,4 @@
-public enum ReviewJobState: String, Codable, Sendable, Hashable {
+public enum ReviewRunState: String, Codable, Sendable, Hashable {
     case queued
     case running
     case succeeded

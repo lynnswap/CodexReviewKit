@@ -3,13 +3,13 @@ import Foundation
 package extension CodexReviewAPI.Read {
 struct Result: Codable, Sendable, Hashable {
     package var jobID: String
-    package var core: ReviewJobCore
+    package var core: ReviewRunCore
     package var elapsedSeconds: Int?
     package var cancellable: Bool
 
     package init(
         jobID: String,
-        core: ReviewJobCore,
+        core: ReviewRunCore,
         elapsedSeconds: Int? = nil,
         cancellable: Bool
     ) {
@@ -27,7 +27,7 @@ struct ListItem: Codable, Sendable, Hashable {
     package var jobID: String
     package var cwd: String
     package var targetSummary: String
-    package var core: ReviewJobCore
+    package var core: ReviewRunCore
     package var elapsedSeconds: Int?
     package var cancellable: Bool
 
@@ -35,7 +35,7 @@ struct ListItem: Codable, Sendable, Hashable {
         jobID: String,
         cwd: String,
         targetSummary: String,
-        core: ReviewJobCore,
+        core: ReviewRunCore,
         elapsedSeconds: Int?,
         cancellable: Bool
     ) {
@@ -65,12 +65,12 @@ package extension CodexReviewAPI.Job {
 struct Selector: Sendable, Hashable {
     package var jobID: String?
     package var cwd: String?
-    package var statuses: [ReviewJobState]?
+    package var statuses: [ReviewRunState]?
 
     package init(
         jobID: String? = nil,
         cwd: String? = nil,
-        statuses: [ReviewJobState]? = nil
+        statuses: [ReviewRunState]? = nil
     ) {
         self.jobID = jobID
         self.cwd = cwd?.nilIfEmpty
@@ -108,12 +108,12 @@ package extension CodexReviewAPI.Cancel {
 struct Outcome: Codable, Sendable, Hashable {
     package var jobID: String
     package var cancelled: Bool
-    package var core: ReviewJobCore
+    package var core: ReviewRunCore
 
     package init(
         jobID: String,
         cancelled: Bool,
-        core: ReviewJobCore
+        core: ReviewRunCore
     ) {
         self.jobID = jobID
         self.cancelled = cancelled

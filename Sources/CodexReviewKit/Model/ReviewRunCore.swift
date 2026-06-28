@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ReviewJobCore: Codable, Sendable, Hashable {
+public struct ReviewRunCore: Codable, Sendable, Hashable {
     public struct Run: Codable, Sendable, Hashable {
         public internal(set) var attemptID: String?
         public internal(set) var reviewThreadID: String?
@@ -24,7 +24,7 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
     }
 
     public struct Lifecycle: Codable, Sendable, Hashable {
-        public internal(set) var status: ReviewJobState
+        public internal(set) var status: ReviewRunState
         public internal(set) var exitCode: Int?
         public internal(set) var startedAt: Date?
         public internal(set) var endedAt: Date?
@@ -32,7 +32,7 @@ public struct ReviewJobCore: Codable, Sendable, Hashable {
         public internal(set) var errorMessage: String?
 
         public init(
-            status: ReviewJobState,
+            status: ReviewRunState,
             exitCode: Int? = nil,
             startedAt: Date? = nil,
             endedAt: Date? = nil,

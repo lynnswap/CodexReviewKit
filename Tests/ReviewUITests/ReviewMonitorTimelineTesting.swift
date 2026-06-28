@@ -97,7 +97,7 @@ extension ReviewRunRecord {
         model: String? = "gpt-5",
         threadID: String? = nil,
         turnID: String? = nil,
-        status: ReviewJobState,
+        status: ReviewRunState,
         cancellationRequested: Bool = false,
         cancellation: ReviewCancellation? = nil,
         startedAt: Date? = nil,
@@ -290,14 +290,14 @@ private func makePreviewChatLogFixtureForTesting(
     let chat = try #require(job.reviewChatSelectionForTesting)
     let turn = CodexChatTurnStateSnapshot(
         id: job.previewTurnIDForTesting,
-        status: CodexTurnStatus(reviewJobStateForTesting: job.core.lifecycle.status),
+        status: CodexTurnStatus(reviewRunStateForTesting: job.core.lifecycle.status),
         errorDescription: job.core.lifecycle.errorMessage,
         usage: nil
     )
     let initialSnapshot = CodexChatSnapshot(
         chatID: chat.id,
         phase: CodexDataPhase(
-            reviewJobStateForTesting: job.core.lifecycle.status,
+            reviewRunStateForTesting: job.core.lifecycle.status,
             errorMessage: job.core.lifecycle.errorMessage
         ),
         turns: [turn],
@@ -343,7 +343,7 @@ private enum ReviewChatLogFixtureStore {
             turns: [
                 .init(
                     id: job.previewTurnIDForTesting,
-                    status: CodexTurnStatus(reviewJobStateForTesting: job.core.lifecycle.status)
+                    status: CodexTurnStatus(reviewRunStateForTesting: job.core.lifecycle.status)
                 )
             ],
             items: items(for: job)
@@ -600,7 +600,7 @@ extension ReviewRunRecord {
             workspaceCWD: cwd,
             updatedAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
             recencyAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
-            status: CodexThreadStatus(reviewJobStateForTesting: core.lifecycle.status)
+            status: CodexThreadStatus(reviewRunStateForTesting: core.lifecycle.status)
         )
     }
 
@@ -610,7 +610,7 @@ extension ReviewRunRecord {
 }
 
 private extension CodexThreadStatus {
-    init(reviewJobStateForTesting jobState: ReviewJobState) {
+    init(reviewRunStateForTesting jobState: ReviewRunState) {
         switch jobState {
         case .queued, .running:
             self = .active(activeFlags: [])
@@ -621,7 +621,7 @@ private extension CodexThreadStatus {
 }
 
 private extension CodexTurnStatus {
-    init(reviewJobStateForTesting jobState: ReviewJobState) {
+    init(reviewRunStateForTesting jobState: ReviewRunState) {
         switch jobState {
         case .queued, .running:
             self = .running
@@ -636,7 +636,7 @@ private extension CodexTurnStatus {
 }
 
 private extension CodexDataPhase {
-    init(reviewJobStateForTesting jobState: ReviewJobState, errorMessage: String?) {
+    init(reviewRunStateForTesting jobState: ReviewRunState, errorMessage: String?) {
         switch jobState {
         case .queued, .running, .succeeded, .cancelled:
             self = .loaded

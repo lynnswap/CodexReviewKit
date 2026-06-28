@@ -1,6 +1,6 @@
 import Foundation
 
-package struct CodexReviewRuntimeJobState: Sendable {
+package struct CodexReviewRuntimeRunState: Sendable {
     package let activeRun: CodexReviewBackendModel.Review.Run?
     package let hasActiveWorker: Bool
     package let hasDetachedWorker: Bool
@@ -12,97 +12,97 @@ final class CodexReviewStoreRuntimeState {
     typealias BackendReviewRun = CodexReviewBackendModel.Review.Run
 
     private var activeRuns: [String: BackendReviewRun] = [:]
-    private var reviewRecoveryWaitingJobIDs: Set<String> = []
-    private var startingJobIDs: Set<String> = []
+    private var reviewRecoveryWaitingRunIDs: Set<String> = []
+    private var startingRunIDs: Set<String> = []
     private var startupCancellations: [String: ReviewCancellation] = [:]
     private var reviewWorkerTasks: [String: Task<Void, Never>] = [:]
     private var runtimeStopDetachedReviewWorkerTasks: [String: Task<Void, Never>] = [:]
 
-    func jobState(for jobID: String) -> CodexReviewRuntimeJobState {
-        CodexReviewRuntimeJobState(
-            activeRun: activeRuns[jobID],
-            hasActiveWorker: reviewWorkerTasks[jobID] != nil,
-            hasDetachedWorker: runtimeStopDetachedReviewWorkerTasks[jobID] != nil,
-            isWaitingForNetworkRecovery: reviewRecoveryWaitingJobIDs.contains(jobID)
+    func runState(for runID: String) -> CodexReviewRuntimeRunState {
+        CodexReviewRuntimeRunState(
+            activeRun: activeRuns[runID],
+            hasActiveWorker: reviewWorkerTasks[runID] != nil,
+            hasDetachedWorker: runtimeStopDetachedReviewWorkerTasks[runID] != nil,
+            isWaitingForNetworkRecovery: reviewRecoveryWaitingRunIDs.contains(runID)
         )
     }
 
-    func activeRun(for jobID: String) -> BackendReviewRun? {
-        activeRuns[jobID]
+    func activeRun(for runID: String) -> BackendReviewRun? {
+        activeRuns[runID]
     }
 
-    func setActiveRun(_ run: BackendReviewRun, for jobID: String) {
-        activeRuns[jobID] = run
+    func setActiveRun(_ run: BackendReviewRun, for runID: String) {
+        activeRuns[runID] = run
     }
 
-    func removeActiveRun(for jobID: String) {
-        activeRuns.removeValue(forKey: jobID)
+    func removeActiveRun(for runID: String) {
+        activeRuns.removeValue(forKey: runID)
     }
 
     func recoveryWaitingRuns() -> [BackendReviewRun] {
-        reviewRecoveryWaitingJobIDs
+        reviewRecoveryWaitingRunIDs
             .sorted()
             .compactMap { activeRuns[$0] }
     }
 
-    func isWaitingForNetworkRecovery(_ jobID: String) -> Bool {
-        reviewRecoveryWaitingJobIDs.contains(jobID)
+    func isWaitingForNetworkRecovery(_ runID: String) -> Bool {
+        reviewRecoveryWaitingRunIDs.contains(runID)
     }
 
-    func markWaitingForNetworkRecovery(_ jobID: String) {
-        reviewRecoveryWaitingJobIDs.insert(jobID)
+    func markWaitingForNetworkRecovery(_ runID: String) {
+        reviewRecoveryWaitingRunIDs.insert(runID)
     }
 
-    func clearWaitingForNetworkRecovery(_ jobID: String) {
-        reviewRecoveryWaitingJobIDs.remove(jobID)
+    func clearWaitingForNetworkRecovery(_ runID: String) {
+        reviewRecoveryWaitingRunIDs.remove(runID)
     }
 
-    func markStarting(_ jobID: String) {
-        startingJobIDs.insert(jobID)
+    func markStarting(_ runID: String) {
+        startingRunIDs.insert(runID)
     }
 
-    func clearStarting(_ jobID: String) {
-        startingJobIDs.remove(jobID)
+    func clearStarting(_ runID: String) {
+        startingRunIDs.remove(runID)
     }
 
-    func isStarting(_ jobID: String) -> Bool {
-        startingJobIDs.contains(jobID)
+    func isStarting(_ runID: String) -> Bool {
+        startingRunIDs.contains(runID)
     }
 
-    func setStartupCancellation(_ cancellation: ReviewCancellation, for jobID: String) {
-        startupCancellations[jobID] = cancellation
+    func setStartupCancellation(_ cancellation: ReviewCancellation, for runID: String) {
+        startupCancellations[runID] = cancellation
     }
 
-    func takeStartupCancellation(for jobID: String) -> ReviewCancellation? {
-        startupCancellations.removeValue(forKey: jobID)
+    func takeStartupCancellation(for runID: String) -> ReviewCancellation? {
+        startupCancellations.removeValue(forKey: runID)
     }
 
-    func setActiveWorker(_ task: Task<Void, Never>, for jobID: String) {
-        reviewWorkerTasks[jobID] = task
+    func setActiveWorker(_ task: Task<Void, Never>, for runID: String) {
+        reviewWorkerTasks[runID] = task
     }
 
-    func cancelActiveWorker(for jobID: String) {
-        reviewWorkerTasks[jobID]?.cancel()
+    func cancelActiveWorker(for runID: String) {
+        reviewWorkerTasks[runID]?.cancel()
     }
 
-    func removeActiveWorker(for jobID: String) {
-        reviewWorkerTasks.removeValue(forKey: jobID)
+    func removeActiveWorker(for runID: String) {
+        reviewWorkerTasks.removeValue(forKey: runID)
     }
 
-    func awaitActiveWorker(for jobID: String) async {
-        let task = reviewWorkerTasks[jobID]
+    func awaitActiveWorker(for runID: String) async {
+        let task = reviewWorkerTasks[runID]
         await task?.value
     }
 
-    func cancelAndDetachActiveWorkerForRuntimeStop(jobID: String) {
-        if let task = reviewWorkerTasks.removeValue(forKey: jobID) {
+    func cancelAndDetachActiveWorkerForRuntimeStop(runID: String) {
+        if let task = reviewWorkerTasks.removeValue(forKey: runID) {
             task.cancel()
-            runtimeStopDetachedReviewWorkerTasks[jobID] = task
+            runtimeStopDetachedReviewWorkerTasks[runID] = task
         }
     }
 
-    func removeDetachedWorker(for jobID: String) {
-        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: jobID)
+    func removeDetachedWorker(for runID: String) {
+        runtimeStopDetachedReviewWorkerTasks.removeValue(forKey: runID)
     }
 
     func activeWorkerTasks() -> [Task<Void, Never>] {
@@ -117,16 +117,16 @@ final class CodexReviewStoreRuntimeState {
         activeWorkerTasks() + detachedWorkerTasks()
     }
 
-    func clearRuntimeStopState(for jobID: String) {
-        removeActiveRun(for: jobID)
-        clearWaitingForNetworkRecovery(jobID)
-        clearStarting(jobID)
-        _ = takeStartupCancellation(for: jobID)
+    func clearRuntimeStopState(for runID: String) {
+        removeActiveRun(for: runID)
+        clearWaitingForNetworkRecovery(runID)
+        clearStarting(runID)
+        _ = takeStartupCancellation(for: runID)
     }
 
-    func clearReviewRunState(for jobID: String) {
-        removeActiveRun(for: jobID)
-        clearWaitingForNetworkRecovery(jobID)
+    func clearReviewRunState(for runID: String) {
+        removeActiveRun(for: runID)
+        clearWaitingForNetworkRecovery(runID)
     }
 
     func cancelAllWorkers() {
@@ -148,15 +148,15 @@ final class CodexReviewStoreRuntimeState {
     func clearForTesting() {
         reviewWorkerTasks.removeAll(keepingCapacity: false)
         runtimeStopDetachedReviewWorkerTasks.removeAll(keepingCapacity: false)
-        startingJobIDs.removeAll(keepingCapacity: false)
+        startingRunIDs.removeAll(keepingCapacity: false)
         startupCancellations.removeAll(keepingCapacity: false)
         activeRuns.removeAll(keepingCapacity: false)
-        reviewRecoveryWaitingJobIDs.removeAll(keepingCapacity: false)
+        reviewRecoveryWaitingRunIDs.removeAll(keepingCapacity: false)
     }
 }
 
 extension CodexReviewStore {
-    package func runtimeReviewRunState(jobID: String) -> CodexReviewRuntimeJobState {
-        runtimeState.jobState(for: jobID)
+    package func runtimeReviewRunState(runID: String) -> CodexReviewRuntimeRunState {
+        runtimeState.runState(for: runID)
     }
 }

@@ -92,7 +92,7 @@ func reviewTarget(from object: [String: Value]) throws -> CodexReviewAPI.Target 
     }
 }
 
-func statuses(from value: Value?) throws -> [ReviewJobState]? {
+func statuses(from value: Value?) throws -> [ReviewRunState]? {
     guard let value else {
         return nil
     }
@@ -100,7 +100,7 @@ func statuses(from value: Value?) throws -> [ReviewJobState]? {
         throw MCPProtocolServerError.invalidArgument("statuses must be an array.")
     }
     return try array.map { item in
-        guard let raw = item.stringValue, let status = ReviewJobState(rawValue: raw) else {
+        guard let raw = item.stringValue, let status = ReviewRunState(rawValue: raw) else {
             throw MCPProtocolServerError.invalidArgument("Invalid review status.")
         }
         return status

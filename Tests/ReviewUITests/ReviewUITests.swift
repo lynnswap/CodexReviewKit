@@ -4935,7 +4935,7 @@ func makeJob(
     id: String = UUID().uuidString,
     cwd: String = "/tmp/repo",
     startedAt: Date = Date(timeIntervalSince1970: 200),
-    status: ReviewJobState,
+    status: ReviewRunState,
     targetSummary: String,
     summary: String? = nil,
     reviewResult: ParsedReviewResult? = nil,

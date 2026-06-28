@@ -32,7 +32,7 @@ package extension CodexReviewMCP.Tool {
         case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
         case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
         case reviewRead(sessionID: String?, jobID: String)
-        case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
+        case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewRunState]?, limit: Int?)
         case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
     }
 }

@@ -9,7 +9,7 @@ extension ReviewRunRecord {
         model: String? = "gpt-5",
         threadID: String? = nil,
         turnID: String? = nil,
-        status: ReviewJobState,
+        status: ReviewRunState,
         cancellationRequested: Bool = false,
         cancellation: ReviewCancellation? = nil,
         startedAt: Date? = nil,
@@ -26,7 +26,7 @@ extension ReviewRunRecord {
             sessionID: sessionID,
             cwd: cwd,
             targetSummary: targetSummary,
-            core: ReviewJobCore(
+            core: ReviewRunCore(
                 run: .init(
                     reviewThreadID: threadID,
                     threadID: threadID,
@@ -54,7 +54,7 @@ extension ReviewRunRecord {
 
     package func updateStateForTesting(
         targetSummary: String? = nil,
-        status: ReviewJobState? = nil,
+        status: ReviewRunState? = nil,
         endedAt: Date? = nil,
         clearEndedAt: Bool = false,
         summary: String? = nil
