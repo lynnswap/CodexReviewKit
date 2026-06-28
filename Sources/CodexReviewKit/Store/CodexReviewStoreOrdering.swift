@@ -64,11 +64,11 @@ extension CodexReviewStore {
         }
 
         let ordered = orderedReviewRuns(inWorkspace: cwd)
-        guard let job = ordered.first(where: { $0.id == id }) else {
+        guard let runRecord = ordered.first(where: { $0.id == id }) else {
             return false
         }
 
-        let remaining = ordered.filter { $0 !== job }
+        let remaining = ordered.filter { $0 !== runRecord }
         let destinationIndex: Int
         if let beforeRunID {
             guard let beforeIndex = remaining.firstIndex(where: { $0.id == beforeRunID }) else {
@@ -92,8 +92,8 @@ extension CodexReviewStore {
         }
 
         let ordered = orderedReviewRuns(inWorkspace: cwd)
-        guard let job = ordered.first(where: { $0.id == id }),
-              let sourceIndex = ordered.firstIndex(where: { $0 === job })
+        guard let runRecord = ordered.first(where: { $0.id == id }),
+              let sourceIndex = ordered.firstIndex(where: { $0 === runRecord })
         else {
             return false
         }
@@ -104,7 +104,7 @@ extension CodexReviewStore {
         }
 
         var sortOrder = reorderedSortOrder(
-            moving: job,
+            moving: runRecord,
             toIndex: destinationIndex,
             in: ordered,
             sortOrder: \.sortOrder
@@ -112,7 +112,7 @@ extension CodexReviewStore {
         if sortOrder == nil {
             normalizeReviewRunSortOrders(inWorkspace: cwd)
             sortOrder = reorderedSortOrder(
-                moving: job,
+                moving: runRecord,
                 toIndex: destinationIndex,
                 in: orderedReviewRuns(inWorkspace: cwd),
                 sortOrder: \.sortOrder
@@ -121,7 +121,7 @@ extension CodexReviewStore {
         guard let sortOrder else {
             return false
         }
-        job.sortOrder = sortOrder
+        runRecord.sortOrder = sortOrder
         writeDiagnosticsIfNeeded()
         return true
     }

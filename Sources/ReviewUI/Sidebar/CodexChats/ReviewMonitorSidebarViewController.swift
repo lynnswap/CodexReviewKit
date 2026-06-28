@@ -733,12 +733,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                     cancellation: .userInterface()
                 )
             } catch {
-                guard let job = self.store.reviewRun(id: runID) else {
-                    return
-                }
                 try? self.store.recordCancellationFailure(
                     runID: runID,
-                    sessionID: job.sessionID,
                     message: error.localizedDescription
                 )
             }

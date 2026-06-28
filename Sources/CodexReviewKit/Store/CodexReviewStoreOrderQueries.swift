@@ -20,8 +20,8 @@ extension CodexReviewStore {
         workspaces.first(where: { $0.cwd == cwd })
     }
 
-    package func workspace(containing job: ReviewRunRecord) -> CodexReviewWorkspace? {
-        workspace(cwd: job.cwd)
+    package func workspace(containing runRecord: ReviewRunRecord) -> CodexReviewWorkspace? {
+        workspace(cwd: runRecord.cwd)
     }
 
     package func reviewRun(id: String) -> ReviewRunRecord? {
@@ -64,8 +64,8 @@ extension CodexReviewStore {
 
     package func normalizeReviewRunSortOrders(inWorkspace cwd: String) {
         let ordered = orderedReviewRuns(inWorkspace: cwd)
-        for (index, job) in ordered.enumerated() {
-            job.sortOrder = Double(ordered.count - index - 1)
+        for (index, runRecord) in ordered.enumerated() {
+            runRecord.sortOrder = Double(ordered.count - index - 1)
         }
     }
 

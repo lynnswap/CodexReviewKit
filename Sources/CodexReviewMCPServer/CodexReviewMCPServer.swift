@@ -122,12 +122,12 @@ package final class CodexReviewMCPServer {
                 limit: limit
             ))
         case .reviewCancel(let sessionID, let selector, let reason):
-            let job = try store.resolveRun(
+            let runRecord = try store.resolveRun(
                 sessionID: sessionID,
                 selector: selector.defaultingToActiveStatusesForCancellation()
             )
             return .reviewCancel(try await store.cancelReview(
-                runID: job.id,
+                runID: runRecord.id,
                 cancellation: reason
             ))
         }

@@ -87,6 +87,21 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
+    package func recordCancellationFailure(
+        runID: String,
+        message: String
+    ) throws {
+        guard let runRecord = reviewRun(id: runID)
+        else {
+            throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
+        }
+        try recordCancellationFailure(
+            runID: runID,
+            sessionID: runRecord.sessionID,
+            message: message
+        )
+    }
+
     public func cancelAllRunningReviewRuns(
         reason: String = "Cancellation requested."
     ) async throws {
