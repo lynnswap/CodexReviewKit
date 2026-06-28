@@ -1325,15 +1325,12 @@ struct ReviewUITests {
             exitCode: 0,
             commandStatus: "completed"
         )
-        let job = ReviewRunRecord.makeForTesting(
+        let chat = makeReviewChatFixtureForTesting(
             id: "job-command-output-panel",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
@@ -1348,7 +1345,7 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1358,10 +1355,10 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
@@ -1423,14 +1420,16 @@ struct ReviewUITests {
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
         let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
         appendChatLogEntryForTesting(
-            job,
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
                 text: "\noutput line 10",
                 metadata: commandMetadata
-            ))
-        _ = try await awaitChatRenderForTesting(job, in: transport)
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        _ = try await awaitChatRenderForTesting(chat, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logReloadCountForTesting == expandedOutputAppendReloadCount)
         let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
@@ -1459,15 +1458,21 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
         appendChatLogEntryForTesting(
-            job,
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
                 text: "\noutput line 11",
                 metadata: commandMetadata
-            ))
-        appendChatLogEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
-        _ = try await awaitChatRenderForTesting(job, in: transport)
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        appendChatLogEntryForTesting(
+            .init(kind: .agentMessage, text: "Visible text after command output."),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        _ = try await awaitChatRenderForTesting(chat, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
         #expect(transport.logFindStringForTesting.contains("output line 11") == false)
@@ -1481,15 +1486,12 @@ struct ReviewUITests {
         let secondOutput = (1...80)
             .map { "second output line \($0)" }
             .joined(separator: "\n")
-        let job = ReviewRunRecord.makeForTesting(
+        let chat = makeReviewChatFixtureForTesting(
             id: "job-command-output-panel-isolation",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
@@ -1510,7 +1512,7 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1520,16 +1522,16 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd_1")
-        let secondBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd_2")
+        let firstBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "cmd_1")
+        let secondBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "cmd_2")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: firstBlockID))
         await awaitNativeLayoutTurn()
 
@@ -1549,15 +1551,12 @@ struct ReviewUITests {
     }
 
     @Test func startedCommandRendersAsCollapsedPanelBeforeOutputArrives() async throws {
-        let job = ReviewRunRecord.makeForTesting(
+        let chat = makeReviewChatFixtureForTesting(
             id: "job-command-start-panel",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test")
             ]
@@ -1565,7 +1564,7 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1575,10 +1574,10 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
@@ -1587,7 +1586,6 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
         appendChatLogEntryForTesting(
-            job,
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
@@ -1600,8 +1598,11 @@ struct ReviewUITests {
                     exitCode: 0,
                     commandStatus: "completed"
                 )
-            ))
-        _ = try await awaitChatRenderForTesting(job, in: transport)
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        _ = try await awaitChatRenderForTesting(chat, in: transport)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -1612,15 +1613,12 @@ struct ReviewUITests {
         let outputText = (1...5)
             .map { "output line \($0)" }
             .joined(separator: "\n")
-        let job = ReviewRunRecord.makeForTesting(
+        let chat = makeReviewChatFixtureForTesting(
             id: "job-command-output-find-refresh",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(kind: .commandOutput, groupID: "cmd_1", text: outputText),
@@ -1629,7 +1627,7 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1639,9 +1637,9 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
@@ -1666,8 +1664,11 @@ struct ReviewUITests {
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
             appendChatLogEntryForTesting(
-                job, .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
-            _ = try await awaitChatRenderForTesting(job, in: transport)
+                .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"),
+                to: chat.chatID,
+                turnID: chat.turnID
+            )
+            _ = try await awaitChatRenderForTesting(chat, in: transport)
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -4957,6 +4958,31 @@ func makeJob(
     )
     seedChatLogForTesting(job, logText: logText, rawLogText: rawLogText)
     return job
+}
+
+@MainActor
+func makeReviewChatFixtureForTesting(
+    id: String = UUID().uuidString,
+    cwd: String = "/tmp/repo",
+    startedAt: Date = Date(timeIntervalSince1970: 200),
+    status: ReviewRunState,
+    targetSummary: String,
+    summary: String? = nil,
+    logText: String = ""
+) -> ReviewChatFixtureForTesting {
+    let trimmedLogText = logText.trimmingCharacters(in: .newlines)
+    return makeReviewChatFixtureForTesting(
+        id: id,
+        cwd: cwd,
+        title: targetSummary,
+        preview: summary ?? status.displayText,
+        status: status,
+        startedAt: startedAt,
+        updatedAt: status.isTerminal ? startedAt.addingTimeInterval(1) : startedAt,
+        chatEntries: trimmedLogText.isEmpty
+            ? []
+            : [.init(kind: .agentMessage, groupID: "fixture-log-\(id)", text: trimmedLogText)]
+    )
 }
 
 func reviewChatCellTestChat(
