@@ -17,22 +17,13 @@ struct ReviewMonitorPreviewChatLogFixture {
         cwd: String,
         streamID: String,
         isRunning: Bool,
-        turn: CodexChatTurnStateSnapshot,
-        phase: CodexDataPhase,
-        initialItems: [ReviewTimelineItem]
+        initialSnapshot: CodexChatSnapshot
     ) {
         self.chat = chat
         self.cwd = cwd
         self.streamID = streamID
         self.isRunning = isRunning
-        self.initialSnapshot = CodexChatSnapshot(
-            chatID: chat.id,
-            phase: phase,
-            turns: [turn],
-            items: initialItems.map {
-                CodexChatItemSnapshot(previewItem: $0, turnID: turn.id)
-            }
-        )
+        self.initialSnapshot = initialSnapshot
     }
 }
 
@@ -387,7 +378,7 @@ private extension CodexChatChange {
     }
 }
 
-private extension CodexChatItemSnapshot {
+extension CodexChatItemSnapshot {
     @MainActor
     init(previewItem item: ReviewTimelineItem, turnID: CodexTurnID) {
         self.init(

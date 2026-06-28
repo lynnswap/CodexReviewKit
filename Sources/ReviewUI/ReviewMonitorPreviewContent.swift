@@ -168,22 +168,29 @@ public enum ReviewMonitorPreviewContent {
             guard let chat = job.reviewChatSelection else {
                 return nil
             }
+            let turn = CodexChatTurnStateSnapshot(
+                id: job.previewTurnID,
+                status: CodexTurnStatus(job.core.lifecycle.status),
+                errorDescription: job.core.lifecycle.errorMessage,
+                usage: nil
+            )
+            let initialSnapshot = CodexChatSnapshot(
+                chatID: chat.id,
+                phase: CodexDataPhase(
+                    job.core.lifecycle.status,
+                    errorMessage: job.core.lifecycle.errorMessage
+                ),
+                turns: [turn],
+                items: job.timeline.items.map {
+                    CodexChatItemSnapshot(previewItem: $0, turnID: turn.id)
+                }
+            )
             return ReviewMonitorPreviewChatLogFixture(
                 chat: chat,
                 cwd: job.cwd,
                 streamID: job.id,
                 isRunning: job.core.lifecycle.status == .running,
-                turn: CodexChatTurnStateSnapshot(
-                    id: job.previewTurnID,
-                    status: CodexTurnStatus(job.core.lifecycle.status),
-                    errorDescription: job.core.lifecycle.errorMessage,
-                    usage: nil
-                ),
-                phase: CodexDataPhase(
-                    job.core.lifecycle.status,
-                    errorMessage: job.core.lifecycle.errorMessage
-                ),
-                initialItems: job.timeline.items
+                initialSnapshot: initialSnapshot
             )
         }
     }
