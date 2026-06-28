@@ -235,6 +235,14 @@ struct CodexReviewStoreCommandTests {
             )
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
+            #expect(
+                await waitUntil {
+                    store.reviewRun(id: "run-1")?.agentMessagesByItemID["message-2"] == "second"
+                })
+            let running = try #require(store.reviewRun(id: "run-1"))
+            #expect(running.core.output.lastAgentMessage == nil)
+            #expect(running.core.reviewText == "Review started.")
+
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
 
@@ -1391,7 +1399,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func failedReviewPreservesBufferedEventsBeforeStreamError() async throws {
+    @Test func failedReviewKeepsBufferedMessagesOutOfRunOutput() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1404,11 +1412,15 @@ struct CodexReviewStoreCommandTests {
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "run-1") != nil)
             await backend.yield(.message("partial review"))
+            #expect(
+                await waitUntil {
+                    store.reviewRun(id: "run-1")?.agentMessagesByItemID.values.contains("partial review") == true
+                })
             await backend.finishEvents(throwing: StreamClosedError())
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
-            #expect(read.core.output.lastAgentMessage == "partial review")
+            #expect(read.core.output.lastAgentMessage == nil)
         }
     }
 

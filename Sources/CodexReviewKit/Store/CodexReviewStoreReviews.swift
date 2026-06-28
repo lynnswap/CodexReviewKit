@@ -259,10 +259,6 @@ extension CodexReviewStore {
             text: text,
             isCompleted: isCompleted
         )
-        if let text = text.nilIfEmpty {
-            runRecord.core.output.lastAgentMessage = text
-            runRecord.core.output.summary = text
-        }
     }
 
     private func applyMessageDelta(
@@ -271,11 +267,7 @@ extension CodexReviewStore {
         to runRecord: ReviewRunRecord,
         at timestamp: Date
     ) {
-        guard let updatedMessage = runRecord.appendAgentMessageDelta(itemID: itemID, delta: text) else {
-            return
-        }
-        runRecord.core.output.lastAgentMessage = updatedMessage
-        runRecord.core.output.summary = updatedMessage
+        _ = runRecord.appendAgentMessageDelta(itemID: itemID, delta: text)
     }
 
     private func reviewWorkerInputs(for attempt: BackendReviewAttempt) async -> ReviewWorkerInputs {
@@ -708,7 +700,7 @@ extension CodexReviewStore {
             completeReview(
                 runRecord,
                 summary: runRecord.core.output.summary,
-                result: runRecord.core.output.lastAgentMessage
+                result: runRecord.latestBufferedAgentMessage
             )
         }
         return recoveryState.currentRun
@@ -733,7 +725,7 @@ extension CodexReviewStore {
             completeReview(
                 runRecord,
                 summary: runRecord.core.output.summary,
-                result: runRecord.core.output.lastAgentMessage
+                result: runRecord.latestBufferedAgentMessage
             )
         }
         return true
@@ -854,8 +846,6 @@ extension CodexReviewStore {
             runRecord.core.output.summary = "Review started."
         case .message(let text):
             let now = clock.now()
-            runRecord.core.output.lastAgentMessage = text
-            runRecord.core.output.summary = text
             applyMessageSnapshot(text, itemID: nil, isCompleted: true, to: runRecord, at: now)
         case .messageDelta(let text, let itemID):
             applyMessageDelta(text, itemID: itemID, to: runRecord, at: clock.now())
@@ -901,7 +891,7 @@ extension CodexReviewStore {
             return
         }
         let endedAt = clock.now()
-        let previousAgentMessage = runRecord.core.output.lastAgentMessage?.nilIfEmpty
+        let previousAgentMessage = runRecord.latestBufferedAgentMessage
         let resultText = result?.nilIfEmpty
         let finalReviewText = resultText ?? previousAgentMessage
         runRecord.core.lifecycle.status = .succeeded
@@ -971,17 +961,28 @@ private extension ReviewRunRecord {
         )
     }
 
+    var latestBufferedAgentMessage: String? {
+        guard let latestAgentMessageItemID,
+            let latestMessage = agentMessagesByItemID[latestAgentMessageItemID]?.nilIfEmpty
+        else {
+            return nil
+        }
+        return latestMessage
+    }
+
     func appendAgentMessageDelta(itemID: String, delta: String) -> String? {
         guard completedAgentMessageItemIDs.contains(itemID) == false else {
             return nil
         }
         let updated = (agentMessagesByItemID[itemID] ?? "") + delta
         agentMessagesByItemID[itemID] = updated
+        latestAgentMessageItemID = itemID
         return updated
     }
 
     func noteAgentMessageSnapshot(itemID: String, text: String, isCompleted: Bool) {
         agentMessagesByItemID[itemID] = text
+        latestAgentMessageItemID = itemID
         if isCompleted {
             completedAgentMessageItemIDs.insert(itemID)
         } else {
@@ -994,6 +995,7 @@ private extension ReviewRunRecord {
         core.output.hasFinalReview = false
         core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
+        latestAgentMessageItemID = nil
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
     }
 }

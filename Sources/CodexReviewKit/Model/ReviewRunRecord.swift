@@ -15,6 +15,8 @@ public final class ReviewRunRecord: Identifiable, Hashable {
     @ObservationIgnored
     package var agentMessagesByItemID: [String: String]
     @ObservationIgnored
+    package var latestAgentMessageItemID: String?
+    @ObservationIgnored
     package var completedAgentMessageItemIDs: Set<String>
     @ObservationIgnored
     private var syntheticMessageItemCounter: UInt64
@@ -48,6 +50,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         self.core = core
         self.cancellationRequested = cancellationRequested
         self.agentMessagesByItemID = [:]
+        self.latestAgentMessageItemID = nil
         self.completedAgentMessageItemIDs = []
         self.syntheticMessageItemCounter = 0
     }

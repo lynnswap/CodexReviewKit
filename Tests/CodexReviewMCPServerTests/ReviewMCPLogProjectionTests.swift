@@ -91,4 +91,33 @@ struct ReviewMCPLogProjectionTests {
         #expect(projection.items.map { $0.kind } == ["agentMessage", "reasoning", "commandExecution"])
         #expect(projection.items.map { $0.content.type } == ["message", "reasoning", "command"])
     }
+
+    @Test func terminalTurnItemsProvideFinalResultBeforeRunOutputFallback() throws {
+        let projection = ReviewMCPLogProjection(
+            result: .init(
+                runID: "run-1",
+                core: .init(
+                    run: .init(threadID: "thread-1", turnID: "turn-1"),
+                    lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
+                    output: .init(
+                        summary: "Done.",
+                        hasFinalReview: true,
+                        lastAgentMessage: "stale fallback"
+                    )
+                ),
+                cancellable: false
+            ),
+            turnID: "turn-1",
+            threadItems: [
+                .init(
+                    id: "assistant-1",
+                    kind: .agentMessage,
+                    content: .message(.init(id: "assistant-1", role: .assistant, text: "CodexChat final"))
+                ),
+            ]
+        )
+
+        #expect(projection.finalSummary == "Done.")
+        #expect(projection.finalResult == "CodexChat final")
+    }
 }

@@ -10,11 +10,11 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
     case .reviewStart(let snapshot),
         .reviewAwait(let snapshot):
         value = snapshot.result.structuredContentForStartOrAwait(log: snapshot.log)
-        text = snapshot.result.textContentForStartOrAwait()
+        text = snapshot.result.textContentForStartOrAwait(log: snapshot.log)
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewRead(let snapshot):
         value = snapshot.result.structuredContentForRead(log: snapshot.log)
-        text = snapshot.result.textContentForRead()
+        text = snapshot.result.textContentForRead(log: snapshot.log)
         isError = snapshot.result.core.lifecycle.status == .failed
     case .reviewList(let result):
         value = result.structuredContent()
@@ -33,13 +33,13 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
 }
 
 private extension CodexReviewAPI.Read.Result {
-    func textContent() -> String {
-        core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
+    func textContent(log: ReviewMCPLogProjection) -> String {
+        log.finalResult?.nilIfEmpty ?? core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
     }
 
-    func textContentForStartOrAwait() -> String {
+    func textContentForStartOrAwait(log: ReviewMCPLogProjection) -> String {
         if core.lifecycle.status.isTerminal {
-            return textContent()
+            return textContent(log: log)
         }
 
         var status = "Review \(core.lifecycle.status.rawValue)"
@@ -49,9 +49,9 @@ private extension CodexReviewAPI.Read.Result {
         return "\(status). runId: \(runID). Call `review_await` with this runId to continue waiting."
     }
 
-    func textContentForRead() -> String {
+    func textContentForRead(log: ReviewMCPLogProjection) -> String {
         if core.lifecycle.status.isTerminal {
-            return textContent()
+            return textContent(log: log)
         }
 
         var status = "Review \(core.lifecycle.status.rawValue)"
@@ -89,7 +89,9 @@ private extension CodexReviewAPI.Read.Result {
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "output": core.output.structuredContent(review: core.reviewText),
+            "output": core.output.structuredContent(
+                review: log.finalResult?.nilIfEmpty ?? core.reviewText
+            ),
         ]
         object["log"] =
             includeDetails

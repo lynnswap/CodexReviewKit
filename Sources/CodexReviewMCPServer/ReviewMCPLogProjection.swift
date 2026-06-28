@@ -108,11 +108,27 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
         self.finalSummary = status.isTerminal ? output.summary : nil
-        self.finalResult = status == .succeeded ? result.core.reviewText.nilIfEmpty : nil
+        self.finalResult =
+            status == .succeeded
+            ? projectedItems.lastAgentMessageText ?? result.core.reviewText.nilIfEmpty
+            : nil
+    }
+}
+
+private extension [ReviewMCPLogProjection.Item] {
+    var lastAgentMessageText: String? {
+        reversed().compactMap { $0.content.messageText }.first
     }
 }
 
 private extension ReviewMCPLogProjection.Content {
+    var messageText: String? {
+        guard case .message(let text) = self else {
+            return nil
+        }
+        return text.nilIfEmpty
+    }
+
     init?(threadItem item: CodexThreadItem) {
         switch item.content {
         case .message(let message):
