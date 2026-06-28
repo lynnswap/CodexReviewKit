@@ -89,8 +89,23 @@ final class ReviewMonitorPreviewChatLogSource {
         return pair.stream
     }
 
-    func applyPreviewDomainEvent(_ event: ReviewDomainEvent, to chatID: CodexThreadID) {
-        previewChatsByID[chatID]?.apply(event)
+    func upsertPreviewItem(
+        id: String,
+        kind: CodexThreadItem.Kind,
+        content: CodexThreadItem.Content,
+        to chatID: CodexThreadID
+    ) {
+        previewChatsByID[chatID]?.upsertItem(id: id, kind: kind, content: content)
+    }
+
+    func appendPreviewText(
+        _ delta: String,
+        to chatID: CodexThreadID,
+        itemID: String,
+        kind: CodexThreadItem.Kind,
+        content: CodexThreadItem.Content
+    ) {
+        previewChatsByID[chatID]?.appendTextDelta(delta, itemID: itemID, kind: kind, content: content)
     }
 
     func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
@@ -145,43 +160,6 @@ private final class PreviewReviewChat {
         snapshotStorage
     }
 
-    func apply(_ event: ReviewDomainEvent) {
-        switch event {
-        case .runStarted(let turnID, _, _):
-            snapshotStorage.turns = [
-                .init(
-                    id: CodexTurnID(rawValue: turnID.rawValue),
-                    status: .running
-                ),
-            ]
-            snapshotStorage.items.removeAll(keepingCapacity: true)
-            snapshotStorage.phase = .loaded
-            bumpRevision()
-
-        case .itemStarted(let seed),
-            .itemUpdated(let seed),
-            .itemCompleted(let seed):
-            upsertItem(seed)
-
-        case .textDelta(let itemID, let kind, _, let content, let delta):
-            appendTextDelta(
-                delta,
-                itemID: itemID.rawValue,
-                kind: CodexThreadItem.Kind(kind),
-                content: content
-            )
-
-        case .reviewCompleted:
-            updateTurnStatus(.completed)
-
-        case .reviewFailed:
-            updateTurnStatus(.failed)
-
-        case .reviewCancelled:
-            updateTurnStatus(.cancelled)
-        }
-    }
-
     func applyPreviewStreamStep(
         _ step: ReviewMonitorPreviewContent.PreviewTimelineStep,
         cycle: Int
@@ -201,7 +179,12 @@ private final class PreviewReviewChat {
                 step.deltaText ?? "",
                 itemID: itemID.rawValue,
                 kind: CodexThreadItem.Kind(step.kind),
-                content: step.content
+                content: CodexThreadItem.Content(
+                    previewContent: step.content,
+                    id: itemID.rawValue,
+                    phase: step.phase,
+                    fallbackRawKind: step.kind.rawValue
+                )
             )
         }
     }
@@ -212,6 +195,24 @@ private final class PreviewReviewChat {
 
     private func upsertItem(_ seed: ReviewTimelineItemSeed) {
         let item = CodexChatItemSnapshot(previewSeed: seed, turnID: currentTurnID)
+        upsertItem(item)
+    }
+
+    func upsertItem(
+        id: String,
+        kind: CodexThreadItem.Kind,
+        content: CodexThreadItem.Content
+    ) {
+        let item = CodexChatItemSnapshot(
+            id: id,
+            turnID: currentTurnID,
+            kind: kind,
+            content: content
+        )
+        upsertItem(item)
+    }
+
+    private func upsertItem(_ item: CodexChatItemSnapshot) {
         if let index = snapshotStorage.items.firstIndex(where: { $0.id == item.id && $0.turnID == item.turnID }) {
             snapshotStorage.items[index] = item
         } else {
@@ -220,11 +221,11 @@ private final class PreviewReviewChat {
         bumpRevision()
     }
 
-    private func appendTextDelta(
+    func appendTextDelta(
         _ delta: String,
         itemID: String,
         kind: CodexThreadItem.Kind,
-        content: ReviewTimelineItem.Content
+        content: CodexThreadItem.Content
     ) {
         guard delta.isEmpty == false else {
             return
@@ -237,12 +238,7 @@ private final class PreviewReviewChat {
                 id: itemID,
                 turnID: turnID,
                 kind: kind,
-                content: CodexThreadItem.Content(
-                    previewContent: content,
-                    id: itemID,
-                    phase: .running,
-                    fallbackRawKind: kind.rawValue
-                )
+                content: content
             )
             item.content.appendPreviewText(delta)
             snapshotStorage.items.append(item)

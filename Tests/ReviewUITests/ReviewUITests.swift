@@ -5143,15 +5143,12 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        previewChatLogSource.applyPreviewDomainEvent(
-            .textDelta(
-                itemID: .init(rawValue: "msg_1"),
-                kind: .agentMessage,
-                family: .message,
-                content: .message(.init(text: "")),
-                delta: " log"
-            ),
-            to: chatID
+        previewChatLogSource.appendPreviewText(
+            " log",
+            to: chatID,
+            itemID: "msg_1",
+            kind: .agentMessage,
+            content: .message(.init(id: "msg_1", role: .assistant, text: ""))
         )
 
         let snapshot = try await awaitTransportRender(transport) { $0.log == "Initial log" }
@@ -5195,15 +5192,10 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
-        previewChatLogSource.applyPreviewDomainEvent(
-            .itemUpdated(
-                .init(
-                    id: .init(rawValue: "progress_1"),
-                    kind: ReviewItemKind(rawValue: "progress"),
-                    family: .diagnostic,
-                    phase: .completed,
-                    content: .diagnostic(.init(message: "stream.tick 001"))
-                )),
+        previewChatLogSource.upsertPreviewItem(
+            id: "progress_1",
+            kind: CodexThreadItem.Kind(rawValue: "progress"),
+            content: .diagnostic("stream.tick 001"),
             to: chatID
         )
 
