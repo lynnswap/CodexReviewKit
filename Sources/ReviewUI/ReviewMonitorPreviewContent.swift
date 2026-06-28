@@ -205,8 +205,12 @@ public enum ReviewMonitorPreviewContent {
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
         let timelineItems = makeCommandOutputPreviewTimelineItems()
+        let chatID = CodexThreadID(rawValue: "preview-command-output-panel")
+        let turnID = CodexTurnID(rawValue: "preview-command-output-turn")
         let job = makeJob(
             id: "preview-command-output-panel",
+            threadID: chatID.rawValue,
+            turnID: turnID.rawValue,
             cwd: cwd,
             model: "gpt-5.4",
             status: .running,
@@ -226,11 +230,15 @@ public enum ReviewMonitorPreviewContent {
             workspaces: [CodexReviewWorkspace(cwd: cwd)],
             jobs: [job]
         )
-        if let fixture = makeChatLogFixture(for: job, timelineItems: timelineItems) {
-            store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
-                chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
-            )
-        }
+        let fixture = makeChatLogFixture(
+            chatID: chatID,
+            turnID: turnID,
+            for: job,
+            timelineItems: timelineItems
+        )
+        store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
+            chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
+        )
         return store
     }
 
@@ -661,8 +669,12 @@ public enum ReviewMonitorPreviewContent {
             workspaces.append(CodexReviewWorkspace(cwd: cwd))
             for (jobIndex, definition) in makeJobDefinitions(for: workspaceName).enumerated() {
                 let timelineItems = makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
+                let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(jobIndex)")
+                let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(jobIndex)")
                 let job = makeJob(
                     id: "preview-\(workspaceIndex)-\(jobIndex)",
+                    threadID: chatID.rawValue,
+                    turnID: turnID.rawValue,
                     cwd: cwd,
                     model: definition.model,
                     status: definition.status,
@@ -679,9 +691,13 @@ public enum ReviewMonitorPreviewContent {
                     lastAgentMessage: definition.lastAgentMessage
                 )
                 jobs.append(job)
-                if let fixture = makeChatLogFixture(for: job, timelineItems: timelineItems) {
-                    chatLogFixtures.append(fixture)
-                }
+                chatLogFixtures.append(
+                    makeChatLogFixture(
+                        chatID: chatID,
+                        turnID: turnID,
+                        for: job,
+                        timelineItems: timelineItems
+                    ))
             }
         }
         return PreviewSidebarContent(
@@ -692,14 +708,22 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
+        chatID: CodexThreadID,
+        turnID: CodexTurnID,
         for job: CodexReviewJob,
         timelineItems: [PreviewTimelineItemTemplate]
-    ) -> ReviewMonitorPreviewChatLogFixture? {
-        guard let chat = job.legacyReviewChatSelection else {
-            return nil
-        }
+    ) -> ReviewMonitorPreviewChatLogFixture {
+        let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
+            rowID: .chat(chatID),
+            id: chatID,
+            title: job.displayTitle,
+            preview: job.core.output.lastAgentMessage?.nilIfEmpty ?? job.core.output.summary.nilIfEmpty,
+            model: job.core.run.model,
+            workspaceCWD: job.cwd,
+            updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt
+        )
         let turn = CodexChatTurnStateSnapshot(
-            id: job.previewTurnID,
+            id: turnID,
             status: CodexTurnStatus(job.core.lifecycle.status),
             errorDescription: job.core.lifecycle.errorMessage,
             usage: nil
@@ -749,6 +773,8 @@ public enum ReviewMonitorPreviewContent {
 
     private static func makeJob(
         id: String,
+        threadID: String,
+        turnID: String,
         cwd: String,
         model: String,
         status: ReviewJobState,
@@ -765,8 +791,8 @@ public enum ReviewMonitorPreviewContent {
             cwd: cwd,
             targetSummary: targetSummary,
             model: model,
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            threadID: threadID,
+            turnID: turnID,
             status: status,
             startedAt: startedAt,
             endedAt: endedAt,
@@ -1205,12 +1231,6 @@ public enum ReviewMonitorPreviewContent {
                 hasFinalReview: true
             ),
         ]
-    }
-}
-
-private extension CodexReviewJob {
-    var previewTurnID: CodexTurnID {
-        core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
     }
 }
 
