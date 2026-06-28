@@ -102,6 +102,10 @@ final class ReviewMonitorPreviewChatLogSource {
         previewChatsByID[chatID]?.apply(event)
     }
 
+    func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
+        previewChatsByID[chatID]?.snapshot()
+    }
+
     @discardableResult
     func appendPreviewStreamTick(after currentTick: Int = 0) -> Int {
         let runningChats = previewChats.filter(\.isRunning)

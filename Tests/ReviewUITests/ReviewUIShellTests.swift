@@ -1,4 +1,5 @@
 import AppKit
+import CodexKit
 import Foundation
 import ObservationBridge
 import SwiftUI
@@ -21,7 +22,7 @@ extension ReviewUITests {
     }
 
     @Test func previewPreparationLoadsSelectedChatStreamBeforeWindowAttachment() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let store = ReviewMonitorPreviewContent.makeStore()
         let selectedReviewChatJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
@@ -49,7 +50,7 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let store = ReviewMonitorPreviewContent.makeStore()
         let selectedReviewChatJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
@@ -73,7 +74,7 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerStreamsSelectedChatLogDuringViewLifecycle() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let store = ReviewMonitorPreviewContent.makeStore()
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -284,9 +285,7 @@ extension ReviewUITests {
     }
 
     @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
+        let store = ReviewMonitorPreviewContent.makeStore()
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 760, height: 420)
@@ -794,7 +793,7 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let store = ReviewMonitorPreviewContent.makeStore()
         let selectedReviewChatJob = try #require(
             store.orderedJobs.first { $0.core.lifecycle.status == .running }
                 ?? store.orderedJobs.first
@@ -820,7 +819,7 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        let store = ReviewMonitorPreviewContent.makeStore()
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -1597,102 +1596,103 @@ extension ReviewUITests {
         #expect(backend.startCallCount() == 0)
     }
 
-    @Test func previewRunningJobsAppendPseudoStreamWhenTicked() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
+    @Test func previewRunningChatsAppendPseudoStreamWhenTicked() throws {
+        let source = ReviewMonitorPreviewContent.makeChatLogSource(
+            from: ReviewMonitorPreviewContent.makeStore()
         )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialLog = reviewMonitorLogText(for: runningJob)
-        let initialItemCount = runningJob.timeline.items.count
+        let runningChat = try #require(source.initialChat)
+        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        let initialItemCount = initialSnapshot.items.count
 
-        ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
+        source.appendPreviewStreamTick()
 
-        let appendedText = String(reviewMonitorLogText(for: runningJob).dropFirst(initialLog.count))
-        let appendedItems = Array(runningJob.timeline.items.dropFirst(initialItemCount))
-        #expect(reviewMonitorLogText(for: runningJob) != initialLog)
+        let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
+        let appendedText = appendedItems.compactMap(\.text).joined(separator: "\n")
+        #expect(updatedSnapshot.items != initialSnapshot.items)
         #expect(appendedText.contains("Turn started"))
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)
         #expect(appendedItems.count == 1)
-        #expect(appendedItems.first?.kind == ReviewItemKind(rawValue: "event"))
+        #expect(appendedItems.first?.kind.rawValue == "event")
         #expect(appendedItems.first.map(diagnosticMessage)?.contains("preview-turn") == true)
     }
 
-    @Test func previewStreamUsesMixedReviewLogKinds() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
+    @Test func previewChatStreamUsesMixedLogKinds() throws {
+        let source = ReviewMonitorPreviewContent.makeChatLogSource(
+            from: ReviewMonitorPreviewContent.makeStore()
         )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialItemCount = runningJob.timeline.items.count
+        let runningChat = try #require(source.initialChat)
+        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
         for _ in 0..<720 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = source.appendPreviewStreamTick(after: tick)
         }
 
-        let appendedItems = Array(runningJob.timeline.items.dropFirst(initialItemCount))
-        let appendedKinds = appendedItems.map(\.kind)
-        #expect(appendedKinds.contains(ReviewItemKind(rawValue: "event")))
-        #expect(appendedKinds.contains(.commandExecution))
-        #expect(appendedKinds.contains(.mcpToolCall))
-        #expect(appendedKinds.contains(.plan))
-        #expect(appendedKinds.contains(.contextCompaction))
-        #expect(appendedKinds.contains(.reasoning))
-        #expect(appendedKinds.contains(.agentMessage))
+        let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
+        let appendedKinds = appendedItems.map(\.kind.rawValue)
+        #expect(appendedKinds.contains("event"))
+        #expect(appendedKinds.contains("commandExecution"))
+        #expect(appendedKinds.contains("mcpToolCall"))
+        #expect(appendedKinds.contains("plan"))
+        #expect(appendedKinds.contains("contextCompaction"))
+        #expect(appendedKinds.contains("reasoning"))
+        #expect(appendedKinds.contains("agentMessage"))
         #expect(Set(appendedKinds).count >= 6)
         #expect(Set(appendedItems.map(\.id)).count == appendedItems.count)
 
-        let compactionItems = runningJob.timeline.items
+        let compactionItems = updatedSnapshot.items
             .dropFirst(initialItemCount)
-            .filter { $0.kind == .contextCompaction }
+            .filter { $0.kind.rawValue == "contextCompaction" }
         let compactionItem = try #require(compactionItems.last)
-        #expect(compactionItem.phase == .completed)
         #expect(contextCompactionTitle(compactionItem) == "Context automatically compacted")
-        #expect(contextCompactionStatus(compactionItem) == .completed)
-        let renderedLog = reviewMonitorLogText(for: runningJob)
+        let renderedLog = updatedSnapshot.items.compactMap(\.text).joined(separator: "\n")
         #expect(renderedLog.contains("Context automatically compacted"))
         #expect(renderedLog.contains("Automatically compacting context") == false)
     }
 
-    @Test func previewStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
+    @Test func previewChatStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
+        let source = ReviewMonitorPreviewContent.makeChatLogSource(
+            from: ReviewMonitorPreviewContent.makeStore()
         )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialItemCount = runningJob.timeline.items.count
+        let runningChat = try #require(source.initialChat)
+        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.timeline.items.count == initialItemCount + 1)
-        #expect(runningJob.timeline.items.last?.kind == ReviewItemKind(rawValue: "event"))
+        tick = source.appendPreviewStreamTick(after: tick)
+        var snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        #expect(snapshot.items.count == initialItemCount + 1)
+        #expect(snapshot.items.last?.kind.rawValue == "event")
 
         for _ in 0..<38 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = source.appendPreviewStreamTick(after: tick)
         }
-        #expect(runningJob.timeline.items.count == initialItemCount + 1)
+        snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        #expect(snapshot.items.count == initialItemCount + 1)
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.timeline.items.count == initialItemCount + 2)
-        #expect(runningJob.timeline.items.last?.kind == .plan)
+        tick = source.appendPreviewStreamTick(after: tick)
+        snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        #expect(snapshot.items.count == initialItemCount + 2)
+        #expect(snapshot.items.last?.kind.rawValue == "plan")
 
-        for _ in 0..<180 where runningJob.timeline.items.last?.kind != .reasoning {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+        for _ in 0..<180 where snapshot.items.last?.kind.rawValue != "reasoning" {
+            tick = source.appendPreviewStreamTick(after: tick)
+            snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
         }
-        let firstReasoning = try #require(runningJob.timeline.items.last)
-        #expect(firstReasoning.kind == .reasoning)
+        let firstReasoning = try #require(snapshot.items.last)
+        #expect(firstReasoning.kind.rawValue == "reasoning")
         let reasoningID = firstReasoning.id
         let initialReasoningText = reasoningText(firstReasoning)
         var latestReasoningText = initialReasoningText
 
         for _ in 0..<80 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            let item = try #require(runningJob.timeline.item(for: reasoningID))
+            tick = source.appendPreviewStreamTick(after: tick)
+            snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+            let item = try #require(snapshot.items.first { $0.id == reasoningID })
             let text = reasoningText(item)
             if text == latestReasoningText {
                 break
@@ -1701,21 +1701,21 @@ extension ReviewUITests {
         }
 
         #expect(latestReasoningText.count > initialReasoningText.count)
-        let countAfterReasoning = runningJob.timeline.items.count
+        let countAfterReasoning = snapshot.items.count
         for _ in 0..<37 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = source.appendPreviewStreamTick(after: tick)
         }
-        #expect(runningJob.timeline.items.count == countAfterReasoning)
+        snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        #expect(snapshot.items.count == countAfterReasoning)
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.timeline.items.count == countAfterReasoning + 1)
-        #expect(runningJob.timeline.items.last?.kind == .commandExecution)
+        tick = source.appendPreviewStreamTick(after: tick)
+        snapshot = try #require(source.snapshotForTesting(chatID: runningChat.id))
+        #expect(snapshot.items.count == countAfterReasoning + 1)
+        #expect(snapshot.items.last?.kind.rawValue == "commandExecution")
     }
 
     @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
+        let store = ReviewMonitorPreviewContent.makeStore()
         let firstWorkspace = try #require(store.workspaces.sorted { $0.cwd < $1.cwd }.first)
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -1741,7 +1741,23 @@ private func diagnosticMessage(_ item: ReviewTimelineItem) -> String {
 }
 
 @MainActor
+private func diagnosticMessage(_ item: CodexChatItemSnapshot) -> String {
+    if case .diagnostic(let message) = item.content {
+        return message
+    }
+    return ""
+}
+
+@MainActor
 private func reasoningText(_ item: ReviewTimelineItem) -> String {
+    if case .reasoning(let reasoning) = item.content {
+        return reasoning.text
+    }
+    return ""
+}
+
+@MainActor
+private func reasoningText(_ item: CodexChatItemSnapshot) -> String {
     if case .reasoning(let reasoning) = item.content {
         return reasoning.text
     }
@@ -1752,6 +1768,14 @@ private func reasoningText(_ item: ReviewTimelineItem) -> String {
 private func contextCompactionTitle(_ item: ReviewTimelineItem) -> String {
     if case .contextCompaction(let contextCompaction) = item.content {
         return contextCompaction.title
+    }
+    return ""
+}
+
+@MainActor
+private func contextCompactionTitle(_ item: CodexChatItemSnapshot) -> String {
+    if case .contextCompaction(let title) = item.content {
+        return title ?? ""
     }
     return ""
 }

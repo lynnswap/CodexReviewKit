@@ -277,7 +277,7 @@ struct ReviewMonitorAppComposition {
         return ReviewMonitorAppComposition(
             makeStore: { context, presentationAnchorProvider in
                 if context.requestsPreviewContent {
-                    let store = ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+                    let store = ReviewMonitorPreviewContent.makeStore()
                     previewStore = store
                     return store
                 }

@@ -143,48 +143,8 @@ public enum ReviewMonitorPreviewContent {
         let cycle: Int
     }
 
-    @MainActor
-    private final class PreviewLogStreamer {
-        private weak var store: CodexReviewStore?
-        private let interval: Duration
-        private var task: Task<Void, Never>?
-        private var tick = 0
-
-        init(store: CodexReviewStore, interval: Duration) {
-            self.store = store
-            self.interval = interval
-            task = Task { [weak self, interval] in
-                while Task.isCancelled == false {
-                    try? await Task.sleep(for: interval)
-                    guard let self, Task.isCancelled == false else {
-                        return
-                    }
-                    self.emitTick()
-                }
-            }
-        }
-
-        deinit {
-            task?.cancel()
-        }
-
-        private func emitTick() {
-            guard let store else {
-                task?.cancel()
-                return
-            }
-
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(
-                to: store,
-                after: tick
-            )
-        }
-    }
-
     @_spi(PreviewSupport)
-    public static func makeStore(
-        streamInterval: Duration? = .milliseconds(40)
-    ) -> CodexReviewStore {
+    public static func makeStore() -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
         )
@@ -198,12 +158,6 @@ public enum ReviewMonitorPreviewContent {
             workspaces: previewContent.workspaces,
             jobs: previewContent.jobs
         )
-        if let streamInterval {
-            store.previewSupportRetainer = PreviewLogStreamer(
-                store: store,
-                interval: streamInterval
-            )
-        }
         return store
     }
 
@@ -273,32 +227,6 @@ public enum ReviewMonitorPreviewContent {
         return store
     }
 
-    @_spi(PreviewSupport)
-    public static func appendPreviewStreamTick(to store: CodexReviewStore) {
-        _ = appendPreviewStreamTick(to: store, after: 0)
-    }
-
-    @discardableResult
-    package static func appendPreviewStreamTick(
-        to store: CodexReviewStore,
-        after currentTick: Int
-    ) -> Int {
-        let runningJobs = store.orderedJobs
-            .filter { $0.core.lifecycle.status == .running }
-
-        guard runningJobs.isEmpty == false else {
-            return currentTick
-        }
-
-        let nextTick = currentTick + 1
-        for (index, job) in runningJobs.enumerated() {
-            if let frame = streamFrame(forJobAt: index, tick: nextTick) {
-                applyPreviewStreamStep(frame.step, to: job, cycle: frame.cycle)
-            }
-        }
-        return nextTick
-    }
-
     package static func streamFrame(
         forJobAt jobIndex: Int,
         tick: Int
@@ -319,33 +247,6 @@ public enum ReviewMonitorPreviewContent {
             step: step,
             cycle: (jobTick - 1) / previewStreamTimeline.count
         )
-    }
-
-    private static func applyPreviewStreamStep(
-        _ step: PreviewTimelineStep,
-        to job: CodexReviewJob,
-        cycle: Int
-    ) {
-        let itemID = previewTimelineItemID(
-            itemName: step.itemName,
-            jobID: job.id,
-            cycle: cycle
-        )
-        switch step.mode {
-        case .update:
-            job.timeline.apply(.itemUpdated(step.seed(id: itemID)))
-        case .complete:
-            job.timeline.apply(.itemCompleted(step.seed(id: itemID)))
-        case .textDelta:
-            job.timeline.apply(
-                .textDelta(
-                    itemID: itemID,
-                    kind: step.kind,
-                    family: step.family,
-                    content: step.content,
-                    delta: step.deltaText ?? ""
-                ))
-        }
     }
 
     package static func previewTimelineItemID(

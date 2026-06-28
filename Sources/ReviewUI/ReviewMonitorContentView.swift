@@ -308,7 +308,7 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     let ownsPreviewStore = previewStore == nil
     switch serverState {
     case .running:
-        store = previewStore ?? ReviewMonitorPreviewContent.makeStore(streamInterval: nil)
+        store = previewStore ?? ReviewMonitorPreviewContent.makeStore()
     case .failed, .starting, .stopped:
         store = CodexReviewStore.makePreviewStore()
         store.serverState = serverState
