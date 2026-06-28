@@ -8,25 +8,11 @@ struct ReviewRunCoreTests {
     @Test func reviewTextReflectsTerminalCoreState() {
         let succeeded = ReviewRunCore(
             lifecycle: .init(status: .succeeded),
-            output: .init(
-                summary: "Succeeded.",
-                lastAgentMessage: "No findings."
-            )
+            output: .init(summary: "Succeeded.")
         )
         #expect(succeeded.lifecycle.status == .succeeded)
         #expect(succeeded.output.summary == "Succeeded.")
-        #expect(succeeded.reviewText == "No findings.")
-
-        let succeededWithoutFinalReview = ReviewRunCore(
-            lifecycle: .init(status: .succeeded),
-            output: .init(
-                summary: "Succeeded.",
-                lastAgentMessage: "Succeeded."
-            )
-        )
-        #expect(succeededWithoutFinalReview.lifecycle.status == .succeeded)
-        #expect(succeededWithoutFinalReview.output.summary == "Succeeded.")
-        #expect(succeededWithoutFinalReview.reviewText == "Succeeded.")
+        #expect(succeeded.reviewText == "Succeeded.")
 
         let failed = ReviewRunCore(
             lifecycle: .init(

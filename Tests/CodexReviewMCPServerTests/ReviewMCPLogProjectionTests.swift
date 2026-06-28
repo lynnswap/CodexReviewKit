@@ -29,10 +29,7 @@ struct ReviewMCPLogProjectionTests {
             runID: "run-2",
             core: .init(
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                output: .init(
-                    summary: "Done.",
-                    lastAgentMessage: "No findings."
-                )
+                output: .init(summary: "Done.")
             ),
             cancellable: false
         ))
@@ -94,10 +91,7 @@ struct ReviewMCPLogProjectionTests {
                 core: .init(
                     run: .init(threadID: "thread-1", turnID: "turn-1"),
                     lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                    output: .init(
-                        summary: "Done.",
-                        lastAgentMessage: "stale fallback"
-                    )
+                    output: .init(summary: "Done.")
                 ),
                 cancellable: false
             ),

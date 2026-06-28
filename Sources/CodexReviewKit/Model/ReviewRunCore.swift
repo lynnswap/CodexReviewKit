@@ -50,14 +50,9 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
 
     public struct Output: Codable, Sendable, Hashable {
         public internal(set) var summary: String
-        public internal(set) var lastAgentMessage: String?
 
-        public init(
-            summary: String,
-            lastAgentMessage: String? = nil
-        ) {
+        public init(summary: String) {
             self.summary = summary
-            self.lastAgentMessage = lastAgentMessage
         }
     }
 
@@ -85,9 +80,6 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
                 return errorMessage
             }
             return output.summary
-        }
-        if let lastAgentMessage = output.lastAgentMessage?.nilIfEmpty {
-            return lastAgentMessage
         }
         if let errorMessage = lifecycle.errorMessage?.nilIfEmpty {
             return errorMessage

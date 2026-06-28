@@ -411,7 +411,7 @@ private extension ReviewRunCore.Output {
             "summary": .string(summary),
             "review": .string(review),
             "hasFinalReview": .bool(finalReview != nil),
-            "lastAgentMessage": finalReview.map(Value.string) ?? .null,
+            "finalReview": finalReview.map(Value.string) ?? .null,
             "reviewResult": ParsedReviewResult.parse(finalReviewText: finalReview).structuredContent(),
         ])
     }

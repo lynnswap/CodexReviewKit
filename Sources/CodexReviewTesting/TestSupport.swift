@@ -548,7 +548,6 @@ package final class StoreSnapshotProbe {
                     runID: runRecord.id,
                     status: runRecord.core.lifecycle.status,
                     summary: runRecord.core.output.summary,
-                    lastAgentMessage: runRecord.core.output.lastAgentMessage,
                     run: runRecord.core.run,
                     activeRun: runtimeState.activeRun,
                     cancellationRequested: runRecord.cancellationRequested
@@ -611,7 +610,6 @@ package struct StoreRunSnapshot: Sendable {
     package var runID: String
     package var status: ReviewRunState
     package var summary: String
-    package var lastAgentMessage: String?
     package var run: ReviewRunCore.Run
     package var activeRun: CodexReviewBackendModel.Review.Run?
     package var cancellationRequested: Bool

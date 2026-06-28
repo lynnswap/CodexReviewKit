@@ -15,7 +15,6 @@ extension ReviewRunRecord {
         startedAt: Date? = nil,
         endedAt: Date? = nil,
         summary: String,
-        lastAgentMessage: String? = "",
         errorMessage: String? = nil,
         exitCode: Int? = nil
     ) -> ReviewRunRecord {
@@ -39,10 +38,7 @@ extension ReviewRunRecord {
                     cancellation: cancellation,
                     errorMessage: errorMessage
                 ),
-                output: .init(
-                    summary: summary,
-                    lastAgentMessage: lastAgentMessage
-                )
+                output: .init(summary: summary)
             ),
             cancellationRequested: cancellationRequested
         )

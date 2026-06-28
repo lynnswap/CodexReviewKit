@@ -12,15 +12,6 @@ package final class ReviewRunRecord: Identifiable, Hashable {
     package var core: ReviewRunCore
     package var cancellationRequested: Bool
 
-    @ObservationIgnored
-    package var agentMessagesByItemID: [String: String]
-    @ObservationIgnored
-    package var latestAgentMessageItemID: String?
-    @ObservationIgnored
-    package var completedAgentMessageItemIDs: Set<String>
-    @ObservationIgnored
-    private var syntheticMessageItemCounter: UInt64
-
     package var isTerminal: Bool {
         core.isTerminal
     }
@@ -41,10 +32,6 @@ package final class ReviewRunRecord: Identifiable, Hashable {
         self.targetSummary = targetSummary
         self.core = core
         self.cancellationRequested = cancellationRequested
-        self.agentMessagesByItemID = [:]
-        self.latestAgentMessageItemID = nil
-        self.completedAgentMessageItemIDs = []
-        self.syntheticMessageItemCounter = 0
     }
 
     package nonisolated static func == (lhs: ReviewRunRecord, rhs: ReviewRunRecord) -> Bool {
@@ -55,8 +42,4 @@ package final class ReviewRunRecord: Identifiable, Hashable {
         hasher.combine(id)
     }
 
-    package func nextSyntheticMessageItemID(prefix: String) -> String {
-        syntheticMessageItemCounter &+= 1
-        return "\(id):\(prefix):\(syntheticMessageItemCounter)"
-    }
 }

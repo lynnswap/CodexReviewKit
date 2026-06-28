@@ -106,13 +106,13 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.finalSummary = status.isTerminal ? output.summary : nil
         self.finalResult =
             status == .succeeded
-            ? projectedItems.lastAgentMessageText
+            ? projectedItems.lastAssistantMessageText
             : nil
     }
 }
 
 private extension [ReviewMCPLogProjection.Item] {
-    var lastAgentMessageText: String? {
+    var lastAssistantMessageText: String? {
         reversed().compactMap { $0.content.messageText }.first
     }
 }

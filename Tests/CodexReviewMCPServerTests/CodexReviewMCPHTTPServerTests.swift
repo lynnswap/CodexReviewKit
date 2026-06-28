@@ -411,8 +411,7 @@ struct CodexReviewMCPHTTPServerTests {
                 cwd: "/tmp/project",
                 targetSummary: "Included",
                 status: .succeeded,
-                summary: "Done",
-                lastAgentMessage: "No correctness issues found."
+                summary: "Done"
             )
             store.loadForTesting(
                 serverState: .running,
@@ -477,15 +476,13 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
             let runRecord = ReviewRunRecord.makeForTesting(
                 id: "run-semantic",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
                 status: .succeeded,
-                summary: "Done",
-                lastAgentMessage: longOutput
+                summary: "Done"
             )
             store.loadForTesting(
                 serverState: .running,

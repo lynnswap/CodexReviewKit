@@ -6,7 +6,7 @@ import CodexReviewTesting
 @Suite("Codex review store", .serialized)
 @MainActor
 struct CodexReviewStoreCommandTests {
-    @Test func reviewStartPublishesCompletedRunAndRetainsResult() async throws {
+    @Test func reviewStartPublishesCompletedRunLifecycle() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -24,7 +24,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.runID == "run-1")
             #expect(read.core.lifecycle.status == .succeeded)
-            #expect(read.core.output.lastAgentMessage == "review text")
             #expect(store.listReviews(sessionID: nil).items.map(\.runID) == ["run-1"])
 
             let commands = await backend.recordedCommands()
@@ -55,7 +54,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(running.runID == "run-1")
             #expect(running.core.lifecycle.status == .running)
-            #expect(running.core.output.lastAgentMessage == nil)
 
             await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
             let final = try await store.awaitReview(
@@ -65,7 +63,6 @@ struct CodexReviewStoreCommandTests {
             )
 
             #expect(final.core.lifecycle.status == .succeeded)
-            #expect(final.core.output.lastAgentMessage == "review text")
         }
     }
 
@@ -92,7 +89,6 @@ struct CodexReviewStoreCommandTests {
             let final = try await awaited
 
             #expect(final.core.lifecycle.status == .succeeded)
-            #expect(final.core.output.lastAgentMessage == "review text")
         }
     }
 
@@ -147,7 +143,6 @@ struct CodexReviewStoreCommandTests {
             )
 
             #expect(snapshot.core.lifecycle.status == .running)
-            #expect(snapshot.core.output.lastAgentMessage == nil)
         }
     }
 
@@ -222,7 +217,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewStartTracksAgentMessageDeltasByItemID() async throws {
+    @Test func reviewStartKeepsMessageDeltasOutOfRunOutput() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -235,48 +230,12 @@ struct CodexReviewStoreCommandTests {
             )
             await backend.yield(.messageDelta("first", itemID: "message-1"))
             await backend.yield(.messageDelta("second", itemID: "message-2"))
-            #expect(
-                await waitUntil {
-                    store.reviewRun(id: "run-1")?.agentMessagesByItemID["message-2"] == "second"
-                })
             let running = try #require(store.reviewRun(id: "run-1"))
-            #expect(running.core.output.lastAgentMessage == nil)
             #expect(running.core.reviewText == "Review started.")
 
             await backend.yield(.completed(summary: "Succeeded.", result: nil))
             let read = try await result
-
-            #expect(read.core.output.lastAgentMessage == "second")
-            #expect(read.core.reviewText == "second")
-            #expect(store.reviewRun(id: "run-1")?.core.output.lastAgentMessage == "second")
-        }
-    }
-
-    @Test func reviewStartParsesFinalReviewFindings() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "run-1" })
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            async let result = store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
-            )
-            await backend.yield(
-                .completed(
-                    summary: "Succeeded.",
-                    result: """
-                        Full review comments:
-                        - [P2] Add parser tests — Sources/Parser.swift:12-15
-                          The final review parser should be covered at the model layer.
-                        """))
-            let read = try await result
-
-            let parsedResult = ParsedReviewResult.parse(finalReviewText: read.core.reviewText)
-            #expect(parsedResult.state == .hasFindings)
-            #expect(parsedResult.findingCount == 1)
-            #expect(parsedResult.findings.first?.title == "[P2] Add parser tests")
+            #expect(read.core.reviewText == "Succeeded.")
         }
     }
 
@@ -549,7 +508,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
-            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -665,7 +623,6 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
-            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -713,7 +670,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
-            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -758,7 +714,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .succeeded)
             #expect(read.core.run.turnID == "turn-2")
-            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -1307,7 +1262,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func failedReviewKeepsBufferedMessagesOutOfRunOutput() async throws {
+    @Test func failedReviewKeepsMessageEventsOutOfRunOutput() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1320,15 +1275,10 @@ struct CodexReviewStoreCommandTests {
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "run-1") != nil)
             await backend.yield(.message("partial review"))
-            #expect(
-                await waitUntil {
-                    store.reviewRun(id: "run-1")?.agentMessagesByItemID.values.contains("partial review") == true
-                })
             await backend.finishEvents(throwing: StreamClosedError())
             let read = try await result
 
             #expect(read.core.lifecycle.status == .failed)
-            #expect(read.core.output.lastAgentMessage == nil)
         }
     }
 
@@ -1390,7 +1340,6 @@ struct CodexReviewStoreCommandTests {
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
-            #expect(read.core.output.lastAgentMessage == "recovered review")
         }
     }
 
@@ -1498,7 +1447,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.output.summary == "Stop")
-            #expect(read.core.output.lastAgentMessage == nil)
         }
     }
 
@@ -1524,7 +1472,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.output.summary == "Stop")
-            #expect(read.core.output.lastAgentMessage == nil)
         }
     }
 

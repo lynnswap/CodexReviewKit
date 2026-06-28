@@ -240,34 +240,7 @@ extension CodexReviewStore {
     }
 
     private func markReviewWaitingForNetworkRecovery(_ runRecord: ReviewRunRecord) {
-        runRecord.resetReviewAttemptOutputForRecovery()
         appendRecoveryProgress(networkRecoveryUnavailableMessage, to: runRecord)
-    }
-
-    private func applyMessageSnapshot(
-        _ text: String,
-        itemID: String?,
-        isCompleted: Bool,
-        to runRecord: ReviewRunRecord,
-        at timestamp: Date
-    ) {
-        let resolvedItemID =
-            itemID?.nilIfEmpty
-            ?? runRecord.nextSyntheticMessageItemID(prefix: "message")
-        runRecord.noteAgentMessageSnapshot(
-            itemID: resolvedItemID,
-            text: text,
-            isCompleted: isCompleted
-        )
-    }
-
-    private func applyMessageDelta(
-        _ text: String,
-        itemID: String,
-        to runRecord: ReviewRunRecord,
-        at timestamp: Date
-    ) {
-        _ = runRecord.appendAgentMessageDelta(itemID: itemID, delta: text)
     }
 
     private func reviewWorkerInputs(for attempt: BackendReviewAttempt) async -> ReviewWorkerInputs {
@@ -703,8 +676,7 @@ extension CodexReviewStore {
             }
             completeReview(
                 runRecord,
-                summary: runRecord.core.output.summary,
-                result: runRecord.latestBufferedAgentMessage
+                summary: runRecord.core.output.summary
             )
         }
         return recoveryState.currentRun
@@ -728,8 +700,7 @@ extension CodexReviewStore {
             }
             completeReview(
                 runRecord,
-                summary: runRecord.core.output.summary,
-                result: runRecord.latestBufferedAgentMessage
+                summary: runRecord.core.output.summary
             )
         }
         return true
@@ -848,17 +819,14 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: runRecord.id)
             runRecord.core.output.summary = "Review started."
-        case .message(let text):
-            let now = clock.now()
-            applyMessageSnapshot(text, itemID: nil, isCompleted: true, to: runRecord, at: now)
-        case .messageDelta(let text, let itemID):
-            applyMessageDelta(text, itemID: itemID, to: runRecord, at: clock.now())
+        case .message, .messageDelta:
+            break
         case .log(let text):
             if runRecord.core.output.summary.isEmpty || runRecord.core.output.summary == "Review started." {
                 runRecord.core.output.summary = text
             }
-        case .completed(let summary, let result):
-            completeReview(runRecord, summary: summary, result: result)
+        case .completed(let summary, _):
+            completeReview(runRecord, summary: summary)
         case .failed(let message):
             markReviewFailed(runRecord, message: message)
         case .cancelled(let message):
@@ -888,29 +856,15 @@ extension CodexReviewStore {
 
     private func completeReview(
         _ runRecord: ReviewRunRecord,
-        summary: String,
-        result: String?
+        summary: String
     ) {
         guard runRecord.isTerminal == false else {
             return
         }
         let endedAt = clock.now()
-        let previousAgentMessage = runRecord.latestBufferedAgentMessage
-        let resultText = result?.nilIfEmpty
-        let finalReviewText = resultText ?? previousAgentMessage
         runRecord.core.lifecycle.status = .succeeded
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.output.summary = summary
-        runRecord.core.output.lastAgentMessage = finalReviewText ?? summary
-        if let result = resultText,
-            result != previousAgentMessage
-        {
-            runRecord.noteAgentMessageSnapshot(
-                itemID: runRecord.nextSyntheticMessageItemID(prefix: "message"),
-                text: result,
-                isCompleted: true
-            )
-        }
         writeDiagnosticsIfNeeded()
     }
 
@@ -959,41 +913,6 @@ private extension ReviewRunRecord {
         )
     }
 
-    var latestBufferedAgentMessage: String? {
-        guard let latestAgentMessageItemID,
-            let latestMessage = agentMessagesByItemID[latestAgentMessageItemID]?.nilIfEmpty
-        else {
-            return nil
-        }
-        return latestMessage
-    }
-
-    func appendAgentMessageDelta(itemID: String, delta: String) -> String? {
-        guard completedAgentMessageItemIDs.contains(itemID) == false else {
-            return nil
-        }
-        let updated = (agentMessagesByItemID[itemID] ?? "") + delta
-        agentMessagesByItemID[itemID] = updated
-        latestAgentMessageItemID = itemID
-        return updated
-    }
-
-    func noteAgentMessageSnapshot(itemID: String, text: String, isCompleted: Bool) {
-        agentMessagesByItemID[itemID] = text
-        latestAgentMessageItemID = itemID
-        if isCompleted {
-            completedAgentMessageItemIDs.insert(itemID)
-        } else {
-            completedAgentMessageItemIDs.remove(itemID)
-        }
-    }
-
-    func resetReviewAttemptOutputForRecovery() {
-        core.output.lastAgentMessage = nil
-        agentMessagesByItemID.removeAll(keepingCapacity: true)
-        latestAgentMessageItemID = nil
-        completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
-    }
 }
 
 private struct ReviewWorkerReviewEvent: Sendable {

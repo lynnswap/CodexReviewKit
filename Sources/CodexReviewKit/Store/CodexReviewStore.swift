@@ -365,9 +365,7 @@ public final class CodexReviewStore {
         let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Run] = orderedReviewRuns.map { runRecord in
             return CodexReviewStoreDiagnosticsSnapshot.Run(
                 status: runRecord.core.lifecycle.status.rawValue,
-                summary: runRecord.core.output.summary,
-                logText: runRecord.core.reviewText,
-                rawLogText: runRecord.core.reviewText
+                summary: runRecord.core.output.summary
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(
