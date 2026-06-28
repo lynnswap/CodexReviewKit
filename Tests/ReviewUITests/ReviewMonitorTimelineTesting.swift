@@ -4,10 +4,11 @@ import CodexKit
 @_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 
-struct ReviewTimelineEntryForTesting: Sendable, Hashable {
+struct ReviewChatLogEntryForTesting: Sendable, Hashable {
     enum Kind: String, Sendable, Hashable {
         case command
         case commandOutput
+        case fileChange
         case agentMessage
         case plan
         case todoList
@@ -105,7 +106,7 @@ extension CodexReviewJob {
         hasFinalReview: Bool = false,
         reviewResult: ParsedReviewResult? = nil,
         lastAgentMessage: String? = "",
-        timelineEntries: [ReviewTimelineEntryForTesting],
+        chatEntries: [ReviewChatLogEntryForTesting] = [],
         errorMessage: String? = nil,
         exitCode: Int? = nil
     ) -> CodexReviewJob {
@@ -129,142 +130,117 @@ extension CodexReviewJob {
             errorMessage: errorMessage,
             exitCode: exitCode
         )
-        seedTimelineForTesting(job, entries: timelineEntries)
+        ReviewChatLogFixtureStore.setEntries(chatEntries, for: job)
         return job
     }
 }
 
 @MainActor
-func seedTimelineForTesting(
+func seedChatLogForTesting(
     _ job: CodexReviewJob,
     logText: String = "",
     rawLogText: String = ""
 ) {
+    var entries: [ReviewChatLogEntryForTesting] = []
     let trimmedLogText = logText.trimmingCharacters(in: .newlines)
     if trimmedLogText.isEmpty == false {
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: .init(rawValue: "fixture-log-\(job.id)"),
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: trimmedLogText))
-                )))
+        entries.append(.init(kind: .agentMessage, groupID: "fixture-log-\(job.id)", text: trimmedLogText))
     }
-
     for (index, line) in rawLogText.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: .init(rawValue: "fixture-diagnostic-\(job.id)-\(index)"),
-                    kind: .dynamicToolCall,
-                    family: .diagnostic,
-                    phase: .completed,
-                    content: .diagnostic(.init(message: String(line)))
-                )))
-    }
-}
-
-@MainActor
-func seedTimelineForTesting(_ job: CodexReviewJob, entries: [ReviewTimelineEntryForTesting]) {
-    guard job.timeline.items.isEmpty else {
-        return
-    }
-    for entry in entries {
-        appendTimelineEntryForTesting(job, entry)
-    }
-}
-
-@MainActor
-func appendTimelineEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewTimelineEntryForTesting) {
-    let itemID = ReviewTimelineItem.ID(rawValue: entry.groupID ?? entry.id.uuidString)
-    let existingContent = entry.replacesGroup ? nil : job.timeline.item(for: itemID)?.content
-    let phase = timelinePhase(for: entry)
-    let seed = ReviewTimelineItemSeed(
-        id: itemID,
-        kind: timelineKind(for: entry),
-        family: timelineFamily(for: entry),
-        phase: phase,
-        content: timelineContent(for: entry, existing: existingContent),
-        startedAt: entry.metadata?.startedAt,
-        completedAt: entry.metadata?.completedAt,
-        durationMs: entry.metadata?.durationMs
-    )
-    job.timeline.apply(phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed))
-}
-
-@MainActor
-func replaceTimelineLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
-    job.timeline.apply(
-        .itemUpdated(
+        entries.append(
             .init(
-                id: .init(rawValue: "fixture-log-\(job.id)"),
-                kind: .agentMessage,
-                family: .message,
-                phase: .completed,
-                content: .message(.init(text: text.trimmingCharacters(in: .newlines)))
-            )))
+                kind: .diagnostic,
+                groupID: "fixture-diagnostic-\(job.id)-\(index)",
+                text: String(line)
+            ))
+    }
+    ReviewChatLogFixtureStore.setEntries(entries, for: job)
 }
 
 @MainActor
-func reviewMonitorLogText(for job: CodexReviewJob) -> String {
-    var projection = ReviewMonitorTimelineLogProjection()
-    let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-    let sourceDocument = projection.render(timelineDocument: timelineDocument)
-    let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceDocument)
-    return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+func appendChatLogEntryForTesting(_ job: CodexReviewJob, _ entry: ReviewChatLogEntryForTesting) {
+    ReviewChatLogFixtureStore.append(entry, to: job)
 }
 
-// Direct timeline rendering helpers bypass the production CodexChatChange stream.
-// Keep them for timeline projection tests; new selected-chat detail tests should
-// use ReviewMonitorPreviewChatLogSource or CodexAppServerTestRuntime instead.
 @MainActor
-@discardableResult
-func renderTimelineForTesting(
-    _ job: CodexReviewJob,
-    in transport: ReviewMonitorTransportViewController,
-    restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
-    allowIncrementalUpdate: Bool
-) throws -> Bool {
-    let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
-    let target = try timelineRenderTarget(for: job)
-    transport.bindLogRenderTargetForTesting(target)
-    let sourceDocument = TimelineLogProjectionStore.document(
-        from: timelineDocument,
-        transport: transport,
-        target: target
-    )
-    return transport.renderLogDocumentForTesting(
-        sourceDocument,
-        target: target,
-        restoring: restorationTarget,
-        allowIncrementalUpdate: allowIncrementalUpdate
+func replaceChatLogTextForTesting(_ job: CodexReviewJob, _ text: String) {
+    ReviewChatLogFixtureStore.replaceEntries(
+        [.init(kind: .agentMessage, groupID: "fixture-log-\(job.id)", text: text.trimmingCharacters(in: .newlines))],
+        for: job
     )
 }
 
 @MainActor
-func awaitTimelineRenderForTesting(
+func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, jobs: [CodexReviewJob]) {
+    let fixtures = jobs.compactMap { try? makePreviewChatLogFixtureForTesting(job: $0) }
+    let source = ReviewMonitorPreviewChatLogSource(fixtures: fixtures)
+    store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
+    jobStorePreviewSupportRetainers.append(
+        ReviewChatLogFixtureRetainer(
+            source: source,
+            jobIDs: Set(jobs.map(\.id))
+        ))
+}
+
+@MainActor
+func reviewChatLogText(for job: CodexReviewJob) -> String {
+    ReviewChatLogFixtureStore.logText(for: job)
+}
+
+@MainActor
+func awaitChatRenderForTesting(
     _ job: CodexReviewJob,
     in transport: ReviewMonitorTransportViewController,
-    restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
     allowIncrementalUpdate: Bool = true,
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
-    let expectedLog = reviewMonitorLogText(for: job)
-    _ = try renderTimelineForTesting(
-        job,
-        in: transport,
-        restoring: restorationTarget,
-        allowIncrementalUpdate: allowIncrementalUpdate
-    )
-    return try await awaitTransportRender(transport, timeout: timeout) { snapshot in
+    _ = allowIncrementalUpdate
+    let expectedLog = reviewChatLogText(for: job)
+    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting =
+        .chat(chatIDForTesting(job).rawValue)
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        let state = transport.renderedStateForTesting
+        let matchesSnapshot: Bool
         if let predicate {
-            return predicate(snapshot)
+            matchesSnapshot = predicate(state.snapshot)
+        } else {
+            matchesSnapshot = reviewChatRenderedLogMatches(state.snapshot.log, expectedLog)
         }
-        return snapshot.log == expectedLog
+        if transport.logRenderIsIdleForTesting,
+            state.selection == expectedSelection,
+            matchesSnapshot
+        {
+            return state.snapshot
+        }
+        await Task.yield()
+    } while clock.now < deadline
+
+    let state = transport.renderedStateForTesting
+    let matchesSnapshot: Bool
+    if let predicate {
+        matchesSnapshot = predicate(state.snapshot)
+    } else {
+        matchesSnapshot = reviewChatRenderedLogMatches(state.snapshot.log, expectedLog)
     }
+    if transport.logRenderIsIdleForTesting,
+        state.selection == expectedSelection,
+        matchesSnapshot
+    {
+        return state.snapshot
+    }
+    throw TestFailure(
+        "timed out waiting for selected chat render: "
+            + "idle=\(transport.logRenderIsIdleForTesting), "
+            + "actual=\(state), expectedSelection=\(expectedSelection), expectedLog=\(expectedLog)"
+    )
+}
+
+func reviewChatRenderedLogMatches(_ actual: String, _ expected: String) -> Bool {
+    actual == expected
+        || actual.trimmingCharacters(in: .newlines) == expected.trimmingCharacters(in: .newlines)
 }
 
 @MainActor
@@ -292,11 +268,26 @@ func makePreviewMessageItemForTesting(
 }
 
 @MainActor
+func chatCommandOutputBlockIDForTesting(
+    _ job: CodexReviewJob,
+    itemID: String
+) -> ReviewMonitorLog.BlockID {
+    ReviewMonitorLog.BlockID("commandOutput:\(job.previewTurnIDForTesting.rawValue):\(itemID)")
+}
+
+@MainActor
+private func makePreviewChatLogFixtureForTesting(job: CodexReviewJob) throws -> ReviewMonitorPreviewChatLogFixture {
+    try makePreviewChatLogFixtureForTesting(job: job) { _ in
+        ReviewChatLogFixtureStore.items(for: job)
+    }
+}
+
+@MainActor
 private func makePreviewChatLogFixtureForTesting(
     job: CodexReviewJob,
     items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
 ) throws -> ReviewMonitorPreviewChatLogFixture {
-    let chat = try #require(job.legacyReviewChatSelection)
+    let chat = try #require(job.reviewChatSelectionForTesting)
     let turn = CodexChatTurnStateSnapshot(
         id: job.previewTurnIDForTesting,
         status: CodexTurnStatus(reviewJobStateForTesting: job.core.lifecycle.status),
@@ -322,51 +313,310 @@ private func makePreviewChatLogFixtureForTesting(
 }
 
 @MainActor
-private func timelineRenderTarget(for job: CodexReviewJob) throws
-    -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting
-{
-    let chatID = try #require(job.legacyReviewChatID)
-    return .chat(chatID.rawValue)
-}
+private enum ReviewChatLogFixtureStore {
+    private static var entriesByJobID: [String: [ReviewChatLogEntryForTesting]] = [:]
 
-@MainActor
-private enum TimelineLogProjectionStore {
-    private struct Key: Hashable {
-        var transportID: ObjectIdentifier
-        var targetID: String
+    static func setEntries(_ entries: [ReviewChatLogEntryForTesting], for job: CodexReviewJob) {
+        entriesByJobID[job.id] = entries
     }
 
-    private static var projectionsByKey: [Key: ReviewMonitorTimelineLogProjection] = [:]
-
-    static func document(
-        from timelineDocument: ReviewTimelineDocument,
-        transport: ReviewMonitorTransportViewController,
-        target: ReviewMonitorTransportViewController.DisplayedSelectionForTesting
-    ) -> ReviewMonitorLog.Document {
-        let key = Key(transportID: ObjectIdentifier(transport), targetID: target.projectionStoreID)
-        var projection = projectionsByKey[key] ?? ReviewMonitorTimelineLogProjection()
-        let document = projection.render(timelineDocument: timelineDocument)
-        projectionsByKey[key] = projection
-        return document
+    static func replaceEntries(_ entries: [ReviewChatLogEntryForTesting], for job: CodexReviewJob) {
+        setEntries(entries, for: job)
+        updateRetainedPreviewSource(for: job)
     }
-}
 
-private extension ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
-    var projectionStoreID: String {
-        switch self {
-        case .workspaceSection(let id):
-            "workspaceSection:\(id)"
-        case .workspace(let id):
-            "workspace:\(id)"
-        case .chat(let id):
-            "chat:\(id)"
+    static func append(_ entry: ReviewChatLogEntryForTesting, to job: CodexReviewJob) {
+        entriesByJobID[job.id, default: []].append(entry)
+        updateRetainedPreviewSource(for: job)
+    }
+
+    static func items(for job: CodexReviewJob) -> [CodexChatItemSnapshot] {
+        makeChatItems(from: entriesByJobID[job.id, default: []], turnID: job.previewTurnIDForTesting)
+    }
+
+    static func logText(for job: CodexReviewJob) -> String {
+        var projection = ReviewMonitorSelectedCodexChatLogProjection()
+        var document: ReviewMonitorLog.Document?
+        let snapshot = CodexChatSnapshot(
+            chatID: chatIDForTesting(job),
+            phase: .loaded,
+            turns: [
+                .init(
+                    id: job.previewTurnIDForTesting,
+                    status: CodexTurnStatus(reviewJobStateForTesting: job.core.lifecycle.status)
+                )
+            ],
+            items: items(for: job)
+        )
+        for change in CodexChatChange.previewChangesForTesting(from: nil, to: snapshot) {
+            document = projection.apply(
+                change,
+                chatCreatedAt: nil,
+                chatUpdatedAt: job.core.lifecycle.endedAt
+            )?.sourceDocument ?? document
+        }
+        guard let document else {
+            return ""
+        }
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(from: document)
+        return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
+    }
+
+    private static func updateRetainedPreviewSource(for job: CodexReviewJob) {
+        for support in jobStorePreviewSupportRetainers where support.contains(jobID: job.id) {
+            support.upsert(job: job, items: items(for: job))
         }
     }
 }
 
-private extension CodexReviewJob {
+@MainActor
+private final class ReviewChatLogFixtureRetainer {
+    let source: ReviewMonitorPreviewChatLogSource
+    private var jobIDs: Set<String>
+
+    init(source: ReviewMonitorPreviewChatLogSource, jobIDs: Set<String>) {
+        self.source = source
+        self.jobIDs = jobIDs
+    }
+
+    func contains(jobID: String) -> Bool {
+        jobIDs.contains(jobID)
+    }
+
+    func upsert(job: CodexReviewJob, items: [CodexChatItemSnapshot]) {
+        guard let chatID = job.reviewChatIDForTesting else {
+            return
+        }
+        for item in items {
+            source.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+        }
+    }
+}
+
+@MainActor
+private var jobStorePreviewSupportRetainers: [ReviewChatLogFixtureRetainer] = []
+
+@MainActor
+private func makeChatItems(
+    from entries: [ReviewChatLogEntryForTesting],
+    turnID: CodexTurnID
+) -> [CodexChatItemSnapshot] {
+    var accumulated: [String: ReviewChatLogAccumulatedItem] = [:]
+    var orderedIDs: [String] = []
+    for entry in entries {
+        let itemID = entry.groupID ?? entry.id.uuidString
+        let previous = entry.replacesGroup ? nil : accumulated[itemID]
+        let next = ReviewChatLogAccumulatedItem(entry: entry, existing: previous, itemID: itemID, turnID: turnID)
+        accumulated[itemID] = next
+        if orderedIDs.contains(itemID) == false {
+            orderedIDs.append(itemID)
+        }
+    }
+    return orderedIDs.compactMap { accumulated[$0]?.snapshot }
+}
+
+private struct ReviewChatLogAccumulatedItem {
+    var snapshot: CodexChatItemSnapshot
+
+    init(
+        entry: ReviewChatLogEntryForTesting,
+        existing: ReviewChatLogAccumulatedItem?,
+        itemID: String,
+        turnID: CodexTurnID
+    ) {
+        let status = codexTurnStatus(for: entry)
+        switch entry.kind {
+        case .command:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .commandExecution,
+                content: .command(
+                    .init(
+                        command: chatLogCommandText(for: entry),
+                        cwd: entry.metadata?.cwd,
+                        output: existing?.commandOutput ?? "",
+                        exitCode: entry.metadata?.exitCode,
+                        status: status
+                    ))
+            )
+        case .commandOutput:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .commandExecution,
+                content: .command(
+                    .init(
+                        command: entry.metadata?.command ?? existing?.commandText ?? "Command",
+                        cwd: entry.metadata?.cwd ?? existing?.commandCWD,
+                        output: (existing?.commandOutput ?? "") + entry.text,
+                        exitCode: entry.metadata?.exitCode ?? existing?.commandExitCode,
+                        status: status ?? existing?.commandStatus
+                    ))
+            )
+        case .fileChange:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .fileChange,
+                content: .fileChange(
+                    .init(
+                        path: entry.metadata?.title,
+                        output: (existing?.plainText ?? "") + entry.text,
+                        status: status
+                    ))
+            )
+        case .agentMessage:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .agentMessage,
+                content: .message(
+                    .init(
+                        id: itemID,
+                        role: .assistant,
+                        text: (existing?.messageText ?? "") + entry.text
+                    ))
+            )
+        case .plan, .todoList:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: entry.kind == .todoList ? .init(rawValue: "todoList") : .plan,
+                content: .plan((existing?.plainText ?? "") + entry.text)
+            )
+        case .reasoning, .rawReasoning:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: entry.kind == .rawReasoning ? .init(rawValue: "rawReasoning") : .reasoning,
+                content: .reasoning(.init(content: (existing?.reasoningText ?? "") + entry.text))
+            )
+        case .reasoningSummary:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .init(rawValue: "reasoningSummary"),
+                content: .reasoning(.init(summary: (existing?.reasoningText ?? "") + entry.text))
+            )
+        case .contextCompaction:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .contextCompaction,
+                content: .contextCompaction(entry.text)
+            )
+        case .toolCall:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .mcpToolCall,
+                content: .toolCall(.init(result: (existing?.toolResult ?? "") + entry.text, status: status))
+            )
+        case .diagnostic, .error, .progress, .event:
+            snapshot = .init(
+                id: itemID,
+                turnID: turnID,
+                kind: .init(rawValue: entry.kind.rawValue),
+                content: .diagnostic((existing?.plainText ?? "") + entry.text)
+            )
+        }
+    }
+
+    private var command: CodexCommand? {
+        if case .command(let command) = snapshot.content {
+            return command
+        }
+        return nil
+    }
+
+    private var commandText: String? {
+        command?.command
+    }
+
+    private var commandCWD: String? {
+        command?.cwd
+    }
+
+    private var commandOutput: String {
+        command?.output ?? ""
+    }
+
+    private var commandExitCode: Int? {
+        command?.exitCode
+    }
+
+    private var commandStatus: CodexTurnStatus? {
+        command?.status
+    }
+
+    private var messageText: String? {
+        if case .message(let message) = snapshot.content {
+            return message.text
+        }
+        return nil
+    }
+
+    private var reasoningText: String? {
+        if case .reasoning(let reasoning) = snapshot.content {
+            return reasoning.text
+        }
+        return nil
+    }
+
+    private var toolResult: String? {
+        if case .toolCall(let toolCall) = snapshot.content {
+            return toolCall.result
+        }
+        return nil
+    }
+
+    private var plainText: String? {
+        snapshot.text
+    }
+}
+
+extension CodexReviewJob {
+    var reviewChatIDForTesting: CodexThreadID? {
+        if let reviewThreadID = nonEmptyReviewChatProjectionStringForTesting(core.run.reviewThreadID) {
+            return CodexThreadID(rawValue: reviewThreadID)
+        }
+        if let threadID = nonEmptyReviewChatProjectionStringForTesting(core.run.threadID) {
+            return CodexThreadID(rawValue: threadID)
+        }
+        return nil
+    }
+
+    var reviewChatSelectionForTesting: ReviewMonitorCodexSidebarSnapshot.Chat? {
+        guard let chatID = reviewChatIDForTesting else {
+            return nil
+        }
+        return ReviewMonitorCodexSidebarSnapshot.Chat(
+            rowID: .chat(chatID),
+            id: chatID,
+            title: displayTitle,
+            preview: nonEmptyReviewChatProjectionStringForTesting(core.output.lastAgentMessage)
+                ?? nonEmptyReviewChatProjectionStringForTesting(core.output.summary),
+            workspaceCWD: cwd,
+            updatedAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
+            recencyAt: core.lifecycle.endedAt ?? core.lifecycle.startedAt,
+            status: CodexThreadStatus(reviewJobStateForTesting: core.lifecycle.status)
+        )
+    }
+
     var previewTurnIDForTesting: CodexTurnID {
         core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
+    }
+}
+
+private extension CodexThreadStatus {
+    init(reviewJobStateForTesting jobState: ReviewJobState) {
+        switch jobState {
+        case .queued, .running:
+            self = .active(activeFlags: [])
+        case .succeeded, .failed, .cancelled:
+            self = .idle
+        }
     }
 }
 
@@ -396,134 +646,7 @@ private extension CodexDataPhase {
     }
 }
 
-private func timelineKind(for entry: ReviewTimelineEntryForTesting) -> ReviewItemKind {
-    switch entry.kind {
-    case .command, .commandOutput:
-        .commandExecution
-    case .agentMessage:
-        .agentMessage
-    case .plan, .todoList:
-        .plan
-    case .reasoning, .reasoningSummary, .rawReasoning:
-        .reasoning
-    case .contextCompaction:
-        .contextCompaction
-    case .toolCall:
-        .mcpToolCall
-    case .diagnostic, .error, .progress, .event:
-        ReviewItemKind(rawValue: entry.kind.rawValue)
-    }
-}
-
-private func timelineFamily(for entry: ReviewTimelineEntryForTesting) -> ReviewItemFamily {
-    switch entry.kind {
-    case .command, .commandOutput:
-        .command
-    case .agentMessage:
-        .message
-    case .plan, .todoList:
-        .plan
-    case .reasoning, .reasoningSummary, .rawReasoning:
-        .reasoning
-    case .contextCompaction:
-        .contextCompaction
-    case .toolCall:
-        .tool
-    case .diagnostic, .error, .progress, .event:
-        .diagnostic
-    }
-}
-
-private func timelineContent(
-    for entry: ReviewTimelineEntryForTesting,
-    existing: ReviewTimelineItem.Content?
-) -> ReviewTimelineItem.Content {
-    switch entry.kind {
-    case .command:
-        return .command(
-            .init(
-                command: commandText(for: entry),
-                cwd: entry.metadata?.cwd,
-                output: "",
-                exitCode: entry.metadata?.exitCode,
-                status: commandStatus(for: entry),
-                durationMs: entry.metadata?.durationMs
-            ))
-    case .commandOutput:
-        let existingOutput: String
-        let existingCommand: String?
-        if case .command(let command) = existing {
-            existingOutput = command.output
-            existingCommand = command.command
-        } else {
-            existingOutput = ""
-            existingCommand = nil
-        }
-        return .command(
-            .init(
-                command: entry.metadata?.command ?? existingCommand ?? "Command",
-                cwd: entry.metadata?.cwd,
-                output: existingOutput + entry.text,
-                exitCode: entry.metadata?.exitCode,
-                status: commandStatus(for: entry),
-                durationMs: entry.metadata?.durationMs
-            ))
-    case .agentMessage:
-        return .message(.init(text: existingText(existing, message: "") + entry.text))
-    case .plan, .todoList:
-        return .plan(.init(markdown: existingText(existing, plan: "") + entry.text))
-    case .reasoning:
-        return .reasoning(.init(text: existingText(existing, reasoning: "") + entry.text, style: .raw))
-    case .reasoningSummary:
-        return .reasoning(.init(text: existingText(existing, reasoning: "") + entry.text, style: .summary))
-    case .rawReasoning:
-        return .reasoning(.init(text: existingText(existing, reasoning: "") + entry.text, style: .raw))
-    case .contextCompaction:
-        return .contextCompaction(
-            .init(
-                title: entry.text,
-                status: contextCompactionStatus(for: entry)
-            ))
-    case .toolCall:
-        return .toolCall(
-            .init(
-                result: entry.text,
-                status: toolCallStatus(for: entry)
-            ))
-    case .diagnostic, .error, .progress, .event:
-        return .diagnostic(.init(message: existingText(existing, diagnostic: "") + entry.text))
-    }
-}
-
-private func existingText(_ content: ReviewTimelineItem.Content?, message defaultValue: String) -> String {
-    if case .message(let message) = content {
-        return message.text
-    }
-    return defaultValue
-}
-
-private func existingText(_ content: ReviewTimelineItem.Content?, plan defaultValue: String) -> String {
-    if case .plan(let plan) = content {
-        return plan.markdown
-    }
-    return defaultValue
-}
-
-private func existingText(_ content: ReviewTimelineItem.Content?, reasoning defaultValue: String) -> String {
-    if case .reasoning(let reasoning) = content {
-        return reasoning.text
-    }
-    return defaultValue
-}
-
-private func existingText(_ content: ReviewTimelineItem.Content?, diagnostic defaultValue: String) -> String {
-    if case .diagnostic(let diagnostic) = content {
-        return diagnostic.message
-    }
-    return defaultValue
-}
-
-private func commandText(for entry: ReviewTimelineEntryForTesting) -> String {
+private func chatLogCommandText(for entry: ReviewChatLogEntryForTesting) -> String {
     if let command = entry.metadata?.command, command.isEmpty == false {
         return command
     }
@@ -533,62 +656,90 @@ private func commandText(for entry: ReviewTimelineEntryForTesting) -> String {
     return entry.text
 }
 
-private func timelinePhase(for entry: ReviewTimelineEntryForTesting) -> ReviewItemPhase {
-    let status = entry.metadata?.commandStatus ?? entry.metadata?.status
-    let normalizedStatus = ReviewItemPhase.normalized(status)
-    if normalizedStatus.isTerminal {
-        return normalizedStatus
-    }
-    switch status {
-    case "inProgress", "running", "started":
-        return .running
-    case "failed":
-        return .failed
-    case "cancelled":
-        return .cancelled
-    default:
-        return entry.kind == .command ? .running : .completed
-    }
-}
-
-private func commandStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewCommandStatus? {
+private func codexTurnStatus(for entry: ReviewChatLogEntryForTesting) -> CodexTurnStatus? {
     guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
+        return entry.kind == .command ? .running : nil
+    }
+    return CodexTurnStatus(rawValue: rawValue)
+}
+
+private func nonEmptyReviewChatProjectionStringForTesting(_ value: String?) -> String? {
+    guard let value, value.isEmpty == false else {
         return nil
     }
-    switch rawValue {
-    case "succeeded", "success":
-        return .completed
-    default:
-        return .init(rawValue: rawValue)
+    return value
+}
+
+private extension CodexChatChange {
+    static func previewChangesForTesting(from previous: CodexChatSnapshot?, to current: CodexChatSnapshot) -> [Self] {
+        guard let previous else {
+            return [.snapshot(current)]
+        }
+
+        var changes: [Self] = []
+        let previousTurnsByID = Dictionary(uniqueKeysWithValues: previous.turns.map { ($0.id, $0) })
+        for turn in current.turns where previousTurnsByID[turn.id] != turn {
+            changes.append(.turnUpdated(turn))
+        }
+
+        let previousItemsByID = Dictionary(uniqueKeysWithValues: previous.items.map { ($0.id, $0) })
+        let currentItemIDs = Set(current.items.map(\.id))
+        for removedItem in previous.items where currentItemIDs.contains(removedItem.id) == false {
+            changes.append(.itemRemoved(id: removedItem.id, turnID: removedItem.turnID))
+        }
+        for item in current.items {
+            guard let previousItem = previousItemsByID[item.id] else {
+                changes.append(.itemInserted(item))
+                continue
+            }
+            guard previousItem != item else {
+                continue
+            }
+            if let delta = previousItem.textDeltaForTesting(to: item) {
+                changes.append(.itemTextAppended(id: item.id, turnID: item.turnID, delta: delta, item: item))
+            } else {
+                changes.append(.itemUpdated(item))
+            }
+        }
+
+        if previous.phase != current.phase {
+            changes.append(.phaseChanged(current.phase))
+        }
+        return changes
     }
 }
 
-private func contextCompactionStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewContextCompactionStatus? {
-    guard let rawValue = entry.metadata?.status else {
-        return nil
+private extension CodexChatItemSnapshot {
+    func textDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
+        guard
+            turnID == item.turnID,
+            kind == item.kind,
+            sameContentShapeForTesting(as: item),
+            let previousText = text,
+            let nextText = item.text,
+            nextText.hasPrefix(previousText),
+            nextText.count > previousText.count
+        else {
+            return nil
+        }
+        return String(nextText.dropFirst(previousText.count))
     }
-    switch rawValue {
-    case "inProgress", "running":
-        return .inProgress
-    case "completed", "succeeded", "success":
-        return .completed
-    default:
-        return .init(rawValue: rawValue)
-    }
-}
 
-private func toolCallStatus(for entry: ReviewTimelineEntryForTesting) -> ReviewToolCallStatus? {
-    guard let rawValue = entry.metadata?.status else {
-        return nil
-    }
-    switch rawValue {
-    case "inProgress", "running":
-        return .inProgress
-    case "completed", "succeeded", "success":
-        return .completed
-    case "failed":
-        return .failed
-    default:
-        return .init(rawValue: rawValue)
+    private func sameContentShapeForTesting(as item: CodexChatItemSnapshot) -> Bool {
+        switch (content, item.content) {
+        case (.message, .message),
+            (.plan, .plan),
+            (.reasoning, .reasoning),
+            (.command, .command),
+            (.fileChange, .fileChange),
+            (.toolCall, .toolCall),
+            (.contextCompaction, .contextCompaction),
+            (.diagnostic, .diagnostic),
+            (.log, .log),
+            (.unknown, .unknown):
+            true
+        default:
+            false
+        }
     }
 }

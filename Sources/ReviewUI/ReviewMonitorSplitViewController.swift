@@ -65,6 +65,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         self.uiState = uiState
         self.codexModelSource = codexModelSource
         self.previewChatLogSource = previewChatLogSource
+            ?? (store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport)?.chatLogSource
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }

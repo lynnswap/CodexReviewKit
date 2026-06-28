@@ -50,6 +50,8 @@ extension ReviewUITests {
         let store = ReviewMonitorPreviewContent.makeStore()
         let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
         let selectedChat = try #require(previewChatLogSource.initialChat)
+        let selectedSnapshot = try #require(previewChatLogSource.snapshotForTesting(chatID: selectedChat.id))
+        let expectedLogText = try #require(selectedSnapshot.items.compactMap(\.text).first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -59,7 +61,7 @@ extension ReviewUITests {
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
         let snapshot = try await awaitTransportRender(transport) { snapshot in
-            snapshot.log.contains(selectedChat.title) && snapshot.isShowingEmptyState == false
+            snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
         }
 
         #expect(transport.renderedStateForTesting.selection == .chat(selectedChat.id.rawValue))
@@ -789,6 +791,8 @@ extension ReviewUITests {
         let store = ReviewMonitorPreviewContent.makeStore()
         let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
         let selectedChat = try #require(previewChatLogSource.initialChat)
+        let selectedSnapshot = try #require(previewChatLogSource.snapshotForTesting(chatID: selectedChat.id))
+        let expectedLogText = try #require(selectedSnapshot.items.compactMap(\.text).first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewStore: store
         )
@@ -800,7 +804,7 @@ extension ReviewUITests {
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
         let snapshot = try await awaitTransportRender(transport) { snapshot in
-            snapshot.log.contains(selectedChat.title) && snapshot.isShowingEmptyState == false
+            snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
         }
 
         #expect(transport.renderedStateForTesting.selection == .chat(selectedChat.id.rawValue))
@@ -1706,25 +1710,9 @@ extension ReviewUITests {
 }
 
 @MainActor
-private func diagnosticMessage(_ item: ReviewTimelineItem) -> String {
-    if case .diagnostic(let diagnostic) = item.content {
-        return diagnostic.message
-    }
-    return ""
-}
-
-@MainActor
 private func diagnosticMessage(_ item: CodexChatItemSnapshot) -> String {
     if case .diagnostic(let message) = item.content {
         return message
-    }
-    return ""
-}
-
-@MainActor
-private func reasoningText(_ item: ReviewTimelineItem) -> String {
-    if case .reasoning(let reasoning) = item.content {
-        return reasoning.text
     }
     return ""
 }
@@ -1738,27 +1726,11 @@ private func reasoningText(_ item: CodexChatItemSnapshot) -> String {
 }
 
 @MainActor
-private func contextCompactionTitle(_ item: ReviewTimelineItem) -> String {
-    if case .contextCompaction(let contextCompaction) = item.content {
-        return contextCompaction.title
-    }
-    return ""
-}
-
-@MainActor
 private func contextCompactionTitle(_ item: CodexChatItemSnapshot) -> String {
     if case .contextCompaction(let title) = item.content {
         return title ?? ""
     }
     return ""
-}
-
-@MainActor
-private func contextCompactionStatus(_ item: ReviewTimelineItem) -> ReviewContextCompactionStatus? {
-    if case .contextCompaction(let contextCompaction) = item.content {
-        return contextCompaction.status
-    }
-    return nil
 }
 
 @MainActor
@@ -1769,7 +1741,7 @@ private func renderDetailLogForShellLayoutTesting(
     job: CodexReviewJob
 ) async throws {
     viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-    let chatID = try #require(job.legacyReviewChatID)
+    let chatID = try #require(job.reviewChatIDForTesting)
     let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chatID.rawValue)
     try await waitForCondition {
         transport.renderedStateForTesting.selection == expectedSelection

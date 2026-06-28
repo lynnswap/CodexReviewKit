@@ -491,12 +491,15 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             )
             let presentationChanged = displayedPresentationSignature != presentationSignature
             let finderSupplementChanged = displayedFinderSupplementSignature != finderSupplementSignature
+            let shouldRestoreScroll = currentScrollRestorationTarget != restorationTarget
             let shouldRefreshFindSession = shouldRefreshFindSessionForFinderSupplementChange(
                 to: finderSupplementSignature
             )
             if presentationChanged {
                 logDocumentView.applyPresentation(document)
                 invalidateDocumentLayout()
+                restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
+            } else if shouldRestoreScroll {
                 restoreScrollPosition(restorationTarget, countAsAutoFollow: countBottomRestoreAsAutoFollow)
             } else if finderSupplementChanged {
                 logDocumentView.updateFinderSupplement(document)

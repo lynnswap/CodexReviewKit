@@ -23,7 +23,7 @@ private extension CodexReviewAuthModel {
 
 @MainActor
 func chatIDForTesting(_ job: CodexReviewJob) -> CodexThreadID {
-    guard let chatID = job.legacyReviewChatID else {
+    guard let chatID = job.reviewChatIDForTesting else {
         Issue.record("Expected review job \(job.id) to have a chat id.")
         return CodexThreadID(rawValue: job.id)
     }
@@ -856,10 +856,10 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(recentJob.legacyReviewChatSelection)
+            chat: try #require(recentJob.reviewChatSelectionForTesting)
         )
 
-        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+        let selectedSnapshot = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -869,7 +869,7 @@ struct ReviewUITests {
                 == .init(
                     title: nil,
                     summary: nil,
-                    log: reviewMonitorLogText(for: recentJob),
+                    log: reviewChatLogText(for: recentJob),
                     isShowingEmptyState: false
                 )
         )
@@ -885,11 +885,11 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
 
         activeJob.updateStateForTesting(summary: "Old selection should not render.")
-        replaceTimelineLogTextForTesting(activeJob, "Old selection log")
-        appendTimelineEntryForTesting(
+        replaceChatLogTextForTesting(activeJob, "Old selection log")
+        appendChatLogEntryForTesting(
             recentJob, .init(kind: .progress, text: "Current selection log after stale mutation"))
 
-        let updatedSnapshot = try await awaitTimelineRenderForTesting(recentJob, in: transport) { snapshot in
+        let updatedSnapshot = try await awaitChatRenderForTesting(recentJob, in: transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
         }
         #expect(updatedSnapshot.log.contains("Old selection log") == false)
@@ -909,7 +909,7 @@ struct ReviewUITests {
             summary: "Review completed.",
             hasFinalReview: true,
             lastAgentMessage: "No correctness issues found.",
-            timelineEntries: [
+            chatEntries: [
                 .init(
                     kind: .command,
                     groupID: "cmd_1",
@@ -948,10 +948,10 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(job.legacyReviewChatSelection)
+            chat: try #require(job.reviewChatSelectionForTesting)
         )
 
-        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+        let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -974,9 +974,9 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelUsesTextKit2ForTesting == false)
     }
 
-    @Test func detailPaneRendersDirectTimelineUpdatesWithoutLogEntryChanges() async throws {
+    @Test func detailPaneRendersSelectedChatStreamUpdates() async throws {
         let job = CodexReviewJob.makeForTesting(
-            id: "job-direct-timeline-detail",
+            id: "job-selected-chat-stream-detail",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
             threadID: UUID().uuidString,
@@ -984,7 +984,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: []
+            chatEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -1000,56 +1000,46 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: "message-direct",
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    content: .message(.init(text: "Timeline-only detail update"))
-                )))
+        appendChatLogEntryForTesting(
+            job,
+            .init(kind: .agentMessage, groupID: "message-direct", text: "Selected chat detail update"))
 
-        var snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
-        #expect(snapshot.log == "Timeline-only detail update")
+        var snapshot = try await awaitChatRenderForTesting(job, in: transport)
+        #expect(snapshot.log == "Selected chat detail update")
 
-        let startedAt = Date(timeIntervalSince1970: 250)
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: "cmd-direct",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .completed,
-                    content: .command(
-                        .init(
-                            command: "swift test",
-                            output: "Tests passed",
-                            exitCode: 0,
-                            status: .completed,
-                            durationMs: 2_000
-                        )),
-                    startedAt: startedAt,
-                    completedAt: startedAt.addingTimeInterval(2),
-                    durationMs: 2_000
-                )))
+        appendChatLogEntryForTesting(
+            job,
+            .init(
+                kind: .command,
+                groupID: "cmd-direct",
+                text: "$ swift test",
+                metadata: .init(command: "swift test", commandStatus: "completed")
+            ))
+        appendChatLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd-direct",
+                text: "Tests passed",
+                metadata: .init(command: "swift test", exitCode: 0, commandStatus: "completed")
+            ))
 
-        snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
-            $0.log.contains("Ran swift test for 2s")
+        snapshot = try await awaitChatRenderForTesting(job, in: transport) {
+            $0.log.contains("Ran swift test")
         }
-        #expect(snapshot.log.contains("Timeline-only detail update"))
-        #expect(snapshot.log.contains("Ran swift test for 2s"))
+        #expect(snapshot.log.contains("Selected chat detail update"))
+        #expect(snapshot.log.contains("Ran swift test"))
         #expect(snapshot.log.contains("$ swift test") == false)
         #expect(snapshot.log.contains("Tests passed") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(
@@ -1060,9 +1050,9 @@ struct ReviewUITests {
                 == true)
     }
 
-    @Test func directTimelineFailedCommandPreservesFailedPanelStatus() async throws {
+    @Test func selectedChatFailedCommandPreservesFailedPanelStatus() async throws {
         let job = CodexReviewJob.makeForTesting(
-            id: "job-direct-timeline-failed-command",
+            id: "job-selected-chat-failed-command",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
             threadID: UUID().uuidString,
@@ -1070,7 +1060,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: []
+            chatEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -1086,37 +1076,28 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let startedAt = Date(timeIntervalSince1970: 300)
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: "cmd-failed-direct",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .failed,
-                    content: .command(
-                        .init(
-                            command: "swift test",
-                            output: "Tests failed"
-                        )),
-                    startedAt: startedAt,
-                    completedAt: startedAt.addingTimeInterval(4),
-                    durationMs: 4_000
-                )))
+        appendChatLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd-failed-direct",
+                text: "Tests failed",
+                metadata: .init(command: "swift test", commandStatus: "failed")
+            ))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
-            $0.log.contains("Ran swift test for 4s")
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport) {
+            $0.log.contains("Ran swift test")
         }
         #expect(snapshot.log.contains("Tests failed") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-failed-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd-failed-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Failed")
@@ -1125,9 +1106,9 @@ struct ReviewUITests {
                 == true)
     }
 
-    @Test func directTimelineRunningCommandOutputStaysActive() async throws {
+    @Test func selectedChatRunningCommandOutputStaysActive() async throws {
         let job = CodexReviewJob.makeForTesting(
-            id: "job-direct-timeline-running-command",
+            id: "job-selected-chat-running-command",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
             threadID: UUID().uuidString,
@@ -1135,7 +1116,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: []
+            chatEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -1151,28 +1132,22 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        job.timeline.apply(
-            .itemStarted(
-                .init(
-                    id: "cmd-running-direct",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    content: .command(
-                        .init(
-                            command: "swift test",
-                            output: "Building..."
-                        )),
-                    startedAt: Date(timeIntervalSince1970: 300)
-                )))
+        appendChatLogEntryForTesting(
+            job,
+            .init(
+                kind: .commandOutput,
+                groupID: "cmd-running-direct",
+                text: "Building...",
+                metadata: .init(command: "swift test", commandStatus: "running")
+            ))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport) {
             $0.log.contains("Running swift test")
         }
         #expect(snapshot.log.contains("Running swift test"))
@@ -1180,7 +1155,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Building...") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-running-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd-running-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "running")
@@ -1189,9 +1164,9 @@ struct ReviewUITests {
                 == true)
     }
 
-    @Test func directTimelineTerminalPhaseOverridesStaleCommandStatus() async throws {
+    @Test func selectedChatFileChangePreservesPanelTitle() async throws {
         let job = CodexReviewJob.makeForTesting(
-            id: "job-direct-timeline-stale-command-status",
+            id: "job-selected-chat-file-change",
             cwd: "/tmp/workspace-alpha",
             targetSummary: "Uncommitted changes",
             threadID: UUID().uuidString,
@@ -1199,7 +1174,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: []
+            chatEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
@@ -1215,375 +1190,25 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: "cmd-stale-status-direct",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .completed,
-                    content: .command(
-                        .init(
-                            command: "swift test",
-                            output: "Tests passed",
-                            status: .inProgress
-                        ))
-                )))
-
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
-            $0.log.contains("Ran swift test")
-        }
-        #expect(snapshot.log.contains("Running swift test") == false)
-        #expect(transport.logCommandOutputPanelCountForTesting == 1)
-
-        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd-stale-status-direct")
-        #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
-        await awaitNativeLayoutTurn()
-        #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
-        #expect(
-            transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("Tests passed")
-                == true)
-    }
-
-    @Test func timelineProjectionDoesNotAppendWhenExistingBlockPresentationChanges() {
-        let timestamp = Date(timeIntervalSince1970: 300)
-        var projection = ReviewMonitorTimelineLogProjection()
-
-        func document(
-            revision: UInt64,
-            blocks: [ReviewTimelineDocument.Block]
-        ) -> ReviewTimelineDocument {
-            ReviewTimelineDocument(
-                timelineRevision: .init(rawValue: revision),
-                orderedBlockIDs: blocks.map(\.id),
-                activeBlockIDs: blocks.filter(\.isActive).map(\.id),
-                activeBlockCount: blocks.filter(\.isActive).count,
-                latestActivityBlockID: blocks.last?.id,
-                terminalStatus: nil,
-                terminalSummary: nil,
-                terminalResult: nil,
-                blocks: blocks
-            )
-        }
-
-        func toolBlock(
-            phase: ReviewItemPhase,
-            isActive: Bool,
-            status: ReviewToolCallStatus
-        ) -> ReviewTimelineDocument.Block {
-            ReviewTimelineDocument.Block(
-                id: "tool-block",
-                sourceItemID: "tool-item",
-                kind: .mcpToolCall,
-                family: .tool,
-                phase: phase,
-                isActive: isActive,
-                primaryText: "Tool output",
-                rawTranscriptText: "Tool output",
-                content: .toolCall(
-                    .init(
-                        namespace: "codex_review",
-                        server: "codex_review",
-                        name: "review_start",
-                        result: "Tool output",
-                        status: status
-                    )),
-                createdAt: timestamp,
-                updatedAt: timestamp
-            )
-        }
-
-        let initialDocument = document(
-            revision: 1,
-            blocks: [
-                toolBlock(phase: .running, isActive: true, status: .inProgress)
-            ]
-        )
-        _ = projection.render(timelineDocument: initialDocument)
-
-        let updatedDocument = document(
-            revision: 2,
-            blocks: [
-                toolBlock(phase: .completed, isActive: false, status: .completed),
-                ReviewTimelineDocument.Block(
-                    id: "message-block",
-                    sourceItemID: "message-item",
-                    kind: .agentMessage,
-                    family: .message,
-                    phase: .completed,
-                    isActive: false,
-                    primaryText: "Review complete.",
-                    rawTranscriptText: "Review complete.",
-                    content: .message(.init(text: "Review complete.")),
-                    createdAt: timestamp,
-                    updatedAt: timestamp
-                ),
-            ]
-        )
-        let updatedLog = projection.render(timelineDocument: updatedDocument)
-
-        #expect(updatedLog.text == "Tool output\n\nReview complete.")
-        if case .append = updatedLog.lastChange {
-            Issue.record("Timeline projection must not append when existing block presentation changed.")
-        }
-    }
-
-    @Test func timelineProjectionRendersToolCallProgressUpdates() {
-        let timestamp = Date(timeIntervalSince1970: 300)
-        var projection = ReviewMonitorTimelineLogProjection()
-
-        func document(revision: UInt64, progress: String) -> ReviewTimelineDocument {
-            ReviewTimelineDocument(
-                timelineRevision: .init(rawValue: revision),
-                orderedBlockIDs: ["tool-progress"],
-                activeBlockIDs: ["tool-progress"],
-                activeBlockCount: 1,
-                latestActivityBlockID: "tool-progress",
-                terminalStatus: nil,
-                terminalSummary: nil,
-                terminalResult: nil,
-                blocks: [
-                    .init(
-                        id: "tool-progress",
-                        sourceItemID: "tool-progress",
-                        kind: .mcpToolCall,
-                        family: .tool,
-                        phase: .running,
-                        isActive: true,
-                        primaryText: "codex_review.review_start",
-                        rawTranscriptText: progress,
-                        content: .toolCall(
-                            .init(
-                                namespace: "codex_review",
-                                server: "codex_review",
-                                name: "review_start",
-                                status: .inProgress,
-                                progress: progress
-                            )),
-                        createdAt: timestamp,
-                        updatedAt: timestamp
-                    )
-                ]
-            )
-        }
-
-        let initialLog = projection.render(
-            timelineDocument: document(
-                revision: 1,
-                progress: "MCP codex_review.review_start started."
-            ))
-        let updatedLog = projection.render(
-            timelineDocument: document(
-                revision: 2,
-                progress: "MCP codex_review.review_start still running."
-            ))
-
-        #expect(initialLog.text == "MCP codex_review.review_start started.")
-        #expect(updatedLog.text == "MCP codex_review.review_start still running.")
-    }
-
-    @Test func timelineProjectionPreservesOutputOnlyCommandMetadata() throws {
-        let startedAt = Date(timeIntervalSince1970: 300)
-        let completedAt = startedAt.addingTimeInterval(4)
-        var projection = ReviewMonitorTimelineLogProjection()
-        let document = ReviewTimelineDocument(
-            timelineRevision: .init(rawValue: 1),
-            orderedBlockIDs: ["cmd-output-only"],
-            activeBlockIDs: [],
-            activeBlockCount: 0,
-            latestActivityBlockID: "cmd-output-only",
-            terminalStatus: nil,
-            terminalSummary: nil,
-            terminalResult: nil,
-            blocks: [
-                .init(
-                    id: "cmd-output-only",
-                    sourceItemID: "cmd-output-only",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .failed,
-                    isActive: false,
-                    primaryText: "Command output",
-                    rawTranscriptText: "stderr",
-                    content: .command(
-                        .init(
-                            title: "",
-                            command: "",
-                            output: "stderr",
-                            exitCode: 2,
-                            status: .failed,
-                            durationMs: 4_000
-                        )),
-                    createdAt: startedAt,
-                    updatedAt: completedAt,
-                    startedAt: startedAt,
-                    completedAt: completedAt,
-                    durationMs: 4_000
-                )
-            ]
-        )
-
-        let sourceLog = projection.render(timelineDocument: document)
-        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
-        let panel = try #require(renderedLog.commandOutputPanels.first)
-        let metadata = try #require(sourceLog.blocks.first?.metadata)
-
-        #expect(sourceLog.blocks.map(\.kind) == [.commandOutput])
-        #expect(sourceLog.text == "stderr")
-        #expect(panel.isActive == false)
-        #expect(panel.title == "Ran command for 4s")
-        #expect(panel.exitText == "exit 2")
-        #expect(metadata.itemID == "cmd-output-only")
-        #expect(metadata.command == nil)
-        #expect(metadata.exitCode == 2)
-        #expect(metadata.durationMs == 4_000)
-    }
-
-    @Test func timelineProjectionTreatsExitCodeAsTerminalBeforeActiveFallback() throws {
-        var projection = ReviewMonitorTimelineLogProjection()
-        let document = ReviewTimelineDocument(
-            timelineRevision: .init(rawValue: 1),
-            orderedBlockIDs: ["cmd-active-exited"],
-            activeBlockIDs: ["cmd-active-exited"],
-            activeBlockCount: 1,
-            latestActivityBlockID: "cmd-active-exited",
-            terminalStatus: nil,
-            terminalSummary: nil,
-            terminalResult: nil,
-            blocks: [
-                .init(
-                    id: "cmd-active-exited",
-                    sourceItemID: "cmd-active-exited",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    isActive: true,
-                    primaryText: "Running swift test",
-                    rawTranscriptText: "$ swift test\nTests failed",
-                    content: .command(
-                        .init(
-                            title: "Command",
-                            command: "swift test",
-                            output: "Tests failed",
-                            exitCode: 1
-                        )),
-                    createdAt: Date(timeIntervalSince1970: 400),
-                    updatedAt: Date(timeIntervalSince1970: 400)
-                )
-            ]
-        )
-
-        let sourceLog = projection.render(timelineDocument: document)
-        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
-        let panel = try #require(renderedLog.commandOutputPanels.first)
-        let metadata = try #require(sourceLog.blocks.first?.metadata)
-
-        #expect(panel.isActive == false)
-        #expect(panel.title == "Ran swift test")
-        #expect(panel.exitText == "exit 1")
-        #expect(metadata.status == "failed")
-        #expect(metadata.commandStatus == "failed")
-    }
-
-    @Test func timelineProjectionMarksInactiveRunningCommandCompleted() throws {
-        var projection = ReviewMonitorTimelineLogProjection()
-        let document = ReviewTimelineDocument(
-            timelineRevision: .init(rawValue: 1),
-            orderedBlockIDs: ["cmd-inactive-running"],
-            activeBlockIDs: [],
-            activeBlockCount: 0,
-            latestActivityBlockID: "cmd-inactive-running",
-            terminalStatus: nil,
-            terminalSummary: nil,
-            terminalResult: nil,
-            blocks: [
-                .init(
-                    id: "cmd-inactive-running",
-                    sourceItemID: "cmd-inactive-running",
-                    kind: .commandExecution,
-                    family: .command,
-                    phase: .running,
-                    isActive: false,
-                    primaryText: "Running swift test",
-                    rawTranscriptText: "$ swift test",
-                    content: .command(
-                        .init(
-                            title: "Command",
-                            command: "swift test",
-                            status: .inProgress
-                        )),
-                    createdAt: Date(timeIntervalSince1970: 400),
-                    updatedAt: Date(timeIntervalSince1970: 400)
-                )
-            ]
-        )
-
-        let sourceLog = projection.render(timelineDocument: document)
-        let renderedLog = ReviewMonitorCommandOutputDisplayDocument.make(from: sourceLog)
-        let panel = try #require(renderedLog.commandOutputPanels.first)
-        let metadata = try #require(sourceLog.blocks.first?.metadata)
-
-        #expect(panel.isActive == false)
-        #expect(panel.title == "Ran swift test")
-        #expect(metadata.status == "completed")
-        #expect(metadata.commandStatus == "completed")
-    }
-
-    @Test func directTimelineFileChangePreservesPanelTitle() async throws {
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-direct-timeline-file-change",
-            cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
-            status: .running,
-            startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
-            timelineEntries: []
-        )
-        let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
-            serverState: .running,
-            content: makeSidebarContent(from: [job])
-        )
-        let backend = makeWindowHarness(
-            store: store,
-            contentSize: NSSize(width: 860, height: 520)
-        )
-        let viewController = backend.viewController
-        let window = backend.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        appendChatLogEntryForTesting(
             job,
-            in: transport,
-            allowIncrementalUpdate: false
-        )
+            .init(
+                kind: .fileChange,
+                groupID: "file-change-direct",
+                text: "Sources/App.swift | 12 ++++++------",
+                metadata: .init(
+                    title: "Updated Sources/App.swift",
+                    commandStatus: "completed"
+                )
+            ))
 
-        job.timeline.apply(
-            .itemCompleted(
-                .init(
-                    id: "file-change-direct",
-                    kind: .fileChange,
-                    family: .fileChange,
-                    phase: .completed,
-                    content: .fileChange(
-                        .init(
-                            title: "Updated Sources/App.swift",
-                            output: "Sources/App.swift | 12 ++++++------",
-                            paths: ["Sources/App.swift"],
-                            status: .started
-                        ))
-                )))
-
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport) {
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport) {
             $0.log.contains("Updated Sources/App.swift")
         }
         #expect(snapshot.log.contains("Updated Sources/App.swift"))
@@ -1591,7 +1216,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Sources/App.swift | 12") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = ReviewMonitorLog.BlockID("commandOutput:file-change-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "file-change-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
@@ -1611,7 +1236,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(
                     kind: .contextCompaction,
                     groupID: "compact_1",
@@ -1640,7 +1265,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -1649,7 +1274,7 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
 
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .contextCompaction,
@@ -1662,7 +1287,7 @@ struct ReviewUITests {
                     itemID: "compact_1"
                 )
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.displayedLogForTesting == "Context automatically compacted")
         #expect(transport.displayedLogForTesting.contains("Automatically compacting context") == false)
@@ -1674,7 +1299,7 @@ struct ReviewUITests {
         let outputText = (1...9)
             .map { "output line \($0)" }
             .joined(separator: "\n")
-        let commandMetadata = ReviewTimelineEntryForTesting.Metadata(
+        let commandMetadata = ReviewChatLogEntryForTesting.Metadata(
             sourceType: "command",
             title: "Ran command for 17s",
             status: "succeeded",
@@ -1691,7 +1316,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
                     kind: .commandOutput,
@@ -1717,7 +1342,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -1779,7 +1404,7 @@ struct ReviewUITests {
             transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
         let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -1787,7 +1412,7 @@ struct ReviewUITests {
                 text: "\noutput line 10",
                 metadata: commandMetadata
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logReloadCountForTesting == expandedOutputAppendReloadCount)
         let offsetAfterOutputAppend = try #require(transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
@@ -1815,7 +1440,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -1823,8 +1448,8 @@ struct ReviewUITests {
                 text: "\noutput line 11",
                 metadata: commandMetadata
             ))
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .agentMessage, text: "Visible text after command output."))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelTerminalTextForTesting?.contains("output line 11") == true)
         #expect(transport.logFindStringForTesting.contains("output line 11") == false)
@@ -1847,7 +1472,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(
                     kind: .commandOutput,
@@ -1879,14 +1504,14 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_1")
-        let secondBlockID = ReviewMonitorLog.BlockID("commandOutput:cmd_2")
+        let firstBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd_1")
+        let secondBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "cmd_2")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: firstBlockID))
         await awaitNativeLayoutTurn()
 
@@ -1915,7 +1540,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test")
             ]
         )
@@ -1934,7 +1559,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -1943,7 +1568,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .commandOutput,
@@ -1958,7 +1583,7 @@ struct ReviewUITests {
                     commandStatus: "completed"
                 )
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -1978,7 +1603,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .command, groupID: "cmd_1", text: "$ swift test"),
                 .init(kind: .commandOutput, groupID: "cmd_1", text: outputText),
             ]
@@ -1997,7 +1622,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2006,10 +1631,10 @@ struct ReviewUITests {
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
-            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Ran swift test"))
+            #expect(transport.setLogVisibleFindBarSearchStringForTesting("Running swift test"))
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
@@ -2018,18 +1643,18 @@ struct ReviewUITests {
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
-            appendTimelineEntryForTesting(
+            appendChatLogEntryForTesting(
                 job, .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            _ = try await awaitChatRenderForTesting(job, in: transport)
             await awaitNativeLayoutTurn()
 
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringForTesting.contains("Ran swift test"))
+            #expect(transport.logFindStringForTesting.contains("Running swift test"))
             #expect(transport.logFindStringForTesting.contains("output line 6") == false)
         }
     }
@@ -2060,10 +1685,10 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(activeJob.legacyReviewChatSelection)
+            chat: try #require(activeJob.reviewChatSelectionForTesting)
         )
 
-        let activeSnapshot = try await awaitTimelineRenderForTesting(
+        let activeSnapshot = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2073,10 +1698,10 @@ struct ReviewUITests {
         #expect(window.title == activeJob.targetSummary)
         #expect(window.subtitle == activeJob.cwd)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(recentJob.legacyReviewChatSelection)
+            chat: try #require(recentJob.reviewChatSelectionForTesting)
         )
 
-        let recentSnapshot = try await awaitTimelineRenderForTesting(
+        let recentSnapshot = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2086,7 +1711,7 @@ struct ReviewUITests {
                 == .init(
                     title: nil,
                     summary: nil,
-                    log: reviewMonitorLogText(for: recentJob),
+                    log: reviewChatLogText(for: recentJob),
                     isShowingEmptyState: false
                 )
         )
@@ -2113,14 +1738,14 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         transport.view.layoutSubtreeIfNeeded()
 
-        #expect(transport.isLogPinnedToBottomForTesting)
+        try await waitForLogPinnedToBottom(in: transport)
     }
 
     @Test func switchingSelectedReviewChatStartsUnvisitedReviewChatAtBottomAndRestoresPreviousOffset() async throws {
@@ -2154,7 +1779,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2165,7 +1790,7 @@ struct ReviewUITests {
         #expect(activeOffset > 0)
         #expect(transport.isLogPinnedToBottomForTesting == false)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2173,7 +1798,7 @@ struct ReviewUITests {
 
         #expect(transport.isLogPinnedToBottomForTesting)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2214,7 +1839,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2223,7 +1848,7 @@ struct ReviewUITests {
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2231,9 +1856,9 @@ struct ReviewUITests {
 
         #expect(transport.isLogPinnedToBottomForTesting)
 
-        appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
+        appendChatLogEntryForTesting(activeJob, .init(kind: .progress, text: "Newest active line"))
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
-        let snapshot = try await awaitTimelineRenderForTesting(
+        let snapshot = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2263,7 +1888,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2282,7 +1907,7 @@ struct ReviewUITests {
         )
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [replacement]))
 
-        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: replacement))
+        #expect(transport.displayedLogForTesting == reviewChatLogText(for: replacement))
         #expect(transport.logVerticalScrollOffsetForTesting == preservedOffset)
     }
 
@@ -2313,7 +1938,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -2322,13 +1947,13 @@ struct ReviewUITests {
         transport.scrollLogToOffsetForTesting(120)
         #expect(transport.logVerticalScrollOffsetForTesting > 0)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        #expect(transport.isLogPinnedToBottomForTesting)
+        try await waitForLogPinnedToBottom(in: transport)
     }
 
     @Test func switchingFromShortToLongJobMaterializesVisibleTextKit2Fragments() async throws {
@@ -2358,25 +1983,25 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(longJob))
-        let longSnapshot = try await awaitTimelineRenderForTesting(
+        let longSnapshot = try await awaitChatRenderForTesting(
             longJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        #expect(longSnapshot.log == reviewMonitorLogText(for: longJob))
+        #expect(longSnapshot.log == reviewChatLogText(for: longJob))
         #expect(transport.isLogPinnedToBottomForTesting)
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
 
-    @Test func shortLogSelectionCacheRestoresTopAfterLaterGrowth() async throws {
+    @Test func shortLogSelectionAutoFollowsAfterLaterGrowth() async throws {
         let shortLog = (0..<3).map { "short line \($0)" }.joined(separator: "\n")
         let longLog = (0..<400).map { "long line \($0)" }.joined(separator: "\n")
         let shortJob = makeJob(
@@ -2404,33 +2029,28 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
         )
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
-        replaceTimelineLogTextForTesting(shortJob, longLog)
+        replaceChatLogTextForTesting(shortJob, longLog)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(shortJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             shortJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        #expect(
-            abs(
-                transport.logVerticalScrollOffsetForTesting
-                    - transport.logMinimumVerticalScrollOffsetForTesting
-            ) < 0.5)
-        #expect(transport.isLogPinnedToBottomForTesting == false)
+        #expect(transport.isLogPinnedToBottomForTesting)
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
     }
 
@@ -2460,21 +2080,21 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             activeJob,
             in: transport,
             allowIncrementalUpdate: false
         )
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             recentJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendTimelineEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
-        appendTimelineEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
+        appendChatLogEntryForTesting(activeJob, .init(kind: .progress, text: "stale update"))
+        appendChatLogEntryForTesting(recentJob, .init(kind: .progress, text: "fresh update"))
 
-        let updatedSnapshot = try await awaitTimelineRenderForTesting(recentJob, in: transport) { snapshot in
+        let updatedSnapshot = try await awaitChatRenderForTesting(recentJob, in: transport) { snapshot in
             snapshot.log.contains("fresh update")
         }
         #expect(updatedSnapshot.log.contains("stale update") == false)
@@ -2504,14 +2124,14 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+        let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         viewController.sidebarViewControllerForTesting.clickBlankAreaForTesting()
 
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.legacyReviewChatID)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatIDForTesting)
         #expect(transport.renderSnapshotForTesting == selectedSnapshot)
     }
 
@@ -2541,7 +2161,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2666,10 +2286,10 @@ struct ReviewUITests {
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: try #require(job.legacyReviewChatSelection)
+            chat: try #require(job.reviewChatSelectionForTesting)
         )
 
-        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+        let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2687,7 +2307,7 @@ struct ReviewUITests {
         #expect(window.title == "")
         #expect(window.subtitle == "")
         job.updateStateForTesting(summary: "Deselected summary")
-        replaceTimelineLogTextForTesting(job, "Deselected log")
+        replaceChatLogTextForTesting(job, "Deselected log")
 
         #expect(contentPane.selectedChatLogTaskForTesting == nil)
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
@@ -2712,7 +2332,7 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        let selectedSnapshot = try await awaitTimelineRenderForTesting(
+        let selectedSnapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2723,12 +2343,12 @@ struct ReviewUITests {
             status: .succeeded,
             summary: "Review completed successfully."
         )
-        replaceTimelineLogTextForTesting(job, "Updated log")
+        replaceChatLogTextForTesting(job, "Updated log")
 
-        let updatedSnapshot = try await awaitTimelineRenderForTesting(job, in: transport)
-        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.legacyReviewChatID)
+        let updatedSnapshot = try await awaitChatRenderForTesting(job, in: transport)
+        #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == job.reviewChatIDForTesting)
         #expect(updatedSnapshot.summary == nil)
-        #expect(updatedSnapshot.log == reviewMonitorLogText(for: job))
+        #expect(reviewChatRenderedLogMatches(updatedSnapshot.log, reviewChatLogText(for: job)))
     }
 
     @Test func selectedReviewChatLogAppendUsesAppendPath() async throws {
@@ -2758,7 +2378,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.legacyReviewChatID)
+        let chatID = try #require(job.reviewChatIDForTesting)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         transport.setLogReduceMotionForTesting(false)
@@ -2806,7 +2426,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
-        let chatID = try #require(job.legacyReviewChatID)
+        let chatID = try #require(job.reviewChatIDForTesting)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
@@ -2834,7 +2454,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: decomposedPrefix)
             ]
         )
@@ -2845,7 +2465,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2870,7 +2490,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -2881,15 +2501,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
+        appendChatLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " one"))
+        appendChatLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: " two"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log == "Initial one two")
     }
 
@@ -2903,7 +2523,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
             ]
         )
@@ -2914,15 +2534,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
-        appendTimelineEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
+        appendChatLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"))
+        appendChatLogEntryForTesting(job, .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log.hasSuffix("stream.tick 002"))
     }
 
@@ -2936,7 +2556,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -2947,15 +2567,15 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         transport.setLogReduceMotionForTesting(false)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .progress,
@@ -2963,7 +2583,7 @@ struct ReviewUITests {
                 text: String(repeating: "progress ", count: 20)
             ))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log.contains("progress progress"))
         #expect(transport.logAppendCountForTesting > 0)
         #expect(transport.logWordGlowCountForTesting == wordGlowCount + 1)
@@ -2985,7 +2605,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -2997,14 +2617,14 @@ struct ReviewUITests {
         #expect(
             abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting)
                 < 0.5)
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .progress,
                 text:
                     "stream.tick 001 delta/layout +2 -0 while the short log remains below the scrollable viewport height"
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         transport.view.layoutSubtreeIfNeeded()
 
         let appendedDocumentFrame = transport.logDocumentViewFrameForTesting
@@ -3024,7 +2644,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .plan, groupID: "plan_1", text: "- original")
             ]
         )
@@ -3035,7 +2655,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3043,10 +2663,10 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job, .init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log == "- updated")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
@@ -3064,7 +2684,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: startedAt,
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(
                     kind: .rawReasoning,
                     groupID: "reasoning_1",
@@ -3080,7 +2700,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3088,7 +2708,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .command,
@@ -3103,7 +2723,7 @@ struct ReviewUITests {
                     commandStatus: "inProgress"
                 )
             ))
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .rawReasoning,
@@ -3111,7 +2731,7 @@ struct ReviewUITests {
                 text: "Inspecting details after the command starts."
             ))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log.contains("Need to inspect files."))
         #expect(snapshot.log.contains("Running git diff"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
@@ -3129,7 +2749,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "**bo")
             ]
         )
@@ -3140,7 +2760,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3148,9 +2768,9 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
+        appendChatLogEntryForTesting(job, .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"))
 
-        let snapshot = try await awaitTimelineRenderForTesting(job, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(job, in: transport)
         #expect(snapshot.log == "bold")
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReplaceCountForTesting == replaceCount + 1)
@@ -3167,7 +2787,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .plan, groupID: "plan_1", text: "- original")
             ]
         )
@@ -3178,12 +2798,12 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .plan,
@@ -3191,17 +2811,17 @@ struct ReviewUITests {
                 replacesGroup: true,
                 text: "- updated with longer replacement text"
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         let replaceCount = transport.logReplaceCountForTesting
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport) { snapshot in
-            snapshot.log.contains("Command output")
+        appendChatLogEntryForTesting(job, .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"))
+        _ = try await awaitChatRenderForTesting(job, in: transport) { snapshot in
+            snapshot.log.contains("Running Command")
         }
 
         #expect(transport.displayedLogForTesting.contains("- updated with longer replacement text"))
-        #expect(transport.displayedLogForTesting.contains("Command output"))
+        #expect(transport.displayedLogForTesting.contains("Running Command"))
         #expect(transport.displayedLogForTesting.contains("Command output - 1 line") == false)
         #expect(transport.displayedLogForTesting.contains("hidden output") == false)
         #expect(transport.logAppendCountForTesting == appendCount + 1)
@@ -3224,7 +2844,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3233,7 +2853,7 @@ struct ReviewUITests {
         let reloadCount = transport.logReloadCountForTesting
         job.updateStateForTesting(summary: "Updated summary.")
 
-        #expect(transport.displayedLogForTesting == reviewMonitorLogText(for: job))
+        #expect(transport.displayedLogForTesting == reviewChatLogText(for: job))
         #expect(transport.logAppendCountForTesting == appendCount)
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
@@ -3248,7 +2868,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -3259,30 +2879,30 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         transport.setLogReduceMotionForTesting(false)
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 2)
 
         transport.completeLogWordGlowAnimationsForTesting()
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting == 0)
     }
@@ -3297,7 +2917,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -3310,7 +2930,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 201),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .agentMessage, groupID: "msg_1", text: "Other job")
             ]
         )
@@ -3323,30 +2943,30 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"))
 
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendTimelineEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
-        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
+        appendChatLogEntryForTesting(firstJob, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"))
+        _ = try await awaitChatRenderForTesting(firstJob, in: transport)
         #expect(transport.logWordGlowCountForTesting > 0)
     }
 
@@ -3360,7 +2980,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -3372,7 +2992,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3380,9 +3000,9 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logWordGlowCountForTesting > 0)
         #expect(transport.logWordFadeRenderingAttributeRangeCountForTesting > 0)
@@ -3406,7 +3026,7 @@ struct ReviewUITests {
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
             summary: "Running review.",
-            timelineEntries: [
+            chatEntries: [
                 .init(kind: .rawReasoning, groupID: "reasoning_1", text: "Thinking")
             ]
         )
@@ -3418,15 +3038,15 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         transport.setLogReduceMotionForTesting(false)
 
-        appendTimelineEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logWordGlowCountForTesting > 0)
 
         transport.advanceLogWordGlowAnimationsAfterInitialDelayForTesting(5)
@@ -3453,7 +3073,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3466,16 +3086,16 @@ struct ReviewUITests {
         transport.scrollLogToTopForTesting()
         #expect(transport.isLogPinnedToBottomForTesting == false)
         let unpinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Unpinned update"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logAutoFollowCountForTesting == unpinnedAutoFollow)
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         let pinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Pinned update"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
     }
@@ -3497,7 +3117,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3509,8 +3129,8 @@ struct ReviewUITests {
         let wrappedLine = (0..<140)
             .map { "wrapped-append-segment-\($0)" }
             .joined(separator: " ")
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: wrappedLine))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logAutoFollowCountForTesting == pinnedAutoFollow + 1)
         #expect(transport.isLogPinnedToBottomForTesting)
@@ -3540,7 +3160,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3552,13 +3172,13 @@ struct ReviewUITests {
         let offsetBeforeAppend = transport.logVerticalScrollOffsetForTesting
         let autoFollowBeforeAppend = transport.logAutoFollowCountForTesting
         let programmaticScrollsBeforeAppend = transport.logProgrammaticScrollCountForTesting
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job,
             .init(
                 kind: .progress,
                 text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
             ))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logAutoFollowCountForTesting == autoFollowBeforeAppend)
         #expect(transport.logProgrammaticScrollCountForTesting == programmaticScrollsBeforeAppend)
@@ -3586,7 +3206,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3596,8 +3216,8 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.isLogPinnedToBottomForTesting)
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend + 1)
@@ -3623,7 +3243,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3633,8 +3253,8 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -3658,7 +3278,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3667,8 +3287,8 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "short update"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "short update"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -3687,7 +3307,7 @@ struct ReviewUITests {
             status: .running,
             targetSummary: "Uncommitted changes",
             summary: "Running review.",
-            logText: longLog
+            logText: longLog + "\nsecond chat"
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [firstJob, secondJob]))
@@ -3700,7 +3320,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -3710,22 +3330,25 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToOffsetForTesting(120)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
         let hideCountBeforeRestore = transport.logOverlayScrollerHideRequestCountForTesting
+        transport.setLogOverlayScrollersShownForTesting(true)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
-            restoring: .top,
             allowIncrementalUpdate: false
         )
 
-        #expect(transport.logOverlayScrollerHideRequestCountForTesting > hideCountBeforeRestore)
+        try await waitForOverlayScrollerHideRequest(
+            in: transport,
+            exceeding: hideCountBeforeRestore
+        )
     }
 
     @Test func privateOverlayBridgeNoOpsWhenScrollerImpPairIsUnavailable() async throws {
@@ -3748,7 +3371,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3758,8 +3381,8 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingScrollerImpPair)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -3784,7 +3407,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3794,8 +3417,8 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingHideMethods)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Newest line"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logOverlayScrollerHideRequestCountForTesting == hideCountBeforeAppend)
     }
@@ -3815,7 +3438,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3847,7 +3470,7 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3890,14 +3513,14 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         let appendCount = transport.logAppendCountForTesting
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "Newest fragment line"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logVisibleFragmentViewCountForTesting > 0)
@@ -3919,7 +3542,7 @@ struct ReviewUITests {
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -3928,7 +3551,7 @@ struct ReviewUITests {
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.showFindInterface)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.nextMatch)))
         #expect(viewController.validateUserInterfaceItem(textFinderMenuItemForTesting(.replace)) == false)
-        #expect(transport.logAccessibilityValueForTesting == reviewMonitorLogText(for: job))
+        #expect(transport.logAccessibilityValueForTesting == reviewChatLogText(for: job))
         #expect(transport.logDocumentViewExportsUserInterfaceValidationForTesting)
 
         let copyItem = commandMenuItemForTesting("copy:")
@@ -3943,7 +3566,7 @@ struct ReviewUITests {
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(deleteItem) == false)
 
         transport.selectAllLogForTesting()
-        #expect(transport.logSelectedTextForTesting == reviewMonitorLogText(for: job))
+        #expect(transport.logSelectedTextForTesting == reviewChatLogText(for: job))
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(copyItem))
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(cutItem) == false)
         #expect(transport.validateLogDocumentUserInterfaceItemForTesting(pasteItem) == false)
@@ -3951,7 +3574,7 @@ struct ReviewUITests {
 
         NSPasteboard.general.clearContents()
         transport.copyLogSelectionForTesting()
-        #expect(NSPasteboard.general.string(forType: .string) == reviewMonitorLogText(for: job))
+        #expect(NSPasteboard.general.string(forType: .string) == reviewChatLogText(for: job))
 
         transport.clearLogFinderSelectedRangesForTesting()
         #expect(transport.logSelectedTextForTesting == nil)
@@ -4004,7 +3627,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -4053,13 +3676,13 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let renderedInitialLog = reviewMonitorLogText(for: job)
+        let renderedInitialLog = reviewChatLogText(for: job)
         let renderedInitialLength = (renderedInitialLog as NSString).length
         let visibleRanges = transport.logFindVisibleCharacterRangesForTesting
         #expect(transport.logFindIncrementalSearchUsesSystemHighlightingForTesting)
@@ -4080,10 +3703,10 @@ struct ReviewUITests {
         }
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logHasActiveFindQueryForTesting)
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
-        let appendedLength = (reviewMonitorLogText(for: job) as NSString).length
+        let appendedLength = (reviewChatLogText(for: job) as NSString).length
         let appendedVisibleRanges = transport.logFindVisibleCharacterRangesForTesting
         #expect(transport.logFindStringLengthForTesting == renderedInitialLength)
         #expect(transport.logSelectedTextForTesting == "needle")
@@ -4106,9 +3729,9 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
         let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
-        appendTimelineEntryForTesting(
+        appendChatLogEntryForTesting(
             job, .init(kind: .progress, text: "needle appended while the log is not following bottom"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(abs(transport.logVerticalScrollOffsetForTesting - offsetBeforeMiddleAppend) < 0.5)
         #expect(transport.logSelectedTextForTesting == "needle")
@@ -4116,7 +3739,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
 
-        var burstText = reviewMonitorLogText(for: job)
+        var burstText = reviewChatLogText(for: job)
         for index in 0..<8 {
             burstText += "\nneedle burst \(index)"
             #expect(transport.renderLogForTesting(text: burstText, allowIncrementalUpdate: true))
@@ -4203,19 +3826,19 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
+        appendChatLogEntryForTesting(firstJob, .init(kind: .progress, text: "needle appended"))
+        _ = try await awaitChatRenderForTesting(firstJob, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
         viewController.sidebarViewControllerForTesting.clearSelectionForTesting()
@@ -4223,7 +3846,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -4231,7 +3854,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (transport.displayedLogForTesting as NSString).length)
     }
 
     @Test func logFindContentReuseClearsSnapshotWhenSameTextSkipsRender() async throws {
@@ -4263,28 +3886,28 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
-        _ = try await awaitTimelineRenderForTesting(firstJob, in: transport)
+        appendChatLogEntryForTesting(firstJob, .init(kind: .progress, text: appendedLine))
+        _ = try await awaitChatRenderForTesting(firstJob, in: transport)
         #expect(
             transport.displayedLogForTesting.trimmingCharacters(in: .newlines)
-                == reviewMonitorLogText(for: secondJob).trimmingCharacters(in: .newlines)
+                == reviewChatLogText(for: secondJob).trimmingCharacters(in: .newlines)
         )
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -4292,7 +3915,7 @@ struct ReviewUITests {
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (transport.displayedLogForTesting as NSString).length)
     }
 
     @Test func logFindContentReuseClearsSnapshotForPrefixRelatedLogs() async throws {
@@ -4322,13 +3945,13 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(firstJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             firstJob,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: firstJob) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: firstJob) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
@@ -4339,7 +3962,7 @@ struct ReviewUITests {
 
         let finderIdentifierBeforeSwitch = transport.logTextFinderIdentifierForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(secondJob))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             secondJob,
             in: transport,
             allowIncrementalUpdate: false
@@ -4348,7 +3971,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logTextFinderIdentifierForTesting == finderIdentifierBeforeSwitch)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: secondJob) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: secondJob) as NSString).length)
     }
 
     @Test func logFindHidingVisibleSnapshotReturnsClientToLiveString() async throws {
@@ -4370,26 +3993,26 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.hideFindInterface))
 
         #expect(transport.logFindBarVisibleForTesting == false)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
     }
 
     @Test func logFindClearedSelectionReturnsVisibleUpdatesToLiveString() async throws {
@@ -4411,19 +4034,19 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -4432,12 +4055,12 @@ struct ReviewUITests {
         #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared selection"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
     }
 
     @Test func logFindClearedQueryReturnsVisibleUpdatesToLiveString() async throws {
@@ -4459,19 +4082,19 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let firstNeedleRange = (reviewMonitorLogText(for: job) as NSString).range(of: "needle")
+        let firstNeedleRange = (reviewChatLogText(for: job) as NSString).range(of: "needle")
         #expect(firstNeedleRange.location != NSNotFound)
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended into snapshot"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
 
@@ -4481,12 +4104,12 @@ struct ReviewUITests {
             #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
             #expect(transport.logHasActiveFindQueryForTesting == false)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle appended after cleared query"))
+            _ = try await awaitChatRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
         }
     }
 
@@ -4509,7 +4132,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -4521,12 +4144,12 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            appendChatLogEntryForTesting(job, .init(kind: .progress, text: "future-only needle"))
+            _ = try await awaitChatRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
         }
     }
 
@@ -4549,21 +4172,21 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let initialLength = (reviewMonitorLogText(for: job) as NSString).length
+        let initialLength = (reviewChatLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("core"))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
             #expect(transport.logHasActiveFindQueryForTesting)
-            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            appendChatLogEntryForTesting(job, .init(kind: .progress, text: "core appended while query is visible"))
+            _ = try await awaitChatRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
@@ -4592,21 +4215,21 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
 
-        let initialLength = (reviewMonitorLogText(for: job) as NSString).length
+        let initialLength = (reviewChatLogText(for: job) as NSString).length
         try await withFindPasteboardString(nil) {
             viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("alpha"))
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
-            appendTimelineEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            appendChatLogEntryForTesting(job, .init(kind: .progress, text: "beta appended after active search"))
+            _ = try await awaitChatRenderForTesting(job, in: transport)
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
@@ -4614,7 +4237,7 @@ struct ReviewUITests {
             #expect(transport.logVisibleFindBarSearchStringForTesting == "beta")
             #expect(transport.logFindClientUsesSnapshotForTesting)
             #expect(transport.logFindClientSnapshotMapsToDocumentForTesting)
-            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
         }
     }
 
@@ -4637,7 +4260,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -4648,18 +4271,18 @@ struct ReviewUITests {
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
-            let normalSelectionRange = (reviewMonitorLogText(for: job) as NSString).range(of: "copyable")
+            let normalSelectionRange = (reviewChatLogText(for: job) as NSString).range(of: "copyable")
             #expect(normalSelectionRange.location != NSNotFound)
             transport.setSelectedLogRangeForTesting(normalSelectionRange)
             #expect(transport.logSelectedTextForTesting == "copyable")
             #expect(transport.logHasActiveFindQueryForTesting == false)
-            appendTimelineEntryForTesting(
+            appendChatLogEntryForTesting(
                 job, .init(kind: .progress, text: "needle appended after normal selection"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            _ = try await awaitChatRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+            #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
         }
     }
 
@@ -4682,7 +4305,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -4696,10 +4319,10 @@ struct ReviewUITests {
             transport.simulateLogFinderEmptySelectedRangesForTesting()
             #expect(transport.logHasActiveFindQueryForTesting)
 
-            let initialLength = (reviewMonitorLogText(for: job) as NSString).length
-            appendTimelineEntryForTesting(
+            let initialLength = (reviewChatLogText(for: job) as NSString).length
+            appendChatLogEntryForTesting(
                 job, .init(kind: .progress, text: "active query appears after no-result search"))
-            _ = try await awaitTimelineRenderForTesting(job, in: transport)
+            _ = try await awaitChatRenderForTesting(job, in: transport)
 
             #expect(transport.logFindBarVisibleForTesting)
             #expect(transport.logFindClientUsesSnapshotForTesting)
@@ -4749,7 +4372,7 @@ struct ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
-        _ = try await awaitTimelineRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
@@ -4759,12 +4382,12 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
         #expect(transport.logFindStringLengthForTesting == 0)
-        appendTimelineEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
-        _ = try await awaitTimelineRenderForTesting(job, in: transport)
+        appendChatLogEntryForTesting(job, .init(kind: .progress, text: "needle first content"))
+        _ = try await awaitChatRenderForTesting(job, in: transport)
 
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        #expect(transport.logFindStringLengthForTesting == (reviewMonitorLogText(for: job) as NSString).length)
+        #expect(transport.logFindStringLengthForTesting == (reviewChatLogText(for: job) as NSString).length)
     }
 
     @Test func authFailedJobShowsNormalFailureDetails() async throws {
@@ -4787,13 +4410,13 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        let snapshot = try await awaitTimelineRenderForTesting(
+        let snapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         #expect(snapshot.summary == nil)
-        #expect(snapshot.log == reviewMonitorLogText(for: job))
+        #expect(snapshot.log == reviewChatLogText(for: job))
     }
 
     @Test func authenticatedAuthFailedJobStillShowsNormalFailureDetails() async throws {
@@ -4816,13 +4439,13 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
 
-        let snapshot = try await awaitTimelineRenderForTesting(
+        let snapshot = try await awaitChatRenderForTesting(
             job,
             in: transport,
             allowIncrementalUpdate: false
         )
         #expect(snapshot.summary == nil)
-        #expect(snapshot.log == reviewMonitorLogText(for: job))
+        #expect(snapshot.log == reviewChatLogText(for: job))
     }
 
 }
@@ -4859,8 +4482,11 @@ func makeWindowHarness(
         .defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
+    let previewChatLogSource =
+        (store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport)?.chatLogSource
     let windowController = ReviewMonitorWindowController(
         store: store,
+        previewChatLogSource: previewChatLogSource,
         contentTransitionAnimator: contentTransitionAnimator,
         sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
     )
@@ -5239,6 +4865,43 @@ func awaitContentPaneRender(
     )
 }
 
+@MainActor
+func waitForOverlayScrollerHideRequest(
+    in transport: ReviewMonitorTransportViewController,
+    exceeding previousCount: Int,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        if transport.logOverlayScrollerHideRequestCountForTesting > previousCount {
+            return
+        }
+        try Task.checkCancellation()
+        await Task.yield()
+    } while clock.now < deadline
+
+    throw TestFailure("timed out waiting for overlay scroller hide request")
+}
+
+@MainActor
+func waitForLogPinnedToBottom(
+    in transport: ReviewMonitorTransportViewController,
+    timeout: Duration = .seconds(2)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    repeat {
+        if transport.isLogPinnedToBottomForTesting {
+            return
+        }
+        try Task.checkCancellation()
+        await Task.yield()
+    } while clock.now < deadline
+
+    throw TestFailure("timed out waiting for log to pin to bottom")
+}
+
 final class UncheckedSendableBox<Value>: @unchecked Sendable {
     let value: Value
 
@@ -5271,10 +4934,10 @@ func makeJob(
         summary: summary ?? status.displayText,
         reviewResult: reviewResult,
         lastAgentMessage: "",
-        timelineEntries: [],
+        chatEntries: [],
         errorMessage: status == .failed ? summary ?? status.displayText : nil
     )
-    seedTimelineForTesting(job, logText: logText, rawLogText: rawLogText)
+    seedChatLogForTesting(job, logText: logText, rawLogText: rawLogText)
     return job
 }
 
@@ -5493,6 +5156,7 @@ extension CodexReviewStore {
         jobs: [CodexReviewJob] = [],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
+        installPreviewChatLogSourceForTesting(on: self, jobs: jobs)
         loadForTesting(
             serverState: serverState,
             authPhase: authState.phase,

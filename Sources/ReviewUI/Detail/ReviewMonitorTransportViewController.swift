@@ -267,7 +267,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) {
         selectedChatLogTask?.cancel()
         selectedChatLogTask = Task { @MainActor [weak self] in
-            var didRenderInitialDocument = false
             var projection = ReviewMonitorSelectedCodexChatLogProjection()
             for await change in stream {
                 guard let self,
@@ -284,17 +283,15 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 else {
                     continue
                 }
+                let hasAppliedInitialDocument = self.hasAppliedBoundLog
                 self.applySelectedCodexChatLogChange(
                     logChange,
                     target: target,
-                    restorationTarget: didRenderInitialDocument
+                    restorationTarget: hasAppliedInitialDocument
                         ? self.logScrollView.currentScrollRestorationTarget
                         : initialRestorationTarget,
-                    allowIncrementalUpdate: didRenderInitialDocument && logChange.allowsIncrementalRender
+                    allowIncrementalUpdate: hasAppliedInitialDocument && logChange.allowsIncrementalRender
                 )
-                if logChange.sourceDocument != nil {
-                    didRenderInitialDocument = true
-                }
             }
         }
     }
@@ -306,24 +303,21 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) {
         selectedChatLogTask?.cancel()
         selectedChatLogTask = Task { @MainActor [weak self] in
-            var didRenderInitialDocument = false
             for await change in stream {
                 guard let self,
                     self.isCurrentLogRenderTarget(target)
                 else {
                     return
                 }
+                let hasAppliedInitialDocument = self.hasAppliedBoundLog
                 self.applySelectedCodexChatLogChange(
                     change,
                     target: target,
-                    restorationTarget: didRenderInitialDocument
+                    restorationTarget: hasAppliedInitialDocument
                         ? self.logScrollView.currentScrollRestorationTarget
                         : initialRestorationTarget,
-                    allowIncrementalUpdate: didRenderInitialDocument && change.allowsIncrementalRender
+                    allowIncrementalUpdate: hasAppliedInitialDocument && change.allowsIncrementalRender
                 )
-                if change.sourceDocument != nil {
-                    didRenderInitialDocument = true
-                }
             }
         }
     }
