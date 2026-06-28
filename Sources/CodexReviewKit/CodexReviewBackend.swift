@@ -178,8 +178,7 @@ package actor BackendReviewEventMailbox {
         switch event {
         case .completed, .failed, .cancelled:
             return true
-        case .started,
-            .progress:
+        case .started:
             return false
         }
     }

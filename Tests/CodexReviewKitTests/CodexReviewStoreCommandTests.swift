@@ -18,7 +18,6 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.progress("started"))
             await backend.yield(.completed)
             let read = try await result
 
@@ -217,7 +216,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewStartUsesProgressAsLifecycleMessage() async throws {
+    @Test func reviewStartDoesNotNeedProgressEventsForLifecycle() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -229,12 +228,8 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
             let probe = StoreSnapshotProbe(store: store)
-            try #require(await probe.waitUntilRunStatus(.running, runID: "run-1") != nil)
-            await backend.yield(.progress("Inspecting files."))
-            let progressSnapshot = try #require(await probe.waitUntil { snapshot in
-                snapshot.run("run-1")?.summary == "Inspecting files."
-            })
-            #expect(progressSnapshot.run("run-1")?.summary == "Inspecting files.")
+            let runningSnapshot = try #require(await probe.waitUntilRunStatus(.running, runID: "run-1"))
+            #expect(runningSnapshot.run("run-1")?.summary == "Review started.")
 
             await backend.yield(.completed)
             let read = try await result
@@ -1317,7 +1312,6 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "run-1") != nil)
-            await backend.yield(.progress("partial review"))
             await backend.finishEvents(throwing: StreamClosedError())
             let read = try await result
 

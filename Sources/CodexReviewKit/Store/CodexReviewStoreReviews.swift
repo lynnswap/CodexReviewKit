@@ -813,10 +813,6 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: runRecord.id)
             runRecord.core.lifecycleMessage = "Review started."
-        case .progress(let text):
-            if runRecord.core.lifecycleMessage.isEmpty || runRecord.core.lifecycleMessage == "Review started." {
-                runRecord.core.lifecycleMessage = text
-            }
         case .completed:
             completeReview(runRecord)
         case .failed(let message):
@@ -879,8 +875,7 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started,
-            .progress:
+        case .started:
             false
         }
     }

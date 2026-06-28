@@ -534,10 +534,10 @@ private enum AppServerTypedReviewEventAdapter {
     }
 
     private static func unknownStatusEvents(
-        _ status: String,
-        turnID: String
+        _: String,
+        turnID _: String
     ) -> [CodexReviewBackendModel.Review.Event] {
-        [.progress("Review thread \(turnID) status changed: \(status).")]
+        []
     }
 
     private static func terminalFailureEvents(
@@ -568,9 +568,9 @@ private enum AppServerTypedReviewEventAdapter {
     }
 
     private static func unknownEvents(
-        _ raw: CodexRawNotification
+        _: CodexRawNotification
     ) -> [CodexReviewBackendModel.Review.Event] {
-        [.progress("Unhandled app-server notification: \(raw.method)")]
+        []
     }
 }
 

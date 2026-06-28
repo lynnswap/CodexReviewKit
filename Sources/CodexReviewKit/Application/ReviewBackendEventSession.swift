@@ -178,8 +178,6 @@ package actor ReviewBackendEventSession {
             await callbacks.recordTurnStarted(turnID)
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
-        case .progress:
-            break
         }
     }
 
@@ -207,8 +205,7 @@ private extension CodexReviewBackendModel.Review.Event {
         switch self {
         case .completed, .failed, .cancelled:
             true
-        case .started,
-            .progress:
+        case .started:
             false
         }
     }

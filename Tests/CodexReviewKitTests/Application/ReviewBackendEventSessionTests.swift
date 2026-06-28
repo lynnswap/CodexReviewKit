@@ -47,19 +47,6 @@ struct ReviewBackendEventSessionTests {
         #expect(metrics.terminalLatencyMs != nil)
         #expect(await recorder.finishedMetrics() == metrics)
     }
-
-    @Test func emitsProgressWithoutDelayingLaterUpdates() async throws {
-        let session = ReviewBackendEventSession(run: makeRun())
-        let attempt = await session.attempt()
-
-        await session.receive([.progress("first")], controlThreadID: "review-thread")
-        await session.receive([.progress("second")], controlThreadID: "review-thread")
-        await session.finish(throwing: nil)
-
-        #expect(try await nextEvent(from: attempt.events) == .progress("first"))
-        #expect(try await nextEvent(from: attempt.events) == .progress("second"))
-        #expect(try await nextEvent(from: attempt.events) == nil)
-    }
 }
 
 private actor ReviewBackendEventSessionRecorder {
