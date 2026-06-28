@@ -422,6 +422,7 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
 final class ReviewMonitorCodexSidebarOutlineTree {
     struct ApplyResult: Equatable {
         var topologyChanged: Bool
+        var topologyChanges: [ReviewMonitorCodexSidebarOutlineTopologyChange]
     }
 
     private var nodesByRowID: [ReviewMonitorCodexSidebarRowID: ReviewMonitorCodexSidebarOutlineNode] = [:]
@@ -432,7 +433,11 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         var activeRowIDs: Set<ReviewMonitorCodexSidebarRowID> = []
         roots = snapshot.outlineItems.map { node(for: $0, activeRowIDs: &activeRowIDs) }
         nodesByRowID = nodesByRowID.filter { activeRowIDs.contains($0.key) }
-        return ApplyResult(topologyChanged: topology != oldTopology)
+        let newTopology = topology
+        return ApplyResult(
+            topologyChanged: newTopology != oldTopology,
+            topologyChanges: Self.topologyChanges(from: oldTopology, to: newTopology)
+        )
     }
 
     func node(rowID: ReviewMonitorCodexSidebarRowID) -> ReviewMonitorCodexSidebarOutlineNode? {
@@ -446,6 +451,39 @@ final class ReviewMonitorCodexSidebarOutlineTree {
                 node.children.map(\.rowID)
             }
         )
+    }
+
+    private static func topologyChanges(
+        from oldTopology: ReviewMonitorCodexSidebarOutlineTopology,
+        to newTopology: ReviewMonitorCodexSidebarOutlineTopology
+    ) -> [ReviewMonitorCodexSidebarOutlineTopologyChange] {
+        var changes: [ReviewMonitorCodexSidebarOutlineTopologyChange] = []
+        if oldTopology.roots != newTopology.roots {
+            changes.append(
+                ReviewMonitorCodexSidebarOutlineTopologyChange(
+                    parentRowID: nil,
+                    oldChildRowIDs: oldTopology.roots,
+                    newChildRowIDs: newTopology.roots
+                ))
+        }
+
+        let sharedParentRowIDs = Set(oldTopology.childrenByRowID.keys)
+            .intersection(newTopology.childrenByRowID.keys)
+            .sorted { $0.rawValue < $1.rawValue }
+        for parentRowID in sharedParentRowIDs {
+            let oldChildRowIDs = oldTopology.childrenByRowID[parentRowID] ?? []
+            let newChildRowIDs = newTopology.childrenByRowID[parentRowID] ?? []
+            guard oldChildRowIDs != newChildRowIDs else {
+                continue
+            }
+            changes.append(
+                ReviewMonitorCodexSidebarOutlineTopologyChange(
+                    parentRowID: parentRowID,
+                    oldChildRowIDs: oldChildRowIDs,
+                    newChildRowIDs: newChildRowIDs
+                ))
+        }
+        return changes
     }
 
     private func node(
@@ -472,6 +510,13 @@ final class ReviewMonitorCodexSidebarOutlineTree {
 private struct ReviewMonitorCodexSidebarOutlineTopology: Equatable {
     var roots: [ReviewMonitorCodexSidebarRowID]
     var childrenByRowID: [ReviewMonitorCodexSidebarRowID: [ReviewMonitorCodexSidebarRowID]]
+}
+
+@MainActor
+struct ReviewMonitorCodexSidebarOutlineTopologyChange: Equatable {
+    var parentRowID: ReviewMonitorCodexSidebarRowID?
+    var oldChildRowIDs: [ReviewMonitorCodexSidebarRowID]
+    var newChildRowIDs: [ReviewMonitorCodexSidebarRowID]
 }
 
 @MainActor

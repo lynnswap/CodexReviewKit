@@ -564,6 +564,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
         let firstSection = try #require(snapshot.sections.first)
         let secondSection = try #require(snapshot.sections.dropFirst().first)
+        let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: secondSection.rowID))
         #expect(sidebar.performCodexSectionDropForTesting(id: secondSection.id, toIndex: 0))
@@ -577,6 +578,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 firstSection.id,
                 secondSection.id,
             ])
+        #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
 
     @Test func sidebarViewControllerReordersCodexChatsLocallyWithinContainer() async throws {
@@ -619,6 +621,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         }
         let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
         let container = try #require(snapshot.sections.first?.workspaces.first?.rowID)
+        let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.displayedCodexChatIDsForTesting(container: container) == [firstThreadID, secondThreadID])
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: .chat(secondThreadID)))
@@ -629,6 +632,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 firstThreadID,
                 secondThreadID,
             ])
+        #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
 
     @Test func sidebarViewControllerDoesNotReloadCodexOutlineWhenSelectionChanges() async throws {

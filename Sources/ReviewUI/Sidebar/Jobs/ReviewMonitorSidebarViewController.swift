@@ -380,10 +380,138 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return
         }
         if applyResult.topologyChanged {
-            reloadCodexSidebarOutline()
+            applyCodexSidebarOutlineTopologyChanges(applyResult.topologyChanges)
         } else if isUsingCodexSidebarOutline {
             reconcileOutlineSelection()
         }
+    }
+
+    private func applyCodexSidebarOutlineTopologyChanges(
+        _ changes: [ReviewMonitorCodexSidebarOutlineTopologyChange]
+    ) {
+        guard changes.isEmpty == false else {
+            reconcileOutlineSelection()
+            return
+        }
+
+        isReconcilingSelection = true
+        var appliedIncrementally = true
+        for change in changes {
+            guard applyCodexSidebarOutlineTopologyChange(change) else {
+                appliedIncrementally = false
+                break
+            }
+        }
+        if appliedIncrementally {
+            expandCodexSidebarNodes(codexSidebarOutlineTree.roots)
+            if isUsingCodexSidebarOutline {
+                reconcileOutlineSelection()
+            } else if outlineView.selectedRow != -1 {
+                outlineView.deselectAll(nil)
+            }
+            isReconcilingSelection = false
+        } else {
+            isReconcilingSelection = false
+            reloadCodexSidebarOutline()
+        }
+    }
+
+    private func applyCodexSidebarOutlineTopologyChange(
+        _ change: ReviewMonitorCodexSidebarOutlineTopologyChange
+    ) -> Bool {
+        let parentItem: Any?
+        if let parentRowID = change.parentRowID {
+            guard let parentNode = codexSidebarOutlineTree.node(rowID: parentRowID) else {
+                return false
+            }
+            parentItem = parentNode
+        } else {
+            parentItem = nil
+        }
+        if applyCodexSidebarOutlineChildDelta(change, parentItem: parentItem) {
+            return true
+        }
+        guard let parentItem else {
+            return false
+        }
+        outlineView.reloadItem(parentItem, reloadChildren: true)
+        return true
+    }
+
+    private func applyCodexSidebarOutlineChildDelta(
+        _ change: ReviewMonitorCodexSidebarOutlineTopologyChange,
+        parentItem: Any?
+    ) -> Bool {
+        let oldChildRowIDs = change.oldChildRowIDs
+        let newChildRowIDs = change.newChildRowIDs
+        guard oldChildRowIDs != newChildRowIDs else {
+            return true
+        }
+
+        let oldChildRowIDSet = Set(oldChildRowIDs)
+        let newChildRowIDSet = Set(newChildRowIDs)
+        if oldChildRowIDSet == newChildRowIDSet {
+            return moveCodexSidebarOutlineItems(
+                from: oldChildRowIDs,
+                to: newChildRowIDs,
+                parentItem: parentItem
+            )
+        }
+
+        let retainedOldChildRowIDs = oldChildRowIDs.filter { newChildRowIDSet.contains($0) }
+        let retainedNewChildRowIDs = newChildRowIDs.filter { oldChildRowIDSet.contains($0) }
+        guard retainedOldChildRowIDs == retainedNewChildRowIDs else {
+            return false
+        }
+
+        let removedIndexes = oldChildRowIDs.enumerated().compactMap { offset, rowID in
+            newChildRowIDSet.contains(rowID) ? nil : offset
+        }
+        if removedIndexes.isEmpty == false {
+            outlineView.removeItems(
+                at: IndexSet(removedIndexes),
+                inParent: parentItem,
+                withAnimation: []
+            )
+        }
+
+        let insertedIndexes = newChildRowIDs.enumerated().compactMap { offset, rowID in
+            oldChildRowIDSet.contains(rowID) ? nil : offset
+        }
+        if insertedIndexes.isEmpty == false {
+            outlineView.insertItems(
+                at: IndexSet(insertedIndexes),
+                inParent: parentItem,
+                withAnimation: []
+            )
+        }
+        return true
+    }
+
+    private func moveCodexSidebarOutlineItems(
+        from oldChildRowIDs: [ReviewMonitorCodexSidebarRowID],
+        to newChildRowIDs: [ReviewMonitorCodexSidebarRowID],
+        parentItem: Any?
+    ) -> Bool {
+        var currentChildRowIDs = oldChildRowIDs
+        for targetIndex in newChildRowIDs.indices {
+            let targetRowID = newChildRowIDs[targetIndex]
+            guard let currentIndex = currentChildRowIDs.firstIndex(of: targetRowID) else {
+                return false
+            }
+            guard currentIndex != targetIndex else {
+                continue
+            }
+            outlineView.moveItem(
+                at: currentIndex,
+                inParent: parentItem,
+                to: targetIndex,
+                inParent: parentItem
+            )
+            let movedRowID = currentChildRowIDs.remove(at: currentIndex)
+            currentChildRowIDs.insert(movedRowID, at: targetIndex)
+        }
+        return currentChildRowIDs == newChildRowIDs
     }
 
     private func reloadCodexSidebarOutline() {
