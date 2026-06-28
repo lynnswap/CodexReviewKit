@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CodexReviewKit
 import CodexReviewHost
+@_spi(PreviewSupport) @testable import ReviewUI
 import Testing
 @testable import CodexReviewMonitor
 
@@ -246,6 +247,57 @@ struct CodexReviewMonitorCITests {
         #expect(didRequestPresentationAnchor == false)
         #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func liveCompositionPreviewWindowRendersPreviewChatLog() async throws {
+        let runtimePreferencesStore = FailingRuntimePreferencesStore()
+        var didCallLiveStoreFactory = false
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _, _ in
+                didCallLiveStoreFactory = true
+                Issue.record("Preview window creation should not build a live store.")
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+            ],
+            arguments: [],
+            launchMode: .application
+        )
+        let store = composition.makeStore(context) {
+            Issue.record("Preview store creation should not request a presentation anchor.")
+            return nil
+        }
+
+        let windowController = composition.makeWindowController(store) {}
+        let rootViewController = try #require(
+            windowController.window?.contentViewController as? ReviewMonitorRootViewController
+        )
+        rootViewController.prepareForSwiftUIPreviewRendering()
+
+        let transport = rootViewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let initialSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(didCallLiveStoreFactory == false)
+        if case .chat? = transport.renderedStateForTesting.selection {
+        } else {
+            Issue.record("Expected preview window to select a chat.")
+        }
+        #expect(initialSnapshot.log.isEmpty == false)
+
+        let nextTick = try #require(rootViewController.appendPreviewChatLogStreamTickForTesting())
+        #expect(nextTick == 1)
+        let updatedSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
+            snapshot.log.count > initialSnapshot.log.count
+                && snapshot.log.contains("Turn started")
+                && snapshot.isShowingEmptyState == false
+        }
+        #expect(updatedSnapshot.log.contains("Turn started"))
     }
 
     @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
@@ -749,6 +801,27 @@ private actor TestValueQueue<Value: Sendable> {
             waiters.append(continuation)
         }
     }
+}
+
+@MainActor
+private func awaitPreviewTransportRender(
+    _ transport: ReviewMonitorTransportViewController,
+    matching predicate: (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    for _ in 0..<100 {
+        let state = transport.renderedStateForTesting
+        if transport.logRenderIsIdleForTesting,
+           predicate(state.snapshot)
+        {
+            return state.snapshot
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    let state = transport.renderedStateForTesting
+    Issue.record(
+        "Timed out waiting for preview transport render: selection=\(String(describing: state.selection)), log=\(state.snapshot.log)"
+    )
+    return state.snapshot
 }
 
 @MainActor
