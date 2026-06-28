@@ -497,10 +497,14 @@ private enum AppServerTypedReviewEventAdapter {
             .init(events: reasoningPartEvents(part), controlThreadID: controlThreadID)
         case .reasoningDelta(let delta, _):
             .init(events: reasoningDeltaEvents(delta), controlThreadID: controlThreadID)
-        case .tokenUsageUpdated, .statusChanged(.running):
+        case .tokenUsageUpdated:
             .init(events: [], controlThreadID: controlThreadID)
-        case .statusChanged(.closed):
+        case .statusChanged(.idle), .statusChanged(.active(activeFlags: _)):
+            .init(events: [], controlThreadID: controlThreadID)
+        case .statusChanged(.notLoaded):
             .init(events: [.failed("Review thread is no longer loaded.")], controlThreadID: controlThreadID)
+        case .statusChanged(.systemError):
+            .init(events: [.failed("Review thread has a system error.")], controlThreadID: controlThreadID)
         case .statusChanged(.unknown(let status)):
             .init(
                 events: unknownStatusEvents(status, turnID: review.turnID.rawValue),
