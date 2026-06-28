@@ -280,7 +280,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         var order = ReviewMonitorCodexSidebarPresentationOrder()
 
         let didReorderSection = order.reorderSection(id: "beta", before: "alpha")
-        let didReorderChat = order.reorderChat(id: alphaSecondID, in: .workspace(alphaWorkspaceID), before: alphaFirstID)
+        let didReorderChat = order.reorderChat(
+            id: alphaSecondID,
+            in: .workspace(alphaWorkspaceID),
+            currentOrder: [alphaFirstID, alphaSecondID],
+            before: alphaFirstID
+        )
 
         #expect(didReorderSection)
         #expect(didReorderChat)
@@ -487,6 +492,111 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             repo.lastPathComponent,
             repo.lastPathComponent,
             "App review renamed",
+        ])
+    }
+
+    @Test func sidebarViewControllerReordersCodexSectionsLocally() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let firstRepo = try makeGitRepository()
+        let secondRepo = try makeGitRepository()
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: "thread-first-repo",
+                    workspace: firstRepo,
+                    name: "First repo review",
+                    updatedAt: Date(timeIntervalSince1970: 5_000)
+                ),
+                .init(
+                    id: "thread-second-repo",
+                    workspace: secondRepo,
+                    name: "Second repo review",
+                    updatedAt: Date(timeIntervalSince1970: 4_000)
+                ),
+            ]
+        ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, workspaces: [])
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarRootTitlesForTesting == [
+                firstRepo.lastPathComponent,
+                secondRepo.lastPathComponent,
+            ]
+        }
+        let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
+        let firstSection = try #require(snapshot.sections.first)
+        let secondSection = try #require(snapshot.sections.dropFirst().first)
+
+        #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: secondSection.rowID))
+        #expect(sidebar.performCodexSectionDropForTesting(id: secondSection.id, toIndex: 0))
+        #expect(sidebar.codexSidebarRootTitlesForTesting == [
+            secondSection.title,
+            firstSection.title,
+        ])
+        #expect(sidebar.codexSidebarSnapshotForTesting?.sections.map(\.id) == [
+            firstSection.id,
+            secondSection.id,
+        ])
+    }
+
+    @Test func sidebarViewControllerReordersCodexChatsLocallyWithinContainer() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let firstThreadID = CodexThreadID(rawValue: "thread-first")
+        let secondThreadID = CodexThreadID(rawValue: "thread-second")
+
+        try await runtime.transport.enqueueThreadList(.init(
+            threads: [
+                .init(
+                    id: firstThreadID,
+                    workspace: repo,
+                    name: "First review",
+                    updatedAt: Date(timeIntervalSince1970: 5_000)
+                ),
+                .init(
+                    id: secondThreadID,
+                    workspace: repo,
+                    name: "Second review",
+                    updatedAt: Date(timeIntervalSince1970: 4_000)
+                ),
+            ]
+        ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, workspaces: [])
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(secondThreadID)) == "Second review"
+        }
+        let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
+        let container = try #require(snapshot.sections.first?.workspaces.first?.rowID)
+
+        #expect(sidebar.displayedCodexChatIDsForTesting(container: container) == [firstThreadID, secondThreadID])
+        #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: .chat(secondThreadID)))
+        #expect(sidebar.performCodexChatDropForTesting(id: secondThreadID, container: container, childIndex: 0))
+        #expect(sidebar.displayedCodexChatIDsForTesting(container: container) == [secondThreadID, firstThreadID])
+        #expect(sidebar.codexSidebarSnapshotForTesting?.sections.first?.workspaces.first?.chats.map(\.id) == [
+            firstThreadID,
+            secondThreadID,
         ])
     }
 }

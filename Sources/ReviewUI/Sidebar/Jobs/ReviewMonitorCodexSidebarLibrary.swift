@@ -269,12 +269,37 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
     mutating func reorderChat(
         id: CodexThreadID,
         in container: ReviewMonitorCodexSidebarRowID,
+        currentOrder: [CodexThreadID],
         before targetID: CodexThreadID?
     ) -> Bool {
-        var ids = chatIDsByContainer[container] ?? []
+        var ids = mergedOrder(preferredIDs: chatIDsByContainer[container] ?? [], currentOrder: currentOrder)
         let didChange = Self.reorder(id: id, before: targetID, in: &ids)
         chatIDsByContainer[container] = ids
         return didChange
+    }
+
+    mutating func prune(to snapshot: ReviewMonitorCodexSidebarSnapshot) {
+        let activeSectionIDs = snapshot.sections.map(\.id)
+        sectionIDs = sectionIDs.filter { activeSectionIDs.contains($0) }
+
+        var activeChatIDsByContainer: [ReviewMonitorCodexSidebarRowID: Set<CodexThreadID>] = [:]
+        for section in snapshot.sections {
+            activeChatIDsByContainer[section.rowID] = Set(section.uncategorizedChats.map(\.id))
+            for workspace in section.workspaces {
+                activeChatIDsByContainer[workspace.rowID] = Set(workspace.chats.map(\.id))
+            }
+        }
+        let currentChatIDsByContainer = chatIDsByContainer
+        chatIDsByContainer = currentChatIDsByContainer.reduce(into: [:]) { result, entry in
+            guard let activeChatIDs = activeChatIDsByContainer[entry.key] else {
+                return
+            }
+            let filteredIDs = entry.value.filter { activeChatIDs.contains($0) }
+            guard filteredIDs.isEmpty == false else {
+                return
+            }
+            result[entry.key] = filteredIDs
+        }
     }
 
     private func ordered<Element, ID: Hashable>(
@@ -294,6 +319,15 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
             }
             return lhs.offset < rhs.offset
         }.map(\.element)
+    }
+
+    private func mergedOrder<ID: Hashable>(preferredIDs: [ID], currentOrder: [ID]) -> [ID] {
+        let activeIDs = Set(currentOrder)
+        var merged = preferredIDs.filter { activeIDs.contains($0) }
+        for id in currentOrder where merged.contains(id) == false {
+            merged.append(id)
+        }
+        return merged
     }
 
     private static func reorder<ID: Hashable>(
