@@ -93,7 +93,6 @@ let package = Package(
             name: "ReviewUI",
             dependencies: [
                 "CodexReviewKit",
-                "ReviewMonitorRendering",
                 "TextTransitions",
                 .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
@@ -168,6 +167,7 @@ let package = Package(
                 .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewTesting",
+                "ReviewMonitorRendering",
                 "ReviewUI",
             ],
             swiftSettings: [
