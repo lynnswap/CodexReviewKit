@@ -674,10 +674,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return recoveryState.currentRun
             }
-            completeReview(
-                runRecord,
-                summary: runRecord.core.lifecycleMessage
-            )
+            completeReview(runRecord)
         }
         return recoveryState.currentRun
     }
@@ -698,10 +695,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return true
             }
-            completeReview(
-                runRecord,
-                summary: runRecord.core.lifecycleMessage
-            )
+            completeReview(runRecord)
         }
         return true
     }
@@ -823,8 +817,8 @@ extension CodexReviewStore {
             if runRecord.core.lifecycleMessage.isEmpty || runRecord.core.lifecycleMessage == "Review started." {
                 runRecord.core.lifecycleMessage = text
             }
-        case .completed(let summary):
-            completeReview(runRecord, summary: summary)
+        case .completed:
+            completeReview(runRecord)
         case .failed(let message):
             markReviewFailed(runRecord, message: message)
         case .cancelled(let message):
@@ -852,17 +846,14 @@ extension CodexReviewStore {
         return true
     }
 
-    private func completeReview(
-        _ runRecord: ReviewRunRecord,
-        summary: String
-    ) {
+    private func completeReview(_ runRecord: ReviewRunRecord) {
         guard runRecord.isTerminal == false else {
             return
         }
         let endedAt = clock.now()
         runRecord.core.lifecycle.status = .succeeded
         runRecord.core.lifecycle.endedAt = endedAt
-        runRecord.core.lifecycleMessage = summary
+        runRecord.core.lifecycleMessage = "Review completed."
         writeDiagnosticsIfNeeded()
     }
 

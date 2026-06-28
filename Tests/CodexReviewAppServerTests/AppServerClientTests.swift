@@ -99,7 +99,7 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded."))
+        #expect(try await iterator.next() == .completed)
     }
 
     @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
@@ -151,13 +151,13 @@ struct AppServerClientTests {
         #expect(
             try await firstIterator.next()
                 == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        #expect(try await firstIterator.next() == .completed(summary: "Succeeded."))
+        #expect(try await firstIterator.next() == .completed)
 
         var secondIterator = eventSequence(secondAttempt).makeAsyncIterator()
         #expect(
             try await secondIterator.next()
                 == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        #expect(try await secondIterator.next() == .completed(summary: "Succeeded."))
+        #expect(try await secondIterator.next() == .completed)
     }
 
     @Test func backendKeepsCommandOutputDeltasInCodexChat() async throws {
@@ -202,7 +202,7 @@ struct AppServerClientTests {
             )
         )
 
-        #expect(try await nextEvent(from: attempt.events) == .completed(summary: "Succeeded."))
+        #expect(try await nextEvent(from: attempt.events) == .completed)
     }
 
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {

@@ -135,7 +135,7 @@ struct CodexReviewHostTests {
         }.first)
         #expect(startReview.model == "gpt-5.5")
 
-        await backend.yield(.completed(summary: "Succeeded."))
+        await backend.yield(.completed)
         await backend.finishEvents()
         _ = try await reviewTask.value
     }

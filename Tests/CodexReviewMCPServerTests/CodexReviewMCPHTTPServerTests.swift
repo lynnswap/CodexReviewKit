@@ -160,7 +160,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(summary: "Done"))
+            await backend.yield(.completed)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == false)
@@ -170,7 +170,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                resolved.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String == "Done")
+                resolved.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
+                    == "Review completed.")
             #expect(
                 resolved.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
             #expect(resolved.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
@@ -229,7 +230,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
-            await backend.yield(.completed(summary: "Done"))
+            await backend.yield(.completed)
             let awaited = try await postJSONRPC(
                 endpoint: endpoint,
                 sessionID: sessionID,
@@ -250,13 +251,14 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String == "Done")
+                awaited.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
+                    == "Review completed.")
             #expect(
                 awaited.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
             #expect(awaited.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
             #expect(
                 awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
-                    == "Done")
+                    == "Review completed.")
             #expect(awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) is NSNull)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
@@ -292,7 +294,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(summary: "Done"))
+            await backend.yield(.completed)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
@@ -851,14 +853,14 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.waitForStartReview()
             await server.runSessionCleanupForTesting(now: .distantFuture)
             await gate.open()
-            await backend.yield(.completed(summary: "Done"))
+            await backend.yield(.completed)
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
             let startText = (resolved.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-            #expect(startText == "Done")
+            #expect(startText == "Review completed.")
             #expect(startText?.contains("rawLogText") == false)
             let tools = try await postJSONRPC(
                 endpoint: endpoint,

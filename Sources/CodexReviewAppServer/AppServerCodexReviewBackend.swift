@@ -529,7 +529,7 @@ private enum AppServerTypedReviewEventAdapter {
             )
         }
         return [
-            .completed(summary: "Succeeded.")
+            .completed
         ]
     }
 
@@ -561,7 +561,7 @@ private enum AppServerTypedReviewEventAdapter {
         }
         if phase == .completed, item.kind.rawValue == "exitedReviewMode" {
             return [
-                .completed(summary: "Succeeded.")
+                .completed
             ]
         }
         return []
