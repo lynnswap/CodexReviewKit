@@ -1202,13 +1202,12 @@ extension ReviewUITests {
 
     @Test func detailLogViewExtendsBehindTitlebarWithoutOverlappingSidebar() async throws {
         let logText = "Safe area log\n"
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-safe-area",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 900, height: 600)
@@ -1217,7 +1216,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         let logFrame = transport.logFrameForTesting
         let viewBounds = transport.viewBoundsForTesting
@@ -1241,13 +1240,12 @@ extension ReviewUITests {
 
     @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
         let logText = "Short log\n"
-        let job = makeJob(
+        let chat = makeShellReviewChatForTesting(
             id: "job-short-log-layout",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 900, height: 600)
@@ -1256,7 +1254,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, job: job)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         let textContentFrame = transport.logTextContentFrameForTesting
         let documentViewFrame = transport.logDocumentViewFrameForTesting
@@ -1731,6 +1729,41 @@ private func contextCompactionTitle(_ item: CodexChatItemSnapshot) -> String {
         return title ?? ""
     }
     return ""
+}
+
+@MainActor
+private func makeShellReviewChatForTesting(
+    id: String,
+    title: String
+) -> ReviewChatFixtureForTesting {
+    makeReviewChatFixtureForTesting(
+        id: id,
+        title: title,
+        status: .running,
+        startedAt: Date(timeIntervalSince1970: 200)
+    )
+}
+
+@MainActor
+private func renderDetailLogForShellLayoutTesting(
+    _ text: String,
+    in transport: ReviewMonitorTransportViewController,
+    viewController: ReviewMonitorSplitViewController,
+    chat: ReviewChatFixtureForTesting
+) async throws {
+    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
+    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chat.chatID.rawValue)
+    try await waitForCondition {
+        transport.renderedStateForTesting.selection == expectedSelection
+            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+    }
+    #expect(transport.renderLogForTesting(text: text, allowIncrementalUpdate: false))
+    transport.scrollLogToBottomForTesting()
+    if let window = viewController.view.window {
+        window.layoutIfNeeded()
+    }
+    viewController.view.layoutSubtreeIfNeeded()
+    transport.view.layoutSubtreeIfNeeded()
 }
 
 @MainActor
