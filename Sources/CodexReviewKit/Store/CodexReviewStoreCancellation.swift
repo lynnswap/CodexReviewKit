@@ -107,7 +107,7 @@ extension CodexReviewStore {
         let cancellation = ReviewCancellation.system(
             message: reason.nilIfEmpty ?? "Cancellation requested."
         )
-        let cancellableReviewRuns = orderedReviewRuns.filter { $0.isTerminal == false }
+        let cancellableReviewRuns = orderedReviewRuns.filter(isCancellableReviewRun)
         var firstError: (any Error)?
         for runRecord in cancellableReviewRuns {
             do {

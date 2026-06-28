@@ -287,7 +287,7 @@ extension CodexReviewStore {
             runID: runRecord.id,
             core: runRecord.core,
             elapsedSeconds: elapsedSeconds(for: runRecord),
-            cancellable: runRecord.isTerminal == false && runRecord.cancellationRequested == false
+            cancellable: isCancellableReviewRun(runRecord)
         )
     }
 
@@ -371,7 +371,7 @@ extension CodexReviewStore {
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
         let runRecord = try requireReviewRun(runID: runID)
-        guard runRecord.isTerminal == false else {
+        guard isCancellableReviewRun(runRecord) else {
             return .init(runID: runRecord.id, cancelled: false, core: runRecord.core)
         }
 
@@ -515,7 +515,7 @@ extension CodexReviewStore {
             targetSummary: runRecord.targetSummary,
             core: runRecord.core,
             elapsedSeconds: elapsedSeconds(for: runRecord),
-            cancellable: runRecord.isTerminal == false && runRecord.cancellationRequested == false
+            cancellable: isCancellableReviewRun(runRecord)
         )
     }
 

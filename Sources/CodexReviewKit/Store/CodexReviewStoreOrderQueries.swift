@@ -12,13 +12,17 @@ extension CodexReviewStore {
         reviewRuns.first(where: { $0.id == id })
     }
 
+    package func isCancellableReviewRun(_ runRecord: ReviewRunRecord) -> Bool {
+        runRecord.isTerminal == false && runRecord.cancellationRequested == false
+    }
+
     package func hasCancellableReview(forChatID chatID: String) -> Bool {
         cancellableReviewRun(forChatID: chatID) != nil
     }
 
     package func cancellableReviewRun(forChatID chatID: String) -> ReviewRunRecord? {
         orderedReviewRuns.first { runRecord in
-            guard runRecord.isTerminal == false else {
+            guard isCancellableReviewRun(runRecord) else {
                 return false
             }
             return runRecord.matchesChatID(chatID)

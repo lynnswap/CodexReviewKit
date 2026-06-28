@@ -380,6 +380,46 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func pendingCancellationIsNoLongerCancellable() async throws {
+        let backend = FakeCodexReviewBackend()
+        let interruptGate = AsyncGate()
+        await backend.holdInterruptReview(with: interruptGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "run-1") != nil)
+
+            async let cancellation = store.cancelReview(
+                runID: "run-1",
+                cancellation: .mcpClient(message: "Stop")
+            )
+            try await backend.waitForInterruptReview(timeout: .seconds(2))
+
+            #expect(try store.readReview(runID: "run-1").cancellable == false)
+            #expect(store.listReviews().items.first?.cancellable == false)
+            #expect(store.hasCancellableReview(forChatID: "thread-1") == false)
+
+            let duplicate = try await store.cancelReview(
+                runID: "run-1",
+                cancellation: .mcpClient(message: "Stop again")
+            )
+            #expect(duplicate.cancelled == false)
+            #expect(duplicate.core.lifecycle.cancellation?.message == "Stop")
+
+            await interruptGate.open()
+            _ = try await cancellation
+            let read = try await result
+            #expect(read.core.lifecycle.status == .cancelled)
+            #expect(read.core.lifecycle.cancellation?.message == "Stop")
+        }
+    }
+
     @Test func transientNetworkOutageDoesNotRecoverReview() async throws {
         let backend = FakeCodexReviewBackend()
         let networkMonitor = ManualCodexReviewNetworkMonitor()
