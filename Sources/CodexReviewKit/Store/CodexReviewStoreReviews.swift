@@ -290,7 +290,7 @@ extension CodexReviewStore {
     }
 
     private func updateCoreOutput(
-        from seed: ReviewTimelineItemSeed,
+        from seed: ReviewEventItemSeed,
         isCompleted: Bool,
         for job: ReviewRunRecord
     ) {

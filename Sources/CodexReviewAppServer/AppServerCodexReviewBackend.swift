@@ -543,7 +543,7 @@ private enum AppServerTypedReviewEventAdapter {
         _ status: String,
         turnID: String
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let seed = ReviewTimelineItemSeed(
+        let seed = ReviewEventItemSeed(
             id: .init(rawValue: "\(turnID):status"),
             kind: .init(rawValue: "reviewThreadStatus"),
             family: .diagnostic,
@@ -581,7 +581,7 @@ private enum AppServerTypedReviewEventAdapter {
             ]
         }
         guard item.kind != .userMessage,
-            let seed = timelineSeed(for: item, phase: phase)
+            let seed = eventItemSeed(for: item, phase: phase)
         else {
             return []
         }
@@ -637,14 +637,14 @@ private enum AppServerTypedReviewEventAdapter {
     private static func reasoningPartEvents(
         _ part: CodexReasoningPart
     ) -> [CodexReviewBackendModel.Review.Event] {
-        let style: ReviewTimelineItem.Reasoning.Style =
+        let style: ReviewEventItem.Reasoning.Style =
             switch part.kind {
             case .summary:
                 .summary
             case .text:
                 .raw
             }
-        let seed = ReviewTimelineItemSeed(
+        let seed = ReviewEventItemSeed(
             id: .init(rawValue: part.id),
             kind: .reasoning,
             family: .reasoning,
@@ -660,7 +660,7 @@ private enum AppServerTypedReviewEventAdapter {
         guard delta.delta.isEmpty == false else {
             return []
         }
-        let style: ReviewTimelineItem.Reasoning.Style =
+        let style: ReviewEventItem.Reasoning.Style =
             switch delta.part.kind {
             case .summary:
                 .summary
@@ -685,7 +685,7 @@ private enum AppServerTypedReviewEventAdapter {
             ?? raw.threadID?.rawValue
             ?? raw.method
         let detail = String(data: raw.params, encoding: .utf8)
-        let seed = ReviewTimelineItemSeed(
+        let seed = ReviewEventItemSeed(
             id: .init(rawValue: "\(itemID):\(raw.method)"),
             kind: .init(rawValue: raw.method),
             family: .unknown,
@@ -700,16 +700,16 @@ private enum AppServerTypedReviewEventAdapter {
         return [.domainEvents([.itemUpdated(seed)])]
     }
 
-    private static func timelineSeed(
+    private static func eventItemSeed(
         for item: CodexThreadItem,
         phase: AppServerTypedItemPhase
-    ) -> ReviewTimelineItemSeed? {
-        ReviewTimelineItemSeed(
+    ) -> ReviewEventItemSeed? {
+        ReviewEventItemSeed(
             id: .init(rawValue: item.id),
             kind: .init(rawValue: item.kind.rawValue),
             family: item.reviewItemFamily,
             phase: item.reviewItemPhase(defaultingTo: phase),
-            content: item.reviewTimelineContent
+            content: item.reviewEventContent
         )
     }
 
@@ -763,7 +763,7 @@ private extension CodexThreadItem {
         }
     }
 
-    var reviewTimelineContent: ReviewTimelineItem.Content {
+    var reviewEventContent: ReviewEventItem.Content {
         switch content {
         case .message(let message):
             .message(.init(text: message.text))

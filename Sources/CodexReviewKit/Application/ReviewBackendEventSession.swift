@@ -205,7 +205,7 @@ package actor ReviewBackendEventSession {
         }
     }
 
-    private func recordTypedMessageText(from seed: ReviewTimelineItemSeed) {
+    private func recordTypedMessageText(from seed: ReviewEventItemSeed) {
         guard seed.family == .message,
             case .message(let message) = seed.content
         else {
