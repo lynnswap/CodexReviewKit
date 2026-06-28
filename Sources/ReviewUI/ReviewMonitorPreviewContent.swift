@@ -17,7 +17,7 @@ public enum ReviewMonitorPreviewContent {
         let lifecycle: PreviewChatLifecycle
         let targetSummary: String
         let summary: String
-        let lastAgentMessage: String
+        let initialMessage: String
         let model: String
         let startedOffset: TimeInterval?
         let endedOffset: TimeInterval?
@@ -30,7 +30,7 @@ public enum ReviewMonitorPreviewContent {
         let cwd: String
         let targetSummary: String
         let summary: String
-        let lastAgentMessage: String
+        let initialMessage: String
         let model: String
         let lifecycle: PreviewChatLifecycle
         let startedAt: Date?
@@ -194,7 +194,7 @@ public enum ReviewMonitorPreviewContent {
             cwd: cwd,
             targetSummary: "Command output panel",
             summary: "A command output block is collapsed by default.",
-            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
+            initialMessage: "Opened command output should stay bounded to a short embedded scroll view.",
             model: "gpt-5.4",
             lifecycle: .running,
             startedAt: now.addingTimeInterval(-135),
@@ -617,7 +617,7 @@ public enum ReviewMonitorPreviewContent {
                     cwd: cwd,
                     targetSummary: definition.targetSummary,
                     summary: definition.summary,
-                    lastAgentMessage: definition.lastAgentMessage,
+                    initialMessage: definition.initialMessage,
                     model: definition.model,
                     lifecycle: definition.lifecycle,
                     startedAt: definition.startedOffset.map { now.addingTimeInterval($0) },
@@ -642,7 +642,7 @@ public enum ReviewMonitorPreviewContent {
             rowID: .chat(chatFixture.chatID),
             id: chatFixture.chatID,
             title: chatFixture.targetSummary,
-            preview: chatFixture.lastAgentMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
+            preview: chatFixture.initialMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
             model: chatFixture.model,
             workspaceCWD: chatFixture.cwd,
             updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
@@ -850,7 +850,7 @@ public enum ReviewMonitorPreviewContent {
                     message: definition.summary
                 ),
                 messageItem(
-                    "failed-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
+                    "failed-message-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
             ]
         case .cancelled:
             return [
@@ -865,7 +865,7 @@ public enum ReviewMonitorPreviewContent {
                     message: definition.summary
                 ),
                 messageItem(
-                    "cancelled-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
+                    "cancelled-message-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
             ]
         case .succeeded:
             let commandName = "preview-complete-command-\(workspaceName)-\(definition.targetSummary)"
@@ -894,7 +894,7 @@ public enum ReviewMonitorPreviewContent {
                     text: definition.summary
                 ),
                 messageItem(
-                    "complete-message-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
+                    "complete-message-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
             ]
         }
     }
@@ -962,7 +962,7 @@ public enum ReviewMonitorPreviewContent {
                     "I am comparing the current UI state with the streaming log updates before changing the finder integration."
             ),
             messageItem(
-                "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)", text: definition.lastAgentMessage),
+                "preview-initial-agent-\(workspaceName)-\(definition.targetSummary)", text: definition.initialMessage),
         ]
     }
 
@@ -972,7 +972,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .running,
                 targetSummary: "Branch: feature/\(workspaceName.lowercased())-sidebar",
                 summary: "Review is streaming updates from the embedded server.",
-                lastAgentMessage: "Inspecting recent sidebar changes and collecting render timings.",
+                initialMessage: "Inspecting recent sidebar changes and collecting render timings.",
                 model: "gpt-5.4",
                 startedOffset: -420,
                 endedOffset: nil
@@ -981,7 +981,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .running,
                 targetSummary: "Uncommitted changes",
                 summary: "The working tree review is still in progress.",
-                lastAgentMessage: "Comparing row reuse behavior across the latest local edits.",
+                initialMessage: "Comparing row reuse behavior across the latest local edits.",
                 model: "gpt-5.4-mini",
                 startedOffset: -135,
                 endedOffset: nil
@@ -990,7 +990,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .queued,
                 targetSummary: "Base branch: main",
                 summary: "Queued behind another active review in this workspace.",
-                lastAgentMessage: "Waiting for an available backend slot.",
+                initialMessage: "Waiting for an available backend slot.",
                 model: "gpt-5.3-codex",
                 startedOffset: nil,
                 endedOffset: nil
@@ -999,7 +999,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .succeeded,
                 targetSummary: "Commit: abc1234",
                 summary: "Review completed without correctness findings.",
-                lastAgentMessage: "No correctness issues found in the touched files.",
+                initialMessage: "No correctness issues found in the touched files.",
                 model: "gpt-5.4",
                 startedOffset: -1_500,
                 endedOffset: -1_260
@@ -1008,7 +1008,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .failed,
                 targetSummary: "Custom: investigate CI flake",
                 summary: "The review stopped after the test command failed.",
-                lastAgentMessage: "Build failed before the model could finish evaluating the patch.",
+                initialMessage: "Build failed before the model could finish evaluating the patch.",
                 model: "gpt-5.3-codex",
                 startedOffset: -2_400,
                 endedOffset: -2_190
@@ -1017,7 +1017,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .cancelled,
                 targetSummary: "Branch: feature/\(workspaceName.lowercased())-transport",
                 summary: "Cancellation was requested after initial diagnostics completed.",
-                lastAgentMessage: "Stopped after the first pass to free the session for a retry.",
+                initialMessage: "Stopped after the first pass to free the session for a retry.",
                 model: "gpt-5.4-mini",
                 startedOffset: -960,
                 endedOffset: -840
@@ -1026,7 +1026,7 @@ public enum ReviewMonitorPreviewContent {
                 lifecycle: .succeeded,
                 targetSummary: "Commit: def5678",
                 summary: "Review suggested a small cleanup in the sidebar row renderer.",
-                lastAgentMessage: "Suggested simplifying duplicated state handling in the row view.",
+                initialMessage: "Suggested simplifying duplicated state handling in the row view.",
                 model: "gpt-5.4",
                 startedOffset: -5_400,
                 endedOffset: -5_040
