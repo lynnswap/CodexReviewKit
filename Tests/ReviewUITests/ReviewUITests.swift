@@ -1183,21 +1183,19 @@ struct ReviewUITests {
     }
 
     @Test func selectedChatFileChangePreservesPanelTitle() async throws {
-        let job = ReviewRunRecord.makeForTesting(
-            id: "job-selected-chat-file-change",
+        let chat = makeReviewChatFixtureForTesting(
+            id: "chat-selected-chat-file-change",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
+            turnID: CodexTurnID(rawValue: "turn-selected-chat-file-change"),
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: []
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1207,15 +1205,14 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
 
         appendChatLogEntryForTesting(
-            job,
             .init(
                 kind: .fileChange,
                 groupID: "file-change-direct",
@@ -1224,9 +1221,12 @@ struct ReviewUITests {
                     title: "Updated Sources/App.swift",
                     commandStatus: "completed"
                 )
-            ))
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
 
-        let snapshot = try await awaitChatRenderForTesting(job, in: transport) {
+        let snapshot = try await awaitChatRenderForTesting(chat, in: transport) {
             $0.log.contains("Updated Sources/App.swift")
         }
         #expect(snapshot.log.contains("Updated Sources/App.swift"))
@@ -1234,7 +1234,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Sources/App.swift | 12") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = chatCommandOutputBlockIDForTesting(job, itemID: "file-change-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "file-change-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
@@ -1245,15 +1245,13 @@ struct ReviewUITests {
     }
 
     @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
-        let job = ReviewRunRecord.makeForTesting(
-            id: "job-context-compaction-marker",
+        let chat = makeReviewChatFixtureForTesting(
+            id: "chat-context-compaction-marker",
             cwd: "/tmp/workspace-alpha",
-            targetSummary: "Uncommitted changes",
-            threadID: UUID().uuidString,
-            turnID: UUID().uuidString,
+            title: "Uncommitted changes",
+            turnID: CodexTurnID(rawValue: "turn-context-compaction-marker"),
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
             chatEntries: [
                 .init(
                     kind: .contextCompaction,
@@ -1271,7 +1269,7 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [job])
+            fixtures: [chat]
         )
         let backend = makeWindowHarness(
             store: store,
@@ -1281,10 +1279,10 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: job.previewChatIDForTesting)
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         _ = try await awaitChatRenderForTesting(
-            job,
+            chat,
             in: transport,
             allowIncrementalUpdate: false
         )
@@ -1293,7 +1291,6 @@ struct ReviewUITests {
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
 
         appendChatLogEntryForTesting(
-            job,
             .init(
                 kind: .contextCompaction,
                 groupID: "compact_1",
@@ -1304,8 +1301,11 @@ struct ReviewUITests {
                     status: "completed",
                     itemID: "compact_1"
                 )
-            ))
-        _ = try await awaitChatRenderForTesting(job, in: transport)
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        _ = try await awaitChatRenderForTesting(chat, in: transport)
 
         #expect(transport.displayedLogForTesting == "Context automatically compacted")
         #expect(transport.displayedLogForTesting.contains("Automatically compacting context") == false)
