@@ -812,12 +812,12 @@ struct ReviewUITests {
     }
 
     @Test func reviewChatsPresentOnInitialLoadStayUnselected() {
-        let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes")
-        let recentJob = makeJob(status: .succeeded, targetSummary: "Commit: abc123")
+        let activeChat = makeReviewChatFixtureForTesting(title: "Uncommitted changes", status: .running)
+        let recentChat = makeReviewChatFixtureForTesting(title: "Commit: abc123", status: .succeeded)
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [activeJob, recentJob])
+            fixtures: [activeChat, recentChat]
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -849,17 +849,21 @@ struct ReviewUITests {
     }
 
     @Test func selectingReviewChatUpdatesDetailPane() async throws {
-        let activeJob = makeJob(status: .running, targetSummary: "Uncommitted changes", logText: "Running review\n")
-        let recentJob = makeJob(
+        let activeChat = makeReviewChatFixtureForTesting(
+            title: "Uncommitted changes",
+            status: .running,
+            chatEntries: [.init(kind: .agentMessage, text: "Running review")]
+        )
+        let recentChat = makeReviewChatFixtureForTesting(
+            title: "Commit: abc123",
+            preview: "MCP server codex_review ready.",
             status: .succeeded,
-            targetSummary: "Commit: abc123",
-            summary: "MCP server codex_review ready.",
-            logText: "Findings ready\n"
+            chatEntries: [.init(kind: .agentMessage, text: "Findings ready")]
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            content: makeSidebarContent(from: [activeJob, recentJob])
+            fixtures: [activeChat, recentChat]
         )
         let backend = makeWindowHarness(store: store)
         let viewController = backend.viewController
@@ -867,25 +871,20 @@ struct ReviewUITests {
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: recentJob.reviewChatSelectionForTesting
+            chat: recentChat.chat
         )
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
-            recentJob,
+            recentChat,
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(
-            selectedSnapshot
-                == .init(
-                    title: nil,
-                    summary: nil,
-                    log: reviewChatLogText(for: recentJob),
-                    isShowingEmptyState: false
-                )
-        )
-        #expect(window.title == recentJob.targetSummary)
-        #expect(window.subtitle == recentJob.cwd)
+        #expect(selectedSnapshot.title == nil)
+        #expect(selectedSnapshot.summary == nil)
+        #expect(selectedSnapshot.log == reviewChatLogText(for: recentChat))
+        #expect(selectedSnapshot.isShowingEmptyState == false)
+        #expect(window.title == recentChat.chat.title)
+        #expect(window.subtitle == recentChat.cwd)
         #expect(transport.logUsesFindBarForTesting)
         #expect(transport.logIsIncrementalSearchingEnabledForTesting)
         #expect(transport.logFindBarVisibleForTesting == false)
@@ -895,12 +894,19 @@ struct ReviewUITests {
         viewController.performTextFinderAction(findItem)
         #expect(transport.logFindBarVisibleForTesting)
 
-        activeJob.updateStateForTesting(summary: "Old selection should not render.")
-        replaceChatLogTextForTesting(activeJob, "Old selection log")
+        replaceChatLogTextForTesting(
+            "Old selection log",
+            for: activeChat.chatID,
+            fixtureID: activeChat.id,
+            turnID: activeChat.turnID
+        )
         appendChatLogEntryForTesting(
-            recentJob, .init(kind: .progress, text: "Current selection log after stale mutation"))
+            .init(kind: .progress, text: "Current selection log after stale mutation"),
+            to: recentChat.chatID,
+            turnID: recentChat.turnID
+        )
 
-        let updatedSnapshot = try await awaitChatRenderForTesting(recentJob, in: transport) { snapshot in
+        let updatedSnapshot = try await awaitChatRenderForTesting(recentChat, in: transport) { snapshot in
             snapshot.log.contains("Current selection log after stale mutation")
         }
         #expect(updatedSnapshot.log.contains("Old selection log") == false)
@@ -5159,6 +5165,24 @@ func testAuthState(from auth: CodexReviewAuthModel) -> TestAuthState {
 
 @MainActor
 extension CodexReviewStore {
+    func loadForTesting(
+        serverState: CodexReviewServerState,
+        authState: TestAuthState = .signedOut,
+        serverURL: URL? = nil,
+        fixtures: [ReviewChatFixtureForTesting],
+        settingsSnapshot: CodexReviewSettings.Snapshot? = nil
+    ) {
+        loadForTesting(
+            serverState: serverState,
+            authState: authState,
+            serverURL: serverURL,
+            workspaces: [],
+            reviewRuns: [],
+            settingsSnapshot: settingsSnapshot
+        )
+        installPreviewChatLogSourceForTesting(on: self, fixtures: fixtures)
+    }
+
     func loadForTesting(
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,

@@ -303,11 +303,37 @@ func reviewChatLogText(for run: ReviewRunRecord) -> String {
 }
 
 @MainActor
+func reviewChatLogText(for fixture: ReviewChatFixtureForTesting) -> String {
+    reviewChatLogText(
+        for: codexChatSnapshotForTesting(fixture),
+        chatUpdatedAt: fixture.chat.updatedAt
+    )
+}
+
+@MainActor
 func reviewChatLogText(
     for snapshot: CodexChatSnapshot,
     chatUpdatedAt: Date? = nil
 ) -> String {
     ReviewChatLogFixtureStore.logText(for: snapshot, chatUpdatedAt: chatUpdatedAt)
+}
+
+@MainActor
+func awaitChatRenderForTesting(
+    _ fixture: ReviewChatFixtureForTesting,
+    in transport: ReviewMonitorTransportViewController,
+    allowIncrementalUpdate: Bool = true,
+    timeout: Duration = .seconds(2),
+    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    try await awaitChatRenderForTesting(
+        chatID: fixture.chatID,
+        expectedLog: reviewChatLogText(for: fixture),
+        in: transport,
+        allowIncrementalUpdate: allowIncrementalUpdate,
+        timeout: timeout,
+        matching: predicate
+    )
 }
 
 @MainActor
@@ -509,6 +535,16 @@ private func makePreviewChatLogFixtureForTesting(
         streamID: fixture.streamID,
         isRunning: fixture.isRunning,
         initialSnapshot: initialSnapshot
+    )
+}
+
+@MainActor
+func codexChatSnapshotForTesting(_ fixture: ReviewChatFixtureForTesting) -> CodexChatSnapshot {
+    makeCodexChatSnapshotForTesting(
+        chatID: fixture.chatID,
+        phase: fixture.initialSnapshot.phase,
+        turns: fixture.initialSnapshot.turns,
+        items: ReviewChatLogFixtureStore.items(for: fixture.chatID, turnID: fixture.turnID)
     )
 }
 
