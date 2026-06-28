@@ -25,14 +25,6 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         core.isTerminal
     }
 
-    public var displayTitle: String {
-        targetSummary
-    }
-
-    public var reviewText: String {
-        core.reviewText
-    }
-
     package init(
         id: String,
         sessionID: String,

@@ -2,56 +2,52 @@ import Foundation
 import Testing
 @testable import CodexReviewKit
 
-@Suite("Review run record")
+@Suite("Review run core")
 @MainActor
-struct ReviewRunRecordTests {
-    @Test func prebuiltTerminalRunsKeepCoreTerminalState() {
-        let succeeded = ReviewRunRecord.makeForTesting(
-            id: "run-terminal-succeeded",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .succeeded,
-            summary: "Succeeded.",
-            lastAgentMessage: "No findings."
+struct ReviewRunCoreTests {
+    @Test func reviewTextReflectsTerminalCoreState() {
+        let succeeded = ReviewRunCore(
+            lifecycle: .init(status: .succeeded),
+            output: .init(
+                summary: "Succeeded.",
+                lastAgentMessage: "No findings."
+            )
         )
-        #expect(succeeded.core.lifecycle.status == .succeeded)
-        #expect(succeeded.core.output.summary == "Succeeded.")
-        #expect(succeeded.core.reviewText == "No findings.")
+        #expect(succeeded.lifecycle.status == .succeeded)
+        #expect(succeeded.output.summary == "Succeeded.")
+        #expect(succeeded.reviewText == "No findings.")
 
-        let succeededWithoutFinalReview = ReviewRunRecord.makeForTesting(
-            id: "run-terminal-succeeded-no-review",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .succeeded,
-            summary: "Succeeded.",
-            lastAgentMessage: "Succeeded."
+        let succeededWithoutFinalReview = ReviewRunCore(
+            lifecycle: .init(status: .succeeded),
+            output: .init(
+                summary: "Succeeded.",
+                lastAgentMessage: "Succeeded."
+            )
         )
-        #expect(succeededWithoutFinalReview.core.lifecycle.status == .succeeded)
-        #expect(succeededWithoutFinalReview.core.output.summary == "Succeeded.")
-        #expect(succeededWithoutFinalReview.core.reviewText == "Succeeded.")
+        #expect(succeededWithoutFinalReview.lifecycle.status == .succeeded)
+        #expect(succeededWithoutFinalReview.output.summary == "Succeeded.")
+        #expect(succeededWithoutFinalReview.reviewText == "Succeeded.")
 
-        let failed = ReviewRunRecord.makeForTesting(
-            id: "run-terminal-failed",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .failed,
-            summary: "Failed.",
-            errorMessage: "Backend failed."
+        let failed = ReviewRunCore(
+            lifecycle: .init(
+                status: .failed,
+                errorMessage: "Backend failed."
+            ),
+            output: .init(summary: "Failed.")
         )
-        #expect(failed.core.lifecycle.status == .failed)
-        #expect(failed.core.lifecycle.errorMessage == "Backend failed.")
-        #expect(failed.core.reviewText == "Backend failed.")
+        #expect(failed.lifecycle.status == .failed)
+        #expect(failed.lifecycle.errorMessage == "Backend failed.")
+        #expect(failed.reviewText == "Backend failed.")
 
-        let cancelled = ReviewRunRecord.makeForTesting(
-            id: "run-terminal-cancelled",
-            cwd: "/tmp/workspace",
-            targetSummary: "Uncommitted changes",
-            status: .cancelled,
-            cancellation: .mcpClient(message: "Session closed."),
-            summary: "Cancelled."
+        let cancelled = ReviewRunCore(
+            lifecycle: .init(
+                status: .cancelled,
+                cancellation: .mcpClient(message: "Session closed.")
+            ),
+            output: .init(summary: "Cancelled.")
         )
-        #expect(cancelled.core.lifecycle.status == .cancelled)
-        #expect(cancelled.core.lifecycle.cancellation?.message == "Session closed.")
-        #expect(cancelled.core.reviewText == "Cancelled.")
+        #expect(cancelled.lifecycle.status == .cancelled)
+        #expect(cancelled.lifecycle.cancellation?.message == "Session closed.")
+        #expect(cancelled.reviewText == "Cancelled.")
     }
 }
