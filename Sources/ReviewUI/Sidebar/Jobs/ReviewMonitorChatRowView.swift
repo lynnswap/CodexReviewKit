@@ -1,24 +1,6 @@
 import Foundation
 import SwiftUI
 
-struct ReviewMonitorSidebarReviewChatOperation: Equatable {
-    var jobID: String
-    var sessionID: String
-    var cwd: String
-}
-
-struct ReviewMonitorSidebarReviewChatRuntime: Equatable {
-    var operation: ReviewMonitorSidebarReviewChatOperation
-    var fallbackTitle: String
-    var fallbackSubtitle: String?
-    var model: String?
-    var startedAt: Date?
-    var endedAt: Date?
-    var isRunning: Bool
-    var isTerminal: Bool
-    var cancellationRequested: Bool
-}
-
 struct ReviewMonitorSidebarChatRow: Equatable {
     var id: String
     var title: String
@@ -46,21 +28,6 @@ struct ReviewMonitorSidebarChatRow: Equatable {
         self.isRunning = isRunning
     }
 
-    init(
-        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
-        runtime: ReviewMonitorSidebarReviewChatRuntime
-    ) {
-        self.init(
-            id: chat?.id.rawValue ?? runtime.operation.jobID,
-            title: chat?.title.trimmedNonEmpty ?? runtime.fallbackTitle,
-            model: runtime.model,
-            subtitle: chat?.preview?.trimmedNonEmpty ?? runtime.fallbackSubtitle,
-            startedAt: runtime.startedAt,
-            endedAt: runtime.endedAt,
-            isRunning: runtime.isRunning
-        )
-    }
-
     init(chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
         self.init(
             id: chat.id.rawValue,
@@ -74,38 +41,7 @@ struct ReviewMonitorSidebarChatRow: Equatable {
     }
 }
 
-@MainActor
-final class ReviewMonitorSidebarReviewChatRow {
-    private(set) var operation: ReviewMonitorSidebarReviewChatOperation
-    private(set) var chat: ReviewMonitorCodexSidebarSnapshot.Chat?
-    private(set) var presentation: ReviewMonitorSidebarChatRow
-    private(set) var isTerminal: Bool
-    private(set) var cancellationRequested: Bool
-
-    init(
-        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
-        runtime: ReviewMonitorSidebarReviewChatRuntime
-    ) {
-        self.operation = runtime.operation
-        self.chat = chat
-        self.presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
-        self.isTerminal = runtime.isTerminal
-        self.cancellationRequested = runtime.cancellationRequested
-    }
-
-    func update(
-        chat: ReviewMonitorCodexSidebarSnapshot.Chat?,
-        runtime: ReviewMonitorSidebarReviewChatRuntime
-    ) {
-        operation = runtime.operation
-        self.chat = chat
-        presentation = ReviewMonitorSidebarChatRow(chat: chat, runtime: runtime)
-        isTerminal = runtime.isTerminal
-        cancellationRequested = runtime.cancellationRequested
-    }
-}
-
-struct ReviewMonitorChatRowView: View {
+struct ReviewMonitorChatRowContentView: View {
     var row: ReviewMonitorSidebarChatRow
 
     var body: some View {
@@ -151,6 +87,23 @@ struct ReviewMonitorChatRowView: View {
     }
 }
 
+struct ReviewMonitorChatRowView: View {
+    var node: ReviewMonitorCodexSidebarOutlineNode
+
+    var row: ReviewMonitorSidebarChatRow? {
+        guard case .chat(let chat) = node.item else {
+            return nil
+        }
+        return ReviewMonitorSidebarChatRow(chat: chat)
+    }
+
+    var body: some View {
+        if let row {
+            ReviewMonitorChatRowContentView(row: row)
+        }
+    }
+}
+
 struct ReviewMonitorChatRowTimerLabel: View {
     var row: ReviewMonitorSidebarChatRow
 
@@ -168,41 +121,41 @@ struct ReviewMonitorChatRowTimerLabel: View {
 }
 
 #if DEBUG
-#Preview {
-    NavigationSplitView {
-        List {
-            Section("workspace-alpha") {
-                ReviewMonitorChatRowView(
-                    row: ReviewMonitorSidebarChatRow(
-                        id: "preview-running",
-                        title: "Uncommitted changes",
-                        model: "gpt-5.5",
-                        subtitle: "Inspecting recent changes",
-                        startedAt: Date(timeIntervalSinceNow: -640),
-                        endedAt: nil,
-                        isRunning: true
+    #Preview {
+        NavigationSplitView {
+            List {
+                Section("workspace-alpha") {
+                    ReviewMonitorChatRowContentView(
+                        row: ReviewMonitorSidebarChatRow(
+                            id: "preview-running",
+                            title: "Uncommitted changes",
+                            model: "gpt-5.5",
+                            subtitle: "Inspecting recent changes",
+                            startedAt: Date(timeIntervalSinceNow: -640),
+                            endedAt: nil,
+                            isRunning: true
+                        )
                     )
-                )
-                ReviewMonitorChatRowView(
-                    row: ReviewMonitorSidebarChatRow(
-                        id: "preview-completed",
-                        title: "Base branch: main",
-                        model: "gpt-5.5-codex",
-                        subtitle: "No findings",
-                        startedAt: Date(timeIntervalSinceNow: -3_600),
-                        endedAt: Date(timeIntervalSinceNow: -2_900),
-                        isRunning: false
+                    ReviewMonitorChatRowContentView(
+                        row: ReviewMonitorSidebarChatRow(
+                            id: "preview-completed",
+                            title: "Base branch: main",
+                            model: "gpt-5.5-codex",
+                            subtitle: "No findings",
+                            startedAt: Date(timeIntervalSinceNow: -3_600),
+                            endedAt: Date(timeIntervalSinceNow: -2_900),
+                            isRunning: false
+                        )
                     )
-                )
+                }
+            }
+            .frame(minWidth: 320)
+        } detail: {
+            ContentUnavailableView {
+                Text(verbatim: "Preview")
             }
         }
-        .frame(minWidth: 320)
-    } detail: {
-        ContentUnavailableView {
-            Text(verbatim: "Preview")
-        }
     }
-}
 #endif
 
 private extension String {

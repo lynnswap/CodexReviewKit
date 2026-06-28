@@ -1,6 +1,7 @@
 import CodexKit
 import CodexReviewKit
 import Foundation
+import Observation
 
 package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringConvertible {
     package var rawValue: String
@@ -42,7 +43,7 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             var workspaceCWDs = workspaces.map(\.cwd)
             for chat in uncategorizedChats {
                 guard let cwd = chat.workspaceCWD,
-                      workspaceCWDs.contains(cwd) == false
+                    workspaceCWDs.contains(cwd) == false
                 else {
                     continue
                 }
@@ -165,7 +166,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
 
         return ReviewMonitorCodexSidebarSnapshot(
             sections: sections.map { section in
-                let latestFinishedChatID = filter.contains(.latestFinished)
+                let latestFinishedChatID =
+                    filter.contains(.latestFinished)
                     ? Self.latestFinishedChat(in: section.allChats)?.id
                     : nil
                 return Section(
@@ -339,7 +341,7 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
         ids.removeAll { $0 == id }
         let insertionIndex: Int
         if let targetID,
-           let targetIndex = ids.firstIndex(of: targetID)
+            let targetIndex = ids.firstIndex(of: targetID)
         {
             insertionIndex = targetIndex
         } else {
@@ -418,17 +420,32 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
 
 @MainActor
 final class ReviewMonitorCodexSidebarOutlineTree {
+    struct ApplyResult: Equatable {
+        var topologyChanged: Bool
+    }
+
     private var nodesByRowID: [ReviewMonitorCodexSidebarRowID: ReviewMonitorCodexSidebarOutlineNode] = [:]
     private(set) var roots: [ReviewMonitorCodexSidebarOutlineNode] = []
 
-    func apply(snapshot: ReviewMonitorCodexSidebarSnapshot) {
+    func apply(snapshot: ReviewMonitorCodexSidebarSnapshot) -> ApplyResult {
+        let oldTopology = topology
         var activeRowIDs: Set<ReviewMonitorCodexSidebarRowID> = []
         roots = snapshot.outlineItems.map { node(for: $0, activeRowIDs: &activeRowIDs) }
         nodesByRowID = nodesByRowID.filter { activeRowIDs.contains($0.key) }
+        return ApplyResult(topologyChanged: topology != oldTopology)
     }
 
     func node(rowID: ReviewMonitorCodexSidebarRowID) -> ReviewMonitorCodexSidebarOutlineNode? {
         nodesByRowID[rowID]
+    }
+
+    private var topology: ReviewMonitorCodexSidebarOutlineTopology {
+        ReviewMonitorCodexSidebarOutlineTopology(
+            roots: roots.map(\.rowID),
+            childrenByRowID: nodesByRowID.mapValues { node in
+                node.children.map(\.rowID)
+            }
+        )
     }
 
     private func node(
@@ -438,20 +455,32 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         activeRowIDs.insert(item.rowID)
         let node = nodesByRowID[item.rowID] ?? ReviewMonitorCodexSidebarOutlineNode(item: item)
         nodesByRowID[item.rowID] = node
-        node.item = item
-        node.children = item.children.map { child in
+        if node.item != item {
+            node.item = item
+        }
+        let children = item.children.map { child in
             self.node(for: child, activeRowIDs: &activeRowIDs)
+        }
+        if node.children.map(\.rowID) != children.map(\.rowID) {
+            node.children = children
         }
         return node
     }
 }
 
 @MainActor
+private struct ReviewMonitorCodexSidebarOutlineTopology: Equatable {
+    var roots: [ReviewMonitorCodexSidebarRowID]
+    var childrenByRowID: [ReviewMonitorCodexSidebarRowID: [ReviewMonitorCodexSidebarRowID]]
+}
+
+@MainActor
+@Observable
 final class ReviewMonitorCodexSidebarOutlineNode {
     fileprivate(set) var item: ReviewMonitorCodexSidebarOutlineItem
     fileprivate(set) var children: [ReviewMonitorCodexSidebarOutlineNode] = []
 
-    fileprivate init(item: ReviewMonitorCodexSidebarOutlineItem) {
+    init(item: ReviewMonitorCodexSidebarOutlineItem) {
         self.item = item
     }
 
@@ -583,10 +612,11 @@ package final class ReviewMonitorCodexSidebarLibrary {
                     workspaces[index].chats.append(chat)
                 } else {
                     workspaceIndexesByID[workspace.id] = workspaces.count
-                    workspaces.append(ReviewMonitorCodexSidebarWorkspace(
-                        workspace: workspace,
-                        chats: [chat]
-                    ))
+                    workspaces.append(
+                        ReviewMonitorCodexSidebarWorkspace(
+                            workspace: workspace,
+                            chats: [chat]
+                        ))
                 }
             }
 

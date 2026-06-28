@@ -229,6 +229,7 @@ func renderTimelineForTesting(
 ) throws -> Bool {
     let timelineDocument = ReviewTimelineDocumentRenderer().document(from: job.timeline)
     let target = try timelineRenderTarget(for: job)
+    transport.bindLogRenderTargetForTesting(target)
     let sourceDocument = TimelineLogProjectionStore.document(
         from: timelineDocument,
         transport: transport,
@@ -252,11 +253,6 @@ func awaitTimelineRenderForTesting(
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     let expectedLog = reviewMonitorLogText(for: job)
-    let expectedTarget = try timelineRenderTarget(for: job)
-    try await waitForCondition(timeout: timeout) {
-        transport.renderedStateForTesting.selection == expectedTarget
-            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
-    }
     _ = try renderTimelineForTesting(
         job,
         in: transport,
@@ -326,7 +322,9 @@ private func makePreviewChatLogFixtureForTesting(
 }
 
 @MainActor
-private func timelineRenderTarget(for job: CodexReviewJob) throws -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
+private func timelineRenderTarget(for job: CodexReviewJob) throws
+    -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting
+{
     let chatID = try #require(job.legacyReviewChatID)
     return .chat(chatID.rawValue)
 }

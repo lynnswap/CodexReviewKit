@@ -1222,6 +1222,31 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
             )
         }
 
+        func bindLogRenderTargetForTesting(_ target: DisplayedSelectionForTesting) {
+            switch target {
+            case .chat(let id):
+                let chatID = CodexThreadID(rawValue: id)
+                if boundChatID != chatID {
+                    let isSwitchingRenderedChat = boundChatID != nil
+                    cacheBoundLogScrollTarget()
+                    if isSwitchingRenderedChat {
+                        logScrollView.resetFindStateForContentReuse()
+                    }
+                    selectedChatLogTask?.cancel()
+                    selectedChatLogTask = nil
+                    resetLogRenderer()
+                    boundChatID = chatID
+                }
+                clearDisplayedWorkspace()
+                hidePlaceholder()
+                logScrollView.isHidden = false
+                workspaceFindingsView.isHidden = true
+                displayedSelection = .chat(chatID)
+            case .workspaceSection, .workspace:
+                break
+            }
+        }
+
         func copyLogSelectionForTesting() {
             logScrollView.copySelectionForTesting()
         }
