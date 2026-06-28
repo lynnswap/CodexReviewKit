@@ -5,7 +5,7 @@ import Observation
 @Observable
 public final class CodexReviewJob: Identifiable, Hashable {
     public nonisolated let id: String
-    public let timeline: ReviewTimeline
+    package let timeline: ReviewTimeline
     public let sessionID: String
     public let cwd: String
     public internal(set) var sortOrder: Double
