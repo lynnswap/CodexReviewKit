@@ -364,12 +364,11 @@ public final class CodexReviewStore {
             return
         }
         let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Job] = orderedReviewRuns.map { job in
-            let timelineTextSnapshot = job.timeline.textSnapshot
             return CodexReviewStoreDiagnosticsSnapshot.Job(
                 status: job.core.lifecycle.status.rawValue,
                 summary: job.core.output.summary,
-                timelineText: timelineTextSnapshot.timelineText,
-                rawTimelineText: timelineTextSnapshot.rawTimelineText
+                timelineText: job.core.reviewText,
+                rawTimelineText: job.core.reviewText
             )
         }
         let snapshot = CodexReviewStoreDiagnosticsSnapshot(

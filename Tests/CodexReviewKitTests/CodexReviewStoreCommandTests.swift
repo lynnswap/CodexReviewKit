@@ -240,14 +240,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.output.lastAgentMessage == "second")
             #expect(read.core.reviewText == "second")
-            let job = try #require(store.reviewRun(id: "job-1"))
-            let messages = job.timeline.items.compactMap { item -> String? in
-                guard case .message(let message) = item.content else {
-                    return nil
-                }
-                return message.text
-            }
-            #expect(messages == ["first", "second"])
+            #expect(store.reviewRun(id: "job-1")?.core.output.lastAgentMessage == "second")
         }
     }
 

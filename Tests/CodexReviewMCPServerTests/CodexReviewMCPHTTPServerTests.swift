@@ -249,7 +249,8 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String == "Done")
+                awaited.value(for: ["result", "structuredContent", "timeline", "terminalSummary"]) as? String
+                    == "Done")
             #expect(
                 awaited.value(for: ["result", "structuredContent", "timeline", "terminalResult"]) as? String
                     == "review text")
@@ -420,17 +421,6 @@ struct CodexReviewMCPHTTPServerTests {
                 hasFinalReview: true,
                 lastAgentMessage: "No correctness issues found."
             )
-            includedJob.timeline.apply(
-                .itemCompleted(
-                    .init(
-                        id: "cmd-1",
-                        kind: .commandExecution,
-                        family: .command,
-                        phase: .completed,
-                        content: .command(.init(command: "swift test", output: "Tests passed", status: .completed))
-                    )),
-                at: Date()
-            )
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
@@ -495,8 +485,6 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let startedAt = Date(timeIntervalSince1970: 20)
-            let completedAt = Date(timeIntervalSince1970: 23)
             let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
             let job = ReviewRunRecord.makeForTesting(
                 id: "job-semantic",
@@ -504,26 +492,10 @@ struct CodexReviewMCPHTTPServerTests {
                 cwd: "/tmp/project",
                 targetSummary: "Included",
                 status: .succeeded,
-                summary: "Done"
+                summary: "Done",
+                hasFinalReview: true,
+                lastAgentMessage: longOutput
             )
-            job.timeline.apply(
-                .itemCompleted(
-                    .init(
-                        id: "cmd-1",
-                        kind: .commandExecution,
-                        family: .command,
-                        phase: .completed,
-                        content: .command(
-                            .init(
-                                command: "swift test",
-                                cwd: "/tmp/project",
-                                output: longOutput,
-                                exitCode: 0
-                            )),
-                        startedAt: startedAt,
-                        completedAt: completedAt,
-                        durationMs: 3000
-                    )))
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
@@ -559,36 +531,29 @@ struct CodexReviewMCPHTTPServerTests {
 
             let timeline = try #require(
                 defaultResponse.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            #expect(timeline["orderedItemIds"] as? [String] == ["cmd-1"])
+            #expect(timeline["orderedItemIds"] as? [String] == ["job-semantic:message"])
             #expect(timeline["activeItemIds"] as? [String] == [])
             #expect(timeline["activeItemCount"] as? Int == 0)
-            #expect(timeline["latestActivityId"] as? String == "cmd-1")
+            #expect(timeline["latestActivityId"] as? String == "job-semantic:message")
             let itemsPage = try #require(timeline["itemsPage"] as? [String: Any])
             #expect(itemsPage["total"] as? Int == 1)
             #expect(itemsPage["limit"] as? Int == 1)
             #expect(itemsPage["returned"] as? Int == 1)
             let items = try #require(timeline["items"] as? [[String: Any]])
-            let commandItem = try #require(items.first)
-            #expect(commandItem["id"] as? String == "cmd-1")
-            #expect(commandItem["kind"] as? String == "commandExecution")
-            #expect(commandItem["family"] as? String == "command")
-            #expect(commandItem["phase"] as? String == "completed")
-            #expect(commandItem["isActive"] as? Bool == false)
-            #expect(commandItem["durationMs"] as? Int == 3000)
-            let content = try #require(commandItem["content"] as? [String: Any])
-            #expect(content["type"] as? String == "command")
-            #expect(content["command"] as? String == "swift test")
-            #expect(content["cwd"] as? String == "/tmp/project")
-            #expect(content["exitCode"] as? Int == 0)
-            let timelineOutput = try #require(content["output"] as? String)
+            let messageItem = try #require(items.first)
+            #expect(messageItem["id"] as? String == "job-semantic:message")
+            #expect(messageItem["kind"] as? String == "agentMessage")
+            let content = try #require(messageItem["content"] as? [String: Any])
+            #expect(content["type"] as? String == "message")
+            let timelineOutput = try #require(content["text"] as? String)
             #expect(timelineOutput.hasPrefix("Tests passed"))
             #expect(timelineOutput.hasSuffix("..."))
             #expect(timelineOutput.count < longOutput.count)
-            #expect(content["truncatedFields"] as? [String] == ["output"])
+            #expect(content["truncatedFields"] as? [String] == ["text"])
         }
     }
 
-    @Test func streamableHTTPReviewReadIncludesToolProgressInTimelineContent() async throws {
+    @Test func streamableHTTPReviewReadIncludesRunningSummaryInTimelineContent() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -604,21 +569,6 @@ struct CodexReviewMCPHTTPServerTests {
                 status: .running,
                 summary: "Running"
             )
-            job.timeline.apply(
-                .itemUpdated(
-                    .init(
-                        id: "tool-1:progress",
-                        kind: .mcpToolCall,
-                        family: .tool,
-                        phase: .running,
-                        content: .toolCall(
-                            .init(
-                                namespace: "mcp",
-                                server: "codex_review",
-                                tool: "review_read",
-                                progress: "Reading review job"
-                            ))
-                    )))
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
@@ -643,18 +593,15 @@ struct CodexReviewMCPHTTPServerTests {
 
             let timeline = try #require(
                 response.value(for: ["result", "structuredContent", "timeline"]) as? [String: Any])
-            #expect(timeline["activeItemIds"] as? [String] == ["tool-1:progress"])
+            #expect(timeline["activeItemIds"] as? [String] == ["job-tool-progress:summary"])
             #expect(timeline["activeItemCount"] as? Int == 1)
             let items = try #require(timeline["items"] as? [[String: Any]])
             let item = try #require(items.first)
-            #expect(item["id"] as? String == "tool-1:progress")
-            #expect(item["isActive"] as? Bool == true)
+            #expect(item["id"] as? String == "job-tool-progress:summary")
+            #expect(item["kind"] as? String == "diagnostic")
             let content = try #require(item["content"] as? [String: Any])
-            #expect(content["type"] as? String == "toolCall")
-            #expect(content["namespace"] as? String == "mcp")
-            #expect(content["server"] as? String == "codex_review")
-            #expect(content["tool"] as? String == "review_read")
-            #expect(content["progress"] as? String == "Reading review job")
+            #expect(content["type"] as? String == "diagnostic")
+            #expect(content["message"] as? String == "Running")
         }
     }
 

@@ -109,11 +109,11 @@ private extension ReviewMCPProjection {
     func structuredContent() -> Value {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
-            "revision": timelineRevision.rawValue.structuredRevisionValue(),
-            "orderedItemIds": .array(orderedItemIDs.map { .string($0.rawValue) }),
-            "activeItemIds": .array(activeItemIDs.map { .string($0.rawValue) }),
+            "revision": .string(revision),
+            "orderedItemIds": .array(orderedItemIDs.map(Value.string)),
+            "activeItemIds": .array(activeItemIDs.map(Value.string)),
             "activeItemCount": .int(activeItemCount),
-            "latestActivityId": latestActivityID.map { .string($0.rawValue) } ?? .null,
+            "latestActivityId": latestActivityID.map(Value.string) ?? .null,
             "terminalSummary": boundedTimelineString(
                 terminalSummary,
                 field: "terminalSummary",
@@ -135,11 +135,11 @@ private extension ReviewMCPProjection {
     func structuredContentWithItems() -> Value {
         var truncatedFields: [String] = []
         var object: [String: Value] = [
-            "revision": timelineRevision.rawValue.structuredRevisionValue(),
-            "orderedItemIds": .array(orderedItemIDs.map { .string($0.rawValue) }),
-            "activeItemIds": .array(activeItemIDs.map { .string($0.rawValue) }),
+            "revision": .string(revision),
+            "orderedItemIds": .array(orderedItemIDs.map(Value.string)),
+            "activeItemIds": .array(activeItemIDs.map(Value.string)),
             "activeItemCount": .int(activeItemCount),
-            "latestActivityId": latestActivityID.map { .string($0.rawValue) } ?? .null,
+            "latestActivityId": latestActivityID.map(Value.string) ?? .null,
             "terminalSummary": boundedTimelineString(
                 terminalSummary,
                 field: "terminalSummary",
@@ -171,17 +171,9 @@ private extension ReviewMCPProjection {
 private extension ReviewMCPProjection.Item {
     func structuredContent() -> Value {
         .object([
-            "id": .string(id.rawValue),
-            "kind": .string(kind.rawValue),
-            "family": .string(family.rawValue),
-            "phase": .string(phase.rawValue),
-            "isActive": .bool(isActive),
+            "id": .string(id),
+            "kind": .string(kind),
             "content": content.structuredContent(),
-            "createdAt": .string(createdAt.ISO8601Format()),
-            "updatedAt": .string(updatedAt.ISO8601Format()),
-            "startedAt": startedAt.map { .string($0.ISO8601Format()) } ?? .null,
-            "completedAt": completedAt.map { .string($0.ISO8601Format()) } ?? .null,
-            "durationMs": durationMs.map(Value.int) ?? .null,
         ])
     }
 }
@@ -189,185 +181,24 @@ private extension ReviewMCPProjection.Item {
 private extension ReviewMCPProjection.Content {
     func structuredContent() -> Value {
         switch self {
-        case .approval(let approval):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("approval"),
-                "title": boundedTimelineString(
-                    approval.title,
-                    field: "title",
-                    truncatedFields: &truncatedFields
-                ),
-                "detail": boundedTimelineString(
-                    approval.detail,
-                    field: "detail",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .command(let command):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("command"),
-                "command": boundedTimelineString(
-                    command.command,
-                    field: "command",
-                    truncatedFields: &truncatedFields
-                ),
-                "cwd": boundedTimelineString(
-                    command.cwd,
-                    field: "cwd",
-                    truncatedFields: &truncatedFields
-                ),
-                "output": boundedTimelineString(
-                    command.output,
-                    field: "output",
-                    truncatedFields: &truncatedFields
-                ),
-                "exitCode": command.exitCode.map(Value.int) ?? .null,
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .contextCompaction(let contextCompaction):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("contextCompaction"),
-                "title": boundedTimelineString(
-                    contextCompaction.title,
-                    field: "title",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .diagnostic(let diagnostic):
+        case .diagnostic(let message):
             var truncatedFields: [String] = []
             return .object([
                 "type": .string("diagnostic"),
                 "message": boundedTimelineString(
-                    diagnostic.message,
+                    message,
                     field: "message",
                     truncatedFields: &truncatedFields
                 ),
                 "truncatedFields": .array(truncatedFields.map(Value.string)),
             ])
-        case .fileChange(let fileChange):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("fileChange"),
-                "title": boundedTimelineString(
-                    fileChange.title,
-                    field: "title",
-                    truncatedFields: &truncatedFields
-                ),
-                "output": boundedTimelineString(
-                    fileChange.output,
-                    field: "output",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .message(let message):
+        case .message(let text):
             var truncatedFields: [String] = []
             return .object([
                 "type": .string("message"),
                 "text": boundedTimelineString(
-                    message.text,
+                    text,
                     field: "text",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .plan(let plan):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("plan"),
-                "markdown": boundedTimelineString(
-                    plan.markdown,
-                    field: "markdown",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .reasoning(let reasoning):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("reasoning"),
-                "text": boundedTimelineString(
-                    reasoning.text,
-                    field: "text",
-                    truncatedFields: &truncatedFields
-                ),
-                "style": .string(reasoning.style.rawValue),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .search(let search):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("search"),
-                "query": boundedTimelineString(
-                    search.query,
-                    field: "query",
-                    truncatedFields: &truncatedFields
-                ),
-                "result": boundedTimelineString(
-                    search.result,
-                    field: "result",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .toolCall(let toolCall):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("toolCall"),
-                "namespace": boundedTimelineString(
-                    toolCall.namespace,
-                    field: "namespace",
-                    truncatedFields: &truncatedFields
-                ),
-                "server": boundedTimelineString(
-                    toolCall.server,
-                    field: "server",
-                    truncatedFields: &truncatedFields
-                ),
-                "tool": boundedTimelineString(
-                    toolCall.tool,
-                    field: "tool",
-                    truncatedFields: &truncatedFields
-                ),
-                "arguments": boundedTimelineString(
-                    toolCall.arguments,
-                    field: "arguments",
-                    truncatedFields: &truncatedFields
-                ),
-                "progress": boundedTimelineString(
-                    toolCall.progress,
-                    field: "progress",
-                    truncatedFields: &truncatedFields
-                ),
-                "result": boundedTimelineString(
-                    toolCall.result,
-                    field: "result",
-                    truncatedFields: &truncatedFields
-                ),
-                "error": boundedTimelineString(
-                    toolCall.error,
-                    field: "error",
-                    truncatedFields: &truncatedFields
-                ),
-                "truncatedFields": .array(truncatedFields.map(Value.string)),
-            ])
-        case .unknown(let unknown):
-            var truncatedFields: [String] = []
-            return .object([
-                "type": .string("unknown"),
-                "title": boundedTimelineString(
-                    unknown.title,
-                    field: "title",
-                    truncatedFields: &truncatedFields
-                ),
-                "detail": boundedTimelineString(
-                    unknown.detail,
-                    field: "detail",
                     truncatedFields: &truncatedFields
                 ),
                 "truncatedFields": .array(truncatedFields.map(Value.string)),
@@ -468,15 +299,6 @@ private extension String {
         }
         let end = index(startIndex, offsetBy: limit)
         return (String(self[..<end]) + "...", true)
-    }
-}
-
-private extension UInt64 {
-    func structuredRevisionValue() -> Value {
-        if self <= UInt64(Int.max) {
-            return .int(Int(self))
-        }
-        return .string(String(self))
     }
 }
 

@@ -235,9 +235,7 @@ extension CodexReviewStore {
     }
 
     private func appendRecoveryProgress(_ message: String, to job: ReviewRunRecord) {
-        let now = clock.now()
         job.core.output.summary = message
-        appendDiagnostic(message, to: job, at: now)
         writeDiagnosticsIfNeeded()
     }
 
@@ -256,7 +254,6 @@ extension CodexReviewStore {
                 continue
             }
             updateCoreOutput(from: event, for: job)
-            job.timeline.apply(event, at: timestamp)
         }
     }
 
@@ -322,21 +319,17 @@ extension CodexReviewStore {
         at timestamp: Date
     ) {
         let resolvedItemID =
-            itemID?.nilIfEmpty.map(ReviewTimelineItem.ID.init(rawValue:))
-            ?? job.nextSyntheticTimelineItemID(prefix: "message")
-        let seed = ReviewTimelineItemSeed(
-            id: resolvedItemID,
-            kind: .agentMessage,
-            family: .message,
-            phase: isCompleted ? .completed : .running,
-            content: .message(.init(text: text))
-        )
+            itemID?.nilIfEmpty
+            ?? job.nextSyntheticMessageItemID(prefix: "message")
         job.noteAgentMessageSnapshot(
-            itemID: resolvedItemID.rawValue,
+            itemID: resolvedItemID,
             text: text,
             isCompleted: isCompleted
         )
-        job.timeline.apply(isCompleted ? .itemCompleted(seed) : .itemUpdated(seed), at: timestamp)
+        if let text = text.nilIfEmpty {
+            job.core.output.lastAgentMessage = text
+            job.core.output.summary = text
+        }
     }
 
     private func applyMessageDelta(
@@ -350,33 +343,6 @@ extension CodexReviewStore {
         }
         job.core.output.lastAgentMessage = updatedMessage
         job.core.output.summary = updatedMessage
-        job.timeline.apply(
-            .textDelta(
-                itemID: .init(rawValue: itemID),
-                kind: .agentMessage,
-                family: .message,
-                content: .message(.init(text: "")),
-                delta: text
-            ), at: timestamp)
-    }
-
-    private func appendDiagnostic(
-        _ message: String,
-        to job: ReviewRunRecord,
-        at timestamp: Date,
-        severity: ReviewDiagnosticSeverity? = nil
-    ) {
-        guard let message = message.nilIfEmpty else {
-            return
-        }
-        let seed = ReviewTimelineItemSeed(
-            id: job.nextSyntheticTimelineItemID(prefix: "diagnostic"),
-            kind: .init(rawValue: "reviewDiagnostic"),
-            family: .diagnostic,
-            phase: .completed,
-            content: .diagnostic(.init(message: message, severity: severity))
-        )
-        job.timeline.apply(.itemCompleted(seed), at: timestamp)
     }
 
     private func reviewWorkerInputs(for attempt: BackendReviewAttempt) async -> ReviewWorkerInputs {
@@ -668,12 +634,6 @@ extension CodexReviewStore {
         job.core.lifecycle.status = .running
         job.core.lifecycle.startedAt = startedAt
         job.core.output.summary = "Review started."
-        job.timeline.apply(
-            .runStarted(
-                turnID: .init(rawValue: job.core.run.turnID ?? job.id),
-                reviewThreadID: job.core.run.reviewThreadID.map(ReviewThread.ID.init(rawValue:)),
-                model: job.core.run.model
-            ), at: startedAt)
         writeDiagnosticsIfNeeded()
     }
 
@@ -682,12 +642,10 @@ extension CodexReviewStore {
             return
         }
         let endedAt = clock.now()
-        job.timeline.closeActiveItems(family: .command, phase: .failed, timestamp: endedAt)
         job.core.lifecycle.status = .failed
         job.core.lifecycle.endedAt = endedAt
         job.core.lifecycle.errorMessage = message
         job.core.output.summary = message
-        job.timeline.apply(.reviewFailed(message), at: endedAt)
         writeDiagnosticsIfNeeded()
     }
 
@@ -963,13 +921,6 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: job.id)
             job.core.output.summary = "Review started."
-            job.timeline.apply(
-                .runStarted(
-                    turnID: .init(rawValue: turnID),
-                    reviewThreadID: (reviewThreadID ?? job.core.run.reviewThreadID).map(
-                        ReviewThread.ID.init(rawValue:)),
-                    model: model ?? job.core.run.model
-                ), at: clock.now())
         case .message(let text):
             let now = clock.now()
             job.core.output.lastAgentMessage = text
@@ -978,7 +929,9 @@ extension CodexReviewStore {
         case .messageDelta(let text, let itemID):
             applyMessageDelta(text, itemID: itemID, to: job, at: clock.now())
         case .log(let text):
-            appendDiagnostic(text, to: job, at: clock.now())
+            if job.core.output.summary.isEmpty || job.core.output.summary == "Review started." {
+                job.core.output.summary = text
+            }
         case .completed(let summary, let result):
             completeReview(job, summary: summary, result: result)
         case .failed(let message):
@@ -1020,7 +973,6 @@ extension CodexReviewStore {
         let previousAgentMessage = job.core.output.lastAgentMessage?.nilIfEmpty
         let resultText = result?.nilIfEmpty
         let finalReviewText = resultText ?? previousAgentMessage
-        job.timeline.closeActiveItems(family: .command, phase: .completed, timestamp: endedAt)
         job.core.lifecycle.status = .succeeded
         job.core.lifecycle.endedAt = endedAt
         job.core.output.summary = summary
@@ -1030,9 +982,12 @@ extension CodexReviewStore {
         if let result = resultText,
             result != previousAgentMessage
         {
-            applyMessageSnapshot(result, itemID: nil, isCompleted: true, to: job, at: endedAt)
+            job.noteAgentMessageSnapshot(
+                itemID: job.nextSyntheticMessageItemID(prefix: "message"),
+                text: result,
+                isCompleted: true
+            )
         }
-        job.timeline.apply(.reviewCompleted(summary: summary, result: finalReviewText), at: endedAt)
         writeDiagnosticsIfNeeded()
     }
 
@@ -1110,8 +1065,6 @@ private extension ReviewRunRecord {
         core.output.reviewResult = nil
         agentMessagesByItemID.removeAll(keepingCapacity: true)
         completedAgentMessageItemIDs.removeAll(keepingCapacity: true)
-        timeline.reset(keepingTerminal: core.lifecycle.status.isTerminal)
-        syncTimelineTerminalStateFromCore()
     }
 }
 

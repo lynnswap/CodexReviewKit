@@ -137,11 +137,10 @@ package final class CodexReviewMCPServer {
         _ result: CodexReviewAPI.Read.Result,
         sessionID: String?
     ) throws -> CodexReviewMCP.Tool.ReviewSnapshot {
-        let job = try store.resolveJob(
-            sessionID: sessionID,
-            selector: .init(jobID: result.jobID)
-        )
-        return .init(result: result, timeline: ReviewMCPProjection(timeline: job.timeline))
+        if let sessionID {
+            _ = try store.resolveJob(sessionID: sessionID, selector: .init(jobID: result.jobID))
+        }
+        return .init(result: result, timeline: ReviewMCPProjection(result: result))
     }
 
     package func closeSession(_ sessionID: String) async {

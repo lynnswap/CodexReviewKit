@@ -5,7 +5,6 @@ import Observation
 @Observable
 public final class ReviewRunRecord: Identifiable, Hashable {
     public nonisolated let id: String
-    package let timeline: ReviewTimeline
     public let sessionID: String
     public let cwd: String
     public internal(set) var sortOrder: Double
@@ -18,7 +17,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
     @ObservationIgnored
     package var completedAgentMessageItemIDs: Set<String>
     @ObservationIgnored
-    private var syntheticTimelineItemCounter: UInt64
+    private var syntheticMessageItemCounter: UInt64
 
     public var isTerminal: Bool {
         core.isTerminal
@@ -42,7 +41,6 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         cancellationRequested: Bool = false
     ) {
         self.id = id
-        self.timeline = ReviewTimeline()
         self.sessionID = sessionID
         self.cwd = cwd
         self.sortOrder = sortOrder
@@ -51,8 +49,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         self.cancellationRequested = cancellationRequested
         self.agentMessagesByItemID = [:]
         self.completedAgentMessageItemIDs = []
-        self.syntheticTimelineItemCounter = 0
-        syncTimelineTerminalStateFromCore()
+        self.syntheticMessageItemCounter = 0
     }
 
     public nonisolated static func == (lhs: ReviewRunRecord, rhs: ReviewRunRecord) -> Bool {
@@ -63,38 +60,8 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         hasher.combine(id)
     }
 
-    package func nextSyntheticTimelineItemID(prefix: String) -> ReviewTimelineItem.ID {
-        syntheticTimelineItemCounter &+= 1
-        return .init(rawValue: "\(id):\(prefix):\(syntheticTimelineItemCounter)")
-    }
-
-    package func syncTimelineTerminalStateFromCore() {
-        guard core.lifecycle.status.isTerminal else {
-            return
-        }
-        let timestamp = core.lifecycle.endedAt ?? Date()
-        switch core.lifecycle.status {
-        case .succeeded:
-            timeline.apply(
-                .reviewCompleted(
-                    summary: core.output.summary,
-                    result: core.output.hasFinalReview ? core.output.lastAgentMessage?.nilIfEmpty : nil
-                ),
-                at: timestamp
-            )
-        case .failed:
-            timeline.apply(.reviewFailed(core.lifecycle.errorMessage?.nilIfEmpty ?? core.output.summary), at: timestamp)
-        case .cancelled:
-            timeline.apply(
-                .reviewCancelled(
-                    core.lifecycle.cancellation?.message.nilIfEmpty
-                        ?? core.lifecycle.errorMessage?.nilIfEmpty
-                        ?? core.output.summary
-                ),
-                at: timestamp
-            )
-        case .queued, .running:
-            break
-        }
+    package func nextSyntheticMessageItemID(prefix: String) -> String {
+        syntheticMessageItemCounter &+= 1
+        return "\(id):\(prefix):\(syntheticMessageItemCounter)"
     }
 }

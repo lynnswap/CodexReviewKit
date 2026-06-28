@@ -46,7 +46,6 @@ extension CodexReviewStore {
         }
 
         let endedAt = clock.now()
-        job.timeline.closeActiveItems(family: .command, phase: .cancelled, timestamp: endedAt)
         job.cancellationRequested = false
         job.core.lifecycle.cancellation = cancellation
         job.core.lifecycle.status = .cancelled
@@ -56,7 +55,6 @@ extension CodexReviewStore {
             cancellation.message.nilIfEmpty
             ?? job.core.lifecycle.errorMessage
         job.core.lifecycle.endedAt = endedAt
-        job.timeline.apply(.reviewCancelled(cancellation.message), at: endedAt)
         noteJobMutation()
     }
 
@@ -265,7 +263,6 @@ extension CodexReviewStore {
                 ?? reason.nilIfEmpty
                 ?? job.core.lifecycle.errorMessage
             job.core.lifecycle.endedAt = clock.now()
-            job.timeline.apply(.reviewFailed(job.core.output.summary), at: job.core.lifecycle.endedAt ?? clock.now())
         }
         noteJobMutation()
     }
