@@ -87,6 +87,69 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
     }
 }
 
+struct ReviewChatFixtureForTesting: Sendable {
+    var id: String
+    var cwd: String
+    var chat: ReviewMonitorCodexSidebarSnapshot.Chat
+    var turnID: CodexTurnID
+    var streamID: String
+    var isRunning: Bool
+    var initialSnapshot: CodexChatSnapshot
+
+    var chatID: CodexThreadID {
+        chat.id
+    }
+}
+
+@MainActor
+func makeReviewChatFixtureForTesting(
+    id: String = UUID().uuidString,
+    cwd: String = "/tmp/repo",
+    title: String,
+    preview: String? = nil,
+    model: String? = "gpt-5",
+    chatID: CodexThreadID? = nil,
+    turnID: CodexTurnID? = nil,
+    status: ReviewRunState = .succeeded,
+    startedAt: Date? = Date(timeIntervalSince1970: 200),
+    updatedAt: Date? = nil,
+    chatEntries: [ReviewChatLogEntryForTesting] = [],
+    errorMessage: String? = nil
+) -> ReviewChatFixtureForTesting {
+    let resolvedChatID = chatID ?? CodexThreadID(rawValue: id)
+    let resolvedTurnID = turnID ?? CodexTurnID(rawValue: "\(id):preview-turn")
+    let resolvedUpdatedAt = updatedAt ?? startedAt
+    let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
+        rowID: .chat(resolvedChatID),
+        id: resolvedChatID,
+        title: title,
+        preview: preview,
+        model: model,
+        workspaceCWD: cwd,
+        updatedAt: resolvedUpdatedAt,
+        recencyAt: resolvedUpdatedAt,
+        status: CodexThreadStatus(reviewRunStateForTesting: status)
+    )
+    ReviewChatLogFixtureStore.setEntries(chatEntries, for: resolvedChatID)
+    let initialSnapshot = makeCodexChatSnapshotForTesting(
+        chatID: resolvedChatID,
+        turnID: resolvedTurnID,
+        phase: CodexDataPhase(reviewRunStateForTesting: status, errorMessage: errorMessage),
+        turnStatus: CodexTurnStatus(reviewRunStateForTesting: status),
+        turnErrorDescription: errorMessage,
+        items: ReviewChatLogFixtureStore.items(for: resolvedChatID, turnID: resolvedTurnID)
+    )
+    return ReviewChatFixtureForTesting(
+        id: id,
+        cwd: cwd,
+        chat: chat,
+        turnID: resolvedTurnID,
+        streamID: id,
+        isRunning: status == .running,
+        initialSnapshot: initialSnapshot
+    )
+}
+
 extension ReviewRunRecord {
     @MainActor
     static func makeForTesting(
@@ -202,13 +265,24 @@ func replaceChatLogTextForTesting(
 
 @MainActor
 func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, reviewRuns: [ReviewRunRecord]) {
-    let fixtures = reviewRuns.compactMap { try? makePreviewChatLogFixtureForTesting(run: $0) }
+    installPreviewChatLogSourceForTesting(
+        on: store,
+        fixtures: reviewRuns.map(\.reviewChatFixtureForTesting)
+    )
+}
+
+@MainActor
+func installPreviewChatLogSourceForTesting(
+    on store: CodexReviewStore,
+    fixtures: [ReviewChatFixtureForTesting]
+) {
+    let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
     let source = ReviewMonitorPreviewChatLogSource(fixtures: fixtures)
     store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
     runStorePreviewSupportRetainers.append(
         ReviewChatLogFixtureRetainer(
             source: source,
-            chatIDs: Set(reviewRuns.map(\.previewChatIDForTesting))
+            chatIDs: Set(fixtures.map(\.chat.id))
         ))
 }
 
@@ -391,7 +465,9 @@ func chatCommandOutputBlockIDForTesting(
 
 @MainActor
 private func makePreviewChatLogFixtureForTesting(run: ReviewRunRecord) throws -> ReviewMonitorPreviewChatLogFixture {
-    try makePreviewChatLogFixtureForTesting(run: run) { _ in
+    makePreviewChatLogFixtureForTesting(
+        fixture: run.reviewChatFixtureForTesting
+    ) { _ in
         ReviewChatLogFixtureStore.items(for: run.previewChatIDForTesting, turnID: run.previewTurnIDForTesting)
     }
 }
@@ -401,27 +477,37 @@ private func makePreviewChatLogFixtureForTesting(
     run: ReviewRunRecord,
     items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
 ) throws -> ReviewMonitorPreviewChatLogFixture {
-    let chat = run.reviewChatSelectionForTesting
-    let turn = CodexChatTurnStateSnapshot(
-        id: run.previewTurnIDForTesting,
-        status: CodexTurnStatus(reviewRunStateForTesting: run.core.lifecycle.status),
-        errorDescription: run.core.lifecycle.errorMessage,
-        usage: nil
+    makePreviewChatLogFixtureForTesting(
+        fixture: run.reviewChatFixtureForTesting,
+        items: makeItems
     )
+}
+
+@MainActor
+private func makePreviewChatLogFixtureForTesting(
+    _ fixture: ReviewChatFixtureForTesting
+) -> ReviewMonitorPreviewChatLogFixture {
+    makePreviewChatLogFixtureForTesting(fixture: fixture) { _ in
+        fixture.initialSnapshot.items
+    }
+}
+
+@MainActor
+private func makePreviewChatLogFixtureForTesting(
+    fixture: ReviewChatFixtureForTesting,
+    items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
+) -> ReviewMonitorPreviewChatLogFixture {
     let initialSnapshot = makeCodexChatSnapshotForTesting(
-        chatID: chat.id,
-        phase: CodexDataPhase(
-            reviewRunStateForTesting: run.core.lifecycle.status,
-            errorMessage: run.core.lifecycle.errorMessage
-        ),
-        turns: [turn],
-        items: makeItems(turn.id)
+        chatID: fixture.chatID,
+        phase: fixture.initialSnapshot.phase,
+        turns: fixture.initialSnapshot.turns,
+        items: makeItems(fixture.turnID)
     )
     return makePreviewChatLogFixtureForTesting(
-        chat: chat,
-        cwd: run.cwd,
-        streamID: run.id,
-        isRunning: run.core.lifecycle.status == .running,
+        chat: fixture.chat,
+        cwd: fixture.cwd,
+        streamID: fixture.streamID,
+        isRunning: fixture.isRunning,
         initialSnapshot: initialSnapshot
     )
 }
@@ -758,6 +844,31 @@ private struct ReviewChatLogAccumulatedItem {
 }
 
 extension ReviewRunRecord {
+    var reviewChatFixtureForTesting: ReviewChatFixtureForTesting {
+        let chat = reviewChatSelectionForTesting
+        let turnID = previewTurnIDForTesting
+        let initialSnapshot = makeCodexChatSnapshotForTesting(
+            chatID: chat.id,
+            turnID: turnID,
+            phase: CodexDataPhase(
+                reviewRunStateForTesting: core.lifecycle.status,
+                errorMessage: core.lifecycle.errorMessage
+            ),
+            turnStatus: CodexTurnStatus(reviewRunStateForTesting: core.lifecycle.status),
+            turnErrorDescription: core.lifecycle.errorMessage,
+            items: ReviewChatLogFixtureStore.items(for: chat.id, turnID: turnID)
+        )
+        return ReviewChatFixtureForTesting(
+            id: id,
+            cwd: cwd,
+            chat: chat,
+            turnID: turnID,
+            streamID: id,
+            isRunning: core.lifecycle.status == .running,
+            initialSnapshot: initialSnapshot
+        )
+    }
+
     var previewChatIDForTesting: CodexThreadID {
         if let reviewThreadID = nonEmptyReviewChatProjectionStringForTesting(core.run.reviewThreadID) {
             return CodexThreadID(rawValue: reviewThreadID)
