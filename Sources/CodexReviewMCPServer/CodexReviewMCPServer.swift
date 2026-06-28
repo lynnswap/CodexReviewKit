@@ -150,7 +150,7 @@ package final class CodexReviewMCPServer {
         if let sessionID {
             _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
         }
-        let log = await logProjectionProvider?(result) ?? ReviewMCPLogProjection(result: result)
+        let log = await logProjectionProvider?(result) ?? ReviewMCPLogProjection.unavailable(result: result)
         return .init(result: result, log: log)
     }
 

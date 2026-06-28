@@ -35,7 +35,11 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
     var finalResult: String?
     var items: [Item]
 
-    init(result: CodexReviewAPI.Read.Result) {
+    static func unavailable(result: CodexReviewAPI.Read.Result) -> Self {
+        Self(result: result)
+    }
+
+    private init(result: CodexReviewAPI.Read.Result) {
         let lifecycle = result.core.lifecycle
         let output = result.core.output
         let status = lifecycle.status
@@ -44,23 +48,15 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
             status.rawValue,
             lifecycle.endedAt?.timeIntervalSince1970.description ?? "running",
             output.summary,
-            output.lastAgentMessage ?? "",
         ].joined(separator: ":")
 
-        var items: [Item] = []
-        if let text = output.lastAgentMessage?.nilIfEmpty {
-            items.append(.init(id: "\(result.runID):message", kind: "agentMessage", content: .message(text)))
-        } else if let summary = output.summary.nilIfEmpty {
-            items.append(.init(id: "\(result.runID):summary", kind: "diagnostic", content: .diagnostic(summary)))
-        }
-
-        self.items = items
-        self.orderedEntryIDs = items.map(\.id)
-        self.activeEntryIDs = status.isTerminal ? [] : items.map(\.id)
+        self.items = []
+        self.orderedEntryIDs = []
+        self.activeEntryIDs = []
         self.activeEntryCount = activeEntryIDs.count
         self.latestEntryID = orderedEntryIDs.last
         self.finalSummary = status.isTerminal ? output.summary : nil
-        self.finalResult = status == .succeeded ? result.core.reviewText.nilIfEmpty : nil
+        self.finalResult = nil
     }
 
     @MainActor
@@ -110,7 +106,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.finalSummary = status.isTerminal ? output.summary : nil
         self.finalResult =
             status == .succeeded
-            ? projectedItems.lastAgentMessageText ?? result.core.reviewText.nilIfEmpty
+            ? projectedItems.lastAgentMessageText
             : nil
     }
 }

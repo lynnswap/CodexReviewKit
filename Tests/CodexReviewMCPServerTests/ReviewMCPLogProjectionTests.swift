@@ -6,8 +6,8 @@ import CodexKit
 
 @Suite("Review MCP log projection")
 struct ReviewMCPLogProjectionTests {
-    @Test func runningResultProjectsSummaryAsActiveDiagnosticItem() throws {
-        let projection = ReviewMCPLogProjection(result: .init(
+    @Test func unavailableProjectionDoesNotRebuildLogFromRunOutput() throws {
+        let projection = ReviewMCPLogProjection.unavailable(result: .init(
             runID: "run-1",
             core: .init(
                 lifecycle: .init(status: .running),
@@ -16,17 +16,16 @@ struct ReviewMCPLogProjectionTests {
             cancellable: true
         ))
 
-        #expect(projection.orderedEntryIDs == ["run-1:summary"])
-        #expect(projection.activeEntryIDs == ["run-1:summary"])
-        #expect(projection.activeEntryCount == 1)
-        #expect(projection.latestEntryID == "run-1:summary")
-        let item = try #require(projection.items.first)
-        #expect(item.kind == "diagnostic")
-        #expect(item.content.type == "diagnostic")
+        #expect(projection.orderedEntryIDs == [])
+        #expect(projection.activeEntryIDs == [])
+        #expect(projection.activeEntryCount == 0)
+        #expect(projection.latestEntryID == nil)
+        #expect(projection.items.isEmpty)
+        #expect(projection.finalResult == nil)
     }
 
-    @Test func finalResultProjectsFinalReviewText() throws {
-        let projection = ReviewMCPLogProjection(result: .init(
+    @Test func unavailableTerminalProjectionKeepsSummaryButNoFinalResult() throws {
+        let projection = ReviewMCPLogProjection.unavailable(result: .init(
             runID: "run-2",
             core: .init(
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
@@ -41,11 +40,8 @@ struct ReviewMCPLogProjectionTests {
         #expect(projection.activeEntryIDs == [])
         #expect(projection.activeEntryCount == 0)
         #expect(projection.finalSummary == "Done.")
-        #expect(projection.finalResult == "No findings.")
-        let item = try #require(projection.items.first)
-        #expect(item.id == "run-2:message")
-        #expect(item.kind == "agentMessage")
-        #expect(item.content.type == "message")
+        #expect(projection.finalResult == nil)
+        #expect(projection.items.isEmpty)
     }
 
     @Test func turnItemsProjectAsOrderedLogItems() throws {
@@ -91,7 +87,7 @@ struct ReviewMCPLogProjectionTests {
         #expect(projection.items.map { $0.content.type } == ["message", "reasoning", "command"])
     }
 
-    @Test func terminalTurnItemsProvideFinalResultBeforeRunOutputFallback() throws {
+    @Test func terminalTurnItemsProvideFinalResultFromCodexChatOnly() throws {
         let projection = ReviewMCPLogProjection(
             result: .init(
                 runID: "run-1",

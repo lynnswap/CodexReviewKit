@@ -34,7 +34,7 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
 
 private extension CodexReviewAPI.Read.Result {
     func textContent(log: ReviewMCPLogProjection) -> String {
-        log.finalResult?.nilIfEmpty ?? core.reviewText.nilIfEmpty ?? core.lifecycle.status.rawValue
+        log.finalResult?.nilIfEmpty ?? core.lifecycleText
     }
 
     func textContentForStartOrAwait(log: ReviewMCPLogProjection) -> String {
@@ -90,7 +90,7 @@ private extension CodexReviewAPI.Read.Result {
                 cancellable: cancellable
             ),
             "output": core.output.structuredContent(
-                review: log.finalResult?.nilIfEmpty ?? core.reviewText,
+                review: log.finalResult?.nilIfEmpty ?? core.lifecycleText,
                 finalReview: log.finalResult?.nilIfEmpty
             ),
         ]
@@ -328,8 +328,8 @@ private extension CodexReviewAPI.Run.ListItem {
                 cancellable: cancellable
             ),
             "output": core.output.structuredContent(
-                review: core.reviewText,
-                finalReview: core.finalReviewText
+                review: core.lifecycleText,
+                finalReview: nil
             ),
         ])
     }
@@ -362,8 +362,8 @@ private extension CodexReviewAPI.Cancel.Outcome {
                 cancellable: false
             ),
             "output": core.output.structuredContent(
-                review: core.reviewText,
-                finalReview: core.finalReviewText
+                review: core.lifecycleText,
+                finalReview: nil
             ),
         ])
     }
@@ -399,11 +399,8 @@ private extension ReviewRunCore.Lifecycle {
 }
 
 private extension ReviewRunCore {
-    var finalReviewText: String? {
-        guard lifecycle.status == .succeeded else {
-            return nil
-        }
-        return reviewText.nilIfEmpty
+    var lifecycleText: String {
+        lifecycle.errorMessage?.nilIfEmpty ?? output.summary.nilIfEmpty ?? lifecycle.status.rawValue
     }
 }
 

@@ -170,7 +170,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+                resolved.value(for: ["result", "structuredContent", "output", "review"]) as? String == "Done")
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -247,13 +247,11 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "succeeded")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "review text")
+                awaited.value(for: ["result", "structuredContent", "output", "review"]) as? String == "Done")
             #expect(
                 awaited.value(for: ["result", "structuredContent", "log", "finalSummary"]) as? String
                     == "Done")
-            #expect(
-                awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) as? String
-                    == "review text")
+            #expect(awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) is NSNull)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -462,7 +460,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(allowed.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-            #expect(readText == "No correctness issues found.")
+            #expect(readText == "Done")
             #expect(readText?.contains("rawLogText") == false)
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect(
@@ -471,7 +469,7 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
-    @Test func streamableHTTPReviewReadAddsSemanticLog() async throws {
+    @Test func streamableHTTPReviewReadLeavesLogEmptyWithoutChatProvider() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -523,29 +521,20 @@ struct CodexReviewMCPHTTPServerTests {
 
             let log = try #require(
                 defaultResponse.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["orderedEntryIds"] as? [String] == ["run-semantic:message"])
+            #expect(log["orderedEntryIds"] as? [String] == [])
             #expect(log["activeEntryIds"] as? [String] == [])
             #expect(log["activeEntryCount"] as? Int == 0)
-            #expect(log["latestEntryId"] as? String == "run-semantic:message")
+            #expect(log["latestEntryId"] is NSNull)
             let itemsPage = try #require(log["itemsPage"] as? [String: Any])
-            #expect(itemsPage["total"] as? Int == 1)
-            #expect(itemsPage["limit"] as? Int == 1)
-            #expect(itemsPage["returned"] as? Int == 1)
+            #expect(itemsPage["total"] as? Int == 0)
+            #expect(itemsPage["limit"] as? Int == 0)
+            #expect(itemsPage["returned"] as? Int == 0)
             let items = try #require(log["items"] as? [[String: Any]])
-            let messageItem = try #require(items.first)
-            #expect(messageItem["id"] as? String == "run-semantic:message")
-            #expect(messageItem["kind"] as? String == "agentMessage")
-            let content = try #require(messageItem["content"] as? [String: Any])
-            #expect(content["type"] as? String == "message")
-            let logOutput = try #require(content["text"] as? String)
-            #expect(logOutput.hasPrefix("Tests passed"))
-            #expect(logOutput.hasSuffix("..."))
-            #expect(logOutput.count < longOutput.count)
-            #expect(content["truncatedFields"] as? [String] == ["text"])
+            #expect(items.isEmpty)
         }
     }
 
-    @Test func streamableHTTPReviewReadIncludesRunningSummaryInLogContent() async throws {
+    @Test func streamableHTTPReviewReadDoesNotProjectRunningSummaryAsLogContent() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -584,15 +573,10 @@ struct CodexReviewMCPHTTPServerTests {
 
             let log = try #require(
                 response.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["activeEntryIds"] as? [String] == ["run-tool-progress:summary"])
-            #expect(log["activeEntryCount"] as? Int == 1)
+            #expect(log["activeEntryIds"] as? [String] == [])
+            #expect(log["activeEntryCount"] as? Int == 0)
             let items = try #require(log["items"] as? [[String: Any]])
-            let item = try #require(items.first)
-            #expect(item["id"] as? String == "run-tool-progress:summary")
-            #expect(item["kind"] as? String == "diagnostic")
-            let content = try #require(item["content"] as? [String: Any])
-            #expect(content["type"] as? String == "diagnostic")
-            #expect(content["message"] as? String == "Running")
+            #expect(items.isEmpty)
         }
     }
 
@@ -866,7 +850,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
             let startText = (resolved.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-            #expect(startText == "review text")
+            #expect(startText == "Done")
             #expect(startText?.contains("rawLogText") == false)
             let tools = try await postJSONRPC(
                 endpoint: endpoint,
