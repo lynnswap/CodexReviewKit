@@ -8,31 +8,31 @@ struct ReviewRunCoreTests {
     @Test func coreKeepsLifecycleAndSummaryOnly() {
         let succeeded = ReviewRunCore(
             lifecycle: .init(status: .succeeded),
-            output: .init(summary: "Succeeded.")
+            summary: "Succeeded."
         )
         #expect(succeeded.lifecycle.status == .succeeded)
-        #expect(succeeded.output.summary == "Succeeded.")
+        #expect(succeeded.summary == "Succeeded.")
 
         let failed = ReviewRunCore(
             lifecycle: .init(
                 status: .failed,
                 errorMessage: "Backend failed."
             ),
-            output: .init(summary: "Failed.")
+            summary: "Failed."
         )
         #expect(failed.lifecycle.status == .failed)
         #expect(failed.lifecycle.errorMessage == "Backend failed.")
-        #expect(failed.output.summary == "Failed.")
+        #expect(failed.summary == "Failed.")
 
         let cancelled = ReviewRunCore(
             lifecycle: .init(
                 status: .cancelled,
                 cancellation: .mcpClient(message: "Session closed.")
             ),
-            output: .init(summary: "Cancelled.")
+            summary: "Cancelled."
         )
         #expect(cancelled.lifecycle.status == .cancelled)
         #expect(cancelled.lifecycle.cancellation?.message == "Session closed.")
-        #expect(cancelled.output.summary == "Cancelled.")
+        #expect(cancelled.summary == "Cancelled.")
     }
 }

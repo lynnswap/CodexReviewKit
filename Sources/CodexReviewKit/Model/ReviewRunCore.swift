@@ -48,26 +48,18 @@ public struct ReviewRunCore: Codable, Sendable, Hashable {
         }
     }
 
-    public struct Output: Codable, Sendable, Hashable {
-        public internal(set) var summary: String
-
-        public init(summary: String) {
-            self.summary = summary
-        }
-    }
-
     public internal(set) var run: Run
     public internal(set) var lifecycle: Lifecycle
-    public internal(set) var output: Output
+    public internal(set) var summary: String
 
     public init(
         run: Run = .init(),
         lifecycle: Lifecycle,
-        output: Output
+        summary: String
     ) {
         self.run = run
         self.lifecycle = lifecycle
-        self.output = output
+        self.summary = summary
     }
 
     public var isTerminal: Bool {

@@ -72,7 +72,7 @@ extension CodexReviewStore {
             targetSummary: validatedRequest.target.displaySummary,
             core: .init(
                 lifecycle: .init(status: .queued),
-                output: .init(summary: "Queued.")
+                summary: "Queued."
             )
         )
         insertReviewRun(runRecord)
@@ -201,7 +201,7 @@ extension CodexReviewStore {
         let cancellation = runRecord.core.lifecycle.cancellation ?? .system()
         runRecord.cancellationRequested = true
         runRecord.core.lifecycle.cancellation = cancellation
-        runRecord.core.output.summary = cancellation.message
+        runRecord.core.summary = cancellation.message
         runRecord.core.lifecycle.errorMessage = cancellation.message
         do {
             try await backend.interruptReview(
@@ -235,7 +235,7 @@ extension CodexReviewStore {
     }
 
     private func appendRecoveryProgress(_ message: String, to runRecord: ReviewRunRecord) {
-        runRecord.core.output.summary = message
+        runRecord.core.summary = message
         writeDiagnosticsIfNeeded()
     }
 
@@ -377,7 +377,7 @@ extension CodexReviewStore {
 
         runRecord.cancellationRequested = true
         runRecord.core.lifecycle.cancellation = cancellation
-        runRecord.core.output.summary = cancellation.message
+        runRecord.core.summary = cancellation.message
         runRecord.core.lifecycle.errorMessage = cancellation.message
 
         if runRecord.core.lifecycle.status == .queued {
@@ -535,7 +535,7 @@ extension CodexReviewStore {
     private func markReviewRunning(_ runRecord: ReviewRunRecord, startedAt: Date) {
         runRecord.core.lifecycle.status = .running
         runRecord.core.lifecycle.startedAt = startedAt
-        runRecord.core.output.summary = "Review started."
+        runRecord.core.summary = "Review started."
         writeDiagnosticsIfNeeded()
     }
 
@@ -547,7 +547,7 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.status = .failed
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.lifecycle.errorMessage = message
-        runRecord.core.output.summary = message
+        runRecord.core.summary = message
         writeDiagnosticsIfNeeded()
     }
 
@@ -676,7 +676,7 @@ extension CodexReviewStore {
             }
             completeReview(
                 runRecord,
-                summary: runRecord.core.output.summary
+                summary: runRecord.core.summary
             )
         }
         return recoveryState.currentRun
@@ -700,7 +700,7 @@ extension CodexReviewStore {
             }
             completeReview(
                 runRecord,
-                summary: runRecord.core.output.summary
+                summary: runRecord.core.summary
             )
         }
         return true
@@ -818,12 +818,12 @@ extension CodexReviewStore {
             updatedRun.reviewThreadID = reviewThreadID ?? updatedRun.reviewThreadID
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: runRecord.id)
-            runRecord.core.output.summary = "Review started."
+            runRecord.core.summary = "Review started."
         case .message, .messageDelta:
             break
         case .log(let text):
-            if runRecord.core.output.summary.isEmpty || runRecord.core.output.summary == "Review started." {
-                runRecord.core.output.summary = text
+            if runRecord.core.summary.isEmpty || runRecord.core.summary == "Review started." {
+                runRecord.core.summary = text
             }
         case .completed(let summary, _):
             completeReview(runRecord, summary: summary)
@@ -864,7 +864,7 @@ extension CodexReviewStore {
         let endedAt = clock.now()
         runRecord.core.lifecycle.status = .succeeded
         runRecord.core.lifecycle.endedAt = endedAt
-        runRecord.core.output.summary = summary
+        runRecord.core.summary = summary
         writeDiagnosticsIfNeeded()
     }
 

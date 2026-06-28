@@ -11,7 +11,7 @@ struct ReviewMCPLogProjectionTests {
             runID: "run-1",
             core: .init(
                 lifecycle: .init(status: .running),
-                output: .init(summary: "Review started.")
+                summary: "Review started."
             ),
             cancellable: true
         ))
@@ -29,7 +29,7 @@ struct ReviewMCPLogProjectionTests {
             runID: "run-2",
             core: .init(
                 lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                output: .init(summary: "Done.")
+                summary: "Done."
             ),
             cancellable: false
         ))
@@ -48,7 +48,7 @@ struct ReviewMCPLogProjectionTests {
                 core: .init(
                     run: .init(threadID: "thread-1", turnID: "turn-1"),
                     lifecycle: .init(status: .running),
-                    output: .init(summary: "Running.")
+                    summary: "Running."
                 ),
                 cancellable: true
             ),
@@ -91,7 +91,7 @@ struct ReviewMCPLogProjectionTests {
                 core: .init(
                     run: .init(threadID: "thread-1", turnID: "turn-1"),
                     lifecycle: .init(status: .succeeded, endedAt: Date(timeIntervalSince1970: 1_234)),
-                    output: .init(summary: "Done.")
+                    summary: "Done."
                 ),
                 cancellable: false
             ),

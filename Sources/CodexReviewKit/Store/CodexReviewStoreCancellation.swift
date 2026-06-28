@@ -49,7 +49,7 @@ extension CodexReviewStore {
         runRecord.cancellationRequested = false
         runRecord.core.lifecycle.cancellation = cancellation
         runRecord.core.lifecycle.status = .cancelled
-        runRecord.core.output.summary = cancellation.message
+        runRecord.core.summary = cancellation.message
         runRecord.core.lifecycle.errorMessage =
             cancellation.message.nilIfEmpty
             ?? runRecord.core.lifecycle.errorMessage
@@ -75,13 +75,13 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.cancellation = nil
         if let message = message.nilIfEmpty {
             if message == "Failed to cancel review." {
-                runRecord.core.output.summary = message
+                runRecord.core.summary = message
             } else {
-                runRecord.core.output.summary = "Failed to cancel review: \(message)"
+                runRecord.core.summary = "Failed to cancel review: \(message)"
             }
             runRecord.core.lifecycle.errorMessage = message
         } else {
-            runRecord.core.output.summary = "Failed to cancel review."
+            runRecord.core.summary = "Failed to cancel review."
         }
         writeDiagnosticsIfNeeded()
     }
@@ -267,9 +267,9 @@ extension CodexReviewStore {
             runRecord.core.lifecycle.cancellation = nil
             runRecord.core.lifecycle.status = .failed
             if let resolvedError {
-                runRecord.core.output.summary = "Failed to cancel review: \(resolvedError)"
+                runRecord.core.summary = "Failed to cancel review: \(resolvedError)"
             } else {
-                runRecord.core.output.summary = "Failed to cancel review."
+                runRecord.core.summary = "Failed to cancel review."
             }
             runRecord.core.lifecycle.errorMessage =
                 resolvedError

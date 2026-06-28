@@ -38,7 +38,7 @@ extension ReviewRunRecord {
                     cancellation: cancellation,
                     errorMessage: errorMessage
                 ),
-                output: .init(summary: summary)
+                summary: summary
             ),
             cancellationRequested: cancellationRequested
         )
@@ -63,7 +63,7 @@ extension ReviewRunRecord {
             core.lifecycle.endedAt = nil
         }
         if let summary {
-            core.output.summary = summary
+            core.summary = summary
         }
     }
 }
