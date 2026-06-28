@@ -489,10 +489,9 @@ private enum AppServerTypedReviewEventAdapter {
             .init(events: itemEvents(item, phase: .updated), controlThreadID: controlThreadID)
         case .itemCompleted(let item, _):
             .init(events: itemEvents(item, phase: .completed), controlThreadID: controlThreadID)
-        case .message(let message, _):
-            .init(events: messageEvents(message), controlThreadID: controlThreadID)
-        case .messageDelta(let delta, _):
-            .init(events: messageDeltaEvents(delta), controlThreadID: controlThreadID)
+        case .message,
+            .messageDelta:
+            .init(events: [], controlThreadID: controlThreadID)
         case .reasoningSummaryPartAdded:
             .init(events: [], controlThreadID: controlThreadID)
         case .reasoningDelta:
@@ -530,12 +529,7 @@ private enum AppServerTypedReviewEventAdapter {
             )
         }
         return [
-            .completed(
-                summary: "Succeeded.",
-                result: response.finalAnswer?.nilIfEmpty
-                    ?? response.transcript.finalAnswer?.nilIfEmpty
-                    ?? response.transcript.responseText?.nilIfEmpty
-            )
+            .completed(summary: "Succeeded.")
         ]
     }
 
@@ -543,7 +537,7 @@ private enum AppServerTypedReviewEventAdapter {
         _ status: String,
         turnID: String
     ) -> [CodexReviewBackendModel.Review.Event] {
-        [.log("Review thread \(turnID) status changed: \(status).")]
+        [.progress("Review thread \(turnID) status changed: \(status).")]
     }
 
     private static func terminalFailureEvents(
@@ -567,45 +561,16 @@ private enum AppServerTypedReviewEventAdapter {
         }
         if phase == .completed, item.kind.rawValue == "exitedReviewMode" {
             return [
-                .completed(
-                    summary: "Succeeded.",
-                    result: item.text?.nilIfEmpty
-                )
+                .completed(summary: "Succeeded.")
             ]
         }
-        guard item.kind == .agentMessage,
-            let text = item.text?.nilIfEmpty
-        else {
-            return []
-        }
-        return [.message(text)]
-    }
-
-    private static func messageEvents(
-        _ message: CodexMessage
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        guard message.role != .user,
-            message.text.isEmpty == false
-        else {
-            return []
-        }
-        return [.message(message.text)]
-    }
-
-    private static func messageDeltaEvents(
-        _ delta: CodexMessageDelta
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        guard delta.text.isEmpty == false else {
-            return []
-        }
-        let itemID = delta.itemID?.nilIfEmpty ?? "agent-message-delta"
-        return [.messageDelta(delta.text, itemID: itemID)]
+        return []
     }
 
     private static func unknownEvents(
         _ raw: CodexRawNotification
     ) -> [CodexReviewBackendModel.Review.Event] {
-        [.log("Unhandled app-server notification: \(raw.method)")]
+        [.progress("Unhandled app-server notification: \(raw.method)")]
     }
 }
 

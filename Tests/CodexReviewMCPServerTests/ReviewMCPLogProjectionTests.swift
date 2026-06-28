@@ -6,7 +6,7 @@ import CodexKit
 
 @Suite("Review MCP log projection")
 struct ReviewMCPLogProjectionTests {
-    @Test func unavailableProjectionDoesNotRebuildLogFromRunOutput() throws {
+    @Test func unavailableProjectionDoesNotRebuildLogFromRunLifecycle() throws {
         let projection = ReviewMCPLogProjection.unavailable(result: .init(
             runID: "run-1",
             core: .init(

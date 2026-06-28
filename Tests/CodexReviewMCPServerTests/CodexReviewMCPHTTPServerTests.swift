@@ -160,7 +160,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(summary: "Done", result: "review text"))
+            await backend.yield(.completed(summary: "Done"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == false)
@@ -229,7 +229,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
-            await backend.yield(.completed(summary: "Done", result: "review text"))
+            await backend.yield(.completed(summary: "Done"))
             let awaited = try await postJSONRPC(
                 endpoint: endpoint,
                 sessionID: sessionID,
@@ -292,7 +292,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed(summary: "Done", result: "review text"))
+            await backend.yield(.completed(summary: "Done"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
@@ -851,7 +851,7 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.waitForStartReview()
             await server.runSessionCleanupForTesting(now: .distantFuture)
             await gate.open()
-            await backend.yield(.completed(summary: "Done", result: "review text"))
+            await backend.yield(.completed(summary: "Done"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")

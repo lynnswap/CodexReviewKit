@@ -22,7 +22,7 @@ struct ReviewBackendEventSessionTests {
         await session.receive(
             [
                 .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"),
-                .completed(summary: "Succeeded.", result: "Looks good."),
+                .completed(summary: "Succeeded."),
             ], controlThreadID: "review-thread")
 
         #expect(
@@ -34,10 +34,7 @@ struct ReviewBackendEventSessionTests {
                 ))
         #expect(
             try await nextEvent(from: attempt.events)
-                == .completed(
-                    summary: "Succeeded.",
-                    result: "Looks good."
-                ))
+                == .completed(summary: "Succeeded."))
         #expect(await recorder.startedTurnIDs() == ["turn-1"])
         #expect(await recorder.finishedRun() == makeRun())
 
@@ -51,35 +48,17 @@ struct ReviewBackendEventSessionTests {
         #expect(await recorder.finishedMetrics() == metrics)
     }
 
-    @Test func emitsLogsWithoutDelayingLaterUpdates() async throws {
+    @Test func emitsProgressWithoutDelayingLaterUpdates() async throws {
         let session = ReviewBackendEventSession(run: makeRun())
         let attempt = await session.attempt()
 
-        await session.receive([.log("first")], controlThreadID: "review-thread")
-        await session.receive([.log("second")], controlThreadID: "review-thread")
+        await session.receive([.progress("first")], controlThreadID: "review-thread")
+        await session.receive([.progress("second")], controlThreadID: "review-thread")
         await session.finish(throwing: nil)
 
-        #expect(try await nextEvent(from: attempt.events) == .log("first"))
-        #expect(try await nextEvent(from: attempt.events) == .log("second"))
+        #expect(try await nextEvent(from: attempt.events) == .progress("first"))
+        #expect(try await nextEvent(from: attempt.events) == .progress("second"))
         #expect(try await nextEvent(from: attempt.events) == nil)
-    }
-
-    @Test func fillsCompletionResultFromStreamedMessageText() async throws {
-        let session = ReviewBackendEventSession(run: makeRun())
-        let attempt = await session.attempt()
-
-        await session.receive([messageTextDelta("Looks ", itemID: "msg-1")])
-        await session.receive([messageTextDelta("good.", itemID: "msg-1")])
-        await session.receive([.completed(summary: "Succeeded.", result: nil)])
-
-        #expect(try await nextEvent(from: attempt.events) == messageTextDelta("Looks ", itemID: "msg-1"))
-        #expect(try await nextEvent(from: attempt.events) == messageTextDelta("good.", itemID: "msg-1"))
-        #expect(
-            try await nextEvent(from: attempt.events)
-                == .completed(
-                    summary: "Succeeded.",
-                    result: "Looks good."
-                ))
     }
 }
 
@@ -143,11 +122,4 @@ private func makeRun() -> CodexReviewBackendModel.Review.Run {
         reviewThreadID: "review-thread",
         model: "gpt-5"
     )
-}
-
-private func messageTextDelta(
-    _ delta: String,
-    itemID: String
-) -> CodexReviewBackendModel.Review.Event {
-    .messageDelta(delta, itemID: itemID)
 }

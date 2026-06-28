@@ -34,7 +34,7 @@ visible.
 
 ## What Runs Locally
 
-- `CodexReviewMonitor.app` shows review jobs, output, and findings.
+- `CodexReviewMonitor.app` shows review runs, CodexChat logs, and findings.
 - `http://localhost:9417/mcp` is the app-managed MCP endpoint.
 - `codex app-server` runs behind CodexReviewMonitor as the live review backend.
 - `~/.codex_review` is the dedicated Codex home used by CodexReviewMonitor.

@@ -278,10 +278,8 @@ package extension CodexReviewBackendModel.Review {
 package extension CodexReviewBackendModel.Review {
     enum Event: Equatable, Sendable {
         case started(turnID: String, reviewThreadID: String?, model: String?)
-        case message(String)
-        case messageDelta(String, itemID: String)
-        case log(String)
-        case completed(summary: String, result: String?)
+        case progress(String)
+        case completed(summary: String)
         case failed(String)
         case cancelled(String)
     }

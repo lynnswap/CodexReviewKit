@@ -819,13 +819,11 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: runRecord.id)
             runRecord.core.lifecycleMessage = "Review started."
-        case .message, .messageDelta:
-            break
-        case .log(let text):
+        case .progress(let text):
             if runRecord.core.lifecycleMessage.isEmpty || runRecord.core.lifecycleMessage == "Review started." {
                 runRecord.core.lifecycleMessage = text
             }
-        case .completed(let summary, _):
+        case .completed(let summary):
             completeReview(runRecord, summary: summary)
         case .failed(let message):
             markReviewFailed(runRecord, message: message)
@@ -891,9 +889,7 @@ private extension CodexReviewBackendModel.Review.Event {
         case .completed, .failed, .cancelled:
             true
         case .started,
-            .message,
-            .messageDelta,
-            .log:
+            .progress:
             false
         }
     }

@@ -40,12 +40,9 @@ package actor ReviewBackendEventSession {
     private let callbacks: ReviewBackendEventSessionCallbacks
     private var reviewThreadIDsForCleanup: [String] = []
     private var cancellationRequestedMessage: String?
-    private let completionCoordinator = ReviewCompletionCoordinator()
     private let createdAt = Date()
     private var finished = false
     private var metrics = ReviewBackendEventSessionMetrics()
-    private var typedMessageTextByItemID: [String: String] = [:]
-    private var typedReviewResultText: String?
 
     package init(
         run: CodexReviewBackendModel.Review.Run,
@@ -100,13 +97,8 @@ package actor ReviewBackendEventSession {
         }
         if let error {
             finished = true
-            completionCoordinator.cancelPendingCompletion()
             await mailbox.fail(error)
         } else {
-            if await flushPendingCompletion() {
-                finished = true
-                return
-            }
             finished = true
             await mailbox.finish()
         }
@@ -117,7 +109,6 @@ package actor ReviewBackendEventSession {
             return
         }
         finished = true
-        completionCoordinator.cancelPendingCompletion()
         await mailbox.abandon()
     }
 
@@ -139,42 +130,9 @@ package actor ReviewBackendEventSession {
             return
         }
         metrics.decoded += 1
-        for event in eventsWithTypedResultFallback(events) {
-            if event.shouldDeferReviewBackendCompletion {
-                completionCoordinator.deferCompletion(event)
-                continue
-            }
+        for event in events {
             if await emit(event, controlThreadID: controlThreadID) {
                 return
-            }
-        }
-    }
-
-    private func eventsWithTypedResultFallback(
-        _ events: [CodexReviewBackendModel.Review.Event]
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        events.map { event in
-            switch event {
-            case .message(let text):
-                if let text = text.nilIfEmpty {
-                    typedReviewResultText = text
-                }
-                return event
-            case .messageDelta(let delta, let itemID):
-                let text = (typedMessageTextByItemID[itemID] ?? "") + delta
-                typedMessageTextByItemID[itemID] = text
-                if let text = text.nilIfEmpty {
-                    typedReviewResultText = text
-                }
-                return event
-            case .completed(let summary, nil):
-                return .completed(summary: summary, result: typedReviewResultText)
-            case .started,
-                .log,
-                .completed,
-                .failed,
-                .cancelled:
-                return event
             }
         }
     }
@@ -183,7 +141,6 @@ package actor ReviewBackendEventSession {
         guard finished == false else {
             return
         }
-        completionCoordinator.cancelPendingCompletion()
         if let cancellationMessage {
             _ = await emit(.cancelled(cancellationMessage))
         } else {
@@ -207,26 +164,9 @@ package actor ReviewBackendEventSession {
         controlThreadID: String? = nil
     ) async -> Bool {
         noteEmission(event)
-        let didFinish = completionCoordinator.emit(event)
         await mailbox.append(event)
         await recordReviewEvent(event, controlThreadID: controlThreadID)
-        return didFinish
-    }
-
-    private func flushPendingCompletion(
-        controlThreadID: String? = nil
-    ) async -> Bool {
-        guard let event = completionCoordinator.flushPendingCompletion() else {
-            return false
-        }
-        let events = eventsWithTypedResultFallback([event])
-        guard let event = events.first else {
-            return false
-        }
-        noteEmission(event)
-        await mailbox.append(event)
-        await recordReviewEvent(event, controlThreadID: controlThreadID)
-        return true
+        return event.isReviewBackendTerminal
     }
 
     private func recordReviewEvent(
@@ -238,9 +178,7 @@ package actor ReviewBackendEventSession {
             await callbacks.recordTurnStarted(turnID)
         case .completed, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
-        case .message,
-            .messageDelta,
-            .log:
+        case .progress:
             break
         }
     }
@@ -270,56 +208,8 @@ private extension CodexReviewBackendModel.Review.Event {
         case .completed, .failed, .cancelled:
             true
         case .started,
-            .message,
-            .messageDelta,
-            .log:
+            .progress:
             false
         }
-    }
-
-    var shouldDeferReviewBackendCompletion: Bool {
-        guard case .completed(_, let result) = self else {
-            return false
-        }
-        return result?.nilIfEmpty == nil
-    }
-}
-
-private final class ReviewCompletionCoordinator {
-    private var pendingCompletion: CodexReviewBackendModel.Review.Event?
-    private var finished = false
-
-    func emit(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
-        guard finished == false else {
-            return true
-        }
-        guard event.isReviewBackendTerminal else {
-            return false
-        }
-        finished = true
-        pendingCompletion = nil
-        return true
-    }
-
-    func deferCompletion(_ event: CodexReviewBackendModel.Review.Event) {
-        guard finished == false else {
-            return
-        }
-        pendingCompletion = event
-    }
-
-    func flushPendingCompletion() -> CodexReviewBackendModel.Review.Event? {
-        guard finished == false,
-            let event = pendingCompletion
-        else {
-            return nil
-        }
-        pendingCompletion = nil
-        finished = true
-        return event
-    }
-
-    func cancelPendingCompletion() {
-        pendingCompletion = nil
     }
 }

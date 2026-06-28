@@ -99,11 +99,10 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .messageDelta("Looks good.", itemID: "msg-1"))
-        #expect(try await iterator.next() == .completed(summary: "Succeeded.", result: "Looks good."))
+        #expect(try await iterator.next() == .completed(summary: "Succeeded."))
     }
 
-    @Test func backendScopesMessageDeltasByReviewThread() async throws {
+    @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread-1")
@@ -133,18 +132,32 @@ struct AppServerClientTests {
                 delta: "second"
             )
         )
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread-1",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread-2",
+                turn: .init(id: "turn-2", status: "completed")
+            )
+        )
 
         var firstIterator = eventSequence(firstAttempt).makeAsyncIterator()
         #expect(
             try await firstIterator.next()
                 == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        #expect(try await firstIterator.next() == .messageDelta("first", itemID: "msg-1"))
+        #expect(try await firstIterator.next() == .completed(summary: "Succeeded."))
 
         var secondIterator = eventSequence(secondAttempt).makeAsyncIterator()
         #expect(
             try await secondIterator.next()
                 == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        #expect(try await secondIterator.next() == .messageDelta("second", itemID: "msg-1"))
+        #expect(try await secondIterator.next() == .completed(summary: "Succeeded."))
     }
 
     @Test func backendKeepsCommandOutputDeltasInCodexChat() async throws {
@@ -189,7 +202,7 @@ struct AppServerClientTests {
             )
         )
 
-        #expect(try await nextEvent(from: attempt.events) == .completed(summary: "Succeeded.", result: nil))
+        #expect(try await nextEvent(from: attempt.events) == .completed(summary: "Succeeded."))
     }
 
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {

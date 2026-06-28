@@ -18,8 +18,8 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.log("started"))
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.progress("started"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let read = try await result
 
             #expect(read.runID == "run-1")
@@ -55,7 +55,7 @@ struct CodexReviewStoreCommandTests {
             #expect(running.runID == "run-1")
             #expect(running.core.lifecycle.status == .running)
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let final = try await store.awaitReview(
                 sessionID: "session-1",
                 runID: "run-1",
@@ -85,7 +85,7 @@ struct CodexReviewStoreCommandTests {
                 runID: "run-1",
                 timeout: .seconds(1)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let final = try await awaited
 
             #expect(final.core.lifecycle.status == .succeeded)
@@ -146,7 +146,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func awaitReviewReturnsWhenLocalTerminationUpdatesRunOutput() async throws {
+    @Test func awaitReviewReturnsWhenLocalTerminationUpdatesRunLifecycle() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -203,7 +203,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await result
 
             let commands = await backend.recordedCommands()
@@ -217,7 +217,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func reviewStartKeepsMessageDeltasOutOfRunOutput() async throws {
+    @Test func reviewStartUsesProgressAsLifecycleMessage() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -228,12 +228,15 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.messageDelta("first", itemID: "message-1"))
-            await backend.yield(.messageDelta("second", itemID: "message-2"))
-            let running = try #require(store.reviewRun(id: "run-1"))
-            #expect(running.core.lifecycleMessage == "Review started.")
+            let probe = StoreSnapshotProbe(store: store)
+            try #require(await probe.waitUntilRunStatus(.running, runID: "run-1") != nil)
+            await backend.yield(.progress("Inspecting files."))
+            let progressSnapshot = try #require(await probe.waitUntil { snapshot in
+                snapshot.run("run-1")?.summary == "Inspecting files."
+            })
+            #expect(progressSnapshot.run("run-1")?.summary == "Inspecting files.")
 
-            await backend.yield(.completed(summary: "Succeeded.", result: nil))
+            await backend.yield(.completed(summary: "Succeeded."))
             let read = try await result
             #expect(read.core.lifecycleMessage == "Succeeded.")
         }
@@ -249,7 +252,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/old-project", target: .baseBranch("main"))
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "first"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await first
             await backend.finishEvents()
 
@@ -257,7 +260,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "second"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await second
 
             #expect(store.orderedReviewRuns.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
@@ -274,7 +277,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "first"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await first
             await backend.finishEvents()
 
@@ -282,7 +285,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "second"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await second
 
             #expect(
@@ -311,7 +314,7 @@ struct CodexReviewStoreCommandTests {
 
             #expect(try store.readReview(runID: "run-1").elapsedSeconds == 12)
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await result
         }
     }
@@ -339,7 +342,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "new"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await result
 
             #expect(store.listReviews(cwd: "/tmp/project").items.map(\.targetSummary).first == "Uncommitted changes")
@@ -422,7 +425,7 @@ struct CodexReviewStoreCommandTests {
                     }
                 } == false)
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let read = try await result
             #expect(read.core.lifecycle.status == .succeeded)
         }
@@ -503,7 +506,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
@@ -574,7 +577,7 @@ struct CodexReviewStoreCommandTests {
             #expect(recoveredFromRuns.last?.turnID == "turn-actual")
 
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
@@ -617,8 +620,8 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "stale review"), for: initialRun)
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: initialRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
 
             let read = try await result
             #expect(read.core.lifecycle.status == .succeeded)
@@ -665,7 +668,7 @@ struct CodexReviewStoreCommandTests {
             await recoverGate.open()
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
@@ -709,7 +712,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
@@ -1224,7 +1227,7 @@ struct CodexReviewStoreCommandTests {
             }
             #expect(try store.readReview(runID: "run-1").cancellable)
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await result
 
             let commands = await backend.recordedCommands()
@@ -1262,7 +1265,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func failedReviewKeepsMessageEventsOutOfRunOutput() async throws {
+    @Test func failedReviewDoesNotRequireReviewText() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
@@ -1274,7 +1277,7 @@ struct CodexReviewStoreCommandTests {
                 request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
             )
             try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(.running, runID: "run-1") != nil)
-            await backend.yield(.message("partial review"))
+            await backend.yield(.progress("partial review"))
             await backend.finishEvents(throwing: StreamClosedError())
             let read = try await result
 
@@ -1336,7 +1339,7 @@ struct CodexReviewStoreCommandTests {
             try await backend.waitForRestartPreparedReview(timeout: .seconds(2))
             try #require(await waitForRunAttemptActivation(store: store, run: recoveredRun))
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "recovered review"), for: recoveredRun)
+            await backend.yield(.completed(summary: "Succeeded."), for: recoveredRun)
             let read = try await result
 
             #expect(read.core.lifecycle.status == .succeeded)
@@ -1421,7 +1424,7 @@ struct CodexReviewStoreCommandTests {
             #expect(readAfterFailure.core.lifecycle.cancellation == nil)
             #expect(readAfterFailure.core.lifecycleMessage == "Failed to cancel review: Interrupt failed")
 
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             _ = try await result
         }
     }
@@ -1442,7 +1445,7 @@ struct CodexReviewStoreCommandTests {
                 runID: "run-1",
                 cancellation: .mcpClient(message: "Stop")
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "late result"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let read = try await result
 
             #expect(read.core.lifecycle.status == .cancelled)
@@ -1465,7 +1468,7 @@ struct CodexReviewStoreCommandTests {
             )
             async let cancel = store.cancelReview(runID: "run-1", cancellation: .mcpClient(message: "Stop"))
             try await backend.waitForInterruptReview(timeout: .seconds(2))
-            await backend.yield(.completed(summary: "Reviewer failed to output a response.", result: nil))
+            await backend.yield(.completed(summary: "Reviewer failed to output a response."))
             await interruptGate.open()
             _ = try await cancel
             let read = try await result
@@ -1560,7 +1563,7 @@ struct CodexReviewStoreCommandTests {
                 sessionID: "session-1",
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
-            await backend.yield(.completed(summary: "Succeeded.", result: "review text"))
+            await backend.yield(.completed(summary: "Succeeded."))
             let read = try await result
 
             #expect(read.runID == "run-1")

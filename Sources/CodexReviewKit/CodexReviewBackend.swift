@@ -179,9 +179,7 @@ package actor BackendReviewEventMailbox {
         case .completed, .failed, .cancelled:
             return true
         case .started,
-            .message,
-            .messageDelta,
-            .log:
+            .progress:
             return false
         }
     }
