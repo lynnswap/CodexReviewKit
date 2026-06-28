@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import CodexKit
 @_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
 
@@ -271,6 +272,60 @@ func awaitTimelineRenderForTesting(
 }
 
 @MainActor
+func makePreviewChatLogSourceForTesting(
+    job: CodexReviewJob,
+    items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
+) throws -> ReviewMonitorPreviewChatLogSource {
+    ReviewMonitorPreviewChatLogSource(
+        fixtures: [try makePreviewChatLogFixtureForTesting(job: job, items: makeItems)]
+    )
+}
+
+@MainActor
+func makePreviewMessageItemForTesting(
+    id: String,
+    text: String,
+    turnID: CodexTurnID
+) -> CodexChatItemSnapshot {
+    CodexChatItemSnapshot(
+        id: id,
+        turnID: turnID,
+        kind: .agentMessage,
+        content: .message(.init(id: id, role: .assistant, text: text))
+    )
+}
+
+@MainActor
+private func makePreviewChatLogFixtureForTesting(
+    job: CodexReviewJob,
+    items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
+) throws -> ReviewMonitorPreviewChatLogFixture {
+    let chat = try #require(job.legacyReviewChatSelection)
+    let turn = CodexChatTurnStateSnapshot(
+        id: job.previewTurnIDForTesting,
+        status: CodexTurnStatus(reviewJobStateForTesting: job.core.lifecycle.status),
+        errorDescription: job.core.lifecycle.errorMessage,
+        usage: nil
+    )
+    let initialSnapshot = CodexChatSnapshot(
+        chatID: chat.id,
+        phase: CodexDataPhase(
+            reviewJobStateForTesting: job.core.lifecycle.status,
+            errorMessage: job.core.lifecycle.errorMessage
+        ),
+        turns: [turn],
+        items: makeItems(turn.id)
+    )
+    return ReviewMonitorPreviewChatLogFixture(
+        chat: chat,
+        cwd: job.cwd,
+        streamID: job.id,
+        isRunning: job.core.lifecycle.status == .running,
+        initialSnapshot: initialSnapshot
+    )
+}
+
+@MainActor
 private func timelineRenderTarget(for job: CodexReviewJob) throws -> ReviewMonitorTransportViewController.DisplayedSelectionForTesting {
     let chatID = try #require(job.legacyReviewChatID)
     return .chat(chatID.rawValue)
@@ -307,6 +362,38 @@ private extension ReviewMonitorTransportViewController.DisplayedSelectionForTest
             "workspace:\(id)"
         case .chat(let id):
             "chat:\(id)"
+        }
+    }
+}
+
+private extension CodexReviewJob {
+    var previewTurnIDForTesting: CodexTurnID {
+        core.run.turnID.map(CodexTurnID.init(rawValue:)) ?? CodexTurnID(rawValue: "\(id):preview-turn")
+    }
+}
+
+private extension CodexTurnStatus {
+    init(reviewJobStateForTesting jobState: ReviewJobState) {
+        switch jobState {
+        case .queued, .running:
+            self = .running
+        case .succeeded:
+            self = .completed
+        case .failed:
+            self = .failed
+        case .cancelled:
+            self = .cancelled
+        }
+    }
+}
+
+private extension CodexDataPhase {
+    init(reviewJobStateForTesting jobState: ReviewJobState, errorMessage: String?) {
+        switch jobState {
+        case .queued, .running, .succeeded, .cancelled:
+            self = .loaded
+        case .failed:
+            self = .failed(errorMessage ?? "Review failed")
         }
     }
 }

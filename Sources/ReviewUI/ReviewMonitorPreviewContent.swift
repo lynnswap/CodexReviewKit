@@ -173,47 +173,11 @@ public enum ReviewMonitorPreviewContent {
         return store
     }
 
-    static func makeChatLogFixtures(
-        from jobs: [CodexReviewJob]
-    ) -> [ReviewMonitorPreviewChatLogFixture] {
-        jobs.compactMap { job in
-            guard let chat = job.legacyReviewChatSelection else {
-                return nil
-            }
-            let turn = CodexChatTurnStateSnapshot(
-                id: job.previewTurnID,
-                status: CodexTurnStatus(job.core.lifecycle.status),
-                errorDescription: job.core.lifecycle.errorMessage,
-                usage: nil
-            )
-            let initialSnapshot = CodexChatSnapshot(
-                chatID: chat.id,
-                phase: CodexDataPhase(
-                    job.core.lifecycle.status,
-                    errorMessage: job.core.lifecycle.errorMessage
-                ),
-                turns: [turn],
-                items: job.timeline.items.map {
-                    CodexChatItemSnapshot(previewItem: $0, turnID: turn.id)
-                }
-            )
-            return ReviewMonitorPreviewChatLogFixture(
-                chat: chat,
-                cwd: job.cwd,
-                streamID: job.id,
-                isRunning: job.core.lifecycle.status == .running,
-                initialSnapshot: initialSnapshot
-            )
-        }
-    }
-
     static func makeChatLogSource(from store: CodexReviewStore) -> ReviewMonitorPreviewChatLogSource {
         if let previewSupport = store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport {
             return previewSupport.chatLogSource
         }
-        return ReviewMonitorPreviewChatLogSource(
-            fixtures: makeChatLogFixtures(from: store.orderedJobs)
-        )
+        return ReviewMonitorPreviewChatLogSource(fixtures: [])
     }
 
     static func retainChatLogStreamer(

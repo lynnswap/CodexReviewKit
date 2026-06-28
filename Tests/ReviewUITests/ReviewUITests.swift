@@ -5116,16 +5116,13 @@ struct ReviewUITests {
             turnID: UUID().uuidString,
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
-            timelineEntries: [
-                .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
-            ]
+            summary: "Running review."
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let previewChatLogSource = ReviewMonitorPreviewChatLogSource(
-            fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: [job])
-        )
+        let previewChatLogSource = try makePreviewChatLogSourceForTesting(job: job) { turnID in
+            [makePreviewMessageItemForTesting(id: "msg_1", text: "Initial", turnID: turnID)]
+        }
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
@@ -5167,16 +5164,13 @@ struct ReviewUITests {
             turnID: UUID().uuidString,
             status: .running,
             startedAt: Date(timeIntervalSince1970: 200),
-            summary: "Running review.",
-            timelineEntries: [
-                .init(kind: .agentMessage, groupID: "msg_1", text: "Initial")
-            ]
+            summary: "Running review."
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let previewChatLogSource = ReviewMonitorPreviewChatLogSource(
-            fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: [job])
-        )
+        let previewChatLogSource = try makePreviewChatLogSourceForTesting(job: job) { turnID in
+            [makePreviewMessageItemForTesting(id: "msg_1", text: "Initial", turnID: turnID)]
+        }
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
