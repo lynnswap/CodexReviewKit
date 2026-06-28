@@ -5137,6 +5137,7 @@ func makeReviewChatFixtureForTesting(
     )
 }
 
+@MainActor
 func reviewChatCellTestChat(
     id: String,
     title: String,

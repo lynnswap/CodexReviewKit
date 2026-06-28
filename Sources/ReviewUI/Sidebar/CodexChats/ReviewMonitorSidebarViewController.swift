@@ -1464,6 +1464,34 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return cellView.isHostingReviewMonitorChatRowViewForTesting
         }
 
+        func codexSidebarChatCellHostingViewIdentityForTesting(
+            _ id: CodexThreadID
+        ) -> ObjectIdentifier? {
+            guard let row = row(forCodexSidebarSelectionID: .chat(id)),
+                let cellView = outlineView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: true
+                ) as? ReviewMonitorReviewChatCellView
+            else {
+                return nil
+            }
+            return cellView.hostingViewIdentityForTesting
+        }
+
+        func codexSidebarChatCellBindingGenerationForTesting(_ id: CodexThreadID) -> Int? {
+            guard let row = row(forCodexSidebarSelectionID: .chat(id)),
+                let cellView = outlineView.view(
+                    atColumn: 0,
+                    row: row,
+                    makeIfNecessary: true
+                ) as? ReviewMonitorReviewChatCellView
+            else {
+                return nil
+            }
+            return cellView.bindingGenerationValueForTesting
+        }
+
         func selectCodexSidebarRowForTesting(rowID: ReviewMonitorCodexSidebarRowID) {
             guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
                 return

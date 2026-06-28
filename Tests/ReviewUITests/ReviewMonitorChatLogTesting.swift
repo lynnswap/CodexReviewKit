@@ -87,7 +87,8 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
     }
 }
 
-struct ReviewChatFixtureForTesting: Sendable {
+@MainActor
+struct ReviewChatFixtureForTesting {
     var id: String
     var cwd: String
     var chat: ReviewMonitorCodexSidebarSnapshot.Chat

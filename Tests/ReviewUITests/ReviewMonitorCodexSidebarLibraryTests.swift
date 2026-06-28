@@ -498,6 +498,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             window.title == "App review"
         }
+        let hostingViewIdentityBeforeContentUpdate = try #require(
+            sidebar.codexSidebarChatCellHostingViewIdentityForTesting(threadID)
+        )
+        let bindingGenerationBeforeContentUpdate = try #require(
+            sidebar.codexSidebarChatCellBindingGenerationForTesting(threadID)
+        )
         let fullReloadCountBeforeContentUpdate = sidebar.sidebarFullReloadCountForTesting
 
         let chat = context.model(for: threadID)
@@ -523,6 +529,14 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             window.title == "App review renamed"
         }
+        #expect(
+            sidebar.codexSidebarChatCellHostingViewIdentityForTesting(threadID)
+                == hostingViewIdentityBeforeContentUpdate
+        )
+        #expect(
+            sidebar.codexSidebarChatCellBindingGenerationForTesting(threadID)
+                == bindingGenerationBeforeContentUpdate
+        )
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeContentUpdate)
         #expect(
             sidebar.displayedCodexSidebarTitlesForTesting == [
@@ -704,6 +718,7 @@ private struct ThreadListParams: Decodable {
     var sourceKinds: [String]?
 }
 
+@MainActor
 private func sidebarSnapshot(
     workspaceID: CodexWorkspaceID,
     threadID: CodexThreadID,
@@ -721,6 +736,7 @@ private func sidebarSnapshot(
     )
 }
 
+@MainActor
 private func sidebarSnapshot(
     workspaceID: CodexWorkspaceID,
     chats: [ReviewMonitorCodexSidebarSnapshot.Chat]
@@ -732,6 +748,7 @@ private func sidebarSnapshot(
     )
 }
 
+@MainActor
 private func sidebarSection(
     id: String,
     title: String,
@@ -755,6 +772,7 @@ private func sidebarSection(
     )
 }
 
+@MainActor
 private func sidebarChat(
     id: CodexThreadID,
     title: String,

@@ -27,8 +27,10 @@ package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringC
     }
 }
 
-package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
-    package struct Section: Equatable, Sendable {
+@MainActor
+package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
+    @MainActor
+    package struct Section: Equatable {
         package var rowID: ReviewMonitorCodexSidebarRowID
         package var id: String
         package var title: String
@@ -57,28 +59,111 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         }
     }
 
-    package struct Workspace: Equatable, Sendable {
+    @MainActor
+    package struct Workspace: Equatable {
+        private struct Fixture: Equatable {
+            var cwd: String
+            var title: String
+        }
+
+        private enum Source: Equatable {
+            case codex(CodexWorkspace)
+            case fixture(Fixture)
+
+            static func == (lhs: Source, rhs: Source) -> Bool {
+                switch (lhs, rhs) {
+                case (.codex(let lhs), .codex(let rhs)):
+                    lhs === rhs
+                case (.fixture(let lhs), .fixture(let rhs)):
+                    lhs == rhs
+                default:
+                    false
+                }
+            }
+        }
+
         package var rowID: ReviewMonitorCodexSidebarRowID
         package var id: CodexWorkspaceID
-        package var cwd: String
-        package var title: String
         package var chats: [Chat]
+        private var source: Source
 
         package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
             [rowID] + chats.map(\.rowID)
         }
+
+        package var cwd: String {
+            switch source {
+            case .codex(let workspace):
+                workspace.url.path
+            case .fixture(let fixture):
+                fixture.cwd
+            }
+        }
+
+        package var title: String {
+            switch source {
+            case .codex(let workspace):
+                workspace.name
+            case .fixture(let fixture):
+                fixture.title
+            }
+        }
+
+        package init(
+            rowID: ReviewMonitorCodexSidebarRowID,
+            id: CodexWorkspaceID,
+            cwd: String,
+            title: String,
+            chats: [Chat]
+        ) {
+            self.rowID = rowID
+            self.id = id
+            self.chats = chats
+            self.source = .fixture(Fixture(cwd: cwd, title: title))
+        }
+
+        package init(
+            workspace: CodexWorkspace,
+            chats: [Chat]
+        ) {
+            self.rowID = .workspace(workspace.id)
+            self.id = workspace.id
+            self.chats = chats
+            self.source = .codex(workspace)
+        }
     }
 
-    package struct Chat: Equatable, Sendable {
+    @MainActor
+    package struct Chat: Equatable {
+        private struct Fixture: Equatable {
+            var title: String
+            var preview: String?
+            var model: String?
+            var workspaceCWD: String?
+            var updatedAt: Date?
+            var recencyAt: Date?
+            var status: CodexThreadStatus?
+        }
+
+        private enum Source: Equatable {
+            case codex(CodexChat)
+            case fixture(Fixture)
+
+            static func == (lhs: Source, rhs: Source) -> Bool {
+                switch (lhs, rhs) {
+                case (.codex(let lhs), .codex(let rhs)):
+                    lhs === rhs
+                case (.fixture(let lhs), .fixture(let rhs)):
+                    lhs == rhs
+                default:
+                    false
+                }
+            }
+        }
+
         package var rowID: ReviewMonitorCodexSidebarRowID
         package var id: CodexThreadID
-        package var title: String
-        package var preview: String?
-        package var model: String?
-        package var workspaceCWD: String?
-        package var updatedAt: Date?
-        package var recencyAt: Date?
-        package var status: CodexThreadStatus?
+        private var source: Source
 
         package init(
             rowID: ReviewMonitorCodexSidebarRowID,
@@ -93,13 +178,94 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         ) {
             self.rowID = rowID
             self.id = id
-            self.title = title
-            self.preview = preview
-            self.model = model
-            self.workspaceCWD = workspaceCWD
-            self.updatedAt = updatedAt
-            self.recencyAt = recencyAt
-            self.status = status
+            self.source = .fixture(
+                Fixture(
+                    title: title,
+                    preview: preview,
+                    model: model,
+                    workspaceCWD: workspaceCWD,
+                    updatedAt: updatedAt,
+                    recencyAt: recencyAt,
+                    status: status
+                ))
+        }
+
+        package init(chat: CodexChat) {
+            self.rowID = .chat(chat.id)
+            self.id = chat.id
+            self.source = .codex(chat)
+        }
+
+        package var codexChat: CodexChat? {
+            switch source {
+            case .codex(let chat):
+                chat
+            case .fixture:
+                nil
+            }
+        }
+
+        package var title: String {
+            switch source {
+            case .codex(let chat):
+                chat.title
+            case .fixture(let fixture):
+                fixture.title
+            }
+        }
+
+        package var preview: String? {
+            switch source {
+            case .codex(let chat):
+                chat.preview
+            case .fixture(let fixture):
+                fixture.preview
+            }
+        }
+
+        package var model: String? {
+            switch source {
+            case .codex(let chat):
+                chat.modelProvider
+            case .fixture(let fixture):
+                fixture.model
+            }
+        }
+
+        package var workspaceCWD: String? {
+            switch source {
+            case .codex(let chat):
+                chat.workspace?.url.path
+            case .fixture(let fixture):
+                fixture.workspaceCWD
+            }
+        }
+
+        package var updatedAt: Date? {
+            switch source {
+            case .codex(let chat):
+                chat.updatedAt
+            case .fixture(let fixture):
+                fixture.updatedAt
+            }
+        }
+
+        package var recencyAt: Date? {
+            switch source {
+            case .codex(let chat):
+                chat.recencyAt
+            case .fixture(let fixture):
+                fixture.recencyAt
+            }
+        }
+
+        package var status: CodexThreadStatus? {
+            switch source {
+            case .codex(let chat):
+                chat.status
+            case .fixture(let fixture):
+                fixture.status
+            }
         }
 
         var activityDate: Date? {
@@ -230,7 +396,8 @@ private extension ReviewMonitorCodexSidebarSnapshot.Section {
     }
 }
 
-struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
+@MainActor
+struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
     private var sectionIDs: [String] = []
     private var chatIDsByContainer: [ReviewMonitorCodexSidebarRowID: [CodexThreadID]] = [:]
 
@@ -352,7 +519,8 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable, Sendable {
     }
 }
 
-package enum ReviewMonitorCodexSidebarOutlineItem: Equatable, Sendable {
+@MainActor
+package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
     case section(ReviewMonitorCodexSidebarSnapshot.Section)
     case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)
     case chat(ReviewMonitorCodexSidebarSnapshot.Chat)
@@ -674,10 +842,7 @@ package final class ReviewMonitorCodexSidebarLibrary {
                     title: section.title,
                     workspaces: section.workspaces.map { workspace in
                         ReviewMonitorCodexSidebarSnapshot.Workspace(
-                            rowID: .workspace(workspace.id),
-                            id: workspace.id,
-                            cwd: workspace.cwd,
-                            title: workspace.title,
+                            workspace: workspace.workspace,
                             chats: workspace.chats.map(Self.snapshotChat(_:))
                         )
                     },
@@ -688,16 +853,6 @@ package final class ReviewMonitorCodexSidebarLibrary {
     }
 
     private static func snapshotChat(_ chat: CodexChat) -> ReviewMonitorCodexSidebarSnapshot.Chat {
-        ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(chat.id),
-            id: chat.id,
-            title: chat.title,
-            preview: chat.preview,
-            model: chat.modelProvider,
-            workspaceCWD: chat.workspace?.url.path,
-            updatedAt: chat.updatedAt,
-            recencyAt: chat.recencyAt,
-            status: chat.status
-        )
+        ReviewMonitorCodexSidebarSnapshot.Chat(chat: chat)
     }
 }

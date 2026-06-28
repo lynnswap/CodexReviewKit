@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 
+@MainActor
 struct ReviewMonitorSidebarChatRow: Equatable {
     var id: String
     var title: String
@@ -41,6 +42,7 @@ struct ReviewMonitorSidebarChatRow: Equatable {
     }
 }
 
+@MainActor
 struct ReviewMonitorChatRowContentView: View {
     var row: ReviewMonitorSidebarChatRow
 
@@ -87,6 +89,7 @@ struct ReviewMonitorChatRowContentView: View {
     }
 }
 
+@MainActor
 struct ReviewMonitorChatRowView: View {
     var node: ReviewMonitorCodexSidebarOutlineNode
 
@@ -104,6 +107,7 @@ struct ReviewMonitorChatRowView: View {
     }
 }
 
+@MainActor
 struct ReviewMonitorChatRowTimerLabel: View {
     var row: ReviewMonitorSidebarChatRow
 
