@@ -8,12 +8,12 @@ extension CodexReviewStore {
         }
     }
 
-    package var orderedJobs: [ReviewRunRecord] {
-        orderedWorkspaces.flatMap { orderedJobs(in: $0) }
+    package var orderedReviewRuns: [ReviewRunRecord] {
+        orderedWorkspaces.flatMap { orderedReviewRuns(in: $0) }
     }
 
-    package var hasReviewJobs: Bool {
-        jobs.isEmpty == false
+    package var hasReviewRuns: Bool {
+        reviewRuns.isEmpty == false
     }
 
     package func workspace(cwd: String) -> CodexReviewWorkspace? {
@@ -24,20 +24,20 @@ extension CodexReviewStore {
         workspace(cwd: job.cwd)
     }
 
-    package func job(id: String) -> ReviewRunRecord? {
-        jobs.first(where: { $0.id == id })
+    package func reviewRun(id: String) -> ReviewRunRecord? {
+        reviewRuns.first(where: { $0.id == id })
     }
 
-    package func jobs(inWorkspace cwd: String) -> [ReviewRunRecord] {
-        jobs.filter { $0.cwd == cwd }
+    package func reviewRuns(inWorkspace cwd: String) -> [ReviewRunRecord] {
+        reviewRuns.filter { $0.cwd == cwd }
     }
 
-    package func orderedJobs(in workspace: CodexReviewWorkspace) -> [ReviewRunRecord] {
-        orderedJobs(inWorkspace: workspace.cwd)
+    package func orderedReviewRuns(in workspace: CodexReviewWorkspace) -> [ReviewRunRecord] {
+        orderedReviewRuns(inWorkspace: workspace.cwd)
     }
 
-    package func orderedJobs(inWorkspace cwd: String) -> [ReviewRunRecord] {
-        jobs(inWorkspace: cwd).sorted {
+    package func orderedReviewRuns(inWorkspace cwd: String) -> [ReviewRunRecord] {
+        reviewRuns(inWorkspace: cwd).sorted {
             if $0.sortOrder == $1.sortOrder {
                 return $0.id < $1.id
             }
@@ -45,16 +45,16 @@ extension CodexReviewStore {
         }
     }
 
-    package func jobCount(in workspace: CodexReviewWorkspace) -> Int {
-        jobs(inWorkspace: workspace.cwd).count
+    package func reviewRunCount(in workspace: CodexReviewWorkspace) -> Int {
+        reviewRuns(inWorkspace: workspace.cwd).count
     }
 
-    package func totalJobCount() -> Int {
-        jobs.count
+    package func totalReviewRunCount() -> Int {
+        reviewRuns.count
     }
 
-    package func normalizeJobSortOrders(inWorkspace cwd: String) {
-        let ordered = orderedJobs(inWorkspace: cwd)
+    package func normalizeReviewRunSortOrders(inWorkspace cwd: String) {
+        let ordered = orderedReviewRuns(inWorkspace: cwd)
         for (index, job) in ordered.enumerated() {
             job.sortOrder = Double(ordered.count - index - 1)
         }
@@ -67,9 +67,9 @@ extension CodexReviewStore {
         }
     }
 
-    package func normalizeAllJobSortOrders() {
+    package func normalizeAllReviewRunSortOrders() {
         for workspace in workspaces {
-            normalizeJobSortOrders(inWorkspace: workspace.cwd)
+            normalizeReviewRunSortOrders(inWorkspace: workspace.cwd)
         }
     }
 }

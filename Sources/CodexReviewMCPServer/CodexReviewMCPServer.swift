@@ -149,7 +149,7 @@ package final class CodexReviewMCPServer {
     }
 
     package func hasActiveReviews(in sessionID: String) -> Bool {
-        store.activeJobIDs(for: sessionID).isEmpty == false
+        store.activeReviewRunIDs(for: sessionID).isEmpty == false
     }
 }
 

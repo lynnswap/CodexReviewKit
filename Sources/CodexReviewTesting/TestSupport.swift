@@ -535,7 +535,7 @@ package final class StoreSnapshotProbe {
     }
 
     package func snapshot() -> StoreSnapshot {
-        let jobs = store.jobs
+        let reviewRuns = store.reviewRuns
             .sorted { lhs, rhs in
                 if lhs.sortOrder == rhs.sortOrder {
                     return lhs.id < rhs.id
@@ -543,7 +543,7 @@ package final class StoreSnapshotProbe {
                 return lhs.sortOrder > rhs.sortOrder
             }
             .map { job in
-                let runtimeState = store.runtimeJobState(jobID: job.id)
+                let runtimeState = store.runtimeReviewRunState(jobID: job.id)
                 return StoreJobSnapshot(
                     jobID: job.id,
                     status: job.core.lifecycle.status,
@@ -554,7 +554,7 @@ package final class StoreSnapshotProbe {
                     cancellationRequested: job.cancellationRequested
                 )
             }
-        return StoreSnapshot(jobs: jobs)
+        return StoreSnapshot(reviewRuns: reviewRuns)
     }
 
     package func waitUntilJobStatus(
@@ -597,13 +597,13 @@ package final class StoreSnapshotProbe {
 }
 
 package struct StoreSnapshot: Sendable {
-    package var jobs: [StoreJobSnapshot]
+    package var reviewRuns: [StoreJobSnapshot]
 
     package func job(_ jobID: String? = nil) -> StoreJobSnapshot? {
         guard let jobID else {
-            return jobs.first
+            return reviewRuns.first
         }
-        return jobs.first { $0.jobID == jobID }
+        return reviewRuns.first { $0.jobID == jobID }
     }
 }
 

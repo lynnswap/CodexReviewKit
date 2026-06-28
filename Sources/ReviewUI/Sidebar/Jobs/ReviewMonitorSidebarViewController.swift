@@ -721,7 +721,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func cancellableReviewJob(
         for chat: ReviewMonitorCodexSidebarSnapshot.Chat
     ) -> ReviewRunRecord? {
-        store.orderedJobs.first { job in
+        store.orderedReviewRuns.first { job in
             guard job.isTerminal == false,
                 let chatID = job.sidebarChatID
             else {
@@ -746,7 +746,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                     cancellation: .userInterface()
                 )
             } catch {
-                guard let job = self.store.job(id: jobID) else {
+                guard let job = self.store.reviewRun(id: jobID) else {
                     return
                 }
                 try? self.store.recordCancellationFailure(

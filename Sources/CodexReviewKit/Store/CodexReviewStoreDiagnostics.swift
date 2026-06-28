@@ -25,5 +25,5 @@ struct CodexReviewStoreDiagnosticsSnapshot: Encodable {
     var failureMessage: String?
     var serverURL: String?
     var childRuntimePath: String?
-    var jobs: [Job]
+    var reviewRuns: [Job]
 }

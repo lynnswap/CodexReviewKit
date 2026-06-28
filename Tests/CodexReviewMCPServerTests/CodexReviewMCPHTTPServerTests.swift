@@ -377,7 +377,7 @@ struct CodexReviewMCPHTTPServerTests {
                     .init(cwd: "/tmp/project"),
                     .init(cwd: "/tmp/other"),
                 ],
-                jobs: [included, otherSession, otherWorkspace]
+                reviewRuns: [included, otherSession, otherWorkspace]
             )
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -434,7 +434,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
+                reviewRuns: [
                     includedJob,
                     ReviewRunRecord.makeForTesting(
                         id: "job-other-session",
@@ -527,7 +527,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [job]
+                reviewRuns: [job]
             )
 
             let defaultResponse = try await postJSONRPC(
@@ -622,7 +622,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [job]
+                reviewRuns: [job]
             )
 
             let response = try await postJSONRPC(
@@ -689,7 +689,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running, otherSession]
+                reviewRuns: [running, otherSession]
             )
             let response = try await postJSONRPC(
                 endpoint: await server.url,
@@ -756,7 +756,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [completed, running]
+                reviewRuns: [completed, running]
             )
 
             let response = try await postJSONRPC(
@@ -794,7 +794,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [
+                reviewRuns: [
                     ReviewRunRecord.makeForTesting(
                         id: "job-running-1",
                         sessionID: sessionID,
@@ -837,7 +837,7 @@ struct CodexReviewMCPHTTPServerTests {
             let text = (response.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
 
             #expect(response.value(for: ["result", "isError"]) as? Bool == true)
-            #expect(text?.contains("matched multiple jobs") == true)
+            #expect(text?.contains("matched multiple review jobs") == true)
             #expect(text?.contains("job-running-1") == true)
             #expect(text?.contains("job-running-2") == true)
         }
@@ -864,7 +864,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running]
+                reviewRuns: [running]
             )
 
             let response = try await postJSONRPC(
@@ -1034,7 +1034,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [other]
+                reviewRuns: [other]
             )
 
             let response = try await postJSONRPC(
@@ -1080,7 +1080,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                jobs: [running]
+                reviewRuns: [running]
             )
 
             let response = try await deleteSession(endpoint: await server.url, sessionID: sessionID)

@@ -90,12 +90,12 @@ enum SelectionError: Swift.Error, Sendable {
 extension CodexReviewAPI.Job.SelectionError: LocalizedError {
     package var errorDescription: String? {
         switch self {
-        case .ambiguous(let jobs):
-            let candidates = jobs
+        case .ambiguous(let reviewRuns):
+            let candidates = reviewRuns
                 .map { "- \($0.jobID) [\($0.core.lifecycle.status.rawValue)] \($0.cwd) \($0.targetSummary)" }
                 .joined(separator: "\n")
             return """
-            Review job selector matched multiple jobs:
+            Review job selector matched multiple review jobs:
             \(candidates)
             Specify jobID or narrow cwd/statuses.
             """

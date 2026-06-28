@@ -156,7 +156,7 @@ final class CodexReviewStoreRuntimeState {
 }
 
 extension CodexReviewStore {
-    package func runtimeJobState(jobID: String) -> CodexReviewRuntimeJobState {
+    package func runtimeReviewRunState(jobID: String) -> CodexReviewRuntimeJobState {
         runtimeState.jobState(for: jobID)
     }
 }

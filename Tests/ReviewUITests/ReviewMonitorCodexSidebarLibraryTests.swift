@@ -416,7 +416,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         store.loadForTesting(
             serverState: .running,
             workspaces: [CodexReviewWorkspace(cwd: repo.path)],
-            jobs: [legacyJob]
+            reviewRuns: [legacyJob]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(

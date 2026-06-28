@@ -1147,7 +1147,7 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-first" }
+        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-first" }
 
         try await store.switchAccount(CodexReviewKit.CodexReviewAccount(email: "second@example.com"))
         let result = try await reviewRead
@@ -1218,7 +1218,7 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-active" }
+        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-active" }
 
         await store.logout()
         let result = try await reviewRead
@@ -1321,7 +1321,7 @@ struct CodexReviewHostTests {
             sessionID: sessionID,
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-1" }
 
         let stopTask = Task { @MainActor in
             await store.stop()
@@ -1372,7 +1372,7 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        await waitUntil { store.jobs.first?.core.run.turnID == "turn-1" }
+        await waitUntil { store.reviewRuns.first?.core.run.turnID == "turn-1" }
 
         let startedAt = Date()
         await store.stop()
@@ -1426,7 +1426,7 @@ struct CodexReviewHostTests {
                 request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
             )
         }
-        try #require(await waitUntil(timeout: .seconds(2)) { store.jobs.first?.core.run.turnID == "turn-1" })
+        try #require(await waitUntil(timeout: .seconds(2)) { store.reviewRuns.first?.core.run.turnID == "turn-1" })
 
         networkMonitor.yield(.init(status: .unsatisfied))
         try #require(await waitUntil(timeout: .seconds(2)) {

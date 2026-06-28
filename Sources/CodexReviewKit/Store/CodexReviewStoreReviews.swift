@@ -4,8 +4,8 @@ private let networkRecoveryUnavailableMessage = "Network unavailable; waiting to
 private let networkRecoveryRestoredMessage = "Network restored; restarting review."
 
 extension CodexReviewStore {
-    package func activeJobIDs(for sessionID: String) -> [String] {
-        orderedJobs
+    package func activeReviewRunIDs(for sessionID: String) -> [String] {
+        orderedReviewRuns
             .filter { $0.sessionID == sessionID && $0.isTerminal == false }
             .map(\.id)
     }
@@ -68,14 +68,14 @@ extension CodexReviewStore {
             id: jobID,
             sessionID: sessionID,
             cwd: validatedRequest.cwd,
-            sortOrder: nextJobSortOrder(inWorkspace: validatedRequest.cwd),
+            sortOrder: nextReviewRunSortOrder(inWorkspace: validatedRequest.cwd),
             targetSummary: validatedRequest.target.displaySummary,
             core: .init(
                 lifecycle: .init(status: .queued),
                 output: .init(summary: "Queued.")
             )
         )
-        insertReviewJob(job)
+        insertReviewRun(job)
         markReviewRunning(job, startedAt: createdAt)
         runtimeState.markStarting(jobID)
         launchReviewWorker(jobID: jobID, sessionID: sessionID, request: validatedRequest)
@@ -99,7 +99,7 @@ extension CodexReviewStore {
         sessionID: String,
         request validatedRequest: CodexReviewAPI.Start.Request
     ) async {
-        guard let job = job(id: jobID) else {
+        guard let job = reviewRun(id: jobID) else {
             runtimeState.clearStarting(jobID)
             runtimeState.removeActiveWorker(for: jobID)
             return
@@ -432,7 +432,7 @@ extension CodexReviewStore {
         statuses: [ReviewJobState]? = nil,
         limit: Int? = nil
     ) -> CodexReviewAPI.List.Result {
-        let filtered = filteredJobs(cwd: cwd, statuses: statuses)
+        let filtered = filteredReviewRuns(cwd: cwd, statuses: statuses)
         let clampedLimit = min(max(limit ?? 20, 1), 100)
         return CodexReviewAPI.List.Result(items: Array(filtered.prefix(clampedLimit)).map(makeListItem))
     }
@@ -444,7 +444,7 @@ extension CodexReviewStore {
         limit: Int? = nil
     ) -> CodexReviewAPI.List.Result {
         let statusSet = statuses.map(Set.init)
-        let filtered = orderedJobs.filter { job in
+        let filtered = orderedReviewRuns.filter { job in
             if let sessionID, job.sessionID != sessionID {
                 return false
             }
@@ -466,7 +466,7 @@ extension CodexReviewStore {
 
     package func resolveJob(sessionID: String?, selector: CodexReviewAPI.Job.Selector) throws -> ReviewRunRecord {
         let statusSet = selector.statuses.map(Set.init)
-        let matches = orderedJobs.filter { job in
+        let matches = orderedReviewRuns.filter { job in
             if let sessionID, job.sessionID != sessionID {
                 return false
             }
@@ -495,7 +495,7 @@ extension CodexReviewStore {
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        guard let job = job(id: jobID), job.sessionID == sessionID else {
+        guard let job = reviewRun(id: jobID), job.sessionID == sessionID else {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         return try await cancelReview(jobID: jobID, cancellation: cancellation)
@@ -598,14 +598,14 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .sessionClosed()
     ) async {
         closedSessions.insert(sessionID)
-        for jobID in activeJobIDs(for: sessionID) {
+        for jobID in activeReviewRunIDs(for: sessionID) {
             _ = try? await cancelReview(jobID: jobID, cancellation: reason)
         }
     }
 
     package func closeActiveReviewSessions(reason: ReviewCancellation) async {
         let jobIDs =
-            orderedJobs
+            orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
         for jobID in jobIDs {
@@ -614,15 +614,15 @@ extension CodexReviewStore {
     }
 
     private func job(jobID: String) throws -> ReviewRunRecord {
-        guard let job = job(id: jobID) else {
+        guard let job = reviewRun(id: jobID) else {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
         return job
     }
 
-    private func filteredJobs(cwd: String?, statuses: [ReviewJobState]?) -> [ReviewRunRecord] {
+    private func filteredReviewRuns(cwd: String?, statuses: [ReviewJobState]?) -> [ReviewRunRecord] {
         let statusSet = statuses.map(Set.init)
-        return orderedJobs.filter { job in
+        return orderedReviewRuns.filter { job in
             if let cwd, job.cwd != cwd {
                 return false
             }
@@ -652,7 +652,7 @@ extension CodexReviewStore {
         return max(0, Int(end.timeIntervalSince(startedAt)))
     }
 
-    private func insertReviewJob(_ job: ReviewRunRecord) {
+    private func insertReviewRun(_ job: ReviewRunRecord) {
         if workspace(cwd: job.cwd) == nil {
             let workspace = CodexReviewWorkspace(
                 cwd: job.cwd,
@@ -660,7 +660,7 @@ extension CodexReviewStore {
             )
             workspaces.insert(workspace)
         }
-        jobs.insert(job)
+        reviewRuns.insert(job)
         writeDiagnosticsIfNeeded()
     }
 
@@ -1037,7 +1037,7 @@ extension CodexReviewStore {
     }
 
     private func waitForReviewTerminal(jobID: String, timeout: Duration?) async {
-        guard let job = job(id: jobID),
+        guard let job = reviewRun(id: jobID),
             job.isTerminal == false
         else {
             return
@@ -1048,8 +1048,8 @@ extension CodexReviewStore {
         )
     }
 
-    private func nextJobSortOrder(inWorkspace cwd: String) -> Double {
-        (jobs(inWorkspace: cwd).map(\.sortOrder).max() ?? -1) + 1
+    private func nextReviewRunSortOrder(inWorkspace cwd: String) -> Double {
+        (reviewRuns(inWorkspace: cwd).map(\.sortOrder).max() ?? -1) + 1
     }
 
     private func nextWorkspaceSortOrder() -> Double {

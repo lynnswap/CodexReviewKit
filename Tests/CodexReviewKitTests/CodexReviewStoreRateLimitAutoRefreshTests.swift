@@ -172,17 +172,17 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
         )
         let store = CodexReviewStore.makePreviewStore()
 
-        loadStore(store, account: account, jobs: [])
+        loadStore(store, account: account, reviewRuns: [])
         #expect(store.accountRateLimitAutoRefreshTargets(now: now) == [
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
         ])
 
-        loadStore(store, account: account, jobs: [runningJob])
+        loadStore(store, account: account, reviewRuns: [runningJob])
         #expect(store.accountRateLimitAutoRefreshTargets(now: now) == [
             .init(accountKey: account.accountKey, kind: .selectedRunningInterval, dueAt: now.addingTimeInterval(60)),
         ])
 
-        loadStore(store, account: account, jobs: [])
+        loadStore(store, account: account, reviewRuns: [])
         #expect(store.accountRateLimitAutoRefreshTargets(now: now) == [
             .init(accountKey: account.accountKey, kind: .selectedIdleInterval, dueAt: now.addingTimeInterval(15 * 60)),
         ])
@@ -304,7 +304,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
     private func loadStore(
         _ store: CodexReviewStore,
         account: CodexReviewAccount,
-        jobs: [ReviewRunRecord]
+        reviewRuns: [ReviewRunRecord]
     ) {
         store.loadForTesting(
             serverState: .running,
@@ -312,7 +312,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             account: account,
             persistedAccounts: [account],
             workspaces: [CodexReviewWorkspace(cwd: "/tmp/repo")],
-            jobs: jobs
+            reviewRuns: reviewRuns
         )
     }
 

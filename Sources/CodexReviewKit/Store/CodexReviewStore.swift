@@ -9,7 +9,7 @@ public final class CodexReviewStore {
     package let settings: SettingsStore
     public package(set) var serverURL: URL?
     public package(set) var workspaces: Set<CodexReviewWorkspace> = []
-    public package(set) var jobs: Set<ReviewRunRecord> = []
+    public package(set) var reviewRuns: Set<ReviewRunRecord> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
     }
@@ -122,16 +122,16 @@ public final class CodexReviewStore {
     }
 
     public func stop() async {
-        let locallyCancelledJobIDs: [String]
+        let locallyCancelledReviewRunIDs: [String]
         if backend.invokesRuntimeStopReviewCleanupDuringStop {
-            locallyCancelledJobIDs = []
+            locallyCancelledReviewRunIDs = []
         } else {
-            locallyCancelledJobIDs = await requestActiveReviewCancellationsForRuntimeStop()
+            locallyCancelledReviewRunIDs = await requestActiveReviewCancellationsForRuntimeStop()
         }
         await backend.stop(store: self)
-        let remainingLocallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
+        let remainingLocallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(cancelWorkers: false)
         cancelAndDetachReviewWorkersForRuntimeStop(
-            jobIDs: Array(Set(locallyCancelledJobIDs + remainingLocallyCancelledJobIDs))
+            jobIDs: Array(Set(locallyCancelledReviewRunIDs + remainingLocallyCancelledReviewRunIDs))
         )
         transitionToStopped()
     }
@@ -363,7 +363,7 @@ public final class CodexReviewStore {
         guard let diagnosticsURL else {
             return
         }
-        let jobs: [CodexReviewStoreDiagnosticsSnapshot.Job] = orderedJobs.map { job in
+        let reviewRuns: [CodexReviewStoreDiagnosticsSnapshot.Job] = orderedReviewRuns.map { job in
             let timelineTextSnapshot = job.timeline.textSnapshot
             return CodexReviewStoreDiagnosticsSnapshot.Job(
                 status: job.core.lifecycle.status.rawValue,
@@ -377,7 +377,7 @@ public final class CodexReviewStore {
             failureMessage: serverState.failureMessage,
             serverURL: serverURL?.absoluteString,
             childRuntimePath: nil,
-            jobs: jobs
+            reviewRuns: reviewRuns
         )
         do {
             try FileManager.default.createDirectory(
@@ -396,11 +396,11 @@ public final class CodexReviewStore {
     }
 
     public var hasRunningJobs: Bool {
-        jobs.contains(where: { $0.isTerminal == false })
+        reviewRuns.contains(where: { $0.isTerminal == false })
     }
 
     public var runningJobCount: Int {
-        jobs.filter { $0.isTerminal == false }.count
+        reviewRuns.filter { $0.isTerminal == false }.count
     }
 
     public var canPerformPrimaryAuthenticationAction: Bool {
@@ -420,7 +420,7 @@ public final class CodexReviewStore {
 
     private func resetReviews() {
         workspaces = []
-        jobs = []
+        reviewRuns = []
     }
 
     private func executePendingAccountAction(_ action: CodexReviewAuthModel.PendingAccountAction) async throws {

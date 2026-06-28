@@ -2169,7 +2169,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             workspaces: [workspace],
-            jobs: [job]
+            reviewRuns: [job]
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -4980,10 +4980,10 @@ func reviewChatCellTestChat(
 }
 
 @MainActor
-func makeWorkspaces(from jobs: [ReviewRunRecord]) -> [CodexReviewWorkspace] {
+func makeWorkspaces(from reviewRuns: [ReviewRunRecord]) -> [CodexReviewWorkspace] {
     var seenCWDs: Set<String> = []
     var order: [String] = []
-    for job in jobs {
+    for job in reviewRuns {
         if seenCWDs.contains(job.cwd) == false {
             order.insert(job.cwd, at: 0)
             seenCWDs.insert(job.cwd)
@@ -4993,8 +4993,8 @@ func makeWorkspaces(from jobs: [ReviewRunRecord]) -> [CodexReviewWorkspace] {
 }
 
 @MainActor
-func makeSidebarContent(from jobs: [ReviewRunRecord]) -> (workspaces: [CodexReviewWorkspace], jobs: [ReviewRunRecord]) {
-    return (makeWorkspaces(from: jobs), Array(jobs.reversed()))
+func makeSidebarContent(from reviewRuns: [ReviewRunRecord]) -> (workspaces: [CodexReviewWorkspace], reviewRuns: [ReviewRunRecord]) {
+    return (makeWorkspaces(from: reviewRuns), Array(reviewRuns.reversed()))
 }
 
 struct LinkedWorktreeFixtureForTesting {
@@ -5173,10 +5173,10 @@ extension CodexReviewStore {
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
         workspaces: [CodexReviewWorkspace],
-        jobs: [ReviewRunRecord] = [],
+        reviewRuns: [ReviewRunRecord] = [],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
-        installPreviewChatLogSourceForTesting(on: self, jobs: jobs)
+        installPreviewChatLogSourceForTesting(on: self, reviewRuns: reviewRuns)
         loadForTesting(
             serverState: serverState,
             authPhase: authState.phase,
@@ -5196,7 +5196,7 @@ extension CodexReviewStore {
             } ?? [],
             serverURL: serverURL,
             workspaces: workspaces,
-            jobs: jobs,
+            reviewRuns: reviewRuns,
             settingsSnapshot: settingsSnapshot
         )
     }
@@ -5205,7 +5205,7 @@ extension CodexReviewStore {
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
-        content: (workspaces: [CodexReviewWorkspace], jobs: [ReviewRunRecord]),
+        content: (workspaces: [CodexReviewWorkspace], reviewRuns: [ReviewRunRecord]),
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(
@@ -5213,7 +5213,7 @@ extension CodexReviewStore {
             authState: authState,
             serverURL: serverURL,
             workspaces: content.workspaces,
-            jobs: content.jobs,
+            reviewRuns: content.reviewRuns,
             settingsSnapshot: settingsSnapshot
         )
     }

@@ -63,7 +63,7 @@ extension CodexReviewStore {
             return false
         }
 
-        let ordered = orderedJobs(inWorkspace: cwd)
+        let ordered = orderedReviewRuns(inWorkspace: cwd)
         guard let job = ordered.first(where: { $0.id == id }) else {
             return false
         }
@@ -91,7 +91,7 @@ extension CodexReviewStore {
             return false
         }
 
-        let ordered = orderedJobs(inWorkspace: cwd)
+        let ordered = orderedReviewRuns(inWorkspace: cwd)
         guard let job = ordered.first(where: { $0.id == id }),
               let sourceIndex = ordered.firstIndex(where: { $0 === job })
         else {
@@ -110,11 +110,11 @@ extension CodexReviewStore {
             sortOrder: \.sortOrder
         )
         if sortOrder == nil {
-            normalizeJobSortOrders(inWorkspace: cwd)
+            normalizeReviewRunSortOrders(inWorkspace: cwd)
             sortOrder = reorderedSortOrder(
                 moving: job,
                 toIndex: destinationIndex,
-                in: orderedJobs(inWorkspace: cwd),
+                in: orderedReviewRuns(inWorkspace: cwd),
                 sortOrder: \.sortOrder
             )
         }

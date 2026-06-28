@@ -33,7 +33,7 @@ extension CodexReviewStore {
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) throws {
-        guard let job = job(id: jobID)
+        guard let job = reviewRun(id: jobID)
         else {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
@@ -65,7 +65,7 @@ extension CodexReviewStore {
         sessionID: String,
         message: String
     ) throws {
-        guard let job = job(id: jobID)
+        guard let job = reviewRun(id: jobID)
         else {
             throw CodexReviewAPI.Error.jobNotFound("Job \(jobID) was not found.")
         }
@@ -95,9 +95,9 @@ extension CodexReviewStore {
         let cancellation = ReviewCancellation.system(
             message: reason.nilIfEmpty ?? "Cancellation requested."
         )
-        let cancellableJobs = orderedJobs.filter { $0.isTerminal == false }
+        let cancellableReviewRuns = orderedReviewRuns.filter { $0.isTerminal == false }
         var firstError: (any Error)?
-        for job in cancellableJobs {
+        for job in cancellableReviewRuns {
             do {
                 _ = try await cancelReview(
                     jobID: job.id,
@@ -124,14 +124,14 @@ extension CodexReviewStore {
     package func requestActiveReviewCancellationsForRuntimeStop(
         reason: ReviewCancellation = .system(message: "Review runtime stopped.")
     ) async -> [String] {
-        let activeJobIDs =
-            orderedJobs
+        let activeReviewRunIDs =
+            orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
-        for jobID in activeJobIDs {
+        for jobID in activeReviewRunIDs {
             _ = try? await cancelReview(jobID: jobID, cancellation: reason)
         }
-        return activeJobIDs
+        return activeReviewRunIDs
     }
 
     package func cleanupActiveReviewsForRuntimeStop(
@@ -144,11 +144,11 @@ extension CodexReviewStore {
     ) async -> CodexReviewRuntimeStopReviewCleanupResult {
         let request = runtimeStopReviewCleanupRequest(reason: reason)
         let didCompleteBackendCleanup = await cleanupBackendReviews(request)
-        let locallyCancelledJobIDs = cancelActiveReviewsLocallyForRuntimeStop(
+        let locallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
             cancelWorkers: false
         )
-        cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledJobIDs)
+        cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: locallyCancelledReviewRunIDs)
         let didDrainReviewWorkers = await drainReviewWorkersForRuntimeStop(
             timeout: workerDrainTimeout
         )
@@ -172,16 +172,16 @@ extension CodexReviewStore {
         reason: ReviewCancellation = .system(message: "Review runtime stopped."),
         cancelWorkers: Bool = true
     ) -> [String] {
-        let activeJobIDs =
-            orderedJobs
+        let activeReviewRunIDs =
+            orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
-        guard activeJobIDs.isEmpty == false else {
+        guard activeReviewRunIDs.isEmpty == false else {
             return []
         }
 
-        for jobID in activeJobIDs {
-            if let job = job(id: jobID), job.isTerminal == false {
+        for jobID in activeReviewRunIDs {
+            if let job = reviewRun(id: jobID), job.isTerminal == false {
                 try? completeCancellationLocally(
                     jobID: job.id,
                     sessionID: job.sessionID,
@@ -192,7 +192,7 @@ extension CodexReviewStore {
                 runtimeState.cancelActiveWorker(for: jobID)
             }
         }
-        return activeJobIDs
+        return activeReviewRunIDs
     }
 
     package func cancelAndDetachReviewWorkersForRuntimeStop(jobIDs: [String]) {
@@ -250,7 +250,7 @@ extension CodexReviewStore {
         failureMessage: String
     ) {
         let resolvedError = failureMessage.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        for job in orderedJobs where job.isTerminal == false {
+        for job in orderedReviewRuns where job.isTerminal == false {
             job.cancellationRequested = false
             job.core.lifecycle.cancellation = nil
             job.core.lifecycle.status = .failed

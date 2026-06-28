@@ -171,14 +171,14 @@ func replaceChatLogTextForTesting(_ job: ReviewRunRecord, _ text: String) {
 }
 
 @MainActor
-func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, jobs: [ReviewRunRecord]) {
-    let fixtures = jobs.compactMap { try? makePreviewChatLogFixtureForTesting(job: $0) }
+func installPreviewChatLogSourceForTesting(on store: CodexReviewStore, reviewRuns: [ReviewRunRecord]) {
+    let fixtures = reviewRuns.compactMap { try? makePreviewChatLogFixtureForTesting(job: $0) }
     let source = ReviewMonitorPreviewChatLogSource(fixtures: fixtures)
     store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
     jobStorePreviewSupportRetainers.append(
         ReviewChatLogFixtureRetainer(
             source: source,
-            jobIDs: Set(jobs.map(\.id))
+            jobIDs: Set(reviewRuns.map(\.id))
         ))
 }
 
