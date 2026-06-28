@@ -101,6 +101,38 @@ struct ReviewChatFixtureForTesting: Sendable {
     }
 }
 
+enum ReviewChatFixtureStatus: Sendable, Hashable {
+    case queued
+    case running
+    case succeeded
+    case failed
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .queued, .running:
+            false
+        case .succeeded, .failed, .cancelled:
+            true
+        }
+    }
+
+    var displayText: String {
+        switch self {
+        case .queued:
+            "Queued"
+        case .running:
+            "Running"
+        case .succeeded:
+            "Succeeded"
+        case .failed:
+            "Failed"
+        case .cancelled:
+            "Cancelled"
+        }
+    }
+}
+
 @MainActor
 func makeReviewChatFixtureForTesting(
     id: String = UUID().uuidString,
@@ -110,7 +142,7 @@ func makeReviewChatFixtureForTesting(
     model: String? = "gpt-5",
     chatID: CodexThreadID? = nil,
     turnID: CodexTurnID? = nil,
-    status: ReviewRunState = .succeeded,
+    status: ReviewChatFixtureStatus = .succeeded,
     startedAt: Date? = Date(timeIntervalSince1970: 200),
     updatedAt: Date? = nil,
     chatEntries: [ReviewChatLogEntryForTesting] = [],
@@ -128,14 +160,14 @@ func makeReviewChatFixtureForTesting(
         workspaceCWD: cwd,
         updatedAt: resolvedUpdatedAt,
         recencyAt: resolvedUpdatedAt,
-        status: CodexThreadStatus(reviewRunStateForTesting: status)
+        status: CodexThreadStatus(chatFixtureStatusForTesting: status)
     )
     ReviewChatLogFixtureStore.setEntries(chatEntries, for: resolvedChatID)
     let initialSnapshot = makeCodexChatSnapshotForTesting(
         chatID: resolvedChatID,
         turnID: resolvedTurnID,
-        phase: CodexDataPhase(reviewRunStateForTesting: status, errorMessage: errorMessage),
-        turnStatus: CodexTurnStatus(reviewRunStateForTesting: status),
+        phase: CodexDataPhase(chatFixtureStatusForTesting: status, errorMessage: errorMessage),
+        turnStatus: CodexTurnStatus(chatFixtureStatusForTesting: status),
         turnErrorDescription: errorMessage,
         items: ReviewChatLogFixtureStore.items(for: resolvedChatID, turnID: resolvedTurnID)
     )
@@ -689,8 +721,8 @@ private struct ReviewChatLogAccumulatedItem {
 }
 
 private extension CodexThreadStatus {
-    init(reviewRunStateForTesting jobState: ReviewRunState) {
-        switch jobState {
+    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus) {
+        switch status {
         case .queued, .running:
             self = .active(activeFlags: [])
         case .succeeded, .failed, .cancelled:
@@ -700,8 +732,8 @@ private extension CodexThreadStatus {
 }
 
 private extension CodexTurnStatus {
-    init(reviewRunStateForTesting jobState: ReviewRunState) {
-        switch jobState {
+    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus) {
+        switch status {
         case .queued, .running:
             self = .running
         case .succeeded:
@@ -715,8 +747,8 @@ private extension CodexTurnStatus {
 }
 
 private extension CodexDataPhase {
-    init(reviewRunStateForTesting jobState: ReviewRunState, errorMessage: String?) {
-        switch jobState {
+    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus, errorMessage: String?) {
+        switch status {
         case .queued, .running, .succeeded, .cancelled:
             self = .loaded
         case .failed:

@@ -23,7 +23,7 @@ public enum ReviewMonitorPreviewContent {
         let endedOffset: TimeInterval?
     }
 
-    private struct PreviewRunFixture {
+    private struct PreviewChatFixture {
         let id: String
         let chatID: CodexThreadID
         let turnID: CodexTurnID
@@ -188,7 +188,7 @@ public enum ReviewMonitorPreviewContent {
         let chatItems = makeCommandOutputPreviewChatLogItems()
         let chatID = CodexThreadID(rawValue: "preview-command-output-panel")
         let turnID = CodexTurnID(rawValue: "preview-command-output-turn")
-        let review = PreviewRunFixture(
+        let chatFixture = PreviewChatFixture(
             id: "preview-command-output-panel",
             chatID: chatID,
             turnID: turnID,
@@ -210,7 +210,7 @@ public enum ReviewMonitorPreviewContent {
             workspaces: []
         )
         let fixture = makeChatLogFixture(
-            for: review
+            for: chatFixture
         )
         store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
             chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
@@ -242,10 +242,10 @@ public enum ReviewMonitorPreviewContent {
 
     package static func previewChatLogItemID(
         itemName: String,
-        runID: String,
+        streamID: String,
         cycle: Int
     ) -> String {
-        "preview-\(itemName)-\(runID)-\(cycle)"
+        "preview-\(itemName)-\(streamID)-\(cycle)"
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -612,7 +612,7 @@ public enum ReviewMonitorPreviewContent {
                 let chatItems = makePreviewChatLogItems(for: definition, workspaceName: workspaceName)
                 let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(chatIndex)")
                 let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(chatIndex)")
-                let review = PreviewRunFixture(
+                let chatFixture = PreviewChatFixture(
                     id: "preview-\(workspaceIndex)-\(chatIndex)",
                     chatID: chatID,
                     turnID: turnID,
@@ -628,7 +628,7 @@ public enum ReviewMonitorPreviewContent {
                 )
                 chatLogFixtures.append(
                     makeChatLogFixture(
-                        for: review
+                        for: chatFixture
                     ))
             }
         }
@@ -638,43 +638,43 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
-        for review: PreviewRunFixture
+        for chatFixture: PreviewChatFixture
     ) -> ReviewMonitorPreviewChatLogFixture {
         let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(review.chatID),
-            id: review.chatID,
-            title: review.targetSummary,
-            preview: review.lastAgentMessage.nilIfEmpty ?? review.summary.nilIfEmpty,
-            model: review.model,
-            workspaceCWD: review.cwd,
-            updatedAt: review.endedAt ?? review.startedAt,
-            recencyAt: review.endedAt ?? review.startedAt,
-            status: CodexThreadStatus(previewLifecycle: review.lifecycle)
+            rowID: .chat(chatFixture.chatID),
+            id: chatFixture.chatID,
+            title: chatFixture.targetSummary,
+            preview: chatFixture.lastAgentMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
+            model: chatFixture.model,
+            workspaceCWD: chatFixture.cwd,
+            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            status: CodexThreadStatus(previewLifecycle: chatFixture.lifecycle)
         )
         let turn = CodexChatTurnStateSnapshot(
-            id: review.turnID,
-            status: CodexTurnStatus(review.lifecycle),
-            errorDescription: review.lifecycle == .failed ? review.summary : nil,
+            id: chatFixture.turnID,
+            status: CodexTurnStatus(chatFixture.lifecycle),
+            errorDescription: chatFixture.lifecycle == .failed ? chatFixture.summary : nil,
             usage: nil
         )
         let initialSnapshot = CodexChatSnapshot(
             chatID: chat.id,
             phase: CodexDataPhase(
-                review.lifecycle,
-                errorMessage: review.lifecycle == .failed ? review.summary : nil
+                chatFixture.lifecycle,
+                errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil
             ),
             turns: [turn],
             items: makeInitialChatItems(
-                streamID: review.id,
-                chatItems: review.chatItems,
+                streamID: chatFixture.id,
+                chatItems: chatFixture.chatItems,
                 turnID: turn.id
             )
         )
         return ReviewMonitorPreviewChatLogFixture(
             chat: chat,
-            cwd: review.cwd,
-            streamID: review.id,
-            isRunning: review.lifecycle == .running,
+            cwd: chatFixture.cwd,
+            streamID: chatFixture.id,
+            isRunning: chatFixture.lifecycle == .running,
             initialSnapshot: initialSnapshot
         )
     }
@@ -689,7 +689,7 @@ public enum ReviewMonitorPreviewContent {
             let snapshot = item.itemSnapshot(
                 id: previewChatLogItemID(
                     itemName: item.itemName,
-                    runID: streamID,
+                    streamID: streamID,
                     cycle: 0
                 ),
                 turnID: turnID

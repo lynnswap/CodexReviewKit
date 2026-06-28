@@ -166,7 +166,7 @@ private final class PreviewReviewChat {
     ) {
         let itemID = ReviewMonitorPreviewContent.previewChatLogItemID(
             itemName: step.itemName,
-            runID: streamID,
+            streamID: streamID,
             cycle: cycle
         )
         switch step.mode {

@@ -5099,7 +5099,7 @@ func makeReviewChatFixtureForTesting(
     id: String = UUID().uuidString,
     cwd: String = "/tmp/repo",
     startedAt: Date = Date(timeIntervalSince1970: 200),
-    status: ReviewRunState,
+    status: ReviewChatFixtureStatus,
     targetSummary: String,
     summary: String? = nil,
     logText: String = ""
