@@ -33,28 +33,28 @@ extension CodexReviewStore {
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) throws {
-        guard let job = reviewRun(id: runID)
+        guard let runRecord = reviewRun(id: runID)
         else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        guard job.sessionID == sessionID
+        guard runRecord.sessionID == sessionID
         else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        guard job.isTerminal == false else {
+        guard runRecord.isTerminal == false else {
             return
         }
 
         let endedAt = clock.now()
-        job.cancellationRequested = false
-        job.core.lifecycle.cancellation = cancellation
-        job.core.lifecycle.status = .cancelled
-        job.core.output.summary = cancellation.message
-        job.core.output.hasFinalReview = false
-        job.core.lifecycle.errorMessage =
+        runRecord.cancellationRequested = false
+        runRecord.core.lifecycle.cancellation = cancellation
+        runRecord.core.lifecycle.status = .cancelled
+        runRecord.core.output.summary = cancellation.message
+        runRecord.core.output.hasFinalReview = false
+        runRecord.core.lifecycle.errorMessage =
             cancellation.message.nilIfEmpty
-            ?? job.core.lifecycle.errorMessage
-        job.core.lifecycle.endedAt = endedAt
+            ?? runRecord.core.lifecycle.errorMessage
+        runRecord.core.lifecycle.endedAt = endedAt
         noteReviewRunMutation()
     }
 
@@ -63,26 +63,26 @@ extension CodexReviewStore {
         sessionID: String,
         message: String
     ) throws {
-        guard let job = reviewRun(id: runID)
+        guard let runRecord = reviewRun(id: runID)
         else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        guard job.sessionID == sessionID
+        guard runRecord.sessionID == sessionID
         else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
 
-        job.cancellationRequested = false
-        job.core.lifecycle.cancellation = nil
+        runRecord.cancellationRequested = false
+        runRecord.core.lifecycle.cancellation = nil
         if let message = message.nilIfEmpty {
             if message == "Failed to cancel review." {
-                job.core.output.summary = message
+                runRecord.core.output.summary = message
             } else {
-                job.core.output.summary = "Failed to cancel review: \(message)"
+                runRecord.core.output.summary = "Failed to cancel review: \(message)"
             }
-            job.core.lifecycle.errorMessage = message
+            runRecord.core.lifecycle.errorMessage = message
         } else {
-            job.core.output.summary = "Failed to cancel review."
+            runRecord.core.output.summary = "Failed to cancel review."
         }
         writeDiagnosticsIfNeeded()
     }
@@ -110,18 +110,18 @@ extension CodexReviewStore {
         )
         let cancellableReviewRuns = orderedReviewRuns.filter { $0.isTerminal == false }
         var firstError: (any Error)?
-        for job in cancellableReviewRuns {
+        for runRecord in cancellableReviewRuns {
             do {
                 _ = try await cancelReview(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     cancellation: cancellation
                 )
             } catch {
                 let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
                 try? recordCancellationFailure(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     message: message.isEmpty ? "Failed to cancel review." : message
                 )
                 if firstError == nil {
@@ -194,10 +194,10 @@ extension CodexReviewStore {
         }
 
         for runID in activeReviewRunIDs {
-            if let job = reviewRun(id: runID), job.isTerminal == false {
+            if let runRecord = reviewRun(id: runID), runRecord.isTerminal == false {
                 try? completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     cancellation: reason
                 )
             }
@@ -263,21 +263,21 @@ extension CodexReviewStore {
         failureMessage: String
     ) {
         let resolvedError = failureMessage.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        for job in orderedReviewRuns where job.isTerminal == false {
-            job.cancellationRequested = false
-            job.core.lifecycle.cancellation = nil
-            job.core.lifecycle.status = .failed
+        for runRecord in orderedReviewRuns where runRecord.isTerminal == false {
+            runRecord.cancellationRequested = false
+            runRecord.core.lifecycle.cancellation = nil
+            runRecord.core.lifecycle.status = .failed
             if let resolvedError {
-                job.core.output.summary = "Failed to cancel review: \(resolvedError)"
+                runRecord.core.output.summary = "Failed to cancel review: \(resolvedError)"
             } else {
-                job.core.output.summary = "Failed to cancel review."
+                runRecord.core.output.summary = "Failed to cancel review."
             }
-            job.core.output.hasFinalReview = false
-            job.core.lifecycle.errorMessage =
+            runRecord.core.output.hasFinalReview = false
+            runRecord.core.lifecycle.errorMessage =
                 resolvedError
                 ?? reason.nilIfEmpty
-                ?? job.core.lifecycle.errorMessage
-            job.core.lifecycle.endedAt = clock.now()
+                ?? runRecord.core.lifecycle.errorMessage
+            runRecord.core.lifecycle.endedAt = clock.now()
         }
         noteReviewRunMutation()
     }

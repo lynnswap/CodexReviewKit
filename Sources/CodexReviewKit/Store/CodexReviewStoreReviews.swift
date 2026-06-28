@@ -42,11 +42,11 @@ extension CodexReviewStore {
         runID: String,
         timeout: Duration? = nil
     ) async throws -> CodexReviewAPI.Read.Result {
-        let job = try job(runID: runID)
-        if let sessionID, job.sessionID != sessionID {
+        let runRecord = try requireReviewRun(runID: runID)
+        if let sessionID, runRecord.sessionID != sessionID {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        if job.isTerminal == false {
+        if runRecord.isTerminal == false {
             await waitForReviewTerminal(runID: runID, timeout: timeout)
         }
         return try readReview(sessionID: sessionID, runID: runID)
@@ -64,7 +64,7 @@ extension CodexReviewStore {
         let validatedRequest = try request.validated()
         let runID = idGenerator.next()
         let createdAt = clock.now()
-        let job = ReviewRunRecord(
+        let runRecord = ReviewRunRecord(
             id: runID,
             sessionID: sessionID,
             cwd: validatedRequest.cwd,
@@ -75,8 +75,8 @@ extension CodexReviewStore {
                 output: .init(summary: "Queued.")
             )
         )
-        insertReviewRun(job)
-        markReviewRunning(job, startedAt: createdAt)
+        insertReviewRun(runRecord)
+        markReviewRunning(runRecord, startedAt: createdAt)
         runtimeState.markStarting(runID)
         launchReviewWorker(runID: runID, sessionID: sessionID, request: validatedRequest)
         return runID
@@ -99,7 +99,7 @@ extension CodexReviewStore {
         sessionID: String,
         request validatedRequest: CodexReviewAPI.Start.Request
     ) async {
-        guard let job = reviewRun(id: runID) else {
+        guard let runRecord = reviewRun(id: runID) else {
             runtimeState.clearStarting(runID)
             runtimeState.removeActiveWorker(for: runID)
             return
@@ -119,38 +119,38 @@ extension CodexReviewStore {
             if Task.isCancelled {
                 throw CancellationError()
             }
-            applyBackendRun(backendRun, to: job)
+            applyBackendRun(backendRun, to: runRecord)
             if let startupCancellation = runtimeState.takeStartupCancellation(for: runID) {
                 try? await backend.interruptReview(
                     backendRun,
                     reason: .init(message: startupCancellation.message)
                 )
-                if job.isTerminal == false {
+                if runRecord.isTerminal == false {
                     try completeCancellationLocally(
-                        runID: job.id,
-                        sessionID: job.sessionID,
+                        runID: runRecord.id,
+                        sessionID: runRecord.sessionID,
                         cancellation: startupCancellation
                     )
                 }
-            } else if job.cancellationRequested {
+            } else if runRecord.cancellationRequested {
                 try await backend.interruptReview(
                     backendRun,
-                    reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+                    reason: .init(message: runRecord.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
                 )
                 try completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: job.core.lifecycle.cancellation ?? .system()
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
+                    cancellation: runRecord.core.lifecycle.cancellation ?? .system()
                 )
             }
 
-            if job.isTerminal {
+            if runRecord.isTerminal {
                 await backend.cleanupReview(backendRun)
                 runtimeState.clearReviewRunState(for: runID)
             } else {
                 let currentRun = try await consumeReviewEvents(
                     for: backendAttempt,
-                    job: job,
+                    runRecord: runRecord,
                     startRequest: startRequest
                 )
                 run = currentRun
@@ -161,13 +161,13 @@ extension CodexReviewStore {
             runtimeState.clearStarting(runID)
             let startupCancellation = runtimeState.takeStartupCancellation(for: runID)
             if let cleanupRun = runtimeState.activeRun(for: runID) ?? run {
-                await interruptReviewAfterTaskCancellation(cleanupRun, job: job)
+                await interruptReviewAfterTaskCancellation(cleanupRun, runRecord: runRecord)
                 await backend.cleanupReview(cleanupRun)
-            } else if job.isTerminal == false || startupCancellation != nil {
+            } else if runRecord.isTerminal == false || startupCancellation != nil {
                 try? completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
-                    cancellation: startupCancellation ?? job.core.lifecycle.cancellation ?? .system()
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
+                    cancellation: startupCancellation ?? runRecord.core.lifecycle.cancellation ?? .system()
                 )
             }
             runtimeState.clearReviewRunState(for: runID)
@@ -178,53 +178,53 @@ extension CodexReviewStore {
                 await backend.cleanupReview(cleanupRun)
             }
             runtimeState.clearReviewRunState(for: runID)
-            if job.isTerminal == false, let startupCancellation {
+            if runRecord.isTerminal == false, let startupCancellation {
                 try? completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     cancellation: startupCancellation
                 )
-            } else if job.isTerminal == false {
-                markReviewFailed(job, message: error.localizedDescription)
+            } else if runRecord.isTerminal == false {
+                markReviewFailed(runRecord, message: error.localizedDescription)
             }
         }
         runtimeState.removeActiveWorker(for: runID)
         runtimeState.removeDetachedWorker(for: runID)
     }
 
-    private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, job: ReviewRunRecord)
+    private func interruptReviewAfterTaskCancellation(_ run: CodexReviewBackendModel.Review.Run, runRecord: ReviewRunRecord)
         async
     {
-        guard job.isTerminal == false else {
+        guard runRecord.isTerminal == false else {
             return
         }
-        let cancellation = job.core.lifecycle.cancellation ?? .system()
-        job.cancellationRequested = true
-        job.core.lifecycle.cancellation = cancellation
-        job.core.output.summary = cancellation.message
-        job.core.lifecycle.errorMessage = cancellation.message
+        let cancellation = runRecord.core.lifecycle.cancellation ?? .system()
+        runRecord.cancellationRequested = true
+        runRecord.core.lifecycle.cancellation = cancellation
+        runRecord.core.output.summary = cancellation.message
+        runRecord.core.lifecycle.errorMessage = cancellation.message
         do {
             try await backend.interruptReview(
                 run,
                 reason: .init(message: cancellation.message)
             )
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
         } catch {
             try? recordCancellationFailure(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 message: error.localizedDescription
             )
         }
     }
 
-    private func applyBackendRun(_ backendRun: CodexReviewBackendModel.Review.Run, to job: ReviewRunRecord) {
-        runtimeState.setActiveRun(backendRun, for: job.id)
-        job.core.run = .init(
+    private func applyBackendRun(_ backendRun: CodexReviewBackendModel.Review.Run, to runRecord: ReviewRunRecord) {
+        runtimeState.setActiveRun(backendRun, for: runRecord.id)
+        runRecord.core.run = .init(
             attemptID: backendRun.attemptID,
             reviewThreadID: backendRun.reviewThreadID,
             threadID: backendRun.threadID,
@@ -234,52 +234,52 @@ extension CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    private func appendRecoveryProgress(_ message: String, to job: ReviewRunRecord) {
-        job.core.output.summary = message
+    private func appendRecoveryProgress(_ message: String, to runRecord: ReviewRunRecord) {
+        runRecord.core.output.summary = message
         writeDiagnosticsIfNeeded()
     }
 
-    private func markReviewWaitingForNetworkRecovery(_ job: ReviewRunRecord) {
-        job.resetReviewAttemptOutputForRecovery()
-        appendRecoveryProgress(networkRecoveryUnavailableMessage, to: job)
+    private func markReviewWaitingForNetworkRecovery(_ runRecord: ReviewRunRecord) {
+        runRecord.resetReviewAttemptOutputForRecovery()
+        appendRecoveryProgress(networkRecoveryUnavailableMessage, to: runRecord)
     }
 
     private func applyDomainEvents(
         _ events: [ReviewDomainEvent],
-        to job: ReviewRunRecord,
+        to runRecord: ReviewRunRecord,
         at timestamp: Date
     ) {
         for event in events {
-            guard shouldApplyDomainEvent(event, to: job) else {
+            guard shouldApplyDomainEvent(event, to: runRecord) else {
                 continue
             }
-            updateCoreOutput(from: event, for: job)
+            updateCoreOutput(from: event, for: runRecord)
         }
     }
 
-    private func shouldApplyDomainEvent(_ event: ReviewDomainEvent, to job: ReviewRunRecord) -> Bool {
+    private func shouldApplyDomainEvent(_ event: ReviewDomainEvent, to runRecord: ReviewRunRecord) -> Bool {
         switch event {
         case .textDelta(let itemID, _, let family, _, _)
-        where family == .message && job.completedAgentMessageItemIDs.contains(itemID.rawValue):
+        where family == .message && runRecord.completedAgentMessageItemIDs.contains(itemID.rawValue):
             false
         default:
             true
         }
     }
 
-    private func updateCoreOutput(from event: ReviewDomainEvent, for job: ReviewRunRecord) {
+    private func updateCoreOutput(from event: ReviewDomainEvent, for runRecord: ReviewRunRecord) {
         switch event {
         case .itemStarted(let seed),
             .itemUpdated(let seed):
-            updateCoreOutput(from: seed, isCompleted: false, for: job)
+            updateCoreOutput(from: seed, isCompleted: false, for: runRecord)
         case .itemCompleted(let seed):
-            updateCoreOutput(from: seed, isCompleted: true, for: job)
+            updateCoreOutput(from: seed, isCompleted: true, for: runRecord)
         case .textDelta(let itemID, _, let family, _, let delta) where family == .message:
-            guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID.rawValue, delta: delta) else {
+            guard let updatedMessage = runRecord.appendAgentMessageDelta(itemID: itemID.rawValue, delta: delta) else {
                 return
             }
-            job.core.output.lastAgentMessage = updatedMessage
-            job.core.output.summary = updatedMessage
+            runRecord.core.output.lastAgentMessage = updatedMessage
+            runRecord.core.output.summary = updatedMessage
         case .runStarted,
             .textDelta,
             .reviewCompleted,
@@ -292,14 +292,14 @@ extension CodexReviewStore {
     private func updateCoreOutput(
         from seed: ReviewEventItemSeed,
         isCompleted: Bool,
-        for job: ReviewRunRecord
+        for runRecord: ReviewRunRecord
     ) {
         guard seed.family == .message,
             case .message(let message) = seed.content
         else {
             return
         }
-        job.noteAgentMessageSnapshot(
+        runRecord.noteAgentMessageSnapshot(
             itemID: seed.id.rawValue,
             text: message.text,
             isCompleted: isCompleted
@@ -307,42 +307,42 @@ extension CodexReviewStore {
         guard let text = message.text.nilIfEmpty else {
             return
         }
-        job.core.output.lastAgentMessage = text
-        job.core.output.summary = text
+        runRecord.core.output.lastAgentMessage = text
+        runRecord.core.output.summary = text
     }
 
     private func applyMessageSnapshot(
         _ text: String,
         itemID: String?,
         isCompleted: Bool,
-        to job: ReviewRunRecord,
+        to runRecord: ReviewRunRecord,
         at timestamp: Date
     ) {
         let resolvedItemID =
             itemID?.nilIfEmpty
-            ?? job.nextSyntheticMessageItemID(prefix: "message")
-        job.noteAgentMessageSnapshot(
+            ?? runRecord.nextSyntheticMessageItemID(prefix: "message")
+        runRecord.noteAgentMessageSnapshot(
             itemID: resolvedItemID,
             text: text,
             isCompleted: isCompleted
         )
         if let text = text.nilIfEmpty {
-            job.core.output.lastAgentMessage = text
-            job.core.output.summary = text
+            runRecord.core.output.lastAgentMessage = text
+            runRecord.core.output.summary = text
         }
     }
 
     private func applyMessageDelta(
         _ text: String,
         itemID: String,
-        to job: ReviewRunRecord,
+        to runRecord: ReviewRunRecord,
         at timestamp: Date
     ) {
-        guard let updatedMessage = job.appendAgentMessageDelta(itemID: itemID, delta: text) else {
+        guard let updatedMessage = runRecord.appendAgentMessageDelta(itemID: itemID, delta: text) else {
             return
         }
-        job.core.output.lastAgentMessage = updatedMessage
-        job.core.output.summary = updatedMessage
+        runRecord.core.output.lastAgentMessage = updatedMessage
+        runRecord.core.output.summary = updatedMessage
     }
 
     private func reviewWorkerInputs(for attempt: BackendReviewAttempt) async -> ReviewWorkerInputs {
@@ -381,15 +381,15 @@ extension CodexReviewStore {
         sessionID: String?,
         runID: String
     ) throws -> CodexReviewAPI.Read.Result {
-        let job = try job(runID: runID)
-        if let sessionID, job.sessionID != sessionID {
+        let runRecord = try requireReviewRun(runID: runID)
+        if let sessionID, runRecord.sessionID != sessionID {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         return CodexReviewAPI.Read.Result(
-            runID: job.id,
-            core: job.core,
-            elapsedSeconds: elapsedSeconds(for: job),
-            cancellable: job.isTerminal == false && job.cancellationRequested == false
+            runID: runRecord.id,
+            core: runRecord.core,
+            elapsedSeconds: elapsedSeconds(for: runRecord),
+            cancellable: runRecord.isTerminal == false && runRecord.cancellationRequested == false
         )
     }
 
@@ -410,14 +410,14 @@ extension CodexReviewStore {
         limit: Int? = nil
     ) -> CodexReviewAPI.List.Result {
         let statusSet = statuses.map(Set.init)
-        let filtered = orderedReviewRuns.filter { job in
-            if let sessionID, job.sessionID != sessionID {
+        let filtered = orderedReviewRuns.filter { runRecord in
+            if let sessionID, runRecord.sessionID != sessionID {
                 return false
             }
-            if let cwd, job.cwd != cwd {
+            if let cwd, runRecord.cwd != cwd {
                 return false
             }
-            if let statusSet, statusSet.contains(job.core.lifecycle.status) == false {
+            if let statusSet, statusSet.contains(runRecord.core.lifecycle.status) == false {
                 return false
             }
             return true
@@ -432,23 +432,23 @@ extension CodexReviewStore {
 
     package func resolveRun(sessionID: String?, selector: CodexReviewAPI.Run.Selector) throws -> ReviewRunRecord {
         let statusSet = selector.statuses.map(Set.init)
-        let matches = orderedReviewRuns.filter { job in
-            if let sessionID, job.sessionID != sessionID {
+        let matches = orderedReviewRuns.filter { runRecord in
+            if let sessionID, runRecord.sessionID != sessionID {
                 return false
             }
-            if let cwd = selector.cwd, job.cwd != cwd {
+            if let cwd = selector.cwd, runRecord.cwd != cwd {
                 return false
             }
-            if let statusSet, statusSet.contains(job.core.lifecycle.status) == false {
+            if let statusSet, statusSet.contains(runRecord.core.lifecycle.status) == false {
                 return false
             }
-            if let runID = selector.runID, runID != job.id {
+            if let runID = selector.runID, runID != runRecord.id {
                 return false
             }
             return true
         }
-        if let job = matches.first, matches.count == 1 {
-            return job
+        if let runRecord = matches.first, matches.count == 1 {
+            return runRecord
         }
         if matches.isEmpty {
             throw CodexReviewAPI.Error.runNotFound("No review run matched the selector.")
@@ -461,7 +461,7 @@ extension CodexReviewStore {
         sessionID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        guard let job = reviewRun(id: runID), job.sessionID == sessionID else {
+        guard let runRecord = reviewRun(id: runID), runRecord.sessionID == sessionID else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
         return try await cancelReview(runID: runID, cancellation: cancellation)
@@ -472,33 +472,33 @@ extension CodexReviewStore {
         runID: String,
         cancellation: ReviewCancellation = .system()
     ) async throws -> CodexReviewAPI.Cancel.Outcome {
-        let job = try job(runID: runID)
-        guard job.isTerminal == false else {
-            return .init(runID: job.id, cancelled: false, core: job.core)
+        let runRecord = try requireReviewRun(runID: runID)
+        guard runRecord.isTerminal == false else {
+            return .init(runID: runRecord.id, cancelled: false, core: runRecord.core)
         }
 
-        job.cancellationRequested = true
-        job.core.lifecycle.cancellation = cancellation
-        job.core.output.summary = cancellation.message
-        job.core.lifecycle.errorMessage = cancellation.message
+        runRecord.cancellationRequested = true
+        runRecord.core.lifecycle.cancellation = cancellation
+        runRecord.core.output.summary = cancellation.message
+        runRecord.core.lifecycle.errorMessage = cancellation.message
 
-        if job.core.lifecycle.status == .queued {
+        if runRecord.core.lifecycle.status == .queued {
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
-            return .init(runID: job.id, cancelled: true, core: job.core)
+            return .init(runID: runRecord.id, cancelled: true, core: runRecord.core)
         }
 
         if runtimeState.isWaitingForNetworkRecovery(runID) {
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
             runtimeState.cancelActiveWorker(for: runID)
-            return .init(runID: job.id, cancelled: true, core: job.core)
+            return .init(runID: runRecord.id, cancelled: true, core: runRecord.core)
         }
 
         if let run = runtimeState.activeRun(for: runID) {
@@ -508,35 +508,35 @@ extension CodexReviewStore {
                     reason: .init(message: cancellation.message)
                 )
                 try completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     cancellation: cancellation
                 )
                 runtimeState.cancelActiveWorker(for: runID)
             } catch {
                 try recordCancellationFailure(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     message: error.localizedDescription
                 )
                 throw error
             }
-        } else if let run = job.backendRun {
+        } else if let run = runRecord.backendRun {
             do {
                 try await backend.interruptReview(
                     run,
                     reason: .init(message: cancellation.message)
                 )
                 try completeCancellationLocally(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     cancellation: cancellation
                 )
                 runtimeState.cancelActiveWorker(for: runID)
             } catch {
                 try recordCancellationFailure(
-                    runID: job.id,
-                    sessionID: job.sessionID,
+                    runID: runRecord.id,
+                    sessionID: runRecord.sessionID,
                     message: error.localizedDescription
                 )
                 throw error
@@ -544,19 +544,19 @@ extension CodexReviewStore {
         } else if runtimeState.isStarting(runID) {
             runtimeState.setStartupCancellation(cancellation, for: runID)
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
-            return .init(runID: job.id, cancelled: true, core: job.core)
+            return .init(runID: runRecord.id, cancelled: true, core: runRecord.core)
         } else {
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
         }
-        return .init(runID: job.id, cancelled: true, core: job.core)
+        return .init(runID: runRecord.id, cancelled: true, core: runRecord.core)
     }
 
     package func closeSession(
@@ -579,79 +579,79 @@ extension CodexReviewStore {
         }
     }
 
-    private func job(runID: String) throws -> ReviewRunRecord {
-        guard let job = reviewRun(id: runID) else {
+    private func requireReviewRun(runID: String) throws -> ReviewRunRecord {
+        guard let runRecord = reviewRun(id: runID) else {
             throw CodexReviewAPI.Error.runNotFound("Run \(runID) was not found.")
         }
-        return job
+        return runRecord
     }
 
     private func filteredReviewRuns(cwd: String?, statuses: [ReviewRunState]?) -> [ReviewRunRecord] {
         let statusSet = statuses.map(Set.init)
-        return orderedReviewRuns.filter { job in
-            if let cwd, job.cwd != cwd {
+        return orderedReviewRuns.filter { runRecord in
+            if let cwd, runRecord.cwd != cwd {
                 return false
             }
-            if let statusSet, statusSet.contains(job.core.lifecycle.status) == false {
+            if let statusSet, statusSet.contains(runRecord.core.lifecycle.status) == false {
                 return false
             }
             return true
         }
     }
 
-    private func makeListItem(_ job: ReviewRunRecord) -> CodexReviewAPI.Run.ListItem {
+    private func makeListItem(_ runRecord: ReviewRunRecord) -> CodexReviewAPI.Run.ListItem {
         CodexReviewAPI.Run.ListItem(
-            runID: job.id,
-            cwd: job.cwd,
-            targetSummary: job.targetSummary,
-            core: job.core,
-            elapsedSeconds: elapsedSeconds(for: job),
-            cancellable: job.isTerminal == false && job.cancellationRequested == false
+            runID: runRecord.id,
+            cwd: runRecord.cwd,
+            targetSummary: runRecord.targetSummary,
+            core: runRecord.core,
+            elapsedSeconds: elapsedSeconds(for: runRecord),
+            cancellable: runRecord.isTerminal == false && runRecord.cancellationRequested == false
         )
     }
 
-    private func elapsedSeconds(for job: ReviewRunRecord) -> Int? {
-        guard let startedAt = job.core.lifecycle.startedAt else {
+    private func elapsedSeconds(for runRecord: ReviewRunRecord) -> Int? {
+        guard let startedAt = runRecord.core.lifecycle.startedAt else {
             return nil
         }
-        let end = job.core.lifecycle.endedAt ?? clock.now()
+        let end = runRecord.core.lifecycle.endedAt ?? clock.now()
         return max(0, Int(end.timeIntervalSince(startedAt)))
     }
 
-    private func insertReviewRun(_ job: ReviewRunRecord) {
-        if workspace(cwd: job.cwd) == nil {
+    private func insertReviewRun(_ runRecord: ReviewRunRecord) {
+        if workspace(cwd: runRecord.cwd) == nil {
             let workspace = CodexReviewWorkspace(
-                cwd: job.cwd,
+                cwd: runRecord.cwd,
                 sortOrder: nextWorkspaceSortOrder()
             )
             workspaces.insert(workspace)
         }
-        reviewRuns.insert(job)
+        reviewRuns.insert(runRecord)
         writeDiagnosticsIfNeeded()
     }
 
-    private func markReviewRunning(_ job: ReviewRunRecord, startedAt: Date) {
-        job.core.lifecycle.status = .running
-        job.core.lifecycle.startedAt = startedAt
-        job.core.output.summary = "Review started."
+    private func markReviewRunning(_ runRecord: ReviewRunRecord, startedAt: Date) {
+        runRecord.core.lifecycle.status = .running
+        runRecord.core.lifecycle.startedAt = startedAt
+        runRecord.core.output.summary = "Review started."
         writeDiagnosticsIfNeeded()
     }
 
-    private func markReviewFailed(_ job: ReviewRunRecord, message: String) {
-        guard job.isTerminal == false else {
+    private func markReviewFailed(_ runRecord: ReviewRunRecord, message: String) {
+        guard runRecord.isTerminal == false else {
             return
         }
         let endedAt = clock.now()
-        job.core.lifecycle.status = .failed
-        job.core.lifecycle.endedAt = endedAt
-        job.core.lifecycle.errorMessage = message
-        job.core.output.summary = message
+        runRecord.core.lifecycle.status = .failed
+        runRecord.core.lifecycle.endedAt = endedAt
+        runRecord.core.lifecycle.errorMessage = message
+        runRecord.core.output.summary = message
         writeDiagnosticsIfNeeded()
     }
 
     private func consumeReviewEvents(
         for initialAttempt: BackendReviewAttempt,
-        job: ReviewRunRecord,
+        runRecord: ReviewRunRecord,
         startRequest: CodexReviewBackendModel.Review.Start
     ) async throws -> CodexReviewBackendModel.Review.Run {
         let inputs = await reviewWorkerInputs(for: initialAttempt)
@@ -661,7 +661,7 @@ extension CodexReviewStore {
         var recoveryState = ReviewNetworkRecoveryLoopState(currentRun: initialAttempt.run)
         var activeEventSubscriptionID: Int? = inputs.initialEventSubscriptionID
         while let input = await inputs.next() {
-            if job.isTerminal {
+            if runRecord.isTerminal {
                 return recoveryState.currentRun
             }
             switch input {
@@ -673,10 +673,10 @@ extension CodexReviewStore {
                 }
                 recoveryState.currentRun = handleReviewEvent(
                     event.event,
-                    job: job,
+                    runRecord: runRecord,
                     currentRun: recoveryState.currentRun
                 )
-                if job.isTerminal {
+                if runRecord.isTerminal {
                     return recoveryState.currentRun
                 }
             case .reviewEventsFinished(let finishedRun):
@@ -687,7 +687,7 @@ extension CodexReviewStore {
                     continue
                 }
                 if try handleReviewEventsFinished(
-                    job: job,
+                    runRecord: runRecord,
                     isWaitingForNetworkRecovery: recoveryState.isWaitingForNetworkRecovery
                 ) {
                     return recoveryState.currentRun
@@ -718,7 +718,7 @@ extension CodexReviewStore {
                 case .none:
                     continue
                 case .restartSettling:
-                    appendRecoveryProgress(networkRecoveryRestoredMessage, to: job)
+                    appendRecoveryProgress(networkRecoveryRestoredMessage, to: runRecord)
                 }
             case .networkRecoverySettled(let recoveryGeneration):
                 guard
@@ -729,7 +729,7 @@ extension CodexReviewStore {
                     continue
                 }
                 switch try await restartReviewAfterNetworkRestore(
-                    job: job,
+                    runRecord: runRecord,
                     startRequest: startRequest,
                     inputs: inputs,
                     preparedRestartToken: recoveryState.preparedRestartToken
@@ -738,26 +738,26 @@ extension CodexReviewStore {
                     recoveryState.markWaitingForNetworkRecovery()
                     continue
                 case .finished:
-                    runtimeState.clearWaitingForNetworkRecovery(job.id)
+                    runtimeState.clearWaitingForNetworkRecovery(runRecord.id)
                     return recoveryState.currentRun
                 case .recovered(let recoveredAttempt):
                     let recoveredRun = recoveredAttempt.run
-                    applyBackendRun(recoveredRun, to: job)
+                    applyBackendRun(recoveredRun, to: runRecord)
                     recoveryState.markRecovered(with: recoveredRun)
-                    runtimeState.clearWaitingForNetworkRecovery(job.id)
+                    runtimeState.clearWaitingForNetworkRecovery(runRecord.id)
                     activeEventSubscriptionID = await inputs.subscribe(to: recoveredAttempt)
                 }
             case .networkOutageConfirmed:
                 guard recoveryState.isWaitingForNetworkRecovery == false,
-                    job.isTerminal == false,
-                    job.cancellationRequested == false,
+                    runRecord.isTerminal == false,
+                    runRecord.cancellationRequested == false,
                     await inputs.networkStatusTracker.currentStatus() != .satisfied
                 else {
                     continue
                 }
                 recoveryState.markWaitingForNetworkRecovery()
-                markReviewWaitingForNetworkRecovery(job)
-                runtimeState.markWaitingForNetworkRecovery(job.id)
+                markReviewWaitingForNetworkRecovery(runRecord)
+                runtimeState.markWaitingForNetworkRecovery(runRecord.id)
                 activeEventSubscriptionID = nil
                 await inputs.cancelActiveEventSubscription()
                 let restartToken = try await backend.prepareReviewRestart(recoveryState.currentRun)
@@ -768,21 +768,21 @@ extension CodexReviewStore {
         if Task.isCancelled {
             throw CancellationError()
         }
-        if job.isTerminal == false {
-            if completePendingCancellationIfNeeded(for: job) {
+        if runRecord.isTerminal == false {
+            if completePendingCancellationIfNeeded(for: runRecord) {
                 return recoveryState.currentRun
             }
             completeReview(
-                job,
-                summary: job.core.output.summary,
-                result: job.core.output.lastAgentMessage
+                runRecord,
+                summary: runRecord.core.output.summary,
+                result: runRecord.core.output.lastAgentMessage
             )
         }
         return recoveryState.currentRun
     }
 
     private func handleReviewEventsFinished(
-        job: ReviewRunRecord,
+        runRecord: ReviewRunRecord,
         isWaitingForNetworkRecovery: Bool
     ) throws -> Bool {
         if Task.isCancelled {
@@ -790,17 +790,17 @@ extension CodexReviewStore {
         }
 
         if isWaitingForNetworkRecovery {
-            return job.isTerminal || completePendingCancellationIfNeeded(for: job)
+            return runRecord.isTerminal || completePendingCancellationIfNeeded(for: runRecord)
         }
 
-        if job.isTerminal == false {
-            if completePendingCancellationIfNeeded(for: job) {
+        if runRecord.isTerminal == false {
+            if completePendingCancellationIfNeeded(for: runRecord) {
                 return true
             }
             completeReview(
-                job,
-                summary: job.core.output.summary,
-                result: job.core.output.lastAgentMessage
+                runRecord,
+                summary: runRecord.core.output.summary,
+                result: runRecord.core.output.lastAgentMessage
             )
         }
         return true
@@ -816,18 +816,18 @@ extension CodexReviewStore {
     }
 
     private func restartReviewAfterNetworkRestore(
-        job: ReviewRunRecord,
+        runRecord: ReviewRunRecord,
         startRequest: CodexReviewBackendModel.Review.Start,
         inputs: ReviewWorkerInputs,
         preparedRestartToken: CodexReviewBackendModel.Review.RestartToken?
     ) async throws -> NetworkRestoreRestartResult {
-        if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+        if runRecord.isTerminal || completePendingCancellationIfNeeded(for: runRecord) {
             return .finished
         }
         if Task.isCancelled {
             throw CancellationError()
         }
-        if job.isTerminal || completePendingCancellationIfNeeded(for: job) {
+        if runRecord.isTerminal || completePendingCancellationIfNeeded(for: runRecord) {
             return .finished
         }
         guard await inputs.networkStatusTracker.currentStatus() == .satisfied else {
@@ -841,53 +841,53 @@ extension CodexReviewStore {
             request: startRequest
         )
         let recoveredRun = recoveredAttempt.run
-        if try await stopRecoveredRunIfJobShouldNotResume(recoveredRun, job: job) {
+        if try await stopRecoveredRunIfReviewShouldNotResume(recoveredRun, runRecord: runRecord) {
             return .finished
         }
         return .recovered(recoveredAttempt)
     }
 
-    private func stopRecoveredRunIfJobShouldNotResume(
+    private func stopRecoveredRunIfReviewShouldNotResume(
         _ recoveredRun: CodexReviewBackendModel.Review.Run,
-        job: ReviewRunRecord
+        runRecord: ReviewRunRecord
     ) async throws -> Bool {
         if Task.isCancelled {
             try? await backend.interruptReview(
                 recoveredRun,
-                reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+                reason: .init(message: runRecord.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
             )
             await backend.cleanupReview(recoveredRun)
             throw CancellationError()
         }
 
-        if job.isTerminal {
-            if job.core.lifecycle.status == .cancelled {
+        if runRecord.isTerminal {
+            if runRecord.core.lifecycle.status == .cancelled {
                 try? await backend.interruptReview(
                     recoveredRun,
-                    reason: .init(message: job.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
+                    reason: .init(message: runRecord.core.lifecycle.cancellation?.message ?? "Cancellation requested.")
                 )
             }
             await backend.cleanupReview(recoveredRun)
             return true
         }
 
-        guard job.cancellationRequested else {
+        guard runRecord.cancellationRequested else {
             return false
         }
 
-        let cancellation = job.core.lifecycle.cancellation ?? .system()
+        let cancellation = runRecord.core.lifecycle.cancellation ?? .system()
         do {
             try await backend.interruptReview(recoveredRun, reason: .init(message: cancellation.message))
             try completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
         } catch {
             await backend.cleanupReview(recoveredRun)
             try? recordCancellationFailure(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 message: error.localizedDescription
             )
             throw error
@@ -898,49 +898,49 @@ extension CodexReviewStore {
 
     private func handleReviewEvent(
         _ event: CodexReviewBackendModel.Review.Event,
-        job: ReviewRunRecord,
+        runRecord: ReviewRunRecord,
         currentRun: CodexReviewBackendModel.Review.Run
     ) -> CodexReviewBackendModel.Review.Run {
-        guard job.isTerminal == false else {
+        guard runRecord.isTerminal == false else {
             return currentRun
         }
-        if event.completesReviewRun, completePendingCancellationIfNeeded(for: job) {
+        if event.completesReviewRun, completePendingCancellationIfNeeded(for: runRecord) {
             writeDiagnosticsIfNeeded()
             return currentRun
         }
         var updatedRun = currentRun
         switch event {
         case .domainEvents(let events):
-            applyDomainEvents(events, to: job, at: clock.now())
+            applyDomainEvents(events, to: runRecord, at: clock.now())
         case .started(let turnID, let reviewThreadID, let model):
-            job.core.run.turnID = turnID
-            job.core.run.reviewThreadID = reviewThreadID ?? job.core.run.reviewThreadID
-            job.core.run.model = model ?? job.core.run.model
+            runRecord.core.run.turnID = turnID
+            runRecord.core.run.reviewThreadID = reviewThreadID ?? runRecord.core.run.reviewThreadID
+            runRecord.core.run.model = model ?? runRecord.core.run.model
             updatedRun.turnID = turnID
             updatedRun.reviewThreadID = reviewThreadID ?? updatedRun.reviewThreadID
             updatedRun.model = model ?? updatedRun.model
-            runtimeState.setActiveRun(updatedRun, for: job.id)
-            job.core.output.summary = "Review started."
+            runtimeState.setActiveRun(updatedRun, for: runRecord.id)
+            runRecord.core.output.summary = "Review started."
         case .message(let text):
             let now = clock.now()
-            job.core.output.lastAgentMessage = text
-            job.core.output.summary = text
-            applyMessageSnapshot(text, itemID: nil, isCompleted: true, to: job, at: now)
+            runRecord.core.output.lastAgentMessage = text
+            runRecord.core.output.summary = text
+            applyMessageSnapshot(text, itemID: nil, isCompleted: true, to: runRecord, at: now)
         case .messageDelta(let text, let itemID):
-            applyMessageDelta(text, itemID: itemID, to: job, at: clock.now())
+            applyMessageDelta(text, itemID: itemID, to: runRecord, at: clock.now())
         case .log(let text):
-            if job.core.output.summary.isEmpty || job.core.output.summary == "Review started." {
-                job.core.output.summary = text
+            if runRecord.core.output.summary.isEmpty || runRecord.core.output.summary == "Review started." {
+                runRecord.core.output.summary = text
             }
         case .completed(let summary, let result):
-            completeReview(job, summary: summary, result: result)
+            completeReview(runRecord, summary: summary, result: result)
         case .failed(let message):
-            markReviewFailed(job, message: message)
+            markReviewFailed(runRecord, message: message)
         case .cancelled(let message):
-            let cancellation = job.core.lifecycle.cancellation ?? .system(message: message)
+            let cancellation = runRecord.core.lifecycle.cancellation ?? .system(message: message)
             try? completeCancellationLocally(
-                runID: job.id,
-                sessionID: job.sessionID,
+                runID: runRecord.id,
+                sessionID: runRecord.sessionID,
                 cancellation: cancellation
             )
         }
@@ -948,42 +948,42 @@ extension CodexReviewStore {
         return updatedRun
     }
 
-    private func completePendingCancellationIfNeeded(for job: ReviewRunRecord) -> Bool {
-        guard job.cancellationRequested else {
+    private func completePendingCancellationIfNeeded(for runRecord: ReviewRunRecord) -> Bool {
+        guard runRecord.cancellationRequested else {
             return false
         }
-        let cancellation = job.core.lifecycle.cancellation ?? .system()
+        let cancellation = runRecord.core.lifecycle.cancellation ?? .system()
         try? completeCancellationLocally(
-            runID: job.id,
-            sessionID: job.sessionID,
+            runID: runRecord.id,
+            sessionID: runRecord.sessionID,
             cancellation: cancellation
         )
         return true
     }
 
     private func completeReview(
-        _ job: ReviewRunRecord,
+        _ runRecord: ReviewRunRecord,
         summary: String,
         result: String?
     ) {
-        guard job.isTerminal == false else {
+        guard runRecord.isTerminal == false else {
             return
         }
         let endedAt = clock.now()
-        let previousAgentMessage = job.core.output.lastAgentMessage?.nilIfEmpty
+        let previousAgentMessage = runRecord.core.output.lastAgentMessage?.nilIfEmpty
         let resultText = result?.nilIfEmpty
         let finalReviewText = resultText ?? previousAgentMessage
-        job.core.lifecycle.status = .succeeded
-        job.core.lifecycle.endedAt = endedAt
-        job.core.output.summary = summary
-        job.core.output.lastAgentMessage = finalReviewText ?? summary
-        job.core.output.hasFinalReview = finalReviewText != nil
-        job.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalReviewText)
+        runRecord.core.lifecycle.status = .succeeded
+        runRecord.core.lifecycle.endedAt = endedAt
+        runRecord.core.output.summary = summary
+        runRecord.core.output.lastAgentMessage = finalReviewText ?? summary
+        runRecord.core.output.hasFinalReview = finalReviewText != nil
+        runRecord.core.output.reviewResult = ParsedReviewResult.parse(finalReviewText: finalReviewText)
         if let result = resultText,
             result != previousAgentMessage
         {
-            job.noteAgentMessageSnapshot(
-                itemID: job.nextSyntheticMessageItemID(prefix: "message"),
+            runRecord.noteAgentMessageSnapshot(
+                itemID: runRecord.nextSyntheticMessageItemID(prefix: "message"),
                 text: result,
                 isCompleted: true
             )
@@ -992,13 +992,13 @@ extension CodexReviewStore {
     }
 
     private func waitForReviewTerminal(runID: String, timeout: Duration?) async {
-        guard let job = reviewRun(id: runID),
-            job.isTerminal == false
+        guard let runRecord = reviewRun(id: runID),
+            runRecord.isTerminal == false
         else {
             return
         }
         _ = await ReviewObservationAwaiter.waitUntilTerminal(
-            run: job,
+            run: runRecord,
             timeout: timeout
         )
     }
