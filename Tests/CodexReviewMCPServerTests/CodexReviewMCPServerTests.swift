@@ -26,7 +26,7 @@ struct CodexReviewMCPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
         let server = CodexReviewMCPServer(store: store)
 
@@ -44,7 +44,7 @@ struct CodexReviewMCPServerTests {
         }
         let read = snapshot.result
         let log = snapshot.log
-        #expect(read.runID == "job-1")
+        #expect(read.runID == "run-1")
         #expect(read.core.lifecycle.status == .succeeded)
         #expect(log.finalSummary == "Done")
         #expect(log.finalResult == "review")

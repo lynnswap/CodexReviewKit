@@ -133,7 +133,7 @@ struct CodexReviewMCPHTTPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
 
         try await withHTTPServer(store: store) { server in
@@ -164,7 +164,7 @@ struct CodexReviewMCPHTTPServerTests {
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == false)
-            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "job-1")
+            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(resolved.value(for: ["result", "structuredContent", "runID"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(
@@ -176,7 +176,7 @@ struct CodexReviewMCPHTTPServerTests {
                 commands.contains(
                     .startReview(
                         .init(
-                            runID: "job-1",
+                            runID: "run-1",
                             sessionID: sessionID,
                             request: .init(
                                 cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
@@ -188,7 +188,7 @@ struct CodexReviewMCPHTTPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
         let configuration = CodexReviewMCPHTTPServer.Configuration(
             port: 0,
@@ -219,7 +219,7 @@ struct CodexReviewMCPHTTPServerTests {
             let running = try decodeSSEJSON(from: try await responseData)
 
             #expect(running.value(for: ["result", "isError"]) as? Bool == false)
-            #expect(running.value(for: ["result", "structuredContent", "runId"]) as? String == "job-1")
+            #expect(running.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
             #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
@@ -237,7 +237,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_await",
                         "arguments": [
-                            "runId": "job-1"
+                            "runId": "run-1"
                         ],
                     ],
                 ]
@@ -262,7 +262,7 @@ struct CodexReviewMCPHTTPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
 
         try await withHTTPServer(store: store) { server in
@@ -291,13 +291,13 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
-            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "job-1")
+            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
                     .startReview(
                         .init(
-                            runID: "job-1",
+                            runID: "run-1",
                             sessionID: sessionID,
                             request: .init(
                                 cwd: "/tmp/project", target: .custom(instructions: "Focus on test coverage."))
@@ -309,7 +309,7 @@ struct CodexReviewMCPHTTPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
 
         try await withHTTPServer(store: store) { server in
@@ -336,7 +336,7 @@ struct CodexReviewMCPHTTPServerTests {
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == true)
-            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "job-1")
+            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "failed")
         }
     }
@@ -349,7 +349,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let included = ReviewRunRecord.makeForTesting(
-                id: "job-included",
+                id: "run-included",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
@@ -357,7 +357,7 @@ struct CodexReviewMCPHTTPServerTests {
                 summary: "Done"
             )
             let otherSession = ReviewRunRecord.makeForTesting(
-                id: "job-other-session",
+                id: "run-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
@@ -365,7 +365,7 @@ struct CodexReviewMCPHTTPServerTests {
                 summary: "Done"
             )
             let otherWorkspace = ReviewRunRecord.makeForTesting(
-                id: "job-other-workspace",
+                id: "run-other-workspace",
                 sessionID: sessionID,
                 cwd: "/tmp/other",
                 targetSummary: "Uncommitted changes",
@@ -399,7 +399,7 @@ struct CodexReviewMCPHTTPServerTests {
             )
 
             let items = try #require(response.value(for: ["result", "structuredContent", "items"]) as? [[String: Any]])
-            #expect(items.compactMap { $0["runId"] as? String } == ["job-included"])
+            #expect(items.compactMap { $0["runId"] as? String } == ["run-included"])
         }
     }
 
@@ -411,8 +411,8 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let includedJob = ReviewRunRecord.makeForTesting(
-                id: "job-in-session",
+            let includedRun = ReviewRunRecord.makeForTesting(
+                id: "run-in-session",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
@@ -425,9 +425,9 @@ struct CodexReviewMCPHTTPServerTests {
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [
-                    includedJob,
+                    includedRun,
                     ReviewRunRecord.makeForTesting(
-                        id: "job-other-session",
+                        id: "run-other-session",
                         sessionID: "other-session",
                         cwd: "/tmp/project",
                         targetSummary: "Other",
@@ -446,7 +446,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "method": "tools/call",
                     "params": [
                         "name": "review_read",
-                        "arguments": ["runId": "job-in-session"],
+                        "arguments": ["runId": "run-in-session"],
                     ],
                 ]
             )
@@ -459,12 +459,12 @@ struct CodexReviewMCPHTTPServerTests {
                     "method": "tools/call",
                     "params": [
                         "name": "review_read",
-                        "arguments": ["runID": "job-other-session"],
+                        "arguments": ["runID": "run-other-session"],
                     ],
                 ]
             )
             #expect(allowed.value(for: ["result", "isError"]) as? Bool == false)
-            #expect(allowed.value(for: ["result", "structuredContent", "runId"]) as? String == "job-in-session")
+            #expect(allowed.value(for: ["result", "structuredContent", "runId"]) as? String == "run-in-session")
             #expect(allowed.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(allowed.value(for: ["result", "structuredContent", "logsPage"]) == nil)
             let readText = (allowed.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
@@ -473,7 +473,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(denied.value(for: ["result", "isError"]) as? Bool == true)
             #expect(
                 (denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-                    == "Run job-other-session was not found.")
+                    == "Run run-other-session was not found.")
         }
     }
 
@@ -486,8 +486,8 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let longOutput = "Tests passed\n" + String(repeating: "x", count: 4500)
-            let job = ReviewRunRecord.makeForTesting(
-                id: "job-semantic",
+            let runRecord = ReviewRunRecord.makeForTesting(
+                id: "run-semantic",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
@@ -499,7 +499,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                reviewRuns: [job]
+                reviewRuns: [runRecord]
             )
 
             let defaultResponse = try await postJSONRPC(
@@ -512,13 +512,13 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_read",
                         "arguments": [
-                            "runId": "job-semantic"
+                            "runId": "run-semantic"
                         ],
                     ],
                 ]
             )
 
-            #expect(defaultResponse.value(for: ["result", "structuredContent", "runId"]) as? String == "job-semantic")
+            #expect(defaultResponse.value(for: ["result", "structuredContent", "runId"]) as? String == "run-semantic")
             #expect(defaultResponse.value(for: ["result", "structuredContent", "run"]) != nil)
             #expect(
                 defaultResponse.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String
@@ -531,17 +531,17 @@ struct CodexReviewMCPHTTPServerTests {
 
             let log = try #require(
                 defaultResponse.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["orderedEntryIds"] as? [String] == ["job-semantic:message"])
+            #expect(log["orderedEntryIds"] as? [String] == ["run-semantic:message"])
             #expect(log["activeEntryIds"] as? [String] == [])
             #expect(log["activeEntryCount"] as? Int == 0)
-            #expect(log["latestEntryId"] as? String == "job-semantic:message")
+            #expect(log["latestEntryId"] as? String == "run-semantic:message")
             let itemsPage = try #require(log["itemsPage"] as? [String: Any])
             #expect(itemsPage["total"] as? Int == 1)
             #expect(itemsPage["limit"] as? Int == 1)
             #expect(itemsPage["returned"] as? Int == 1)
             let items = try #require(log["items"] as? [[String: Any]])
             let messageItem = try #require(items.first)
-            #expect(messageItem["id"] as? String == "job-semantic:message")
+            #expect(messageItem["id"] as? String == "run-semantic:message")
             #expect(messageItem["kind"] as? String == "agentMessage")
             let content = try #require(messageItem["content"] as? [String: Any])
             #expect(content["type"] as? String == "message")
@@ -561,8 +561,8 @@ struct CodexReviewMCPHTTPServerTests {
 
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
-            let job = ReviewRunRecord.makeForTesting(
-                id: "job-tool-progress",
+            let runRecord = ReviewRunRecord.makeForTesting(
+                id: "run-tool-progress",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Included",
@@ -572,7 +572,7 @@ struct CodexReviewMCPHTTPServerTests {
             store.loadForTesting(
                 serverState: .running,
                 workspaces: [.init(cwd: "/tmp/project")],
-                reviewRuns: [job]
+                reviewRuns: [runRecord]
             )
 
             let response = try await postJSONRPC(
@@ -585,7 +585,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_read",
                         "arguments": [
-                            "runId": "job-tool-progress"
+                            "runId": "run-tool-progress"
                         ],
                     ],
                 ]
@@ -593,11 +593,11 @@ struct CodexReviewMCPHTTPServerTests {
 
             let log = try #require(
                 response.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            #expect(log["activeEntryIds"] as? [String] == ["job-tool-progress:summary"])
+            #expect(log["activeEntryIds"] as? [String] == ["run-tool-progress:summary"])
             #expect(log["activeEntryCount"] as? Int == 1)
             let items = try #require(log["items"] as? [[String: Any]])
             let item = try #require(items.first)
-            #expect(item["id"] as? String == "job-tool-progress:summary")
+            #expect(item["id"] as? String == "run-tool-progress:summary")
             #expect(item["kind"] as? String == "diagnostic")
             let content = try #require(item["content"] as? [String: Any])
             #expect(content["type"] as? String == "diagnostic")
@@ -614,7 +614,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let running = ReviewRunRecord.makeForTesting(
-                id: "job-running",
+                id: "run-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
@@ -624,7 +624,7 @@ struct CodexReviewMCPHTTPServerTests {
                 summary: "Running"
             )
             let otherSession = ReviewRunRecord.makeForTesting(
-                id: "job-other-session",
+                id: "run-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
                 targetSummary: "Uncommitted changes",
@@ -657,7 +657,7 @@ struct CodexReviewMCPHTTPServerTests {
                 ]
             )
 
-            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "job-running")
+            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
             #expect(running.core.lifecycle.status == .cancelled)
             #expect(running.core.lifecycle.cancellation?.message == "Stop from MCP")
@@ -681,7 +681,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let completed = ReviewRunRecord.makeForTesting(
-                id: "job-completed",
+                id: "run-completed",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Completed",
@@ -691,7 +691,7 @@ struct CodexReviewMCPHTTPServerTests {
                 summary: "Done"
             )
             let running = ReviewRunRecord.makeForTesting(
-                id: "job-running",
+                id: "run-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Running",
@@ -723,7 +723,7 @@ struct CodexReviewMCPHTTPServerTests {
                 ]
             )
 
-            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "job-running")
+            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
             #expect(response.value(for: ["result", "structuredContent", "cancelled"]) as? Bool == true)
             #expect(completed.core.lifecycle.status == .succeeded)
             #expect(running.core.lifecycle.status == .cancelled)
@@ -743,7 +743,7 @@ struct CodexReviewMCPHTTPServerTests {
                 workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [
                     ReviewRunRecord.makeForTesting(
-                        id: "job-running-1",
+                        id: "run-running-1",
                         sessionID: sessionID,
                         cwd: "/tmp/project",
                         targetSummary: "First",
@@ -753,7 +753,7 @@ struct CodexReviewMCPHTTPServerTests {
                         summary: "Running"
                     ),
                     ReviewRunRecord.makeForTesting(
-                        id: "job-running-2",
+                        id: "run-running-2",
                         sessionID: sessionID,
                         cwd: "/tmp/project",
                         targetSummary: "Second",
@@ -785,8 +785,8 @@ struct CodexReviewMCPHTTPServerTests {
 
             #expect(response.value(for: ["result", "isError"]) as? Bool == true)
             #expect(text?.contains("matched multiple review runs") == true)
-            #expect(text?.contains("job-running-1") == true)
-            #expect(text?.contains("job-running-2") == true)
+            #expect(text?.contains("run-running-1") == true)
+            #expect(text?.contains("run-running-2") == true)
         }
     }
 
@@ -799,7 +799,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let running = ReviewRunRecord.makeForTesting(
-                id: "job-running",
+                id: "run-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Running",
@@ -824,14 +824,14 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_cancel",
                         "arguments": [
-                            "runId": "job-running",
+                            "runId": "run-running",
                             "reason": "Stop from MCP",
                         ],
                     ],
                 ]
             )
 
-            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "job-running")
+            #expect(response.value(for: ["result", "structuredContent", "runId"]) as? String == "run-running")
             #expect(running.core.lifecycle.status == .cancelled)
         }
     }
@@ -842,7 +842,7 @@ struct CodexReviewMCPHTTPServerTests {
         await backend.holdStartReview(with: gate)
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
 
         try await withHTTPServer(
@@ -875,7 +875,7 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.yield(.completed(summary: "Done", result: "review text"))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
-            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "job-1")
+            #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
             let startText = (resolved.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
@@ -969,7 +969,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let other = ReviewRunRecord.makeForTesting(
-                id: "job-other-session",
+                id: "run-other-session",
                 sessionID: "other-session",
                 cwd: "/tmp/project",
                 targetSummary: "Other",
@@ -994,7 +994,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "params": [
                         "name": "review_cancel",
                         "arguments": [
-                            "runID": "job-other-session",
+                            "runID": "run-other-session",
                             "reason": "Stop from MCP",
                         ],
                     ],
@@ -1015,7 +1015,7 @@ struct CodexReviewMCPHTTPServerTests {
         try await withHTTPServer(store: store) { server in
             let sessionID = try await initializeSession(endpoint: await server.url)
             let running = ReviewRunRecord.makeForTesting(
-                id: "job-running",
+                id: "run-running",
                 sessionID: sessionID,
                 cwd: "/tmp/project",
                 targetSummary: "Running",
