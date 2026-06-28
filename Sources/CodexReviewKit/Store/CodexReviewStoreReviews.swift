@@ -998,7 +998,7 @@ extension CodexReviewStore {
             return
         }
         _ = await ReviewObservationAwaiter.waitUntilTerminal(
-            job: job,
+            run: job,
             timeout: timeout
         )
     }

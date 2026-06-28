@@ -5,52 +5,52 @@ import Testing
 @MainActor
 @Suite("review observation awaiter")
 struct ReviewObservationAwaiterTests {
-    @Test func resumesWhenJobReachesTerminalState() async throws {
-        let job = makeRunningJob()
+    @Test func resumesWhenRunReachesTerminalState() async throws {
+        let run = makeRunningRun()
 
         let task = Task { @MainActor in
             await ReviewObservationAwaiter.waitUntilTerminal(
-                job: job,
+                run: run,
                 timeout: .seconds(1)
             )
         }
         await Task.yield()
 
-        job.updateStateForTesting(status: .succeeded, summary: "Done")
+        run.updateStateForTesting(status: .succeeded, summary: "Done")
 
         let result = await task.value
         #expect(result)
     }
 
-    @Test func resumesWhenJobCancellationReachesTerminalState() async throws {
-        let job = makeRunningJob()
+    @Test func resumesWhenRunCancellationReachesTerminalState() async throws {
+        let run = makeRunningRun()
 
         let task = Task { @MainActor in
             await ReviewObservationAwaiter.waitUntilTerminal(
-                job: job,
+                run: run,
                 timeout: .seconds(1)
             )
         }
         await Task.yield()
 
-        job.updateStateForTesting(status: .cancelled, summary: "Stop")
+        run.updateStateForTesting(status: .cancelled, summary: "Stop")
 
         let result = await task.value
         #expect(result)
     }
 
     @Test func returnsFalseOnTimeout() async throws {
-        let job = makeRunningJob()
+        let run = makeRunningRun()
 
         let result = await ReviewObservationAwaiter.waitUntilTerminal(
-            job: job,
+            run: run,
             timeout: .milliseconds(10)
         )
 
         #expect(result == false)
     }
 
-    private func makeRunningJob() -> ReviewRunRecord {
+    private func makeRunningRun() -> ReviewRunRecord {
         ReviewRunRecord.makeForTesting(
             id: "job-awaiter",
             targetSummary: "Uncommitted changes",
