@@ -1627,6 +1627,22 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return titles
         }
 
+        @discardableResult
+        func activateReviewChatContextMenuItemForTesting(
+            _ chatID: CodexThreadID,
+            title: String
+        ) -> Bool {
+            var didActivate = false
+            presentReviewChatContextMenuForTesting(chatID) { menu in
+                guard let itemIndex = menu.items.firstIndex(where: { $0.title == title }) else {
+                    return
+                }
+                menu.performActionForItem(at: itemIndex)
+                didActivate = true
+            }
+            return didActivate
+        }
+
         private func presentReviewChatContextMenuForTesting(
             _ chatID: CodexThreadID,
             presenter: @escaping (NSMenu) -> Void

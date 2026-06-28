@@ -849,6 +849,42 @@ struct ReviewUITests {
         #expect(sidebar.reviewChatContextMenuTitlesForTesting(recentChat.chatID).isEmpty)
     }
 
+    @Test func reviewChatContextMenuCancelActionCancelsRunningChat() async throws {
+        let activeChat = makeReviewChatFixtureForTesting(title: "Uncommitted changes", status: .running)
+        let activeRun = ReviewRunRecord.makeForTesting(
+            id: "run-cancellable",
+            cwd: activeChat.cwd,
+            targetSummary: activeChat.chat.title,
+            threadID: activeChat.chatID.rawValue,
+            turnID: activeChat.turnID.rawValue,
+            status: .running,
+            summary: "Running review."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [activeRun]
+        )
+        installPreviewChatLogSourceForTesting(on: store, fixtures: [activeChat])
+        let backend = makeWindowHarness(store: store)
+        let viewController = backend.viewController
+        defer { backend.window.close() }
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        #expect(sidebar.activateReviewChatContextMenuItemForTesting(
+            activeChat.chatID,
+            title: "Cancel Review"
+        ))
+
+        _ = try #require(await StoreSnapshotProbe(store: store).waitUntilRunStatus(
+            .cancelled,
+            runID: "run-cancellable"
+        ))
+        let run = try #require(store.reviewRun(id: "run-cancellable"))
+        #expect(run.core.lifecycle.cancellation?.source == .userInterface)
+        #expect(run.core.lifecycle.cancellation?.message == "Cancelled by user from Review Monitor.")
+    }
+
     @Test func selectingReviewChatUpdatesDetailPane() async throws {
         let activeChat = makeReviewChatFixtureForTesting(
             title: "Uncommitted changes",
