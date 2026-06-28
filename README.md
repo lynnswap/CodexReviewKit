@@ -112,4 +112,10 @@ Create the `notarytool` profile in the local Keychain before publishing:
 xcrun notarytool store-credentials codex-reviewkit
 ```
 
+The release verification workflow also requires the repository variable
+`EXPECTED_DEVELOPER_ID_TEAM_ID`. Set it to the Apple Team ID from the
+Developer ID Application certificate used by `--signing-identity`. The workflow
+will not publish the draft release unless the uploaded DMG and contained app are
+signed and notarized for that Team ID.
+
 [codex-app-server-kit-readme]: https://github.com/lynnswap/CodexKit/blob/main/Sources/CodexAppServerKit/README.md
