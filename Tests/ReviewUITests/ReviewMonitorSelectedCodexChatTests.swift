@@ -77,14 +77,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        try selectReviewChat(
-            makeRunningReviewJob(
-                sourceThreadID: "source-thread",
-                reviewThreadID: "review-thread",
-                turnID: "turn-1"
-            ),
-            in: uiState
-        )
+        selectChat(id: "review-thread", in: uiState)
         try await waitForCondition {
             transport.selectedCodexChatIDForTesting == "review-thread"
                 && transport.selectedCodexChatPhaseForTesting == .loaded
@@ -133,14 +126,7 @@ struct ReviewMonitorSelectedCodexChatTests {
             codexModelSource: modelSource
         )
         transport.loadViewIfNeeded()
-        try selectReviewChat(
-            makeRunningReviewJob(
-                sourceThreadID: "source-thread",
-                reviewThreadID: "review-thread",
-                turnID: "turn-1"
-            ),
-            in: uiState
-        )
+        selectChat(id: "review-thread", in: uiState)
 
         #expect(transport.selectedCodexChatIDForTesting == nil)
 
@@ -150,62 +136,6 @@ struct ReviewMonitorSelectedCodexChatTests {
             transport.selectedCodexChatIDForTesting == "review-thread"
                 && transport.selectedCodexChatPhaseForTesting == .loading
                 && transport.selectedCodexChatItemTextsForTesting == ["Late source"]
-        }
-    }
-
-    @Test func legacyReviewChatSelectionCanStartAfterRunIdentifiersArrive() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
-        try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
-        try await runtime.transport.enqueueThreadRead(
-            .init(
-                id: "review-thread",
-                turns: [
-                    .init(
-                        id: "turn-1",
-                        status: .running,
-                        items: [
-                            .init(
-                                id: "message-1",
-                                kind: .agentMessage,
-                                content: .message(
-                                    .init(
-                                        id: "message-1",
-                                        role: .assistant,
-                                        phase: .finalAnswer,
-                                        text: "Arrived after selection"
-                                    ))
-                            )
-                        ]
-                    )
-                ]
-            ))
-
-        let store = CodexReviewStore.makePreviewStore()
-        let uiState = ReviewMonitorUIState(auth: store.auth)
-        let transport = ReviewMonitorTransportViewController(
-            store: store,
-            uiState: uiState,
-            modelContext: modelContext
-        )
-        transport.loadViewIfNeeded()
-        let job = makeRunningReviewJob(
-            sourceThreadID: nil,
-            reviewThreadID: nil,
-            turnID: nil
-        )
-        #expect(job.legacyReviewChatSelection == nil)
-
-        job.core.run.threadID = "source-thread"
-        job.core.run.reviewThreadID = "review-thread"
-        job.core.run.turnID = "turn-1"
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline trigger"))
-        try selectReviewChat(job, in: uiState)
-
-        try await waitForCondition {
-            transport.selectedCodexChatIDForTesting == "review-thread"
-                && transport.selectedCodexChatPhaseForTesting == .loading
-                && transport.selectedCodexChatItemTextsForTesting == ["Arrived after selection"]
         }
     }
 
@@ -246,13 +176,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        let job = makeRunningReviewJob(
-            sourceThreadID: "source-thread",
-            reviewThreadID: "review-thread",
-            turnID: "turn-1"
-        )
-        appendTimelineEntryForTesting(job, .init(kind: .agentMessage, text: "Timeline fallback"))
-        try selectReviewChat(job, in: uiState)
+        selectChat(id: "review-thread", in: uiState)
 
         let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
             snapshot.log.contains("Chat snapshot")
@@ -317,12 +241,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         )
         transport.loadViewIfNeeded()
 
-        let job = makeRunningReviewJob(
-            sourceThreadID: "source-thread",
-            reviewThreadID: "review-thread",
-            turnID: "turn-1"
-        )
-        try selectReviewChat(job, in: uiState)
+        selectChat(id: "review-thread", in: uiState)
 
         _ = try await awaitTransportRender(transport) { snapshot in
             snapshot.log == "Initial"
@@ -427,32 +346,20 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
     }
 
-    private func makeRunningReviewJob(
-        sourceThreadID: String?,
-        reviewThreadID: String?,
-        turnID: String?
-    ) -> CodexReviewJob {
-        let job = CodexReviewJob.makeForTesting(
-            id: "job-1",
-            sessionID: "session-1",
-            cwd: "/tmp/project",
-            targetSummary: "Uncommitted changes",
-            threadID: sourceThreadID,
-            turnID: turnID,
-            status: .running,
-            summary: "Running"
-        )
-        job.core.run.attemptID = "attempt-1"
-        job.core.run.reviewThreadID = reviewThreadID
-        return job
-    }
-
-    private func selectReviewChat(
-        _ job: CodexReviewJob,
+    private func selectChat(
+        id: String,
+        title: String = "Review",
         in uiState: ReviewMonitorUIState
-    ) throws {
-        let chat = try #require(job.legacyReviewChatSelection)
-        uiState.selection = .chat(chat)
+    ) {
+        let chatID = CodexThreadID(rawValue: id)
+        uiState.selection = .chat(.init(
+            rowID: .chat(chatID),
+            id: chatID,
+            title: title,
+            preview: nil,
+            workspaceCWD: "/tmp/project",
+            updatedAt: nil
+        ))
     }
 }
 
