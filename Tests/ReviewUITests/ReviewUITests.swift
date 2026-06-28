@@ -363,40 +363,40 @@ struct ReviewUITests {
     }
 
     @Test func reviewChatCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() throws {
-        let placeholderJob = makeJob(
-            id: "job-placeholder",
-            status: .queued,
-            targetSummary: "Queued review"
+        let placeholderChat = reviewChatCellTestChat(
+            id: "chat-placeholder",
+            title: "Queued review",
+            workspaceCWD: "/tmp/placeholder"
         )
-        let loadedJob = makeJob(
-            id: "job-loaded",
-            status: .running,
-            targetSummary: "Uncommitted changes"
+        let loadedChat = reviewChatCellTestChat(
+            id: "chat-loaded",
+            title: "Uncommitted changes",
+            workspaceCWD: "/tmp/loaded"
         )
 
-        let cellView = makeReviewMonitorReviewChatCellViewForTesting(job: placeholderJob)
+        let cellView = makeReviewMonitorReviewChatCellViewForTesting(chat: placeholderChat)
         let initialHostingViewIdentity = try #require(
             reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
         let initialHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
 
-        configureReviewMonitorReviewChatCellViewForTesting(cellView, job: loadedJob)
+        configureReviewMonitorReviewChatCellViewForTesting(cellView, chat: loadedChat)
 
         let updatedHostingViewIdentity = try #require(
             reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
         )
         let updatedHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
 
-        #expect(initialHostedRowID == placeholderJob.id)
-        #expect(updatedHostedRowID == loadedJob.legacyReviewChatID?.rawValue)
+        #expect(initialHostedRowID == placeholderChat.id.rawValue)
+        #expect(updatedHostedRowID == loadedChat.id.rawValue)
         #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
         let objectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
         guard case .chat(let objectChat) = objectNode.item else {
             Issue.record("Expected cell to bind a Codex chat node.")
             return
         }
-        #expect(objectChat.id == loadedJob.legacyReviewChatID)
-        #expect(cellView.toolTip == loadedJob.cwd)
+        #expect(objectChat.id == loadedChat.id)
+        #expect(cellView.toolTip == loadedChat.workspaceCWD)
     }
 
     @Test func accountContextMenuPresentationRestoresResponderStateAfterClosing() throws {
@@ -813,7 +813,9 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
+            chat: try #require(recentJob.legacyReviewChatSelection)
+        )
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             recentJob,
@@ -1164,7 +1166,9 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
+            chat: try #require(job.legacyReviewChatSelection)
+        )
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -2274,7 +2278,9 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(activeJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
+            chat: try #require(activeJob.legacyReviewChatSelection)
+        )
 
         let activeSnapshot = try await awaitTimelineRenderForTesting(
             activeJob,
@@ -2285,7 +2291,9 @@ struct ReviewUITests {
         #expect(activeSnapshot.summary == nil)
         #expect(window.title == activeJob.targetSummary)
         #expect(window.subtitle == activeJob.cwd)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(recentJob))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
+            chat: try #require(recentJob.legacyReviewChatSelection)
+        )
 
         let recentSnapshot = try await awaitTimelineRenderForTesting(
             recentJob,
@@ -2883,7 +2891,9 @@ struct ReviewUITests {
         defer { window.close() }
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatIDForTesting(job))
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
+            chat: try #require(job.legacyReviewChatSelection)
+        )
 
         let selectedSnapshot = try await awaitTimelineRenderForTesting(
             job,
@@ -5492,6 +5502,24 @@ func makeJob(
     )
     seedTimelineForTesting(job, logText: logText, rawLogText: rawLogText)
     return job
+}
+
+func reviewChatCellTestChat(
+    id: String,
+    title: String,
+    workspaceCWD: String
+) -> ReviewMonitorCodexSidebarSnapshot.Chat {
+    let chatID = CodexThreadID(rawValue: id)
+    return ReviewMonitorCodexSidebarSnapshot.Chat(
+        rowID: .chat(chatID),
+        id: chatID,
+        title: title,
+        preview: nil,
+        workspaceCWD: workspaceCWD,
+        updatedAt: Date(timeIntervalSince1970: 200),
+        recencyAt: Date(timeIntervalSince1970: 200),
+        status: .idle
+    )
 }
 
 @MainActor

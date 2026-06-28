@@ -1448,42 +1448,32 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             emptyStateViewController.view.isHidden == false
         }
 
-        func selectReviewChatForTesting(id chatID: CodexThreadID) {
-            guard let row = row(forCodexSidebarSelectionID: .chat(chatID)) else {
-                uiState.selection = .chat(testingChatSelectionFallback(id: chatID))
+        func selectReviewChatForTesting(chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
+            guard let row = row(forCodexSidebarSelectionID: .chat(chat.id)) else {
+                uiState.selection = .chat(chat)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
 
-        private func testingChatSelectionFallback(
-            id chatID: CodexThreadID
-        ) -> ReviewMonitorCodexSidebarSnapshot.Chat {
-            if let job = store.orderedJobs.first(where: { job in
-                let reviewThreadID = job.core.run.reviewThreadID?.nilIfEmpty
-                let threadID = job.core.run.threadID?.nilIfEmpty
-                return reviewThreadID == chatID.rawValue || threadID == chatID.rawValue
-            }) {
-                return ReviewMonitorCodexSidebarSnapshot.Chat(
-                    rowID: .chat(chatID),
-                    id: chatID,
-                    title: job.displayTitle,
-                    preview: job.core.output.lastAgentMessage?.nilIfEmpty ?? job.core.output.summary.nilIfEmpty,
-                    model: job.core.run.model,
-                    workspaceCWD: job.cwd,
-                    updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-                    recencyAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-                    status: CodexThreadStatus(reviewJobState: job.core.lifecycle.status)
-                )
+        func selectReviewChatForTesting(id chatID: CodexThreadID) {
+            if let chat = currentChatSelection(id: chatID) {
+                selectReviewChatForTesting(chat: chat)
+                return
             }
-            return ReviewMonitorCodexSidebarSnapshot.Chat(
-                rowID: .chat(chatID),
-                id: chatID,
-                title: chatID.rawValue,
-                preview: nil,
-                workspaceCWD: nil,
-                updatedAt: nil
-            )
+            guard let row = row(forCodexSidebarSelectionID: .chat(chatID)) else {
+                uiState.selection = .chat(
+                    ReviewMonitorCodexSidebarSnapshot.Chat(
+                        rowID: .chat(chatID),
+                        id: chatID,
+                        title: chatID.rawValue,
+                        preview: nil,
+                        workspaceCWD: nil,
+                        updatedAt: nil
+                    ))
+                return
+            }
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
 
         func selectWorkspaceForTesting(_ workspace: CodexReviewWorkspace) {
@@ -2060,33 +2050,13 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
 
 #if DEBUG
     @MainActor
-    private func reviewMonitorReviewChatCellChatForTesting(
-        job: CodexReviewJob
-    ) -> ReviewMonitorCodexSidebarSnapshot.Chat {
-        let chatID = CodexThreadID(
-            rawValue: job.core.run.reviewThreadID?.nilIfEmpty
-                ?? job.core.run.threadID?.nilIfEmpty
-                ?? job.id
-        )
-        return ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(chatID),
-            id: chatID,
-            title: job.displayTitle,
-            preview: job.core.output.lastAgentMessage?.nilIfEmpty ?? job.core.output.summary.nilIfEmpty,
-            model: job.core.run.model,
-            workspaceCWD: job.cwd,
-            updatedAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-            recencyAt: job.core.lifecycle.endedAt ?? job.core.lifecycle.startedAt,
-            status: CodexThreadStatus(reviewJobState: job.core.lifecycle.status)
-        )
-    }
-
-    @MainActor
-    func makeReviewMonitorReviewChatCellViewForTesting(job: CodexReviewJob) -> NSTableCellView {
+    func makeReviewMonitorReviewChatCellViewForTesting(
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat
+    ) -> NSTableCellView {
         let cellView = ReviewMonitorReviewChatCellView()
         cellView.configure(
             with: ReviewMonitorCodexSidebarOutlineNode(
-                item: .chat(reviewMonitorReviewChatCellChatForTesting(job: job))
+                item: .chat(chat)
             ))
         return cellView
     }
@@ -2094,14 +2064,14 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     @MainActor
     func configureReviewMonitorReviewChatCellViewForTesting(
         _ cellView: NSTableCellView,
-        job: CodexReviewJob
+        chat: ReviewMonitorCodexSidebarSnapshot.Chat
     ) {
         guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
             fatalError("Expected ReviewMonitorReviewChatCellView.")
         }
         cellView.configure(
             with: ReviewMonitorCodexSidebarOutlineNode(
-                item: .chat(reviewMonitorReviewChatCellChatForTesting(job: job))
+                item: .chat(chat)
             ))
     }
 
