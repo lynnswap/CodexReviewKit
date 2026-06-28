@@ -24,7 +24,7 @@ private extension CodexReviewAuthModel {
 @MainActor
 func chatIDForTesting(_ job: ReviewRunRecord) -> CodexThreadID {
     guard let chatID = job.reviewChatIDForTesting else {
-        Issue.record("Expected review job \(job.id) to have a chat id.")
+        Issue.record("Expected review run \(job.id) to have a chat id.")
         return CodexThreadID(rawValue: job.id)
     }
     return chatID
