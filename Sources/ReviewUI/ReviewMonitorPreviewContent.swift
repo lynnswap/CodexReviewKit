@@ -234,6 +234,12 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
+    static func makeChatLogSource(from store: CodexReviewStore) -> ReviewMonitorPreviewChatLogSource {
+        ReviewMonitorPreviewChatLogSource(
+            fixtures: makeChatLogFixtures(from: store.orderedJobs)
+        )
+    }
+
     @_spi(PreviewSupport)
     public static func makeCommandOutputStore() -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(

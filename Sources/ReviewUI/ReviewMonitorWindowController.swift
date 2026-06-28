@@ -156,9 +156,7 @@ public extension ReviewMonitorWindowController {
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
-        let previewChatLogSource = ReviewMonitorPreviewChatLogSource(
-            fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: store.orderedJobs)
-        )
+        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
         store.previewSupportRetainer = ReviewMonitorPreviewChatLogStreamer(
             source: previewChatLogSource,
             interval: .milliseconds(40)

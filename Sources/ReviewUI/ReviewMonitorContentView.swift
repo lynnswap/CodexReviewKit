@@ -322,9 +322,7 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     let uiState = ReviewMonitorUIState(auth: store.auth)
     let previewChatLogSource: ReviewMonitorPreviewChatLogSource? =
         if case .running = serverState {
-            ReviewMonitorPreviewChatLogSource(
-                fixtures: ReviewMonitorPreviewContent.makeChatLogFixtures(from: store.orderedJobs)
-            )
+            ReviewMonitorPreviewContent.makeChatLogSource(from: store)
         } else {
             nil
         }
