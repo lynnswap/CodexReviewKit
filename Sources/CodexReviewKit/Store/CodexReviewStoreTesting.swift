@@ -19,7 +19,6 @@ extension CodexReviewStore {
         account: CodexReviewAccount? = nil,
         persistedAccounts: [CodexReviewAccount]? = nil,
         serverURL: URL? = nil,
-        workspaces: [CodexReviewWorkspace],
         reviewRuns: [ReviewRunRecord] = [],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
@@ -41,42 +40,10 @@ extension CodexReviewStore {
             self.auth.updateCurrentAccount(account)
         }
         self.serverURL = serverURL
-        var existingByCWD: [String: CodexReviewWorkspace] = [:]
-        for workspace in self.workspaces {
-            existingByCWD[workspace.cwd] = workspace
+        for (index, runRecord) in reviewRuns.enumerated() {
+            runRecord.sortOrder = Double(reviewRuns.count - index - 1)
         }
-
-        var resolvedWorkspaces: [CodexReviewWorkspace] = []
-        resolvedWorkspaces.reserveCapacity(workspaces.count)
-
-        for (workspaceIndex, workspace) in workspaces.enumerated() {
-            let sortOrder = Double(workspaces.count - workspaceIndex - 1)
-            if let existingWorkspace = existingByCWD.removeValue(forKey: workspace.cwd) {
-                existingWorkspace.sortOrder = sortOrder
-                resolvedWorkspaces.append(existingWorkspace)
-            } else {
-                workspace.sortOrder = sortOrder
-                resolvedWorkspaces.append(workspace)
-            }
-        }
-
-        self.workspaces = Set(resolvedWorkspaces)
-        var runsByCWD: [String: [ReviewRunRecord]] = [:]
-        let resolvedRuns = reviewRuns.filter { runRecord in
-            resolvedWorkspaces.contains(where: { $0.cwd == runRecord.cwd })
-        }
-        for runRecord in resolvedRuns {
-            runsByCWD[runRecord.cwd, default: []].append(runRecord)
-        }
-        for runRecord in resolvedRuns {
-            guard let workspaceRuns = runsByCWD[runRecord.cwd],
-                  let index = workspaceRuns.firstIndex(where: { $0 === runRecord })
-            else {
-                continue
-            }
-            runRecord.sortOrder = Double(workspaceRuns.count - index - 1)
-        }
-        self.reviewRuns = Set(resolvedRuns)
+        self.reviewRuns = Set(reviewRuns)
         if let settingsSnapshot {
             settings.loadForTesting(snapshot: settingsSnapshot)
         }

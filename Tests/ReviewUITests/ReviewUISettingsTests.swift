@@ -20,7 +20,6 @@ struct ReviewUISettingsTests {
         store.loadForTesting(
             serverState: .running,
             authState: .signedIn(accountID: "review@example.com"),
-            workspaces: [],
             settingsSnapshot: settingsSnapshot
         )
 
@@ -37,7 +36,6 @@ struct ReviewUISettingsTests {
         store.loadForTesting(
             serverState: .stopped,
             authState: .signedIn(accountID: "review@example.com"),
-            workspaces: [],
             settingsSnapshot: settingsSnapshot
         )
 

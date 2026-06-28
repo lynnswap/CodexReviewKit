@@ -280,7 +280,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func newlyStartedWorkspaceAppearsBeforeExistingWorkspaces() async throws {
+    @Test func newlyStartedReviewAppearsBeforeExistingRunsAcrossWorkspaces() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -301,30 +301,7 @@ struct CodexReviewStoreCommandTests {
             await backend.yield(.completed(summary: "Succeeded.", result: "second"))
             _ = try await second
 
-            #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
-        }
-    }
-
-    @Test func newlyStartedWorkspaceUsesSortOrderAboveCurrentMaximum() async throws {
-        let backend = FakeCodexReviewBackend()
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
-        )
-        try await withStoreCommandTestCleanup(backend: backend, store: store) {
-            store.loadForTesting(
-                serverState: .running,
-                workspaces: [.init(cwd: "/tmp/old-project")]
-            )
-            store.workspace(cwd: "/tmp/old-project")?.sortOrder = 10
-
-            async let result = store.startReview(
-                sessionID: "session-1",
-                request: .init(cwd: "/tmp/new-project", target: .uncommittedChanges)
-            )
-            await backend.yield(.completed(summary: "Succeeded.", result: "new"))
-            _ = try await result
-
-            #expect(store.orderedWorkspaces.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
+            #expect(store.orderedReviewRuns.map(\.cwd) == ["/tmp/new-project", "/tmp/old-project"])
         }
     }
 
@@ -380,7 +357,7 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
-    @Test func newlyStartedReviewUsesSortOrderAboveCurrentWorkspaceMaximum() async throws {
+    @Test func newlyStartedReviewUsesSortOrderAboveCurrentMaximum() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
@@ -395,7 +372,6 @@ struct CodexReviewStoreCommandTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [existing]
             )
             store.reviewRun(id: "run-existing")?.sortOrder = 10
@@ -409,74 +385,6 @@ struct CodexReviewStoreCommandTests {
 
             #expect(store.orderedReviewRuns(inWorkspace: "/tmp/project").map(\.targetSummary).first == "Uncommitted changes")
         }
-    }
-
-    @Test func workspaceReorderBeforeAnchorMovesBlockAndReportsMutation() {
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
-        )
-        let firstGroupedWorkspace = CodexReviewWorkspace(cwd: "/tmp/group-a-1")
-        let secondWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-b")
-        let thirdWorkspace = CodexReviewWorkspace(cwd: "/tmp/workspace-c")
-        let secondGroupedWorkspace = CodexReviewWorkspace(cwd: "/tmp/group-a-2")
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [firstGroupedWorkspace, secondWorkspace, thirdWorkspace, secondGroupedWorkspace]
-        )
-
-        #expect(
-            store.reorderWorkspaces(
-                cwds: [firstGroupedWorkspace.cwd, secondGroupedWorkspace.cwd],
-                beforeCWD: thirdWorkspace.cwd
-            ))
-        #expect(
-            store.orderedWorkspaces.map(\.cwd) == [
-                secondWorkspace.cwd,
-                firstGroupedWorkspace.cwd,
-                secondGroupedWorkspace.cwd,
-                thirdWorkspace.cwd,
-            ])
-        #expect(
-            store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: firstGroupedWorkspace.cwd) == false)
-        #expect(store.reorderWorkspaces(cwds: [firstGroupedWorkspace.cwd], beforeCWD: "/tmp/missing") == false)
-    }
-
-    @Test func runReorderBeforeAnchorMovesItemAndReportsMutation() {
-        let store = CodexReviewStore.makeTestingStore(
-            backend: TestingCodexReviewStoreBackend(reviewBackend: FakeCodexReviewBackend())
-        )
-        let workspace = CodexReviewWorkspace(cwd: "/tmp/project")
-        let firstRun = ReviewRunRecord.makeForTesting(
-            id: "run-first",
-            cwd: workspace.cwd,
-            targetSummary: "First",
-            status: .running,
-            summary: "Running"
-        )
-        let secondRun = ReviewRunRecord.makeForTesting(
-            id: "run-second",
-            cwd: workspace.cwd,
-            targetSummary: "Second",
-            status: .running,
-            summary: "Running"
-        )
-        let thirdRun = ReviewRunRecord.makeForTesting(
-            id: "run-third",
-            cwd: workspace.cwd,
-            targetSummary: "Third",
-            status: .running,
-            summary: "Running"
-        )
-        store.loadForTesting(
-            serverState: .running,
-            workspaces: [workspace],
-            reviewRuns: [firstRun, secondRun, thirdRun]
-        )
-
-        #expect(store.reorderReviewRun(id: firstRun.id, inWorkspace: workspace.cwd, beforeRunID: thirdRun.id))
-        #expect(store.orderedReviewRuns(in: workspace).map(\.id) == ["run-second", "run-first", "run-third"])
-        #expect(store.reorderReviewRun(id: firstRun.id, inWorkspace: workspace.cwd, beforeRunID: firstRun.id) == false)
-        #expect(store.reorderReviewRun(id: firstRun.id, inWorkspace: workspace.cwd, beforeRunID: "run-missing") == false)
     }
 
     @Test func cancelRunningReviewUsesBackendInterruptAndPublicState() async throws {
@@ -1695,7 +1603,6 @@ struct CodexReviewStoreCommandTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [running]
             )
 
@@ -1757,8 +1664,7 @@ struct CodexReviewStoreCommandTests {
         store.loadForTesting(
             serverState: .running,
             account: selectedAccount,
-            persistedAccounts: [selectedAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [selectedAccount, otherAccount]
         )
         let displayedSelectedAccount = try #require(store.auth.selectedAccount)
         let displayedOtherAccount = try #require(
@@ -1817,16 +1723,16 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
 
-        store.loadForTesting(serverState: .stopped, authPhase: .signedOut, workspaces: [])
+        store.loadForTesting(serverState: .stopped, authPhase: .signedOut)
         #expect(store.canPerformPrimaryAuthenticationAction)
 
-        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut, workspaces: [])
+        store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
         #expect(store.canPerformPrimaryAuthenticationAction)
 
-        store.loadForTesting(serverState: .starting, authPhase: .signedOut, workspaces: [])
+        store.loadForTesting(serverState: .starting, authPhase: .signedOut)
         #expect(store.canPerformPrimaryAuthenticationAction == false)
 
-        store.loadForTesting(serverState: .running, authPhase: .signedOut, workspaces: [])
+        store.loadForTesting(serverState: .running, authPhase: .signedOut)
         #expect(store.canPerformPrimaryAuthenticationAction)
 
         store.auth.updatePhase(.signingIn(.init(title: "Sign in", detail: "Open browser.")))
@@ -1840,7 +1746,7 @@ struct CodexReviewStoreCommandTests {
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
         await withStoreCommandTestCleanup(backend: backend, store: store) {
-            store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut, workspaces: [])
+            store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
 
             await store.performPrimaryAuthenticationAction()
 

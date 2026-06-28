@@ -1,27 +1,15 @@
 extension CodexReviewStore {
-    package var orderedWorkspaces: [CodexReviewWorkspace] {
-        workspaces.sorted {
+    package var orderedReviewRuns: [ReviewRunRecord] {
+        reviewRuns.sorted {
             if $0.sortOrder == $1.sortOrder {
-                return $0.cwd < $1.cwd
+                return $0.id < $1.id
             }
             return $0.sortOrder > $1.sortOrder
         }
     }
 
-    package var orderedReviewRuns: [ReviewRunRecord] {
-        orderedWorkspaces.flatMap { orderedReviewRuns(in: $0) }
-    }
-
     package var hasReviewRuns: Bool {
         reviewRuns.isEmpty == false
-    }
-
-    package func workspace(cwd: String) -> CodexReviewWorkspace? {
-        workspaces.first(where: { $0.cwd == cwd })
-    }
-
-    package func workspace(containing runRecord: ReviewRunRecord) -> CodexReviewWorkspace? {
-        workspace(cwd: runRecord.cwd)
     }
 
     package func reviewRun(id: String) -> ReviewRunRecord? {
@@ -41,21 +29,8 @@ extension CodexReviewStore {
         reviewRuns.filter { $0.cwd == cwd }
     }
 
-    package func orderedReviewRuns(in workspace: CodexReviewWorkspace) -> [ReviewRunRecord] {
-        orderedReviewRuns(inWorkspace: workspace.cwd)
-    }
-
     package func orderedReviewRuns(inWorkspace cwd: String) -> [ReviewRunRecord] {
-        reviewRuns(inWorkspace: cwd).sorted {
-            if $0.sortOrder == $1.sortOrder {
-                return $0.id < $1.id
-            }
-            return $0.sortOrder > $1.sortOrder
-        }
-    }
-
-    package func reviewRunCount(in workspace: CodexReviewWorkspace) -> Int {
-        reviewRuns(inWorkspace: workspace.cwd).count
+        orderedReviewRuns.filter { $0.cwd == cwd }
     }
 
     package func totalReviewRunCount() -> Int {
@@ -69,16 +44,9 @@ extension CodexReviewStore {
         }
     }
 
-    package func normalizeWorkspaceSortOrders() {
-        let ordered = orderedWorkspaces
-        for (index, workspace) in ordered.enumerated() {
-            workspace.sortOrder = Double(ordered.count - index - 1)
-        }
-    }
-
     package func normalizeAllReviewRunSortOrders() {
-        for workspace in workspaces {
-            normalizeReviewRunSortOrders(inWorkspace: workspace.cwd)
+        for cwd in Set(reviewRuns.map(\.cwd)) {
+            normalizeReviewRunSortOrders(inWorkspace: cwd)
         }
     }
 }

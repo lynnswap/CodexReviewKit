@@ -196,8 +196,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             serverState: .running,
             authPhase: .signedOut,
             account: account,
-            persistedAccounts: [account],
-            workspaces: []
+            persistedAccounts: [account]
         )
 
         store.refreshDueAccountRateLimits(now: now)
@@ -225,8 +224,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             serverState: .running,
             authPhase: .signedOut,
             account: account,
-            persistedAccounts: [account],
-            workspaces: []
+            persistedAccounts: [account]
         )
 
         store.refreshDueAccountRateLimits(now: now)
@@ -253,8 +251,7 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             serverState: .running,
             authPhase: .signedOut,
             account: account,
-            persistedAccounts: [account],
-            workspaces: []
+            persistedAccounts: [account]
         )
 
         store.refreshDueAccountRateLimits(now: now)
@@ -311,7 +308,6 @@ struct CodexReviewStoreRateLimitAutoRefreshTests {
             authPhase: .signedOut,
             account: account,
             persistedAccounts: [account],
-            workspaces: [CodexReviewWorkspace(cwd: "/tmp/repo")],
             reviewRuns: reviewRuns
         )
     }

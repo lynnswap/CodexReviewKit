@@ -142,8 +142,7 @@ public enum ReviewMonitorPreviewContent {
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let chatLogSource = ReviewMonitorPreviewChatLogSource(
             fixtures: previewContent.chatLogFixtures
@@ -206,8 +205,7 @@ public enum ReviewMonitorPreviewContent {
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let fixture = makeChatLogFixture(
             for: chatFixture

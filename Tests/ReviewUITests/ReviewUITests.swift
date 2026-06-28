@@ -37,8 +37,7 @@ struct ReviewUITests {
                 )
             ),
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -64,8 +63,7 @@ struct ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -104,8 +102,7 @@ struct ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -149,8 +146,7 @@ struct ReviewUITests {
                 )
             ),
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -181,8 +177,7 @@ struct ReviewUITests {
                 )
             ),
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -214,8 +209,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -247,8 +241,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: firstAccount,
-            persistedAccounts: [firstAccount, secondAccount, thirdAccount],
-            workspaces: []
+            persistedAccounts: [firstAccount, secondAccount, thirdAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -303,8 +296,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: detachedAccount,
-            persistedAccounts: [firstAccount, secondAccount],
-            workspaces: []
+            persistedAccounts: [firstAccount, secondAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -439,8 +431,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -495,8 +486,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -538,8 +528,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -573,8 +562,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -611,8 +599,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -665,8 +652,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -705,8 +691,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: savedAccount,
-            persistedAccounts: [savedAccount],
-            workspaces: []
+            persistedAccounts: [savedAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -776,8 +761,7 @@ struct ReviewUITests {
         store.loadForTesting(
             serverState: .running,
             account: activeAccount,
-            persistedAccounts: [activeAccount, otherAccount],
-            workspaces: []
+            persistedAccounts: [activeAccount, otherAccount]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -853,7 +837,6 @@ struct ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadReviewLifecycleForTesting(
             serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: activeChat.cwd)],
             reviewRuns: [activeRun, recentRun]
         )
         installPreviewChatLogSourceForTesting(on: store, fixtures: [activeChat, recentChat])
@@ -2198,7 +2181,6 @@ struct ReviewUITests {
             summary: "Review is still running.",
             logText: "Selected log\n"
         )
-        let workspace = CodexReviewWorkspace(cwd: chat.cwd)
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
@@ -2219,12 +2201,12 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(cwd: workspace.cwd)
+        viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(cwd: chat.cwd)
 
         _ = try await awaitTransportRender(transport)
         #expect(
             viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
-                workspace.cwd
+                chat.cwd
             ])
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(transport.isShowingNoFindingsStateForTesting)
@@ -2233,7 +2215,7 @@ struct ReviewUITests {
     @Test func newChatsArrivingWhileUnselectedDoNotAutoSelect() {
         let activeChat = makeReviewChatFixtureForTesting(status: .running, targetSummary: "Uncommitted changes")
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(serverState: .running)
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
@@ -2281,7 +2263,7 @@ struct ReviewUITests {
             ]))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(serverState: .running)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
@@ -5319,7 +5301,6 @@ extension CodexReviewStore {
             serverState: serverState,
             authState: authState,
             serverURL: serverURL,
-            workspaces: [],
             settingsSnapshot: settingsSnapshot
         )
         installPreviewChatLogSourceForTesting(on: self, fixtures: fixtures)
@@ -5329,7 +5310,6 @@ extension CodexReviewStore {
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
-        workspaces: [CodexReviewWorkspace],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
         loadForTesting(
@@ -5350,7 +5330,6 @@ extension CodexReviewStore {
                 ]
             } ?? [],
             serverURL: serverURL,
-            workspaces: workspaces,
             reviewRuns: [],
             settingsSnapshot: settingsSnapshot
         )
@@ -5360,7 +5339,6 @@ extension CodexReviewStore {
         serverState: CodexReviewServerState,
         authState: TestAuthState = .signedOut,
         serverURL: URL? = nil,
-        workspaces: [CodexReviewWorkspace],
         reviewRuns: [ReviewRunRecord],
         settingsSnapshot: CodexReviewSettings.Snapshot? = nil
     ) {
@@ -5382,7 +5360,6 @@ extension CodexReviewStore {
                 ]
             } ?? [],
             serverURL: serverURL,
-            workspaces: workspaces,
             reviewRuns: reviewRuns,
             settingsSnapshot: settingsSnapshot
         )

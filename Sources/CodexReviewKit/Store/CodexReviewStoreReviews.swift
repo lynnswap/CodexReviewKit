@@ -68,7 +68,7 @@ extension CodexReviewStore {
             id: runID,
             sessionID: sessionID,
             cwd: validatedRequest.cwd,
-            sortOrder: nextReviewRunSortOrder(inWorkspace: validatedRequest.cwd),
+            sortOrder: nextReviewRunSortOrder(),
             targetSummary: validatedRequest.target.displaySummary,
             core: .init(
                 lifecycle: .init(status: .queued),
@@ -544,13 +544,6 @@ extension CodexReviewStore {
     }
 
     private func insertReviewRun(_ runRecord: ReviewRunRecord) {
-        if workspace(cwd: runRecord.cwd) == nil {
-            let workspace = CodexReviewWorkspace(
-                cwd: runRecord.cwd,
-                sortOrder: nextWorkspaceSortOrder()
-            )
-            workspaces.insert(workspace)
-        }
         reviewRuns.insert(runRecord)
         writeDiagnosticsIfNeeded()
     }
@@ -924,12 +917,8 @@ extension CodexReviewStore {
         )
     }
 
-    private func nextReviewRunSortOrder(inWorkspace cwd: String) -> Double {
-        (reviewRuns(inWorkspace: cwd).map(\.sortOrder).max() ?? -1) + 1
-    }
-
-    private func nextWorkspaceSortOrder() -> Double {
-        (workspaces.map(\.sortOrder).max() ?? -1) + 1
+    private func nextReviewRunSortOrder() -> Double {
+        (reviewRuns.map(\.sortOrder).max() ?? -1) + 1
     }
 }
 

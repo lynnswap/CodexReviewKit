@@ -374,10 +374,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [
-                    .init(cwd: "/tmp/project"),
-                    .init(cwd: "/tmp/other"),
-                ],
                 reviewRuns: [included, otherSession, otherWorkspace]
             )
             let response = try await postJSONRPC(
@@ -423,7 +419,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [
                     includedRun,
                     ReviewRunRecord.makeForTesting(
@@ -498,7 +493,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [runRecord]
             )
 
@@ -571,7 +565,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [runRecord]
             )
 
@@ -635,7 +628,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [running, otherSession]
             )
             let response = try await postJSONRPC(
@@ -702,7 +694,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [completed, running]
             )
 
@@ -740,7 +731,6 @@ struct CodexReviewMCPHTTPServerTests {
             let sessionID = try await initializeSession(endpoint: await server.url)
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [
                     ReviewRunRecord.makeForTesting(
                         id: "run-running-1",
@@ -810,7 +800,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [running]
             )
 
@@ -980,7 +969,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [other]
             )
 
@@ -1026,7 +1014,6 @@ struct CodexReviewMCPHTTPServerTests {
             )
             store.loadForTesting(
                 serverState: .running,
-                workspaces: [.init(cwd: "/tmp/project")],
                 reviewRuns: [running]
             )
 

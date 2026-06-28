@@ -338,8 +338,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-chat-store")]
+            serverState: .running
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
@@ -416,7 +415,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadReviewLifecycleForTesting(
             serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: repo.path)],
             reviewRuns: [legacyRun]
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
@@ -460,8 +458,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .running,
-            workspaces: [CodexReviewWorkspace(cwd: "/tmp/review-chat-store")]
+            serverState: .running
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
@@ -560,7 +557,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(serverState: .running)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
@@ -621,7 +618,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(serverState: .running)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
@@ -675,7 +672,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, workspaces: [])
+        store.loadForTesting(serverState: .running)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),

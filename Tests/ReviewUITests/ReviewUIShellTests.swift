@@ -110,8 +110,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -128,8 +127,7 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerFailedOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -144,8 +142,7 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerStartingOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .starting,
-            workspaces: []
+            serverState: .starting
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -157,8 +154,7 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerStoppedOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .stopped,
-            workspaces: []
+            serverState: .stopped
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -171,8 +167,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -187,8 +182,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
@@ -218,8 +212,7 @@ extension ReviewUITests {
         #expect(viewController.isHidden == false)
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         #expect(viewController.isHidden == false)
 
@@ -305,8 +298,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
@@ -315,8 +307,7 @@ extension ReviewUITests {
         #expect(viewController.sidebarPresentationForTesting == .chatList)
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -327,8 +318,7 @@ extension ReviewUITests {
 
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -555,8 +545,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -673,8 +662,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
@@ -698,8 +686,7 @@ extension ReviewUITests {
         )
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -709,8 +696,7 @@ extension ReviewUITests {
 
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -894,8 +880,7 @@ extension ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: currentAccount,
-            persistedAccounts: [],
-            workspaces: []
+            persistedAccounts: []
         )
         let windowController = ReviewMonitorWindowController(
             store: store,
@@ -923,8 +908,7 @@ extension ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: currentAccount,
-            persistedAccounts: [],
-            workspaces: []
+            persistedAccounts: []
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
@@ -963,8 +947,7 @@ extension ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: nil,
-            persistedAccounts: [CodexReviewAccount(email: "saved@example.com", planType: "pro")],
-            workspaces: []
+            persistedAccounts: [CodexReviewAccount(email: "saved@example.com", planType: "pro")]
         )
         let windowController = ReviewMonitorWindowController(
             store: store,
