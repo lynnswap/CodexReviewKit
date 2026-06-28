@@ -157,8 +157,9 @@ public extension ReviewMonitorWindowController {
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
-        store.previewSupportRetainer = ReviewMonitorPreviewChatLogStreamer(
+        ReviewMonitorPreviewContent.retainChatLogStreamer(
             source: previewChatLogSource,
+            in: store,
             interval: .milliseconds(40)
         )
         self.init(

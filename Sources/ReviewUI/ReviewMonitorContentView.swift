@@ -330,8 +330,9 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
         uiState.selection = .chat(initialChat)
     }
     if ownsPreviewStore, let previewChatLogSource {
-        store.previewSupportRetainer = ReviewMonitorPreviewChatLogStreamer(
+        ReviewMonitorPreviewContent.retainChatLogStreamer(
             source: previewChatLogSource,
+            in: store,
             interval: .milliseconds(40)
         )
     }

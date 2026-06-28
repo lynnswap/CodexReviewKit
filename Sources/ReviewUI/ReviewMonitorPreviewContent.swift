@@ -143,6 +143,12 @@ public enum ReviewMonitorPreviewContent {
         let cycle: Int
     }
 
+    private struct PreviewSidebarContent {
+        var workspaces: [CodexReviewWorkspace]
+        var jobs: [CodexReviewJob]
+        var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture]
+    }
+
     @_spi(PreviewSupport)
     public static func makeStore() -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
@@ -157,6 +163,12 @@ public enum ReviewMonitorPreviewContent {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             workspaces: previewContent.workspaces,
             jobs: previewContent.jobs
+        )
+        let chatLogSource = ReviewMonitorPreviewChatLogSource(
+            fixtures: previewContent.chatLogFixtures
+        )
+        store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
+            chatLogSource: chatLogSource
         )
         return store
     }
@@ -196,9 +208,28 @@ public enum ReviewMonitorPreviewContent {
     }
 
     static func makeChatLogSource(from store: CodexReviewStore) -> ReviewMonitorPreviewChatLogSource {
-        ReviewMonitorPreviewChatLogSource(
+        if let previewSupport = store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport {
+            return previewSupport.chatLogSource
+        }
+        return ReviewMonitorPreviewChatLogSource(
             fixtures: makeChatLogFixtures(from: store.orderedJobs)
         )
+    }
+
+    static func retainChatLogStreamer(
+        source: ReviewMonitorPreviewChatLogSource,
+        in store: CodexReviewStore,
+        interval: Duration
+    ) {
+        let previewSupport: ReviewMonitorPreviewRuntimeSupport
+        if let existingSupport = store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport,
+           existingSupport.chatLogSource === source {
+            previewSupport = existingSupport
+        } else {
+            previewSupport = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
+            store.previewSupportRetainer = previewSupport
+        }
+        previewSupport.startStreaming(interval: interval)
     }
 
     @_spi(PreviewSupport)
@@ -645,7 +676,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    private static func makeSidebarContent() -> (workspaces: [CodexReviewWorkspace], jobs: [CodexReviewJob]) {
+    private static func makeSidebarContent() -> PreviewSidebarContent {
         let now = Date()
         let workspacePaths = [
             "/path/to/workspace-alpha",
@@ -655,11 +686,13 @@ public enum ReviewMonitorPreviewContent {
 
         var workspaces: [CodexReviewWorkspace] = []
         var jobs: [CodexReviewJob] = []
+        var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture] = []
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
             workspaces.append(CodexReviewWorkspace(cwd: cwd))
-            jobs += makeJobDefinitions(for: workspaceName).enumerated().map { jobIndex, definition in
-                makeJob(
+            for (jobIndex, definition) in makeJobDefinitions(for: workspaceName).enumerated() {
+                let timelineItems = makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
+                let job = makeJob(
                     id: "preview-\(workspaceIndex)-\(jobIndex)",
                     cwd: cwd,
                     model: definition.model,
@@ -675,11 +708,75 @@ public enum ReviewMonitorPreviewContent {
                         cwd: cwd
                     ),
                     lastAgentMessage: definition.lastAgentMessage,
-                    timelineItems: makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
+                    timelineItems: timelineItems
                 )
+                jobs.append(job)
+                if let fixture = makeChatLogFixture(for: job, timelineItems: timelineItems) {
+                    chatLogFixtures.append(fixture)
+                }
             }
         }
-        return (workspaces, jobs)
+        return PreviewSidebarContent(
+            workspaces: workspaces,
+            jobs: jobs,
+            chatLogFixtures: chatLogFixtures
+        )
+    }
+
+    private static func makeChatLogFixture(
+        for job: CodexReviewJob,
+        timelineItems: [PreviewTimelineItemTemplate]
+    ) -> ReviewMonitorPreviewChatLogFixture? {
+        guard let chat = job.legacyReviewChatSelection else {
+            return nil
+        }
+        let turn = CodexChatTurnStateSnapshot(
+            id: job.previewTurnID,
+            status: CodexTurnStatus(job.core.lifecycle.status),
+            errorDescription: job.core.lifecycle.errorMessage,
+            usage: nil
+        )
+        let initialSnapshot = CodexChatSnapshot(
+            chatID: chat.id,
+            phase: CodexDataPhase(
+                job.core.lifecycle.status,
+                errorMessage: job.core.lifecycle.errorMessage
+            ),
+            turns: [turn],
+            items: makeInitialChatItems(
+                for: job,
+                timelineItems: timelineItems,
+                turnID: turn.id
+            )
+        )
+        return ReviewMonitorPreviewChatLogFixture(
+            chat: chat,
+            cwd: job.cwd,
+            streamID: job.id,
+            isRunning: job.core.lifecycle.status == .running,
+            initialSnapshot: initialSnapshot
+        )
+    }
+
+    private static func makeInitialChatItems(
+        for job: CodexReviewJob,
+        timelineItems: [PreviewTimelineItemTemplate],
+        turnID: CodexTurnID
+    ) -> [CodexChatItemSnapshot] {
+        let timeline = ReviewTimeline()
+        for item in timelineItems {
+            let itemID = previewTimelineItemID(
+                itemName: item.itemName,
+                jobID: job.id,
+                cycle: 0
+            )
+            let seed = item.seed(id: itemID)
+            let event: ReviewDomainEvent = item.phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed)
+            timeline.apply(event)
+        }
+        return timeline.items.map {
+            CodexChatItemSnapshot(previewItem: $0, turnID: turnID)
+        }
     }
 
     private static func makeJob(

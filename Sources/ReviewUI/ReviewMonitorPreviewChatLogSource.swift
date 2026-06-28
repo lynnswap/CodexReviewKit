@@ -295,6 +295,23 @@ final class ReviewMonitorPreviewChatLogStreamer {
 }
 
 @MainActor
+final class ReviewMonitorPreviewRuntimeSupport {
+    let chatLogSource: ReviewMonitorPreviewChatLogSource
+    private var streamer: ReviewMonitorPreviewChatLogStreamer?
+
+    init(chatLogSource: ReviewMonitorPreviewChatLogSource) {
+        self.chatLogSource = chatLogSource
+    }
+
+    func startStreaming(interval: Duration) {
+        streamer = ReviewMonitorPreviewChatLogStreamer(
+            source: chatLogSource,
+            interval: interval
+        )
+    }
+}
+
+@MainActor
 private final class PreviewChatLogSubscription {
     private let previewChat: PreviewReviewChat
     private let continuation: AsyncStream<CodexChatChange>.Continuation
