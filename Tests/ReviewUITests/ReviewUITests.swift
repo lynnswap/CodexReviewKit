@@ -2384,7 +2384,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let previewChatLogSource = try makePreviewChatLogSourceForTesting(job: job) { turnID in
+        let previewChatLogSource = try makePreviewChatLogSourceForTesting(run: job) { turnID in
             [makePreviewMessageItemForTesting(id: "msg_1", text: "Initial", turnID: turnID)]
         }
         let viewController = ReviewMonitorSplitViewController(
@@ -2432,7 +2432,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
-        let previewChatLogSource = try makePreviewChatLogSourceForTesting(job: job) { turnID in
+        let previewChatLogSource = try makePreviewChatLogSourceForTesting(run: job) { turnID in
             [makePreviewMessageItemForTesting(id: "msg_1", text: "Initial", turnID: turnID)]
         }
         let viewController = ReviewMonitorSplitViewController(

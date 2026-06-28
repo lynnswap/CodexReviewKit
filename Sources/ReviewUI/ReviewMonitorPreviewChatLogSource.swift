@@ -161,12 +161,12 @@ private final class PreviewReviewChat {
     }
 
     func applyPreviewStreamStep(
-        _ step: ReviewMonitorPreviewContent.PreviewTimelineStep,
+        _ step: ReviewMonitorPreviewContent.PreviewChatLogStreamStep,
         cycle: Int
     ) {
-        let itemID = ReviewMonitorPreviewContent.previewTimelineItemID(
+        let itemID = ReviewMonitorPreviewContent.previewChatLogItemID(
             itemName: step.itemName,
-            jobID: streamID,
+            runID: streamID,
             cycle: cycle
         )
         switch step.mode {

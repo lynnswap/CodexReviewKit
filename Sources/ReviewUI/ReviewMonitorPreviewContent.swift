@@ -23,7 +23,7 @@ public enum ReviewMonitorPreviewContent {
         let endedOffset: TimeInterval?
     }
 
-    private struct PreviewReviewFixture {
+    private struct PreviewRunFixture {
         let id: String
         let chatID: CodexThreadID
         let turnID: CodexTurnID
@@ -35,7 +35,7 @@ public enum ReviewMonitorPreviewContent {
         let lifecycle: PreviewChatLifecycle
         let startedAt: Date?
         let endedAt: Date?
-        let chatItems: [PreviewTimelineItemTemplate]
+        let chatItems: [PreviewChatLogItemTemplate]
     }
 
     private enum PreviewReasoningStyle {
@@ -80,7 +80,7 @@ public enum ReviewMonitorPreviewContent {
         case textDelta
     }
 
-    private struct PreviewTimelineItemTemplate {
+    private struct PreviewChatLogItemTemplate {
         let itemName: String
         let kind: CodexThreadItem.Kind
         let content: CodexThreadItem.Content
@@ -105,7 +105,7 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    package struct PreviewTimelineStep {
+    package struct PreviewChatLogStreamStep {
         let itemName: String
         let kind: CodexThreadItem.Kind
         let content: CodexThreadItem.Content
@@ -123,7 +123,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     package struct PreviewStreamFrame {
-        let step: PreviewTimelineStep
+        let step: PreviewChatLogStreamStep
         let cycle: Int
     }
 
@@ -185,10 +185,10 @@ public enum ReviewMonitorPreviewContent {
         let accounts = makePreviewAccounts()
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
-        let timelineItems = makeCommandOutputPreviewTimelineItems()
+        let chatItems = makeCommandOutputPreviewChatLogItems()
         let chatID = CodexThreadID(rawValue: "preview-command-output-panel")
         let turnID = CodexTurnID(rawValue: "preview-command-output-turn")
-        let review = PreviewReviewFixture(
+        let review = PreviewRunFixture(
             id: "preview-command-output-panel",
             chatID: chatID,
             turnID: turnID,
@@ -200,7 +200,7 @@ public enum ReviewMonitorPreviewContent {
             lifecycle: .running,
             startedAt: now.addingTimeInterval(-135),
             endedAt: nil,
-            chatItems: timelineItems
+            chatItems: chatItems
         )
         store.loadForTesting(
             serverState: .running,
@@ -222,7 +222,7 @@ public enum ReviewMonitorPreviewContent {
         forRunningChatAt runningChatIndex: Int,
         tick: Int
     ) -> PreviewStreamFrame? {
-        guard previewStreamTimeline.isEmpty == false else {
+        guard previewChatLogStreamSchedule.isEmpty == false else {
             return nil
         }
         let chatTick = tick - runningChatIndex * previewChatTickOffset
@@ -230,22 +230,22 @@ public enum ReviewMonitorPreviewContent {
             return nil
         }
 
-        let offset = (chatTick - 1) % previewStreamTimeline.count
-        guard let step = previewStreamTimeline[offset] else {
+        let offset = (chatTick - 1) % previewChatLogStreamSchedule.count
+        guard let step = previewChatLogStreamSchedule[offset] else {
             return nil
         }
         return PreviewStreamFrame(
             step: step,
-            cycle: (chatTick - 1) / previewStreamTimeline.count
+            cycle: (chatTick - 1) / previewChatLogStreamSchedule.count
         )
     }
 
-    package static func previewTimelineItemID(
+    package static func previewChatLogItemID(
         itemName: String,
-        jobID: String,
+        runID: String,
         cycle: Int
     ) -> String {
-        "preview-\(itemName)-\(jobID)-\(cycle)"
+        "preview-\(itemName)-\(runID)-\(cycle)"
     }
 
     private static func previewTurnID(_ tick: Int) -> String {
@@ -258,22 +258,22 @@ public enum ReviewMonitorPreviewContent {
         return "preview-turn-\(tick)"
     }
 
-    private static func streamTimeline(from templates: [PreviewStreamTemplate]) -> [PreviewTimelineStep?] {
-        var timeline: [PreviewTimelineStep?] = []
+    private static func chatLogStreamSchedule(from templates: [PreviewStreamTemplate]) -> [PreviewChatLogStreamStep?] {
+        var schedule: [PreviewChatLogStreamStep?] = []
         for (templateIndex, template) in templates.enumerated() {
-            let delay = timeline.isEmpty ? 1 : max(1, template.delayBeforeFrameCount)
+            let delay = schedule.isEmpty ? 1 : max(1, template.delayBeforeFrameCount)
             if delay > 1 {
-                timeline.append(contentsOf: Array(repeating: nil, count: delay - 1))
+                schedule.append(contentsOf: Array(repeating: nil, count: delay - 1))
             }
             let itemName = template.itemName ?? "stream-\(templateIndex)"
             let streamText = template.deltaText ?? ""
             let chunks = template.chunkByWord ? wordChunks(in: streamText) : [streamText]
             for (index, chunk) in chunks.enumerated() {
                 if index > 0 && template.chunkIntervalFrameCount > 1 {
-                    timeline.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
+                    schedule.append(contentsOf: Array(repeating: nil, count: template.chunkIntervalFrameCount - 1))
                 }
-                timeline.append(
-                    PreviewTimelineStep(
+                schedule.append(
+                    PreviewChatLogStreamStep(
                         itemName: itemName,
                         kind: template.kind,
                         content: template.content,
@@ -282,7 +282,7 @@ public enum ReviewMonitorPreviewContent {
                     ))
             }
         }
-        return timeline
+        return schedule
     }
 
     private static func wordChunks(in text: String) -> [String] {
@@ -455,9 +455,9 @@ public enum ReviewMonitorPreviewContent {
         ),
     ]
 
-    private static let previewStreamTimeline = streamTimeline(from: previewStreamTemplates)
+    private static let previewChatLogStreamSchedule = chatLogStreamSchedule(from: previewStreamTemplates)
 
-    private static func makeCommandOutputPreviewTimelineItems() -> [PreviewTimelineItemTemplate] {
+    private static func makeCommandOutputPreviewChatLogItems() -> [PreviewChatLogItemTemplate] {
         let output = """
             Command line invocation:
                 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project Tools/ReviewMonitor/CodexReviewMonitor.xcodeproj -scheme CodexReviewMonitor
@@ -609,10 +609,10 @@ public enum ReviewMonitorPreviewContent {
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
             for (chatIndex, definition) in makeChatDefinitions(for: workspaceName).enumerated() {
-                let timelineItems = makePreviewTimelineItems(for: definition, workspaceName: workspaceName)
+                let chatItems = makePreviewChatLogItems(for: definition, workspaceName: workspaceName)
                 let chatID = CodexThreadID(rawValue: "preview-thread-\(workspaceIndex)-\(chatIndex)")
                 let turnID = CodexTurnID(rawValue: "preview-turn-\(workspaceIndex)-\(chatIndex)")
-                let review = PreviewReviewFixture(
+                let review = PreviewRunFixture(
                     id: "preview-\(workspaceIndex)-\(chatIndex)",
                     chatID: chatID,
                     turnID: turnID,
@@ -624,7 +624,7 @@ public enum ReviewMonitorPreviewContent {
                     lifecycle: definition.lifecycle,
                     startedAt: definition.startedOffset.map { now.addingTimeInterval($0) },
                     endedAt: definition.endedOffset.map { now.addingTimeInterval($0) },
-                    chatItems: timelineItems
+                    chatItems: chatItems
                 )
                 chatLogFixtures.append(
                     makeChatLogFixture(
@@ -638,7 +638,7 @@ public enum ReviewMonitorPreviewContent {
     }
 
     private static func makeChatLogFixture(
-        for review: PreviewReviewFixture
+        for review: PreviewRunFixture
     ) -> ReviewMonitorPreviewChatLogFixture {
         let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
             rowID: .chat(review.chatID),
@@ -666,7 +666,7 @@ public enum ReviewMonitorPreviewContent {
             turns: [turn],
             items: makeInitialChatItems(
                 streamID: review.id,
-                timelineItems: review.chatItems,
+                chatItems: review.chatItems,
                 turnID: turn.id
             )
         )
@@ -681,15 +681,15 @@ public enum ReviewMonitorPreviewContent {
 
     private static func makeInitialChatItems(
         streamID: String,
-        timelineItems: [PreviewTimelineItemTemplate],
+        chatItems: [PreviewChatLogItemTemplate],
         turnID: CodexTurnID
     ) -> [CodexChatItemSnapshot] {
         var snapshots: [CodexChatItemSnapshot] = []
-        for item in timelineItems {
+        for item in chatItems {
             let snapshot = item.itemSnapshot(
-                id: previewTimelineItemID(
+                id: previewChatLogItemID(
                     itemName: item.itemName,
-                    jobID: streamID,
+                    runID: streamID,
                     cycle: 0
                 ),
                 turnID: turnID
@@ -709,7 +709,7 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         kind: CodexThreadItem.Kind,
         message: String
-    ) -> PreviewTimelineItemTemplate {
+    ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: kind,
@@ -717,7 +717,7 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func messageItem(_ itemName: String, text: String) -> PreviewTimelineItemTemplate {
+    private static func messageItem(_ itemName: String, text: String) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .agentMessage,
@@ -725,7 +725,7 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    private static func planItem(_ itemName: String, markdown: String) -> PreviewTimelineItemTemplate {
+    private static func planItem(_ itemName: String, markdown: String) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .plan,
@@ -737,7 +737,7 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         text: String,
         style: PreviewReasoningStyle = .summary
-    ) -> PreviewTimelineItemTemplate {
+    ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .reasoning,
@@ -749,7 +749,7 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         title: String,
         status: ReviewContextCompactionStatus
-    ) -> PreviewTimelineItemTemplate {
+    ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .contextCompaction,
@@ -761,7 +761,7 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         command: String,
         cwd: String? = nil
-    ) -> PreviewTimelineItemTemplate {
+    ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .commandExecution,
@@ -779,7 +779,7 @@ public enum ReviewMonitorPreviewContent {
         output: String,
         exitCode: Int,
         status: ReviewCommandStatus
-    ) -> PreviewTimelineItemTemplate {
+    ) -> PreviewChatLogItemTemplate {
         .init(
             itemName: itemName,
             kind: .commandExecution,
@@ -797,21 +797,21 @@ public enum ReviewMonitorPreviewContent {
         _ itemName: String,
         result: String,
         status: ReviewToolCallStatus
-    ) -> PreviewTimelineItemTemplate {
-        return PreviewTimelineItemTemplate(
+    ) -> PreviewChatLogItemTemplate {
+        return PreviewChatLogItemTemplate(
             itemName: itemName,
             kind: .mcpToolCall,
             content: .toolCall(.init(result: result, status: CodexTurnStatus(status)))
         )
     }
 
-    private static func makePreviewTimelineItems(
+    private static func makePreviewChatLogItems(
         for definition: PreviewChatDefinition,
         workspaceName: String
-    ) -> [PreviewTimelineItemTemplate] {
+    ) -> [PreviewChatLogItemTemplate] {
         switch definition.lifecycle {
         case .running:
-            return makeRunningPreviewTimelineItems(for: definition, workspaceName: workspaceName)
+            return makeRunningPreviewChatLogItems(for: definition, workspaceName: workspaceName)
         case .queued:
             return [
                 diagnosticItem(
@@ -902,10 +902,10 @@ public enum ReviewMonitorPreviewContent {
         }
     }
 
-    private static func makeRunningPreviewTimelineItems(
+    private static func makeRunningPreviewChatLogItems(
         for definition: PreviewChatDefinition,
         workspaceName: String
-    ) -> [PreviewTimelineItemTemplate] {
+    ) -> [PreviewChatLogItemTemplate] {
         let sourceReadItemName = "preview-initial-source-read-\(workspaceName)-\(definition.targetSummary)"
         let sourceReadCommand =
             "sed -n '1,260p' Sources/ReviewUI/Detail/ReviewMonitorCommandOutputDisplayDocument.swift"
