@@ -44,16 +44,3 @@ extension CodexReviewJob {
         )
     }
 }
-
-extension CodexReviewStore {
-    @MainActor
-    func legacyReviewJob(
-        forChatID chatID: CodexThreadID,
-        in workspaces: [CodexReviewWorkspace]? = nil
-    ) -> CodexReviewJob? {
-        orderedJobs.first { job in
-            job.legacyReviewChatID == chatID
-                && (workspaces?.contains { $0.cwd == job.cwd } ?? true)
-        }
-    }
-}

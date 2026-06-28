@@ -930,19 +930,21 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func restoreSelectedReviewChatRowAfterExpansion(of section: SidebarWorkspaceSection) {
-        guard let selectedRuntimeJob = runtimeJobForCurrentChatSelection(),
-              section.workspaces.contains(where: { $0.cwd == selectedRuntimeJob.cwd })
+        guard isUsingCodexSidebarOutline == false,
+              case .chat(let selectedChat) = uiState.selection,
+              let selectedWorkspaceCWD = selectedChat.workspaceCWD,
+              section.workspaces.contains(where: { $0.cwd == selectedWorkspaceCWD })
         else {
             return
         }
-        let selectedRuntimeJobID = selectedRuntimeJob.id
+        let selectedChatID = selectedChat.id
         DispatchQueue.main.async { [weak self, weak section] in
             guard let self,
                   let section,
-                  let currentSelectedRuntimeJob = self.runtimeJobForCurrentChatSelection(),
+                  let currentSelectedChat = self.currentChatSelection(id: selectedChatID),
                   section.isExpanded,
-                  currentSelectedRuntimeJob.id == selectedRuntimeJobID,
-                  let row = self.row(forJobID: selectedRuntimeJobID),
+                  currentSelectedChat.workspaceCWD == selectedWorkspaceCWD,
+                  let row = self.row(forCurrentChatSelectionID: selectedChatID),
                   self.outlineView.selectedRow != row
             else {
                 return
@@ -950,18 +952,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             self.isReconcilingSelection = true
             self.outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             self.isReconcilingSelection = false
-        }
-    }
-
-    private func runtimeJobForCurrentChatSelection() -> CodexReviewJob? {
-        guard isUsingCodexSidebarOutline == false else {
-            return nil
-        }
-        switch uiState.selection {
-        case .chat(let chat):
-            return store.legacyReviewJob(forChatID: chat.id, in: workspaces())
-        case .workspaceSection, .workspace, nil:
-            return nil
         }
     }
 
