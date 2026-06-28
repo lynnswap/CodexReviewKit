@@ -2177,7 +2177,7 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(workspace)
+        viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(cwd: workspace.cwd)
 
         _ = try await awaitTransportRender(transport)
         #expect(
@@ -4624,15 +4624,15 @@ func waitForSidebarPresentation(
 @MainActor
 func waitForWorkspaceExpanded(
     _ viewController: ReviewMonitorSidebarViewController,
-    workspace: CodexReviewWorkspace,
+    workspaceCWD: String,
     _ expected: Bool,
     timeout: Duration = .seconds(2)
 ) async throws {
     let viewControllerBox = UncheckedSendableBox(viewController)
-    let workspaceBox = UncheckedSendableBox(workspace)
+    let workspaceCWDBox = UncheckedSendableBox(workspaceCWD)
     try await withTestTimeout(timeout) {
         while await MainActor.run(body: {
-            viewControllerBox.value.workspaceIsExpandedForTesting(workspaceBox.value) != expected
+            viewControllerBox.value.workspaceIsExpandedForTesting(cwd: workspaceCWDBox.value) != expected
         }) {
             try Task.checkCancellation()
             await Task.yield()

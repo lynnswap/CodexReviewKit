@@ -42,7 +42,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         @MainActor
         private static func measuredWorkspaceRowHeight() -> CGFloat {
             let cellView = ReviewMonitorWorkspaceCellView()
-            cellView.configure(CodexReviewWorkspace(cwd: "/tmp/workspace-alpha"))
+            cellView.configure(title: "workspace-alpha", toolTip: "/tmp/workspace-alpha")
             return ceil(cellView.fittingSize.height)
         }
 
@@ -756,9 +756,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return false
     }
 
-    private func row(for workspace: CodexReviewWorkspace) -> Int? {
-        row(forCodexSidebarSelectionID: .workspace(CodexWorkspaceID(rawValue: workspace.cwd)))
-            ?? row(forCodexSidebarSelectionID: .workspaceSection(workspace.cwd))
+    private func row(forWorkspaceCWD cwd: String) -> Int? {
+        row(forCodexSidebarSelectionID: .workspace(CodexWorkspaceID(rawValue: cwd)))
+            ?? row(forCodexSidebarSelectionID: .workspaceSection(cwd))
     }
 
     private func row(for chatID: CodexThreadID) -> Int? {
@@ -1519,14 +1519,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
 
-        func selectWorkspaceForTesting(_ workspace: CodexReviewWorkspace) {
-            guard let row = row(for: workspace) else {
-                uiState.selection = .workspaceSection(
-                    .init(
-                        id: workspace.cwd,
-                        title: workspace.displayTitle,
-                        workspaceCWDs: [workspace.cwd]
-                    ))
+        func selectWorkspaceForTesting(cwd: String) {
+            guard let row = row(forWorkspaceCWD: cwd) else {
+                uiState.selection = fallbackWorkspaceSectionSelection(cwd: cwd)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -1541,8 +1536,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             codexSidebarOutlineTree.roots.allSatisfy { outlineView.isItemExpanded($0) }
         }
 
-        func workspaceIsSelectableForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-            row(for: workspace).map { shouldAllowSelection(of: outlineView.item(atRow: $0)) } ?? false
+        func workspaceIsSelectableForTesting(cwd: String) -> Bool {
+            row(forWorkspaceCWD: cwd).map { shouldAllowSelection(of: outlineView.item(atRow: $0)) } ?? false
         }
 
         var floatsGroupRowsEnabledForTesting: Bool {
@@ -1565,8 +1560,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             rowHeights.reviewChat + outlineView.intercellSpacing.height
         }
 
-        func workspaceRowHeightForTesting(_ workspace: CodexReviewWorkspace) -> CGFloat? {
-            guard let row = row(for: workspace) else {
+        func workspaceRowHeightForTesting(cwd: String) -> CGFloat? {
+            guard let row = row(forWorkspaceCWD: cwd) else {
                 return nil
             }
             view.layoutSubtreeIfNeeded()
@@ -1581,8 +1576,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return outlineView.rect(ofRow: row).height
         }
 
-        func workspaceCellMinXForTesting(_ workspace: CodexReviewWorkspace) -> CGFloat? {
-            guard let row = row(for: workspace) else {
+        func workspaceCellMinXForTesting(cwd: String) -> CGFloat? {
+            guard let row = row(forWorkspaceCWD: cwd) else {
                 return nil
             }
             view.layoutSubtreeIfNeeded()
@@ -1599,8 +1594,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return cellView.contentMinXForTesting(relativeTo: outlineView)
         }
 
-        func workspaceDisclosureMaxXForTesting(_ workspace: CodexReviewWorkspace) -> CGFloat? {
-            guard let row = row(for: workspace) else {
+        func workspaceDisclosureMaxXForTesting(cwd: String) -> CGFloat? {
+            guard let row = row(forWorkspaceCWD: cwd) else {
                 return nil
             }
             view.layoutSubtreeIfNeeded()
@@ -1674,15 +1669,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.mouseDown(with: mouseEventForTesting(at: point))
         }
 
-        func clickWorkspaceHeaderForTesting(_ workspace: CodexReviewWorkspace) {
+        func clickWorkspaceHeaderForTesting(cwd: String) {
             view.layoutSubtreeIfNeeded()
-            guard let row = row(for: workspace) else {
-                uiState.selection = .workspaceSection(
-                    .init(
-                        id: workspace.cwd,
-                        title: workspace.displayTitle,
-                        workspaceCWDs: [workspace.cwd]
-                    ))
+            guard let row = row(forWorkspaceCWD: cwd) else {
+                uiState.selection = fallbackWorkspaceSectionSelection(cwd: cwd)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -1708,12 +1698,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.menu != nil
         }
 
-        func workspaceIsExpandedForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-            workspaceOutlineIsExpandedForTesting(workspace)
+        func workspaceIsExpandedForTesting(cwd: String) -> Bool {
+            workspaceOutlineIsExpandedForTesting(cwd: cwd)
         }
 
-        func workspaceOutlineIsExpandedForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-            guard let row = row(for: workspace),
+        func workspaceOutlineIsExpandedForTesting(cwd: String) -> Bool {
+            guard let row = row(forWorkspaceCWD: cwd),
                 let item = outlineView.item(atRow: row)
             else {
                 return false
@@ -1721,8 +1711,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return outlineView.isItemExpanded(item)
         }
 
-        func toggleWorkspaceDisclosureForTesting(_ workspace: CodexReviewWorkspace) {
-            guard let row = row(for: workspace),
+        func toggleWorkspaceDisclosureForTesting(cwd: String) {
+            guard let row = row(forWorkspaceCWD: cwd),
                 let item = outlineView.item(atRow: row)
             else {
                 preconditionFailure("Workspace row is not visible.")
@@ -1734,8 +1724,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
         }
 
-        func collapseWorkspaceInOutlineForTesting(_ workspace: CodexReviewWorkspace) {
-            guard let row = row(for: workspace),
+        func collapseWorkspaceInOutlineForTesting(cwd: String) {
+            guard let row = row(forWorkspaceCWD: cwd),
                 let item = outlineView.item(atRow: row)
             else {
                 preconditionFailure("Workspace row is not visible.")
@@ -1743,8 +1733,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.collapseItem(item)
         }
 
-        func expandWorkspaceInOutlineForTesting(_ workspace: CodexReviewWorkspace) {
-            guard let row = row(for: workspace),
+        func expandWorkspaceInOutlineForTesting(cwd: String) {
+            guard let row = row(forWorkspaceCWD: cwd),
                 let item = outlineView.item(atRow: row)
             else {
                 preconditionFailure("Workspace row is not visible.")
@@ -1752,13 +1742,27 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.expandItem(item)
         }
 
-        func workspaceRowIsFloatingForTesting(_ workspace: CodexReviewWorkspace) -> Bool {
-            guard let row = row(for: workspace),
+        func workspaceRowIsFloatingForTesting(cwd: String) -> Bool {
+            guard let row = row(forWorkspaceCWD: cwd),
                 let rowView = outlineView.rowView(atRow: row, makeIfNecessary: true)
             else {
                 return false
             }
             return rowView.isFloating
+        }
+
+        private func fallbackWorkspaceSectionSelection(cwd: String) -> ReviewMonitorSelection {
+            .workspaceSection(
+                .init(
+                    id: cwd,
+                    title: workspaceDisplayTitle(cwd: cwd),
+                    workspaceCWDs: [cwd]
+                ))
+        }
+
+        private func workspaceDisplayTitle(cwd: String) -> String {
+            let title = (cwd as NSString).lastPathComponent
+            return title.isEmpty ? cwd : title
         }
 
         func scrollSidebarToOffsetForTesting(_ yOffset: CGFloat) {
@@ -2247,11 +2251,6 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
-    }
-
-    func configure(_ workspace: CodexReviewWorkspace) {
-        objectValue = workspace
-        configure(title: workspace.displayTitle, toolTip: workspace.cwd)
     }
 
     func configure(with node: ReviewMonitorCodexSidebarOutlineNode) {
