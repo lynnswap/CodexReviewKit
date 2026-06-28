@@ -698,8 +698,9 @@ public enum ReviewMonitorPreviewContent {
         timelineItems: [PreviewTimelineItemTemplate],
         turnID: CodexTurnID
     ) -> [CodexChatItemSnapshot] {
-        timelineItems.map { item in
-            item.itemSnapshot(
+        var snapshots: [CodexChatItemSnapshot] = []
+        for item in timelineItems {
+            let snapshot = item.itemSnapshot(
                 id: previewTimelineItemID(
                     itemName: item.itemName,
                     jobID: streamID,
@@ -707,7 +708,15 @@ public enum ReviewMonitorPreviewContent {
                 ),
                 turnID: turnID
             )
+            if let index = snapshots.firstIndex(where: {
+                $0.id == snapshot.id && $0.turnID == snapshot.turnID
+            }) {
+                snapshots[index] = snapshot
+            } else {
+                snapshots.append(snapshot)
+            }
         }
+        return snapshots
     }
 
     private static func makeJob(from review: PreviewReviewFixture) -> CodexReviewJob {
