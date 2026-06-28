@@ -2,8 +2,8 @@ import Foundation
 import ObservationBridge
 
 @MainActor
-public enum ReviewObservationAwaiter {
-    public static func waitUntilTerminal(
+package enum ReviewObservationAwaiter {
+    package static func waitUntilTerminal(
         run: ReviewRunRecord,
         timeout: Duration? = nil
     ) async -> Bool {

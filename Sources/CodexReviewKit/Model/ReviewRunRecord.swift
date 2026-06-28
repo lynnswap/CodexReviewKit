@@ -3,14 +3,14 @@ import Observation
 
 @MainActor
 @Observable
-public final class ReviewRunRecord: Identifiable, Hashable {
-    public nonisolated let id: String
-    public let sessionID: String
-    public let cwd: String
-    public internal(set) var sortOrder: Double
-    public internal(set) var targetSummary: String
-    public internal(set) var core: ReviewRunCore
-    public internal(set) var cancellationRequested: Bool
+package final class ReviewRunRecord: Identifiable, Hashable {
+    package nonisolated let id: String
+    package let sessionID: String
+    package let cwd: String
+    package var sortOrder: Double
+    package var targetSummary: String
+    package var core: ReviewRunCore
+    package var cancellationRequested: Bool
 
     @ObservationIgnored
     package var agentMessagesByItemID: [String: String]
@@ -21,7 +21,7 @@ public final class ReviewRunRecord: Identifiable, Hashable {
     @ObservationIgnored
     private var syntheticMessageItemCounter: UInt64
 
-    public var isTerminal: Bool {
+    package var isTerminal: Bool {
         core.isTerminal
     }
 
@@ -47,11 +47,11 @@ public final class ReviewRunRecord: Identifiable, Hashable {
         self.syntheticMessageItemCounter = 0
     }
 
-    public nonisolated static func == (lhs: ReviewRunRecord, rhs: ReviewRunRecord) -> Bool {
+    package nonisolated static func == (lhs: ReviewRunRecord, rhs: ReviewRunRecord) -> Bool {
         lhs.id == rhs.id
     }
 
-    public nonisolated func hash(into hasher: inout Hasher) {
+    package nonisolated func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
 

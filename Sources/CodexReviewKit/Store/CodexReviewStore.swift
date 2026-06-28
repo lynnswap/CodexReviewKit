@@ -8,7 +8,7 @@ public final class CodexReviewStore {
     public let auth: CodexReviewAuthModel
     package let settings: SettingsStore
     public package(set) var serverURL: URL?
-    public package(set) var reviewRuns: Set<ReviewRunRecord> = []
+    package var reviewRuns: Set<ReviewRunRecord> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
     }
