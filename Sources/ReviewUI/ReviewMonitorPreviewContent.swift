@@ -240,6 +240,7 @@ public enum ReviewMonitorPreviewContent {
         let accounts = makePreviewAccounts()
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
+        let timelineItems = makeCommandOutputPreviewTimelineItems()
         let job = makeJob(
             id: "preview-command-output-panel",
             cwd: cwd,
@@ -252,7 +253,7 @@ public enum ReviewMonitorPreviewContent {
             hasFinalReview: false,
             reviewResult: nil,
             lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
-            timelineItems: makeCommandOutputPreviewTimelineItems()
+            timelineItems: timelineItems
         )
         store.loadForTesting(
             serverState: .running,
@@ -262,6 +263,11 @@ public enum ReviewMonitorPreviewContent {
             workspaces: [CodexReviewWorkspace(cwd: cwd)],
             jobs: [job]
         )
+        if let fixture = makeChatLogFixture(for: job, timelineItems: timelineItems) {
+            store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
+                chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
+            )
+        }
         return store
     }
 
