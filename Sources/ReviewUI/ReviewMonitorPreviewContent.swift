@@ -216,8 +216,7 @@ public enum ReviewMonitorPreviewContent {
             summary: "A command output block is collapsed by default.",
             hasFinalReview: false,
             reviewResult: nil,
-            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view.",
-            timelineItems: timelineItems
+            lastAgentMessage: "Opened command output should stay bounded to a short embedded scroll view."
         )
         store.loadForTesting(
             serverState: .running,
@@ -677,8 +676,7 @@ public enum ReviewMonitorPreviewContent {
                         jobIndex: jobIndex,
                         cwd: cwd
                     ),
-                    lastAgentMessage: definition.lastAgentMessage,
-                    timelineItems: timelineItems
+                    lastAgentMessage: definition.lastAgentMessage
                 )
                 jobs.append(job)
                 if let fixture = makeChatLogFixture(for: job, timelineItems: timelineItems) {
@@ -760,10 +758,9 @@ public enum ReviewMonitorPreviewContent {
         summary: String,
         hasFinalReview: Bool,
         reviewResult: ParsedReviewResult?,
-        lastAgentMessage: String,
-        timelineItems: [PreviewTimelineItemTemplate]
+        lastAgentMessage: String
     ) -> CodexReviewJob {
-        let job = CodexReviewJob.makeForTesting(
+        CodexReviewJob.makeForTesting(
             id: id,
             cwd: cwd,
             targetSummary: targetSummary,
@@ -778,21 +775,6 @@ public enum ReviewMonitorPreviewContent {
             reviewResult: reviewResult,
             lastAgentMessage: lastAgentMessage
         )
-        seedPreviewTimeline(timelineItems, in: job)
-        return job
-    }
-
-    private static func seedPreviewTimeline(_ timelineItems: [PreviewTimelineItemTemplate], in job: CodexReviewJob) {
-        for item in timelineItems {
-            let itemID = previewTimelineItemID(
-                itemName: item.itemName,
-                jobID: job.id,
-                cycle: 0
-            )
-            let seed = item.seed(id: itemID)
-            let event: ReviewDomainEvent = item.phase.isTerminal ? .itemCompleted(seed) : .itemUpdated(seed)
-            job.timeline.apply(event)
-        }
     }
 
     private static func diagnosticItem(
