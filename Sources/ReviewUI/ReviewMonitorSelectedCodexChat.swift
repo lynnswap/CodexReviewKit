@@ -6,35 +6,6 @@ import ObservationBridge
 @MainActor
 @Observable
 final class ReviewMonitorSelectedCodexChat {
-    private enum BindingTarget: Equatable {
-        case review(CodexReviewIdentity)
-        case chat(CodexThreadID)
-
-        var reviewIdentity: CodexReviewIdentity? {
-            guard case .review(let identity) = self else {
-                return nil
-            }
-            return identity
-        }
-
-        var chatID: CodexThreadID {
-            switch self {
-            case .review(let identity):
-                identity.activeTurnThreadID
-            case .chat(let id):
-                id
-            }
-        }
-
-        var activeTurnID: CodexTurnID? {
-            guard case .review(let identity) = self else {
-                return nil
-            }
-            return identity.turnID
-        }
-    }
-
-    private(set) var identity: CodexReviewIdentity?
     private(set) var chatID: CodexThreadID?
     private(set) var chat: CodexChat?
     var phase: CodexDataPhase {
@@ -49,9 +20,9 @@ final class ReviewMonitorSelectedCodexChat {
     @ObservationIgnored
     private weak var boundModelContext: CodexModelContext?
     @ObservationIgnored
-    private var boundTarget: BindingTarget?
+    private var boundChatID: CodexThreadID?
     @ObservationIgnored
-    private var target: BindingTarget?
+    private var targetChatID: CodexThreadID?
     @ObservationIgnored
     private var observation: CodexChatObservation?
     @ObservationIgnored
@@ -75,18 +46,13 @@ final class ReviewMonitorSelectedCodexChat {
         cancelObservation()
     }
 
-    func bind(to identity: CodexReviewIdentity?) {
-        boundTarget = identity.map(BindingTarget.review)
-        refreshBinding()
-    }
-
     func bind(toChatID chatID: CodexThreadID?) {
-        boundTarget = chatID.map(BindingTarget.chat)
+        boundChatID = chatID
         refreshBinding()
     }
 
     func unbind() {
-        boundTarget = nil
+        boundChatID = nil
         refreshBinding()
     }
 
@@ -116,33 +82,32 @@ final class ReviewMonitorSelectedCodexChat {
     }
 
     private func refreshBinding() {
-        let nextTarget = boundTarget
+        let nextChatID = boundChatID
         let nextModelContext = modelSource?.modelContext
-        guard nextTarget != target || nextModelContext !== boundModelContext else {
+        guard nextChatID != targetChatID || nextModelContext !== boundModelContext else {
             return
         }
         cancelObservation()
-        target = nextTarget
-        identity = nextTarget?.reviewIdentity
-        chatID = nextTarget?.chatID
+        targetChatID = nextChatID
+        chatID = nextChatID
         chat = nil
         publishLogSourceChange(.clear)
         logProjection.reset()
         boundModelContext = nextModelContext
 
-        guard let nextTarget, let modelContext = nextModelContext else {
+        guard let nextChatID, let modelContext = nextModelContext else {
             return
         }
 
-        let nextChat = modelContext.model(for: nextTarget.chatID)
+        let nextChat = modelContext.model(for: nextChatID)
         chat = nextChat
 
-        observationTask = Task { @MainActor [weak self, nextChat, nextTarget, modelContext] in
+        observationTask = Task { @MainActor [weak self, nextChat, nextChatID, modelContext] in
             do {
-                let observation = try await Self.observe(nextTarget, modelContext: modelContext, chat: nextChat)
+                let observation = try await Self.observe(chat: nextChat, modelContext: modelContext)
                 guard Task.isCancelled == false,
                     let self,
-                    self.target == nextTarget,
+                    self.targetChatID == nextChatID,
                     self.chat === nextChat
                 else {
                     observation.cancel()
@@ -151,7 +116,7 @@ final class ReviewMonitorSelectedCodexChat {
                 self.observation = observation
                 for await change in observation.changes {
                     guard Task.isCancelled == false,
-                        self.target == nextTarget,
+                        self.targetChatID == nextChatID,
                         self.chat === nextChat
                     else {
                         break
@@ -159,7 +124,6 @@ final class ReviewMonitorSelectedCodexChat {
                     self.publishLogSourceChange(
                         self.logProjection.apply(
                             change,
-                            activeTurnID: nextTarget.activeTurnID,
                             chatCreatedAt: nextChat.createdAt,
                             chatUpdatedAt: nextChat.updatedAt
                         ))
@@ -188,15 +152,9 @@ final class ReviewMonitorSelectedCodexChat {
     }
 
     private static func observe(
-        _ target: BindingTarget,
-        modelContext: CodexModelContext,
-        chat: CodexChat
+        chat: CodexChat,
+        modelContext: CodexModelContext
     ) async throws -> CodexChatObservation {
-        switch target {
-        case .review(let identity):
-            try await modelContext.observe(identity)
-        case .chat:
-            try await chat.observe()
-        }
+        try await modelContext.observe(chat)
     }
 }

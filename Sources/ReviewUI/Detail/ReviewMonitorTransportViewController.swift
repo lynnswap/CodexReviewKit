@@ -143,7 +143,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
             return displayedSelection != selection?.id
         case .chat(let selectedChat):
             return boundChatID != selectedChat.id
-                || selectedCodexChat.identity != selectedChat.reviewIdentity
                 || displayedSelection != selection?.id
         case nil:
             return displayedSelection != nil
@@ -197,15 +196,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
         resetLogRenderer()
         boundChatID = selectedChat.id
         let restorationTarget = restorationTarget(chatID: selectedChat.id)
-        if let reviewIdentity = selectedChat.reviewIdentity {
-            selectedCodexChat.bind(to: reviewIdentity)
-        } else {
-            selectedCodexChat.bind(toChatID: selectedChat.id)
-        }
+        selectedCodexChat.bind(toChatID: selectedChat.id)
         if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChat.id) {
             startPreviewChatChangeStream(
                 previewStream,
-                activeTurnID: selectedChat.reviewIdentity?.turnID,
                 chatUpdatedAt: selectedChat.updatedAt,
                 target: .chat(selectedChat.id),
                 initialRestorationTarget: restorationTarget
@@ -341,7 +335,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func startPreviewChatChangeStream(
         _ stream: AsyncStream<CodexChatChange>,
-        activeTurnID: CodexTurnID?,
         chatUpdatedAt: Date?,
         target: LogRenderTarget,
         initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
@@ -359,7 +352,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 guard
                     let logChange = projection.apply(
                         change,
-                        activeTurnID: activeTurnID,
                         chatCreatedAt: nil,
                         chatUpdatedAt: chatUpdatedAt
                     )
@@ -532,10 +524,6 @@ private extension ReviewMonitorWorkspaceFindingsView.Entry {
 
         var selectedWorkspaceFindingsObservationForTesting: PortableObservationTracking.Token? {
             selectedWorkspaceFindingsObservation
-        }
-
-        var selectedCodexChatReviewIdentityForTesting: CodexReviewIdentity? {
-            selectedCodexChat.identity
         }
 
         var selectedCodexChatIDForTesting: String? {

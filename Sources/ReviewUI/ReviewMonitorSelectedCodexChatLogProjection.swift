@@ -42,11 +42,9 @@ struct ReviewMonitorSelectedCodexChatLogProjection {
 
     mutating func apply(
         _ change: CodexChatChange,
-        activeTurnID: CodexTurnID?,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewMonitorLogSourceChange? {
-        turnProjection.selection = activeTurnID.map(CodexChatTurnSelection.turn) ?? .latest
         let update = turnProjection.apply(change)
         guard update.affectsSelectedTurn else {
             return nil

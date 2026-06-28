@@ -65,7 +65,6 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
         package var preview: String?
         package var workspaceCWD: String?
         package var updatedAt: Date?
-        package var reviewIdentity: CodexReviewIdentity?
 
         package init(
             rowID: ReviewMonitorCodexSidebarRowID,
@@ -73,8 +72,7 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             title: String,
             preview: String?,
             workspaceCWD: String?,
-            updatedAt: Date?,
-            reviewIdentity: CodexReviewIdentity? = nil
+            updatedAt: Date?
         ) {
             self.rowID = rowID
             self.id = id
@@ -82,7 +80,6 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable, Sendable {
             self.preview = preview
             self.workspaceCWD = workspaceCWD
             self.updatedAt = updatedAt
-            self.reviewIdentity = reviewIdentity
         }
     }
 
