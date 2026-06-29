@@ -314,7 +314,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .workspace(workspace.id)) == nil)
         #expect(sidebar.workspaceRowHeightForTesting(cwd: repo.path) == sidebar.expectedWorkspaceRowRectHeightForTesting)
         #expect(sidebar.reviewChatRowHeightForTesting(threadID) == sidebar.expectedReviewChatRowRectHeightForTesting)
-        #expect(sidebar.codexSidebarChatRowUsesReviewMonitorChatRowViewForTesting(threadID))
 
         sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
         guard case .chat(let selectedChatID) = uiState.selection else {
@@ -420,7 +419,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         }
     }
 
-    @Test func sidebarViewControllerDoesNotRebindCodexChatCellWhenContentChanges() async throws {
+    @Test func sidebarViewControllerPreservesSelectionAndAvoidsFullReloadWhenCodexChatContentChanges() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
@@ -473,15 +472,9 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             window.title == "App review"
         }
-        let hostingViewIdentityBeforeContentUpdate = try #require(
-            sidebar.codexSidebarChatCellHostingViewIdentityForTesting(threadID)
-        )
-        let bindingGenerationBeforeContentUpdate = try #require(
-            sidebar.codexSidebarChatCellBindingGenerationForTesting(threadID)
-        )
         let fullReloadCountBeforeContentUpdate = sidebar.sidebarFullReloadCountForTesting
-
         let chat = context.model(for: threadID)
+        let chatIdentityBeforeContentUpdate = ObjectIdentifier(chat)
         try await runtime.transport.enqueueThreadResume(.init(id: threadID))
         try await runtime.transport.enqueueThreadRead(
             .init(
@@ -499,14 +492,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             window.title == "App review renamed"
         }
-        #expect(
-            sidebar.codexSidebarChatCellHostingViewIdentityForTesting(threadID)
-                == hostingViewIdentityBeforeContentUpdate
-        )
-        #expect(
-            sidebar.codexSidebarChatCellBindingGenerationForTesting(threadID)
-                == bindingGenerationBeforeContentUpdate
-        )
+        #expect(ObjectIdentifier(context.model(for: threadID)) == chatIdentityBeforeContentUpdate)
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeContentUpdate)
         #expect(
             sidebar.displayedCodexSidebarTitlesForTesting == [

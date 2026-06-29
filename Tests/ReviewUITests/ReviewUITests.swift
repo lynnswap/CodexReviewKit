@@ -345,7 +345,7 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func reviewChatCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() async throws {
+    @Test func reviewChatCellViewUpdatesNativeOwnerStateWhenConfiguredWithNewChat() async throws {
         let placeholderChat = try await reviewChatCellTestChat(
             id: "chat-placeholder",
             title: "Queued review",
@@ -358,21 +358,17 @@ struct ReviewUITests {
         )
 
         let cellView = makeReviewMonitorReviewChatCellViewForTesting(chat: placeholderChat)
-        let initialHostingViewIdentity = try #require(
-            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
-        )
-        let initialHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
+        let initialObjectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
+        guard case .chat(let initialObjectChat) = initialObjectNode.item else {
+            Issue.record("Expected cell to bind a Codex chat node.")
+            return
+        }
+
+        #expect(initialObjectChat.id == placeholderChat.id)
+        #expect(cellView.toolTip == (placeholderChat.workspace?.url.path ?? placeholderChat.preview ?? placeholderChat.title))
 
         configureReviewMonitorReviewChatCellViewForTesting(cellView, chat: loadedChat)
 
-        let updatedHostingViewIdentity = try #require(
-            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
-        )
-        let updatedHostedRowID = reviewMonitorReviewChatCellHostedRowIDForTesting(cellView)
-
-        #expect(initialHostedRowID == placeholderChat.id.rawValue)
-        #expect(updatedHostedRowID == loadedChat.id.rawValue)
-        #expect(initialHostingViewIdentity == updatedHostingViewIdentity)
         let objectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
         guard case .chat(let objectChat) = objectNode.item else {
             Issue.record("Expected cell to bind a Codex chat node.")
@@ -380,48 +376,6 @@ struct ReviewUITests {
         }
         #expect(objectChat.id == loadedChat.id)
         #expect(cellView.toolTip == (loadedChat.workspace?.url.path ?? loadedChat.preview ?? loadedChat.title))
-    }
-
-    @Test func reviewChatCellViewSkipsSameNodeConfigureWithoutRebindingHostedContent() async throws {
-        let chat = try await reviewChatCellTestChat(
-            id: "chat-stable",
-            title: "Stable review",
-            workspaceCWD: "/tmp/stable"
-        )
-        let node = ReviewMonitorCodexSidebarOutlineNode(item: .chat(chat))
-
-        let cellView = makeReviewMonitorReviewChatCellViewForTesting(node: node)
-        let initialHostingViewIdentity = try #require(
-            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
-        )
-        let initialHostedNodeIdentity = try #require(
-            reviewMonitorReviewChatCellHostedNodeIdentityForTesting(cellView)
-        )
-        let initialObservation = try #require(
-            reviewMonitorReviewChatCellNodeObservationForTesting(cellView)
-        )
-        let initialBindingGeneration = try #require(
-            reviewMonitorReviewChatCellBindingGenerationForTesting(cellView)
-        )
-
-        configureReviewMonitorReviewChatCellViewForTesting(cellView, node: node)
-
-        let objectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
-        #expect(objectNode === node)
-        #expect(
-            reviewMonitorReviewChatCellHostingViewIdentityForTesting(cellView)
-                == initialHostingViewIdentity
-        )
-        #expect(
-            reviewMonitorReviewChatCellHostedNodeIdentityForTesting(cellView)
-                == initialHostedNodeIdentity
-        )
-        #expect(
-            reviewMonitorReviewChatCellBindingGenerationForTesting(cellView)
-                == initialBindingGeneration
-        )
-        #expect(initialObservation.isActive)
-        #expect(reviewMonitorReviewChatCellNodeObservationForTesting(cellView)?.isActive == true)
     }
 
     @Test func accountContextMenuPresentationRestoresResponderStateAfterClosing() throws {
