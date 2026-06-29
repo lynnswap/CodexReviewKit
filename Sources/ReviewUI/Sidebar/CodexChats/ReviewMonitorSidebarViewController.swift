@@ -717,10 +717,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             if section.workspaces.contains(where: { $0.id == workspaceID })
                 || section.items.contains(where: { $0.workspaceID == workspaceID })
             {
-                return section.workspaceGroupID
+                return section.sidebarWorkspaceGroupID
             }
-            if section.workspaceGroupID.rawValue == cwd || section.workspaceGroupID.rawValue == "cwd:\(cwd)" {
-                return section.workspaceGroupID
+            if section.sidebarWorkspaceGroupID.rawValue == cwd || section.sidebarWorkspaceGroupID.rawValue == "cwd:\(cwd)" {
+                return section.sidebarWorkspaceGroupID
             }
         }
         return nil
@@ -785,7 +785,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func displayedCodexSidebarSection(id: CodexWorkspaceGroupID) -> CodexFetchSection<CodexChat>? {
-        codexSidebarDisplayedSections.first { $0.workspaceGroupID == id }
+        codexSidebarDisplayedSections.first { $0.sidebarWorkspaceGroupID == id }
     }
 
     private func displayedCodexChat(id: CodexThreadID) -> CodexChat? {
@@ -850,7 +850,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func codexWorkspaceGroupSection(
         id: CodexWorkspaceGroupID
     ) -> CodexFetchSection<CodexChat>? {
-        codexSidebarUnfilteredSections.first { $0.workspaceGroupID == id }
+        codexSidebarUnfilteredSections.first { $0.sidebarWorkspaceGroupID == id }
     }
 
     private func codexChatSelection(id: CodexThreadID) -> CodexChat? {

@@ -28,7 +28,7 @@ package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringC
 
 @MainActor
 extension CodexFetchSection where Model == CodexChat {
-    package var workspaceGroupID: CodexWorkspaceGroupID {
+    package var sidebarWorkspaceGroupID: CodexWorkspaceGroupID {
         switch id {
         case .workspaceGroup(let id):
             id
@@ -42,35 +42,7 @@ extension CodexFetchSection where Model == CodexChat {
     }
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
-        .workspaceGroup(workspaceGroupID)
-    }
-
-    package var workspaceGroup: CodexWorkspaceGroup? {
-        items.lazy.compactMap { $0.workspace?.workspaceGroup }.first { $0.id == workspaceGroupID }
-            ?? items.lazy.compactMap { $0.workspace?.workspaceGroup }.first
-    }
-
-    package var workspaces: [CodexWorkspace] {
-        var workspaces: [CodexWorkspace] = []
-        var workspaceIDs = Set<CodexWorkspaceID>()
-        for chat in items {
-            guard let workspace = chat.workspace,
-                workspaceIDs.contains(workspace.id) == false
-            else {
-                continue
-            }
-            workspaceIDs.insert(workspace.id)
-            workspaces.append(workspace)
-        }
-        return workspaces
-    }
-
-    package var chats: [CodexChat] {
-        items
-    }
-
-    package var uncategorizedChats: [CodexChat] {
-        items.filter { $0.workspace == nil }
+        .workspaceGroup(sidebarWorkspaceGroupID)
     }
 
     package var displaysWorkspaceNodes: Bool {
@@ -87,21 +59,6 @@ extension CodexFetchSection where Model == CodexChat {
                 + uncategorizedChats.map { .chat($0.id) }
         }
         return [rowID] + items.map { .chat($0.id) }
-    }
-
-    package func chats(in workspaceID: CodexWorkspaceID) -> [CodexChat] {
-        items.filter { $0.workspace?.id == workspaceID }
-    }
-
-    package func chat(id: CodexThreadID) -> CodexChat? {
-        items.first { $0.id == id }
-    }
-
-    package func hasSameIdentity(as other: Self) -> Bool {
-        workspaceGroupID == other.workspaceGroupID
-            && workspaceGroup === other.workspaceGroup
-            && displayTitle == other.displayTitle
-            && items.elementsEqual(other.items) { $0 === $1 }
     }
 }
 
@@ -128,7 +85,7 @@ extension Array where Element == CodexFetchSection<CodexChat> {
         return map { section in
             let latestFinishedChatID =
                 filter.contains(.latestFinished)
-                ? Self.latestFinishedChat(in: section.chats)?.id
+                ? Self.latestFinishedChat(in: section.items)?.id
                 : nil
             return CodexFetchSection(
                 id: section.id,
@@ -185,7 +142,7 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
     func applying(
         to sections: [CodexFetchSection<CodexChat>]
     ) -> [CodexFetchSection<CodexChat>] {
-        ordered(sections, by: workspaceGroupIDs, id: \.workspaceGroupID).map { section in
+        ordered(sections, by: workspaceGroupIDs, id: \.sidebarWorkspaceGroupID).map { section in
             if section.displaysWorkspaceNodes == false {
                 return CodexFetchSection(
                     id: section.id,
@@ -235,7 +192,7 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
     }
 
     mutating func prune(to sections: [CodexFetchSection<CodexChat>]) {
-        let activeWorkspaceGroupIDs = sections.map(\.workspaceGroupID)
+        let activeWorkspaceGroupIDs = sections.map(\.sidebarWorkspaceGroupID)
         workspaceGroupIDs = workspaceGroupIDs.filter { activeWorkspaceGroupIDs.contains($0) }
 
         var activeChatIDsByContainer: [ReviewMonitorCodexSidebarRowID: Set<CodexThreadID>] = [:]
@@ -433,7 +390,7 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         for section: CodexFetchSection<CodexChat>,
         activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
     ) -> ReviewMonitorCodexSidebarOutlineNode {
-        let node = node(for: .workspaceGroup(section.workspaceGroupID), activeRowIDs: &activeRowIDs)
+        let node = node(for: .workspaceGroup(section.sidebarWorkspaceGroupID), activeRowIDs: &activeRowIDs)
         let children: [ReviewMonitorCodexSidebarOutlineNode]
         if section.displaysWorkspaceNodes {
             children =

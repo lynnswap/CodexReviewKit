@@ -47,7 +47,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(section.displayTitle == repo.lastPathComponent)
         #expect(section.workspaces.map(\.url.path) == [resolvedAppPath, resolvedToolsPath])
         #expect(section.workspaces.map(\.name) == ["App", "Tools"])
-        #expect(section.chats.map(\.title) == ["App chat", "Tools chat"])
+        #expect(section.items.map(\.title) == ["App chat", "Tools chat"])
         #expect(appChat === results.items.first { $0.id == CodexThreadID(rawValue: "thread-app") })
         #expect(appChat.workspace?.url.path == resolvedAppPath)
 
@@ -58,8 +58,8 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let outlineAppChat = try #require(tree.node(rowID: .chat(appChat.id)))
 
         #expect(outlineSection.rowID == section.rowID)
-        #expect(outlineSection.item == .workspaceGroup(section.workspaceGroupID))
-        #expect(outlineSection.selectionID == .workspaceGroup(section.workspaceGroupID))
+        #expect(outlineSection.item == .workspaceGroup(section.sidebarWorkspaceGroupID))
+        #expect(outlineSection.selectionID == .workspaceGroup(section.sidebarWorkspaceGroupID))
         #expect(outlineSection.isExpandable)
         #expect(
             outlineSection.children.map(\.rowID.rawValue) == [
@@ -74,7 +74,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(outlineAppChat.selectionID == .chat(appChat.id))
         #expect(
             results.sections.rowIDs.map(\.rawValue) == [
-                "workspaceGroup:\(section.workspaceGroupID.rawValue)",
+                "workspaceGroup:\(section.sidebarWorkspaceGroupID.rawValue)",
                 "workspace:\(resolvedAppPath)",
                 "chat:thread-app",
                 "workspace:\(resolvedToolsPath)",
@@ -547,16 +547,16 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: secondSection.rowID))
-        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondSection.workspaceGroupID, toIndex: 0))
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondSection.sidebarWorkspaceGroupID, toIndex: 0))
         #expect(
             sidebar.codexSidebarRootTitlesForTesting == [
                 secondSection.displayTitle,
                 firstSection.displayTitle,
             ])
         #expect(
-            sidebar.codexSidebarSectionsForTesting.map(\.workspaceGroupID) == [
-                firstSection.workspaceGroupID,
-                secondSection.workspaceGroupID,
+            sidebar.codexSidebarSectionsForTesting.map(\.sidebarWorkspaceGroupID) == [
+                firstSection.sidebarWorkspaceGroupID,
+                secondSection.sidebarWorkspaceGroupID,
             ])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
