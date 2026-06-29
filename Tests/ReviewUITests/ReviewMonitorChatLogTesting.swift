@@ -616,6 +616,7 @@ private final class ReviewChatLogFixtureRetainer {
     weak var store: CodexReviewStore?
     let runtime: ReviewMonitorPreviewAppServerRuntime
     private var chatIDs: Set<CodexThreadID>
+    private var upsertTask: Task<Void, Never>?
 
     init(store: CodexReviewStore, runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
         self.store = store
@@ -628,35 +629,39 @@ private final class ReviewChatLogFixtureRetainer {
     }
 
     func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) {
-        let previousItemsByID = Dictionary(
-            uniqueKeysWithValues: runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
-        )
-        for item in items {
-            guard let previousItem = previousItemsByID[item.id] else {
-                runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
-                continue
-            }
-            guard previousItem != item else {
-                continue
-            }
-            if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
-                runtime.appendPreviewText(
-                    outputDelta,
-                    to: chatID,
-                    itemID: item.id,
-                    kind: item.kind,
-                    content: previousItem.content
-                )
-            } else if let textDelta = previousItem.textDeltaForTesting(to: item) {
-                runtime.appendPreviewText(
-                    textDelta,
-                    to: chatID,
-                    itemID: item.id,
-                    kind: item.kind,
-                    content: previousItem.content
-                )
-            } else {
-                runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+        let previousTask = upsertTask
+        upsertTask = Task { @MainActor [runtime] in
+            await previousTask?.value
+            let previousItemsByID = Dictionary(
+                uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
+            )
+            for item in items {
+                guard let previousItem = previousItemsByID[item.id] else {
+                    await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                    continue
+                }
+                guard previousItem != item else {
+                    continue
+                }
+                if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
+                    await runtime.appendPreviewText(
+                        outputDelta,
+                        to: chatID,
+                        itemID: item.id,
+                        kind: item.kind,
+                        content: previousItem.content
+                    )
+                } else if let textDelta = previousItem.textDeltaForTesting(to: item) {
+                    await runtime.appendPreviewText(
+                        textDelta,
+                        to: chatID,
+                        itemID: item.id,
+                        kind: item.kind,
+                        content: previousItem.content
+                    )
+                } else {
+                    await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                }
             }
         }
     }

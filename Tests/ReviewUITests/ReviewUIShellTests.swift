@@ -116,7 +116,7 @@ extension ReviewUITests {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
-        let selectedSnapshot = try #require(previewContent.snapshotForTesting(chatID: selectedChatID))
+        let selectedSnapshot = try #require(await previewContent.snapshotForTesting(chatID: selectedChatID))
         let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewContent: previewContent
@@ -846,7 +846,7 @@ extension ReviewUITests {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
-        let selectedSnapshot = try #require(previewContent.snapshotForTesting(chatID: selectedChatID))
+        let selectedSnapshot = try #require(await previewContent.snapshotForTesting(chatID: selectedChatID))
         let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewContent: previewContent
@@ -1634,12 +1634,12 @@ extension ReviewUITests {
     @Test func previewRunningChatsAppendPseudoStreamWhenTicked() async throws {
         let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
-        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
 
         await source.appendPreviewChatLogStreamTick()
 
-        let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
         let appendedText = appendedItems.compactMap { $0.text }.joined(separator: "\n")
         #expect(updatedSnapshot.items != initialSnapshot.items)
@@ -1654,7 +1654,7 @@ extension ReviewUITests {
     @Test func previewChatStreamUsesMixedLogKinds() async throws {
         let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
-        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
@@ -1662,7 +1662,7 @@ extension ReviewUITests {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
 
-        let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
         let appendedKinds = appendedItems.map { $0.kind.rawValue }
         #expect(appendedKinds.contains("event"))
@@ -1688,29 +1688,29 @@ extension ReviewUITests {
     @Test func previewChatStreamWaitsAfterEachCompletedItemAndDrainsChunks() async throws {
         let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
-        let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
         tick = await source.appendPreviewChatLogStreamTick(after: tick)
-        var snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        var snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
         #expect(snapshot.items.last?.kind.rawValue == "event")
 
         for _ in 0..<38 {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
-        snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
 
         tick = await source.appendPreviewChatLogStreamTick(after: tick)
-        snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 2)
         #expect(snapshot.items.last?.kind.rawValue == "plan")
 
         for _ in 0..<180 where snapshot.items.last?.kind.rawValue != "reasoning" {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
-            snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+            snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         }
         let firstReasoning = try #require(snapshot.items.last)
         #expect(firstReasoning.kind.rawValue == "reasoning")
@@ -1720,7 +1720,7 @@ extension ReviewUITests {
 
         for _ in 0..<80 {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
-            snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+            snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
             let item = try #require(snapshot.items.first { $0.id == reasoningID })
             let text = reasoningText(item)
             if text == latestReasoningText {
@@ -1734,11 +1734,11 @@ extension ReviewUITests {
         for _ in 0..<37 {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
-        snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == countAfterReasoning)
 
         tick = await source.appendPreviewChatLogStreamTick(after: tick)
-        snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == countAfterReasoning + 1)
         #expect(snapshot.items.last?.kind.rawValue == "commandExecution")
     }

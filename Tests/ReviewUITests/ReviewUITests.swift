@@ -2337,7 +2337,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        previewRuntime.appendPreviewText(
+        await previewRuntime.appendPreviewText(
             " log",
             to: chatID,
             itemID: "msg_1",
@@ -2382,7 +2382,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
-        previewRuntime.upsertPreviewItem(
+        await previewRuntime.upsertPreviewItem(
             id: "progress_1",
             kind: CodexThreadItem.Kind(rawValue: "progress"),
             content: .diagnostic("stream.tick 001"),
@@ -2825,7 +2825,7 @@ struct ReviewUITests {
         )
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        previewRuntime.upsertPreviewItem(
+        await previewRuntime.upsertPreviewItem(
             id: "fixture-log-\(chat.id)",
             kind: .agentMessage,
             content: .message(.init(id: "fixture-log-\(chat.id)", role: .assistant, text: "Initial log")),

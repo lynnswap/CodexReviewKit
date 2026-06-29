@@ -41,8 +41,8 @@ public final class ReviewMonitorPreviewContentSource {
         )
     }
 
-    public func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
-        runtime.snapshotForTesting(chatID: chatID)
+    public func snapshotForTesting(chatID: CodexThreadID) async -> CodexChatSnapshot? {
+        await runtime.snapshotForTesting(chatID: chatID)
     }
 }
 

@@ -54,7 +54,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private let fixtures: [ReviewMonitorPreviewChatLogFixture]
     private let fixturesByChatID: [CodexThreadID: ReviewMonitorPreviewChatLogFixture]
-    private var snapshotStorageByChatID: [CodexThreadID: CodexChatSnapshot]
+    private let threadStore: CodexAppServerTestThreadStore
     private var runtime: CodexAppServerTestRuntime?
     private var container: CodexModelContainer?
     private var startTask: Task<Void, Never>?
@@ -65,9 +65,9 @@ final class ReviewMonitorPreviewAppServerRuntime {
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
         self.fixtures = fixtures
         self.fixturesByChatID = Dictionary(uniqueKeysWithValues: fixtures.map { ($0.chatID, $0) })
-        self.snapshotStorageByChatID = Dictionary(uniqueKeysWithValues: fixtures.map {
-            ($0.chatID, $0.initialSnapshot)
-        })
+        self.threadStore = CodexAppServerTestThreadStore(
+            threads: fixtures.map(\.threadSnapshot)
+        )
     }
 
     var initialChatID: CodexThreadID? {
@@ -81,8 +81,8 @@ final class ReviewMonitorPreviewAppServerRuntime {
         return (title: fixture.title, subtitle: fixture.cwd)
     }
 
-    func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
-        snapshotStorageByChatID[chatID]
+    func snapshotForTesting(chatID: CodexThreadID) async -> CodexChatSnapshot? {
+        await threadStore.snapshot(id: chatID)?.chatSnapshot
     }
 
     func upsertPreviewItem(
@@ -90,18 +90,18 @@ final class ReviewMonitorPreviewAppServerRuntime {
         kind: CodexThreadItem.Kind,
         content: CodexThreadItem.Content,
         to chatID: CodexThreadID
-    ) {
+    ) async {
         guard let fixture = fixturesByChatID[chatID] else {
             return
         }
-        let turnID = snapshotStorageByChatID[chatID]?.turns.last?.id
-        let item = CodexChatItemSnapshot(
+        guard let item = await upsertStoredItem(
             id: id,
-            turnID: turnID,
             kind: kind,
-            content: content
-        )
-        upsertStoredItem(item, in: chatID)
+            content: content,
+            in: fixture
+        ) else {
+            return
+        }
         start()
         enqueueNotification { [weak self] in
             await self?.emitItem(item, for: fixture)
@@ -114,20 +114,20 @@ final class ReviewMonitorPreviewAppServerRuntime {
         itemID: String,
         kind: CodexThreadItem.Kind,
         content: CodexThreadItem.Content
-    ) {
+    ) async {
         guard delta.isEmpty == false,
               fixturesByChatID[chatID] != nil else {
             return
         }
-        let turnID = snapshotStorageByChatID[chatID]?.turns.last?.id
-        appendStoredText(
+        guard let item = await appendStoredText(
             delta,
             itemID: itemID,
-            turnID: turnID,
             kind: kind,
             content: content,
             in: chatID
-        )
+        ) else {
+            return
+        }
         start()
         enqueueNotification { [weak self] in
             do {
@@ -138,10 +138,10 @@ final class ReviewMonitorPreviewAppServerRuntime {
                 try await self?.emitTextDelta(
                     delta,
                     itemID: itemID,
-                    turnID: turnID ?? CodexTurnID(rawValue: "preview-turn"),
+                    turnID: item.turnID ?? CodexTurnID(rawValue: "preview-turn"),
                     chatID: chatID,
                     kind: kind,
-                    content: content,
+                    content: item.content,
                     runtime: runtime
                 )
             } catch {
@@ -151,28 +151,9 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private func enqueueNotification(_ operation: @escaping @MainActor () async -> Void) {
         let previousTask = notificationTask
-        notificationTask = Task { @MainActor [weak self] in
+        notificationTask = Task { @MainActor in
             await previousTask?.value
-            await self?.refreshRuntimeThreadStubs()
             await operation()
-        }
-    }
-
-    private func refreshRuntimeThreadStubs() async {
-        do {
-            try await ensureStarted()
-            guard let runtime else {
-                return
-            }
-            try await runtime.transport.stubThreads(currentThreadSnapshots())
-        } catch {
-        }
-    }
-
-    private func currentThreadSnapshots() -> [CodexThreadSnapshot] {
-        fixtures.map { fixture in
-            let snapshot = snapshotStorageByChatID[fixture.chatID] ?? fixture.initialSnapshot
-            return fixture.threadSnapshot(snapshot)
         }
     }
 
@@ -233,10 +214,12 @@ final class ReviewMonitorPreviewAppServerRuntime {
             ) else {
                 continue
             }
-            apply(frame.step, cycle: frame.cycle, for: fixture)
+            guard let item = await apply(frame.step, cycle: frame.cycle, for: fixture) else {
+                continue
+            }
             if emitsNotifications {
                 enqueueNotification { [weak self] in
-                    await self?.emit(frame.step, cycle: frame.cycle, for: fixture)
+                    await self?.emit(frame.step, item: item, for: fixture)
                 }
             }
         }
@@ -259,9 +242,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
         if runtime != nil {
             return
         }
-        let runtime = try await CodexAppServerTestRuntime.start(
-            threads: fixtures.map(\.threadSnapshot)
-        )
+        let runtime = try await CodexAppServerTestRuntime.start(threadStore: threadStore)
         let container = CodexModelContainer(appServer: runtime.server)
         self.runtime = runtime
         self.container = container
@@ -270,35 +251,27 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private func emit(
         _ step: ReviewMonitorPreviewContent.PreviewChatLogStreamStep,
-        cycle: Int,
+        item: CodexChatItemSnapshot,
         for fixture: ReviewMonitorPreviewChatLogFixture
     ) async {
         guard let runtime else {
             return
         }
-        let itemID = ReviewMonitorPreviewContent.previewChatLogItemID(
-            itemName: step.itemName,
-            streamID: fixture.streamID,
-            cycle: cycle
-        )
-        let turnID = fixture.initialSnapshot.turns.last?.id ?? CodexTurnID(rawValue: "preview-turn")
+        let turnID = item.turnID ?? fixture.initialSnapshot.turns.last?.id ?? CodexTurnID(rawValue: "preview-turn")
         do {
             switch step.mode {
             case .textDelta:
                 try await emitTextDelta(
                     step.deltaText ?? "",
-                    itemID: itemID,
+                    itemID: item.id,
                     turnID: turnID,
                     chatID: fixture.chatID,
-                    kind: step.kind,
-                    content: step.content,
+                    kind: item.kind,
+                    content: item.content,
                     runtime: runtime
                 )
             case .update, .complete:
-                await emitItem(
-                    step.itemSnapshot(id: itemID, turnID: turnID),
-                    for: fixture
-                )
+                await emitItem(item, for: fixture)
             }
         } catch {
         }
@@ -308,7 +281,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
         _ step: ReviewMonitorPreviewContent.PreviewChatLogStreamStep,
         cycle: Int,
         for fixture: ReviewMonitorPreviewChatLogFixture
-    ) {
+    ) async -> CodexChatItemSnapshot? {
         let itemID = ReviewMonitorPreviewContent.previewChatLogItemID(
             itemName: step.itemName,
             streamID: fixture.streamID,
@@ -316,15 +289,16 @@ final class ReviewMonitorPreviewAppServerRuntime {
         )
         switch step.mode {
         case .update, .complete:
-            upsertStoredItem(
-                step.itemSnapshot(id: itemID, turnID: snapshotStorageByChatID[fixture.chatID]?.turns.last?.id),
-                in: fixture.chatID
+            return await upsertStoredItem(
+                id: itemID,
+                kind: step.kind,
+                content: step.content,
+                in: fixture
             )
         case .textDelta:
-            appendStoredText(
+            return await appendStoredText(
                 step.deltaText ?? "",
                 itemID: itemID,
-                turnID: snapshotStorageByChatID[fixture.chatID]?.turns.last?.id,
                 kind: step.kind,
                 content: step.content,
                 in: fixture.chatID
@@ -332,33 +306,45 @@ final class ReviewMonitorPreviewAppServerRuntime {
         }
     }
 
-    private func upsertStoredItem(_ item: CodexChatItemSnapshot, in chatID: CodexThreadID) {
-        guard var snapshot = snapshotStorageByChatID[chatID] else {
-            return
+    private func upsertStoredItem(
+        id: String,
+        kind: CodexThreadItem.Kind,
+        content: CodexThreadItem.Content,
+        in fixture: ReviewMonitorPreviewChatLogFixture
+    ) async -> CodexChatItemSnapshot? {
+        await updateStoredSnapshot(for: fixture) { snapshot in
+            let item = CodexChatItemSnapshot(
+                id: id,
+                turnID: snapshot.turns.last?.id,
+                kind: kind,
+                content: content
+            )
+            if let index = snapshot.items.firstIndex(where: { $0.id == item.id && $0.turnID == item.turnID }) {
+                snapshot.items[index] = item
+            } else {
+                snapshot.items.append(item)
+            }
+            return item
         }
-        if let index = snapshot.items.firstIndex(where: { $0.id == item.id && $0.turnID == item.turnID }) {
-            snapshot.items[index] = item
-        } else {
-            snapshot.items.append(item)
-        }
-        snapshotStorageByChatID[chatID] = snapshot
     }
 
     private func appendStoredText(
         _ delta: String,
         itemID: String,
-        turnID: CodexTurnID?,
         kind: CodexThreadItem.Kind,
         content: CodexThreadItem.Content,
         in chatID: CodexThreadID
-    ) {
+    ) async -> CodexChatItemSnapshot? {
         guard delta.isEmpty == false,
-              var snapshot = snapshotStorageByChatID[chatID] else {
-            return
+              let fixture = fixturesByChatID[chatID] else {
+            return nil
         }
-        if let index = snapshot.items.firstIndex(where: { $0.id == itemID && $0.turnID == turnID }) {
-            snapshot.items[index].content.appendPreviewText(delta)
-        } else {
+        return await updateStoredSnapshot(for: fixture) { snapshot in
+            let turnID = snapshot.turns.last?.id
+            if let index = snapshot.items.firstIndex(where: { $0.id == itemID && $0.turnID == turnID }) {
+                snapshot.items[index].content.appendPreviewText(delta)
+                return snapshot.items[index]
+            }
             var item = CodexChatItemSnapshot(
                 id: itemID,
                 turnID: turnID,
@@ -367,8 +353,20 @@ final class ReviewMonitorPreviewAppServerRuntime {
             )
             item.content.appendPreviewText(delta)
             snapshot.items.append(item)
+            return item
         }
-        snapshotStorageByChatID[chatID] = snapshot
+    }
+
+    private func updateStoredSnapshot(
+        for fixture: ReviewMonitorPreviewChatLogFixture,
+        _ mutation: (inout CodexChatSnapshot) -> CodexChatItemSnapshot?
+    ) async -> CodexChatItemSnapshot? {
+        guard var snapshot = await threadStore.snapshot(id: fixture.chatID)?.chatSnapshot,
+              let item = mutation(&snapshot) else {
+            return nil
+        }
+        await threadStore.upsert(fixture.threadSnapshot(snapshot))
+        return item
     }
 
     private func emitItem(
@@ -693,6 +691,37 @@ private extension ReviewMonitorPreviewChatLogFixture {
                         .map(\.threadItem)
                 )
             }
+        )
+    }
+}
+
+private extension CodexThreadSnapshot {
+    var chatSnapshot: CodexChatSnapshot {
+        let turnSnapshots = turns ?? []
+        let chatTurns = turnSnapshots.map { turn in
+            CodexChatTurnStateSnapshot(
+                id: turn.id,
+                status: turn.status,
+                errorDescription: turn.errorMessage,
+                usage: nil
+            )
+        }
+        let chatItems = turnSnapshots.flatMap { turn in
+            turn.items.map { item in
+                CodexChatItemSnapshot(
+                    id: item.id,
+                    turnID: turn.id,
+                    kind: item.kind,
+                    content: item.content,
+                    rawPayload: item.rawPayload
+                )
+            }
+        }
+        return CodexChatSnapshot(
+            chatID: id,
+            phase: turnSnapshots.compactMap(\.errorMessage).first.map(CodexDataPhase.failed) ?? .loaded,
+            turns: chatTurns,
+            items: chatItems
         )
     }
 }
