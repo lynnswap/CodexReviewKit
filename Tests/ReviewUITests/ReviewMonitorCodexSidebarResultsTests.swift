@@ -58,7 +58,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let outlineAppChat = try #require(tree.node(rowID: .chat(appChat.id)))
 
         #expect(outlineSection.rowID == section.rowID)
-        #expect(outlineSection.title == section.displayTitle)
+        #expect(outlineSection.item == .workspaceGroup(section.workspaceGroupID))
         #expect(outlineSection.selectionID == .workspaceGroup(section.workspaceGroupID))
         #expect(outlineSection.isExpandable)
         #expect(
@@ -66,10 +66,11 @@ struct ReviewMonitorCodexSidebarResultsTests {
                 "workspace:\(resolvedAppPath)",
                 "workspace:\(resolvedToolsPath)",
             ])
-        #expect(outlineAppWorkspace.title == "App")
+        #expect(outlineAppWorkspace.item == .workspace(appWorkspace.id))
         #expect(outlineAppWorkspace.selectionID == .workspace(appWorkspace.id))
         #expect(outlineAppWorkspace.isExpandable)
         #expect(outlineAppWorkspace.children.map(\.rowID.rawValue) == ["chat:thread-app"])
+        #expect(outlineAppChat.item == .chat(appChat.id))
         #expect(outlineAppChat.selectionID == .chat(appChat.id))
         #expect(
             results.sections.rowIDs.map(\.rawValue) == [
@@ -227,7 +228,8 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(tree.apply(sections: results.sections).topologyChanged == false)
         #expect(tree.roots.first === root)
         #expect(tree.node(rowID: .chat(threadID)) === chatNode)
-        #expect(chatNode.title == "Updated review")
+        #expect(chatNode.item == .chat(threadID))
+        #expect(results.sections.chat(id: threadID)?.title == "Updated review")
         #expect(root.children.map(\.rowID) == [.chat(threadID)])
         #expect(root.children.first === chatNode)
     }

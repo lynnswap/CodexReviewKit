@@ -1,7 +1,6 @@
 import CodexKit
 import CodexReviewKit
 import Foundation
-import Observation
 
 package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringConvertible {
     package var rawValue: String
@@ -312,66 +311,54 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
 }
 
 @MainActor
-package enum ReviewMonitorCodexSidebarOutlineItem {
-    case workspaceGroup(CodexWorkspaceGroup)
-    case fallbackWorkspaceGroup(id: CodexWorkspaceGroupID, title: String)
-    case workspace(CodexWorkspace)
-    case chat(CodexChat)
+package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
+    case workspaceGroup(CodexWorkspaceGroupID)
+    case workspace(CodexWorkspaceID)
+    case chat(CodexThreadID)
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
         switch self {
-        case .workspaceGroup(let workspaceGroup):
-            .workspaceGroup(workspaceGroup.id)
-        case .fallbackWorkspaceGroup(let id, _):
+        case .workspaceGroup(let id):
             .workspaceGroup(id)
-        case .workspace(let workspace):
-            .workspace(workspace.id)
-        case .chat(let chat):
-            .chat(chat.id)
-        }
-    }
-
-    package var title: String {
-        switch self {
-        case .workspaceGroup(let workspaceGroup):
-            workspaceGroup.name
-        case .fallbackWorkspaceGroup(_, let title):
-            title
-        case .workspace(let workspace):
-            workspace.name
-        case .chat(let chat):
-            chat.title
+        case .workspace(let id):
+            .workspace(id)
+        case .chat(let id):
+            .chat(id)
         }
     }
 
     var selectionID: ReviewMonitorSelectionID {
         switch self {
-        case .workspaceGroup(let workspaceGroup):
-            .workspaceGroup(workspaceGroup.id)
-        case .fallbackWorkspaceGroup(let id, _):
+        case .workspaceGroup(let id):
             .workspaceGroup(id)
-        case .workspace(let workspace):
-            .workspace(workspace.id)
-        case .chat(let chat):
-            .chat(chat.id)
+        case .workspace(let id):
+            .workspace(id)
+        case .chat(let id):
+            .chat(id)
         }
     }
 
-    package func hasSameIdentity(as other: Self) -> Bool {
-        switch (self, other) {
-        case (.workspaceGroup(let lhs), .workspaceGroup(let rhs)):
-            lhs === rhs
-        case (.fallbackWorkspaceGroup(let lhsID, let lhsTitle), .fallbackWorkspaceGroup(let rhsID, let rhsTitle)):
-            lhsID == rhsID && lhsTitle == rhsTitle
-        case (.workspace(let lhs), .workspace(let rhs)):
-            lhs === rhs
-        case (.chat(let lhs), .chat(let rhs)):
-            lhs === rhs
-        default:
-            false
+    var workspaceGroupID: CodexWorkspaceGroupID? {
+        switch self {
+        case .workspaceGroup(let id):
+            id
+        case .workspace, .chat:
+            nil
         }
     }
 
+    var chatID: CodexThreadID? {
+        switch self {
+        case .chat(let id):
+            id
+        case .workspaceGroup, .workspace:
+            nil
+        }
+    }
+
+    var isChat: Bool {
+        chatID != nil
+    }
 }
 
 @MainActor
@@ -446,13 +433,7 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         for section: CodexFetchSection<CodexChat>,
         activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
     ) -> ReviewMonitorCodexSidebarOutlineNode {
-        let item: ReviewMonitorCodexSidebarOutlineItem =
-            if let workspaceGroup = section.workspaceGroup {
-                .workspaceGroup(workspaceGroup)
-            } else {
-                .fallbackWorkspaceGroup(id: section.workspaceGroupID, title: section.displayTitle)
-            }
-        let node = node(for: item, activeRowIDs: &activeRowIDs)
+        let node = node(for: .workspaceGroup(section.workspaceGroupID), activeRowIDs: &activeRowIDs)
         let children: [ReviewMonitorCodexSidebarOutlineNode]
         if section.displaysWorkspaceNodes {
             children =
@@ -464,11 +445,11 @@ final class ReviewMonitorCodexSidebarOutlineTree {
                     )
                 }
                 + section.uncategorizedChats.map { chat in
-                    self.node(for: .chat(chat), activeRowIDs: &activeRowIDs)
+                    self.node(for: .chat(chat.id), activeRowIDs: &activeRowIDs)
                 }
         } else {
             children = section.items.map { chat in
-                self.node(for: .chat(chat), activeRowIDs: &activeRowIDs)
+                self.node(for: .chat(chat.id), activeRowIDs: &activeRowIDs)
             }
         }
         updateChildren(of: node, to: children)
@@ -480,9 +461,9 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         chats: [CodexChat],
         activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
     ) -> ReviewMonitorCodexSidebarOutlineNode {
-        let node = node(for: .workspace(workspace), activeRowIDs: &activeRowIDs)
+        let node = node(for: .workspace(workspace.id), activeRowIDs: &activeRowIDs)
         let children = chats.map { child in
-            self.node(for: .chat(child), activeRowIDs: &activeRowIDs)
+            self.node(for: .chat(child.id), activeRowIDs: &activeRowIDs)
         }
         updateChildren(of: node, to: children)
         return node
@@ -495,7 +476,7 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         activeRowIDs.insert(item.rowID)
         let node = nodesByRowID[item.rowID] ?? ReviewMonitorCodexSidebarOutlineNode(item: item)
         nodesByRowID[item.rowID] = node
-        if node.item.hasSameIdentity(as: item) == false {
+        if node.item != item {
             node.item = item
         }
         return node
@@ -525,7 +506,6 @@ struct ReviewMonitorCodexSidebarOutlineTopologyChange: Equatable {
 }
 
 @MainActor
-@Observable
 final class ReviewMonitorCodexSidebarOutlineNode {
     fileprivate(set) var item: ReviewMonitorCodexSidebarOutlineItem
     fileprivate(set) var children: [ReviewMonitorCodexSidebarOutlineNode] = []
@@ -538,23 +518,12 @@ final class ReviewMonitorCodexSidebarOutlineNode {
         item.rowID
     }
 
-    var title: String {
-        item.title
-    }
-
     var selectionID: ReviewMonitorSelectionID {
         item.selectionID
     }
 
     var workspaceGroupID: CodexWorkspaceGroupID? {
-        switch item {
-        case .workspaceGroup(let workspaceGroup):
-            workspaceGroup.id
-        case .fallbackWorkspaceGroup(let id, _):
-            id
-        case .workspace, .chat:
-            nil
-        }
+        item.workspaceGroupID
     }
 
     var isExpandable: Bool {

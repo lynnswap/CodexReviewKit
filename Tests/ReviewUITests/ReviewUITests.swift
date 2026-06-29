@@ -359,22 +359,14 @@ struct ReviewUITests {
         )
 
         let cellView = makeReviewMonitorReviewChatCellViewForTesting(chat: placeholderChat)
-        let initialObjectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
-        guard case .chat(let initialObjectChat) = initialObjectNode.item else {
-            Issue.record("Expected cell to bind a Codex chat node.")
-            return
-        }
+        let initialObjectChat = try #require(cellView.objectValue as? CodexChat)
 
         #expect(initialObjectChat.id == placeholderChat.id)
         #expect(cellView.toolTip == (placeholderChat.workspace?.url.path ?? placeholderChat.preview ?? placeholderChat.title))
 
         configureReviewMonitorReviewChatCellViewForTesting(cellView, chat: loadedChat)
 
-        let objectNode = try #require(cellView.objectValue as? ReviewMonitorCodexSidebarOutlineNode)
-        guard case .chat(let objectChat) = objectNode.item else {
-            Issue.record("Expected cell to bind a Codex chat node.")
-            return
-        }
+        let objectChat = try #require(cellView.objectValue as? CodexChat)
         #expect(objectChat.id == loadedChat.id)
         #expect(cellView.toolTip == (loadedChat.workspace?.url.path ?? loadedChat.preview ?? loadedChat.title))
     }
