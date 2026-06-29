@@ -2000,8 +2000,8 @@ private final class ReviewMonitorReviewChatTableRowView: NSTableRowView {
 @MainActor
 private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
-    private weak var boundChat: CodexChat?
-    private var chatObservation: PortableObservationTracking.Token?
+    private weak var boundNode: ReviewMonitorCodexSidebarOutlineNode?
+    private var nodeObservation: PortableObservationTracking.Token?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2009,7 +2009,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     }
 
     isolated deinit {
-        chatObservation?.cancel()
+        nodeObservation?.cancel()
     }
 
     @available(*, unavailable)
@@ -2018,40 +2018,46 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     }
 
     func configure(with node: ReviewMonitorCodexSidebarOutlineNode) {
-        guard case .chat(let chat) = node.item else {
-            return
-        }
-        guard boundChat !== chat else {
+        guard boundNode !== node else {
             return
         }
         objectValue = node
-        boundChat = chat
-        chatObservation?.cancel()
-        chatObservation = withPortableContinuousObservation { [weak self, chat] _ in
-            guard let self else { return }
-            self.toolTip = chat.workspace?.url.path ?? chat.preview ?? chat.title
-        }
-        if let hostingView {
-            hostingView.rootView.chat = chat
-        } else {
-            let hostingView = NSHostingView(
-                rootView: ReviewMonitorChatRowView(chat: chat)
-            )
-            hostingView.translatesAutoresizingMaskIntoConstraints = false
-            hostingView.setAccessibilityIdentifier("review-monitor.review-chat-row")
-            addSubview(hostingView)
-            NSLayoutConstraint.activate([
-                hostingView.topAnchor.constraint(equalTo: topAnchor),
-                hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
-                hostingView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
-            self.hostingView = hostingView
+        boundNode = node
+        nodeObservation?.cancel()
+        nodeObservation = withPortableContinuousObservation { [weak self, node] _ in
+            guard case .chat(let chat) = node.item else {
+                return
+            }
+            self?.render(chat)
         }
     }
 
     private func configureHierarchy() {
         translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func render(_ chat: CodexChat) {
+        toolTip = chat.workspace?.url.path ?? chat.preview ?? chat.title
+        if let hostingView {
+            if hostingView.rootView.chat !== chat {
+                hostingView.rootView.chat = chat
+            }
+            return
+        }
+
+        let hostingView = NSHostingView(
+            rootView: ReviewMonitorChatRowView(chat: chat)
+        )
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        hostingView.setAccessibilityIdentifier("review-monitor.review-chat-row")
+        addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: topAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        self.hostingView = hostingView
     }
 
     #if DEBUG
@@ -2098,8 +2104,8 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let contentStack = NSStackView()
-    private var boundItem: ReviewMonitorCodexSidebarOutlineItem?
-    private var itemObservation: PortableObservationTracking.Token?
+    private weak var boundNode: ReviewMonitorCodexSidebarOutlineNode?
+    private var nodeObservation: PortableObservationTracking.Token?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2107,7 +2113,7 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     }
 
     isolated deinit {
-        itemObservation?.cancel()
+        nodeObservation?.cancel()
     }
 
     @available(*, unavailable)
@@ -2116,17 +2122,14 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     }
 
     func configure(with node: ReviewMonitorCodexSidebarOutlineNode) {
-        let item = node.item
-        if let boundItem,
-            boundItem.hasSameIdentity(as: item)
-        {
+        guard boundNode !== node else {
             return
         }
         objectValue = node
-        boundItem = item
-        itemObservation?.cancel()
-        itemObservation = withPortableContinuousObservation { [weak self, item] _ in
-            self?.render(item)
+        boundNode = node
+        nodeObservation?.cancel()
+        nodeObservation = withPortableContinuousObservation { [weak self, node] _ in
+            self?.render(node.item)
         }
     }
 
