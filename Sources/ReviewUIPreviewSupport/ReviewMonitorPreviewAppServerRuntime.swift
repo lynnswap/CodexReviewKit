@@ -4,6 +4,24 @@ import CodexReviewKit
 import Foundation
 import ReviewUI
 
+private actor ReviewMonitorPreviewSnapshotMutationQueue {
+    private var tailTask: Task<Void, Never>?
+
+    func run<Value: Sendable>(
+        _ operation: @Sendable @escaping () async -> Value
+    ) async -> Value {
+        let previousTask = tailTask
+        let task = Task<Value, Never> {
+            await previousTask?.value
+            return await operation()
+        }
+        tailTask = Task {
+            _ = await task.value
+        }
+        return await task.value
+    }
+}
+
 @MainActor
 struct ReviewMonitorPreviewChatLogFixture {
     let chatID: CodexThreadID
@@ -60,6 +78,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
     private var startTask: Task<Void, Never>?
     private var streamTask: Task<Void, Never>?
     private var notificationTask: Task<Void, Never>?
+    private let snapshotMutationQueue = ReviewMonitorPreviewSnapshotMutationQueue()
     private var tick = 0
 
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
@@ -359,16 +378,19 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private func updateStoredSnapshot(
         for fixture: ReviewMonitorPreviewChatLogFixture,
-        _ mutation: (inout CodexChatSnapshot) -> CodexChatItemSnapshot?
+        _ mutation: @escaping @Sendable (inout CodexChatSnapshot) -> CodexChatItemSnapshot?
     ) async -> CodexChatItemSnapshot? {
-        guard var snapshot = await threadStore.snapshot(id: fixture.chatID)?.chatSnapshot,
-              let item = mutation(&snapshot) else {
-            return nil
+        await snapshotMutationQueue.run { @MainActor [weak self] in
+            guard let self,
+                  var snapshot = await self.threadStore.snapshot(id: fixture.chatID)?.chatSnapshot,
+                  let item = mutation(&snapshot) else {
+                return nil
+            }
+            await self.replaceThreadStorePreservingFixtureOrder(
+                with: fixture.threadSnapshot(snapshot)
+            )
+            return item
         }
-        await replaceThreadStorePreservingFixtureOrder(
-            with: fixture.threadSnapshot(snapshot)
-        )
-        return item
     }
 
     private func replaceThreadStorePreservingFixtureOrder(

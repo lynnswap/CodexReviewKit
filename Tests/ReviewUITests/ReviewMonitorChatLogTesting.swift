@@ -220,8 +220,8 @@ func appendChatLogEntryForTesting(
     _ entry: ReviewChatLogEntryForTesting,
     to chatID: CodexThreadID,
     turnID: CodexTurnID
-) {
-    ReviewChatLogFixtureStore.append(entry, to: chatID, turnID: turnID)
+) async {
+    await ReviewChatLogFixtureStore.append(entry, to: chatID, turnID: turnID)
 }
 
 @MainActor
@@ -230,8 +230,8 @@ func replaceChatLogTextForTesting(
     for chatID: CodexThreadID,
     fixtureID: String,
     turnID: CodexTurnID
-) {
-    ReviewChatLogFixtureStore.replaceEntries(
+) async {
+    await ReviewChatLogFixtureStore.replaceEntries(
         [.init(kind: .agentMessage, groupID: "fixture-log-\(fixtureID)", text: text.trimmingCharacters(in: .newlines))],
         for: chatID,
         turnID: turnID
@@ -572,14 +572,14 @@ private enum ReviewChatLogFixtureStore {
         _ entries: [ReviewChatLogEntryForTesting],
         for chatID: CodexThreadID,
         turnID: CodexTurnID
-    ) {
+    ) async {
         setEntries(entries, for: chatID)
-        updateRetainedPreviewSource(for: chatID, turnID: turnID)
+        await updateRetainedPreviewSource(for: chatID, turnID: turnID)
     }
 
-    static func append(_ entry: ReviewChatLogEntryForTesting, to chatID: CodexThreadID, turnID: CodexTurnID) {
+    static func append(_ entry: ReviewChatLogEntryForTesting, to chatID: CodexThreadID, turnID: CodexTurnID) async {
         entriesByChatID[chatID, default: []].append(entry)
-        updateRetainedPreviewSource(for: chatID, turnID: turnID)
+        await updateRetainedPreviewSource(for: chatID, turnID: turnID)
     }
 
     static func items(for chatID: CodexThreadID, turnID: CodexTurnID) -> [CodexChatItemSnapshot] {
@@ -603,10 +603,10 @@ private enum ReviewChatLogFixtureStore {
         return ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: displayDocument.text)
     }
 
-    private static func updateRetainedPreviewSource(for chatID: CodexThreadID, turnID: CodexTurnID) {
+    private static func updateRetainedPreviewSource(for chatID: CodexThreadID, turnID: CodexTurnID) async {
         prunePreviewSupportRetainersByStore()
         for support in runStorePreviewSupportRetainers where support.contains(chatID: chatID) {
-            support.upsert(chatID: chatID, items: items(for: chatID, turnID: turnID))
+            await support.upsert(chatID: chatID, items: items(for: chatID, turnID: turnID))
         }
     }
 }
@@ -616,7 +616,6 @@ private final class ReviewChatLogFixtureRetainer {
     weak var store: CodexReviewStore?
     let runtime: ReviewMonitorPreviewAppServerRuntime
     private var chatIDs: Set<CodexThreadID>
-    private var upsertTask: Task<Void, Never>?
 
     init(store: CodexReviewStore, runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
         self.store = store
@@ -628,40 +627,36 @@ private final class ReviewChatLogFixtureRetainer {
         chatIDs.contains(chatID)
     }
 
-    func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) {
-        let previousTask = upsertTask
-        upsertTask = Task { @MainActor [runtime] in
-            await previousTask?.value
-            let previousItemsByID = Dictionary(
-                uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
-            )
-            for item in items {
-                guard let previousItem = previousItemsByID[item.id] else {
-                    await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
-                    continue
-                }
-                guard previousItem != item else {
-                    continue
-                }
-                if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
-                    await runtime.appendPreviewText(
-                        outputDelta,
-                        to: chatID,
-                        itemID: item.id,
-                        kind: item.kind,
-                        content: previousItem.content
-                    )
-                } else if let textDelta = previousItem.textDeltaForTesting(to: item) {
-                    await runtime.appendPreviewText(
-                        textDelta,
-                        to: chatID,
-                        itemID: item.id,
-                        kind: item.kind,
-                        content: previousItem.content
-                    )
-                } else {
-                    await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
-                }
+    func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) async {
+        let previousItemsByID = Dictionary(
+            uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
+        )
+        for item in items {
+            guard let previousItem = previousItemsByID[item.id] else {
+                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                continue
+            }
+            guard previousItem != item else {
+                continue
+            }
+            if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
+                await runtime.appendPreviewText(
+                    outputDelta,
+                    to: chatID,
+                    itemID: item.id,
+                    kind: item.kind,
+                    content: previousItem.content
+                )
+            } else if let textDelta = previousItem.textDeltaForTesting(to: item) {
+                await runtime.appendPreviewText(
+                    textDelta,
+                    to: chatID,
+                    itemID: item.id,
+                    kind: item.kind,
+                    content: previousItem.content
+                )
+            } else {
+                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
             }
         }
     }

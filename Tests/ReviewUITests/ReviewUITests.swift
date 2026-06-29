@@ -811,13 +811,13 @@ struct ReviewUITests {
         viewController.performTextFinderAction(findItem)
         #expect(transport.logFindBarVisibleForTesting)
 
-        replaceChatLogTextForTesting(
+        await replaceChatLogTextForTesting(
             "Old selection log",
             for: activeChat.chatID,
             fixtureID: activeChat.id,
             turnID: activeChat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Current selection log after stale mutation"),
             to: recentChat.chatID,
             turnID: recentChat.turnID
@@ -933,7 +933,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .agentMessage, groupID: "message-direct", text: "Selected chat detail update"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -942,7 +942,7 @@ struct ReviewUITests {
         var snapshot = try await awaitChatRenderForTesting(chat, in: transport)
         #expect(snapshot.log == "Selected chat detail update")
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .command,
                 groupID: "cmd-direct",
@@ -952,7 +952,7 @@ struct ReviewUITests {
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd-direct",
@@ -1017,7 +1017,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd-failed-direct",
@@ -1073,7 +1073,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd-running-direct",
@@ -1131,7 +1131,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .fileChange,
                 groupID: "file-change-direct",
@@ -1209,7 +1209,7 @@ struct ReviewUITests {
         #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .contextCompaction,
                 groupID: "compact_1",
@@ -1338,7 +1338,7 @@ struct ReviewUITests {
             transport.logCommandOutputPanelOutputScrollVerticalOffsetForTesting)
         #expect(scrolledOutputScrollOffset < initialOutputScrollMaximumOffset)
         let expandedOutputAppendReloadCount = transport.logReloadCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
@@ -1376,7 +1376,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("output line 9") == false)
         #expect(transport.logFindStringForTesting.contains("output line 9") == false)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
@@ -1386,7 +1386,7 @@ struct ReviewUITests {
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .agentMessage, text: "Visible text after command output."),
             to: chat.chatID,
             turnID: chat.turnID
@@ -1504,7 +1504,7 @@ struct ReviewUITests {
         #expect(transport.displayedLogForTesting.contains("Running swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .commandOutput,
                 groupID: "cmd_1",
@@ -1582,7 +1582,7 @@ struct ReviewUITests {
             #expect(transport.logFindStringForTesting.contains("$ swift test") == false)
             #expect(transport.logFindStringForTesting.contains("output line 3") == false)
 
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .commandOutput, groupID: "cmd_1", text: "\noutput line 6"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -1790,7 +1790,7 @@ struct ReviewUITests {
 
         #expect(transport.isLogPinnedToBottomForTesting)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest active line"),
             to: activeChat.chatID,
             turnID: activeChat.turnID
@@ -1980,7 +1980,7 @@ struct ReviewUITests {
         )
         expectLogVisibleFragmentsWithoutForcingLayout(transport)
 
-        replaceChatLogTextForTesting(
+        await replaceChatLogTextForTesting(
             longLog,
             for: shortChat.chatID,
             fixtureID: shortChat.id,
@@ -2034,12 +2034,12 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "stale update"),
             to: activeChat.chatID,
             turnID: activeChat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "fresh update"),
             to: recentChat.chatID,
             turnID: recentChat.turnID
@@ -2255,7 +2255,7 @@ struct ReviewUITests {
         #expect(emptySnapshot.log.isEmpty)
         #expect(window.title == "")
         #expect(window.subtitle == "")
-        replaceChatLogTextForTesting(
+        await replaceChatLogTextForTesting(
             "Deselected log",
             for: chat.chatID,
             fixtureID: chat.id,
@@ -2292,7 +2292,7 @@ struct ReviewUITests {
         )
         #expect(selectedSnapshot.title == nil)
         #expect(selectedSnapshot.summary == nil)
-        replaceChatLogTextForTesting(
+        await replaceChatLogTextForTesting(
             "Updated log",
             for: chat.chatID,
             fixtureID: chat.id,
@@ -2452,12 +2452,12 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .agentMessage, groupID: "msg_1", text: " one"),
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .agentMessage, groupID: "msg_1", text: " two"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2490,12 +2490,12 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, groupID: "progress_1", text: "stream.tick 001"),
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, groupID: "progress_2", text: "stream.tick 002"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2530,12 +2530,12 @@ struct ReviewUITests {
         )
         transport.setLogReduceMotionForTesting(false)
         let wordGlowCount = transport.logWordGlowCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"),
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .progress,
                 groupID: "progress_1",
@@ -2579,7 +2579,7 @@ struct ReviewUITests {
         #expect(
             abs(transport.logMaximumVerticalScrollOffsetForTesting - transport.logMinimumVerticalScrollOffsetForTesting)
                 < 0.5)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .progress,
                 text:
@@ -2624,7 +2624,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .plan, groupID: "plan_1", replacesGroup: true, text: "- updated"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2669,7 +2669,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .command,
                 groupID: "cmd_1",
@@ -2686,7 +2686,7 @@ struct ReviewUITests {
             to: chat.chatID,
             turnID: chat.turnID
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .rawReasoning,
                 groupID: "reasoning_2",
@@ -2730,7 +2730,7 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let replaceCount = transport.logReplaceCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .agentMessage, groupID: "msg_1", text: "ld**"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2766,7 +2766,7 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .plan,
                 groupID: "plan_1",
@@ -2780,7 +2780,7 @@ struct ReviewUITests {
         let replaceCount = transport.logReplaceCountForTesting
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .commandOutput, groupID: "cmd_1", text: "hidden output"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2861,7 +2861,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
         transport.setLogReduceMotionForTesting(false)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2873,7 +2873,7 @@ struct ReviewUITests {
         transport.completeLogWordGlowAnimationsForTesting()
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " again"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2883,7 +2883,7 @@ struct ReviewUITests {
         #expect(transport.logWordGlowCountForTesting == 1)
 
         transport.setLogReduceMotionForTesting(true)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " without animation"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -2934,7 +2934,7 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " hidden backlog"),
             to: firstChat.chatID,
             turnID: firstChat.turnID
@@ -2948,7 +2948,7 @@ struct ReviewUITests {
         )
         #expect(transport.logWordGlowCountForTesting == 0)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " live"),
             to: firstChat.chatID,
             turnID: firstChat.turnID
@@ -2984,7 +2984,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
 
         let invalidationCount = transport.logWordFadeDisplayInvalidationCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " through options"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3029,7 +3029,7 @@ struct ReviewUITests {
         )
         transport.setLogReduceMotionForTesting(false)
 
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .rawReasoning, groupID: "reasoning_1", text: " ok"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3074,7 +3074,7 @@ struct ReviewUITests {
         transport.scrollLogToTopForTesting()
         #expect(transport.isLogPinnedToBottomForTesting == false)
         let unpinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Unpinned update"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3086,7 +3086,7 @@ struct ReviewUITests {
         transport.scrollLogToBottomForTesting()
         #expect(transport.isLogPinnedToBottomForTesting)
         let pinnedAutoFollow = transport.logAutoFollowCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Pinned update"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3125,7 +3125,7 @@ struct ReviewUITests {
         let wrappedLine = (0..<140)
             .map { "wrapped-append-segment-\($0)" }
             .joined(separator: " ")
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: wrappedLine),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3172,7 +3172,7 @@ struct ReviewUITests {
         let offsetBeforeAppend = transport.logVerticalScrollOffsetForTesting
         let autoFollowBeforeAppend = transport.logAutoFollowCountForTesting
         let programmaticScrollsBeforeAppend = transport.logProgrammaticScrollCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(
                 kind: .progress,
                 text: "Near-bottom append should not snap inertial or manual scrolling to the document end"
@@ -3218,7 +3218,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest line"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3259,7 +3259,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.scrollLogToBottomForTesting()
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest line"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3297,7 +3297,7 @@ struct ReviewUITests {
         transport.setLogScrollerStyleForTesting(.overlay)
         transport.setLogOverlayScrollersShownForTesting(true)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "short update"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3395,7 +3395,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingScrollerImpPair)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest line"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3435,7 +3435,7 @@ struct ReviewUITests {
         transport.setLogOverlayScrollersShownForTesting(true)
         transport.setLogOverlayScrollerBridgeModeForTesting(.missingHideMethods)
         let hideCountBeforeAppend = transport.logOverlayScrollerHideRequestCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest line"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3541,7 +3541,7 @@ struct ReviewUITests {
             allowIncrementalUpdate: false
         )
         let appendCount = transport.logAppendCountForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "Newest fragment line"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3729,7 +3729,7 @@ struct ReviewUITests {
         }
         #expect(transport.logFindClientUsesSnapshotForTesting)
         #expect(transport.logHasActiveFindQueryForTesting)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3759,7 +3759,7 @@ struct ReviewUITests {
         #expect(transport.isLogPinnedToBottomForTesting == false)
 
         let offsetBeforeMiddleAppend = transport.logVerticalScrollOffsetForTesting
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended while the log is not following bottom"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -3870,7 +3870,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended"),
             to: firstChat.chatID,
             turnID: firstChat.turnID
@@ -3934,7 +3934,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: appendedLine),
             to: firstChat.chatID,
             turnID: firstChat.turnID
@@ -4045,7 +4045,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -4090,7 +4090,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended into snapshot"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -4104,7 +4104,7 @@ struct ReviewUITests {
         #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
         #expect(transport.logSelectedTextForTesting == nil)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended after cleared selection"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -4146,7 +4146,7 @@ struct ReviewUITests {
         transport.setSelectedLogRangeForTesting(firstNeedleRange)
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.setSearchString))
         viewController.performTextFinderAction(textFinderMenuItemForTesting(.showFindInterface))
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle appended into snapshot"),
             to: chat.chatID,
             turnID: chat.turnID
@@ -4161,7 +4161,7 @@ struct ReviewUITests {
             #expect(transport.logFindClientFirstSelectedRangeForTesting.length == 0)
             #expect(transport.logHasActiveFindQueryForTesting == false)
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "needle appended after cleared query"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4205,7 +4205,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "")
             #expect(transport.logFindClientUsesSnapshotForTesting == false)
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "future-only needle"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4250,7 +4250,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("core"))
             #expect(transport.logVisibleFindBarSearchStringForTesting == "core")
             #expect(transport.logHasActiveFindQueryForTesting)
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "core appended while query is visible"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4297,7 +4297,7 @@ struct ReviewUITests {
             #expect(transport.setLogVisibleFindBarSearchStringForTesting("alpha"))
             #expect(transport.logFindStringLengthForTesting == initialLength)
 
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "beta appended after active search"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4349,7 +4349,7 @@ struct ReviewUITests {
             transport.setSelectedLogRangeForTesting(normalSelectionRange)
             #expect(transport.logSelectedTextForTesting == "copyable")
             #expect(transport.logHasActiveFindQueryForTesting == false)
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "needle appended after normal selection"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4396,7 +4396,7 @@ struct ReviewUITests {
             #expect(transport.logHasActiveFindQueryForTesting)
 
             let initialLength = (reviewChatLogText(for: chat) as NSString).length
-            appendChatLogEntryForTesting(
+            await appendChatLogEntryForTesting(
                 .init(kind: .progress, text: "active query appears after no-result search"),
                 to: chat.chatID,
                 turnID: chat.turnID
@@ -4461,7 +4461,7 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.setLogVisibleFindBarSearchStringForTesting(""))
         #expect(transport.logFindStringLengthForTesting == 0)
-        appendChatLogEntryForTesting(
+        await appendChatLogEntryForTesting(
             .init(kind: .progress, text: "needle first content"),
             to: chat.chatID,
             turnID: chat.turnID
