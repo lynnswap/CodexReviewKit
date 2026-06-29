@@ -616,6 +616,9 @@ private final class ReviewChatLogFixtureRetainer {
                 runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
                 continue
             }
+            guard previousItem != item else {
+                continue
+            }
             if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
                 runtime.appendPreviewText(
                     outputDelta,
@@ -921,6 +924,7 @@ private extension CodexChatItemSnapshot {
     func outputDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
         guard turnID == item.turnID,
               kind == item.kind,
+              preservesOutputDeltaMetadata(for: item),
               let previousOutput = commandOutputForTesting,
               let nextOutput = item.commandOutputForTesting,
               nextOutput.hasPrefix(previousOutput),
@@ -936,6 +940,7 @@ private extension CodexChatItemSnapshot {
             turnID == item.turnID,
             kind == item.kind,
             sameContentShapeForTesting(as: item),
+            preservesTextDeltaMetadata(for: item),
             let previousText = text,
             let nextText = item.text,
             nextText.hasPrefix(previousText),
@@ -946,11 +951,50 @@ private extension CodexChatItemSnapshot {
         return String(nextText.dropFirst(previousText.count))
     }
 
-    private var commandOutputForTesting: String? {
-        if case .command(let command) = content {
-            return command.output
+    private func preservesTextDeltaMetadata(for item: CodexChatItemSnapshot) -> Bool {
+        switch (content, item.content) {
+        case (.command, .command),
+            (.fileChange, .fileChange),
+            (.toolCall, .toolCall):
+            preservesOutputDeltaMetadata(for: item)
+        default:
+            true
         }
-        return nil
+    }
+
+    private func preservesOutputDeltaMetadata(for item: CodexChatItemSnapshot) -> Bool {
+        switch (content, item.content) {
+        case (.command(let previous), .command(let next)):
+            previous.command == next.command
+                && previous.cwd == next.cwd
+                && previous.exitCode == next.exitCode
+                && previous.status == next.status
+        case (.fileChange(let previous), .fileChange(let next)):
+            previous.path == next.path
+                && previous.status == next.status
+        case (.toolCall(let previous), .toolCall(let next)):
+            previous.namespace == next.namespace
+                && previous.server == next.server
+                && previous.name == next.name
+                && previous.arguments == next.arguments
+                && previous.error == next.error
+                && previous.status == next.status
+        default:
+            false
+        }
+    }
+
+    private var commandOutputForTesting: String? {
+        switch content {
+        case .command(let command):
+            return command.output
+        case .fileChange(let fileChange):
+            return fileChange.output
+        case .toolCall(let toolCall):
+            return toolCall.result
+        default:
+            return nil
+        }
     }
 
     private func sameContentShapeForTesting(as item: CodexChatItemSnapshot) -> Bool {

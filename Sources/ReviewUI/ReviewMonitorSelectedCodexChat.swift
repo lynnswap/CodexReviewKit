@@ -6,6 +6,8 @@ import ObservationBridge
 @MainActor
 @Observable
 final class ReviewMonitorSelectedCodexChat {
+    private static let incrementalLogUpdateCoalescingDelay: Duration = .milliseconds(10)
+
     private(set) var chatID: CodexThreadID?
     private(set) var chat: CodexChat?
     var phase: CodexDataPhase {
@@ -28,6 +30,10 @@ final class ReviewMonitorSelectedCodexChat {
     @ObservationIgnored
     private var observationTask: Task<Void, Never>?
     @ObservationIgnored
+    private var pendingLogSourceChange: ReviewMonitorLogSourceChange?
+    @ObservationIgnored
+    private var pendingLogSourceChangeTask: Task<Void, Never>?
+    @ObservationIgnored
     private var logProjection = ReviewMonitorSelectedCodexChatLogProjection()
     @ObservationIgnored
     private var modelSourceObservation: PortableObservationTracking.Token?
@@ -43,6 +49,7 @@ final class ReviewMonitorSelectedCodexChat {
 
     isolated deinit {
         modelSourceObservation?.cancel()
+        pendingLogSourceChangeTask?.cancel()
         cancelObservation()
     }
 
@@ -91,7 +98,8 @@ final class ReviewMonitorSelectedCodexChat {
         targetChatID = nextChatID
         chatID = nextChatID
         chat = nil
-        publishLogSourceChange(.clear)
+        cancelPendingLogSourceChange()
+        publishLogSourceChangeNow(.clear)
         logProjection.reset()
         boundModelContext = nextModelContext
 
@@ -146,6 +154,37 @@ final class ReviewMonitorSelectedCodexChat {
     }
 
     private func publishLogSourceChange(_ change: ReviewMonitorLogSourceChange?) {
+        guard let change else {
+            return
+        }
+        guard change.allowsIncrementalRender else {
+            cancelPendingLogSourceChange()
+            publishLogSourceChangeNow(change)
+            return
+        }
+        pendingLogSourceChange = change
+        guard pendingLogSourceChangeTask == nil else {
+            return
+        }
+        pendingLogSourceChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.incrementalLogUpdateCoalescingDelay)
+            guard let self, Task.isCancelled == false else {
+                return
+            }
+            let change = self.pendingLogSourceChange
+            self.pendingLogSourceChange = nil
+            self.pendingLogSourceChangeTask = nil
+            self.publishLogSourceChangeNow(change)
+        }
+    }
+
+    private func cancelPendingLogSourceChange() {
+        pendingLogSourceChangeTask?.cancel()
+        pendingLogSourceChangeTask = nil
+        pendingLogSourceChange = nil
+    }
+
+    private func publishLogSourceChangeNow(_ change: ReviewMonitorLogSourceChange?) {
         guard let change else {
             return
         }

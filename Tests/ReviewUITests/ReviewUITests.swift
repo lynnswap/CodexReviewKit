@@ -2114,11 +2114,15 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
+        let expectedWorkspaceGroupID = try #require(
+            viewController.sidebarViewControllerForTesting.workspaceGroupIDForTesting(cwd: chat.cwd)
+        )
         viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(cwd: chat.cwd)
 
         _ = try await awaitTransportRender(transport)
         #expect(
-            viewController.sidebarViewControllerForTesting.selectedWorkspaceGroupIDForTesting?.rawValue == chat.cwd)
+            viewController.sidebarViewControllerForTesting.selectedWorkspaceGroupIDForTesting
+                == expectedWorkspaceGroupID)
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(transport.isShowingNoFindingsStateForTesting)
     }

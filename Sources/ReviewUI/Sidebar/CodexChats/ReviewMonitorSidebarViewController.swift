@@ -692,6 +692,21 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             ?? row(forCodexSidebarSelectionID: .workspaceGroup(CodexWorkspaceGroupID(rawValue: cwd)))
     }
 
+    private func workspaceGroupID(forWorkspaceCWD cwd: String) -> CodexWorkspaceGroupID? {
+        let workspaceID = CodexWorkspaceID(rawValue: cwd)
+        for section in codexSidebarUnfilteredSections {
+            if section.workspaces.contains(where: { $0.id == workspaceID })
+                || section.items.contains(where: { $0.workspaceID == workspaceID })
+            {
+                return section.workspaceGroupID
+            }
+            if section.workspaceGroupID.rawValue == cwd || section.workspaceGroupID.rawValue == "cwd:\(cwd)" {
+                return section.workspaceGroupID
+            }
+        }
+        return nil
+    }
+
     private func row(for chatID: CodexThreadID) -> Int? {
         row(forCodexSidebarSelectionID: .chat(chatID))
     }
@@ -1405,6 +1420,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return id
         }
 
+        func workspaceGroupIDForTesting(cwd: String) -> CodexWorkspaceGroupID? {
+            workspaceGroupID(forWorkspaceCWD: cwd)
+        }
+
         var codexSidebarSectionsForTesting: [CodexFetchSection<CodexChat>] {
             codexSidebarLibrary?.sections ?? []
         }
@@ -1642,11 +1661,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         func clickWorkspaceHeaderForTesting(cwd: String) {
             view.layoutSubtreeIfNeeded()
-            guard let row = row(forWorkspaceCWD: cwd) else {
+            let workspaceGroupID = workspaceGroupID(forWorkspaceCWD: cwd) ?? CodexWorkspaceGroupID(rawValue: cwd)
+            guard
+                let row = row(forCodexSidebarSelectionID: .workspaceGroup(workspaceGroupID))
+                    ?? row(forWorkspaceCWD: cwd)
+            else {
                 uiState.selection = fallbackWorkspaceGroupSelection(cwd: cwd)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            updateSelectionFromOutlineView()
         }
 
         func focusSidebarForTesting() {

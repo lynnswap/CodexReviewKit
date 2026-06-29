@@ -152,9 +152,28 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private func enqueueNotification(_ operation: @escaping @MainActor () async -> Void) {
         let previousTask = notificationTask
-        notificationTask = Task { @MainActor in
+        notificationTask = Task { @MainActor [weak self] in
             await previousTask?.value
+            await self?.refreshRuntimeThreadStubs()
             await operation()
+        }
+    }
+
+    private func refreshRuntimeThreadStubs() async {
+        do {
+            try await ensureStarted()
+            guard let runtime else {
+                return
+            }
+            try await runtime.transport.stubThreads(currentThreadSnapshots())
+        } catch {
+        }
+    }
+
+    private func currentThreadSnapshots() -> [CodexThreadSnapshot] {
+        fixtures.map { fixture in
+            let snapshot = snapshotStorageByChatID[fixture.chatID] ?? fixture.initialSnapshot
+            return fixture.threadSnapshot(snapshot)
         }
     }
 
@@ -515,9 +534,11 @@ private struct PreviewThreadItemParams: Encodable, Sendable {
         var text: String?
         var phase: String?
         var command: String?
+        var cwd: String?
         var output: String?
         var exitCode: Int?
         var status: String?
+        var path: String?
     }
 }
 
@@ -552,9 +573,11 @@ private func makePreviewNotificationItem(
         text: previewNotificationText(content),
         phase: previewNotificationPhase(content),
         command: previewNotificationCommand(content),
+        cwd: previewNotificationCWD(content),
         output: previewNotificationOutput(content),
         exitCode: previewNotificationExitCode(content),
-        status: previewNotificationStatus(content)
+        status: previewNotificationStatus(content),
+        path: previewNotificationPath(content)
     )
 }
 
@@ -601,11 +624,22 @@ private func previewNotificationCommand(_ content: CodexThreadItem.Content) -> S
     return nil
 }
 
-private func previewNotificationOutput(_ content: CodexThreadItem.Content) -> String? {
+private func previewNotificationCWD(_ content: CodexThreadItem.Content) -> String? {
     if case .command(let command) = content {
-        return command.output
+        return command.cwd
     }
     return nil
+}
+
+private func previewNotificationOutput(_ content: CodexThreadItem.Content) -> String? {
+    switch content {
+    case .command(let command):
+        return command.output
+    case .fileChange(let fileChange):
+        return fileChange.output
+    default:
+        return nil
+    }
 }
 
 private func previewNotificationExitCode(_ content: CodexThreadItem.Content) -> Int? {
@@ -619,6 +653,8 @@ private func previewNotificationStatus(_ content: CodexThreadItem.Content) -> St
     switch content {
     case .command(let command):
         command.status?.rawValue
+    case .fileChange(let fileChange):
+        fileChange.status?.rawValue
     case .toolCall(let toolCall):
         toolCall.status?.rawValue
     default:
@@ -626,8 +662,19 @@ private func previewNotificationStatus(_ content: CodexThreadItem.Content) -> St
     }
 }
 
+private func previewNotificationPath(_ content: CodexThreadItem.Content) -> String? {
+    if case .fileChange(let fileChange) = content {
+        return fileChange.path
+    }
+    return nil
+}
+
 private extension ReviewMonitorPreviewChatLogFixture {
     var threadSnapshot: CodexThreadSnapshot {
+        threadSnapshot(initialSnapshot)
+    }
+
+    func threadSnapshot(_ snapshot: CodexChatSnapshot) -> CodexThreadSnapshot {
         CodexThreadSnapshot(
             id: chatID,
             workspace: workspaceCWD.map { URL(fileURLWithPath: $0, isDirectory: true) },
@@ -637,12 +684,12 @@ private extension ReviewMonitorPreviewChatLogFixture {
             updatedAt: updatedAt,
             recencyAt: recencyAt,
             status: status,
-            turns: initialSnapshot.turns.map { turn in
+            turns: snapshot.turns.map { turn in
                 CodexTurnSnapshot(
                     id: turn.id,
                     status: turn.status,
                     errorMessage: turn.errorDescription,
-                    items: initialSnapshot.items
+                    items: snapshot.items
                         .filter { $0.turnID == turn.id }
                         .map(\.threadItem)
                 )
