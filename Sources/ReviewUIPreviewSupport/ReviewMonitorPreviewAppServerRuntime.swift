@@ -104,6 +104,13 @@ final class ReviewMonitorPreviewAppServerRuntime {
         await threadStore.snapshot(id: chatID)?.chatSnapshot
     }
 
+    func interruptRequestCountForTesting() async -> Int {
+        guard let runtime else {
+            return 0
+        }
+        return await runtime.transport.recordedRequests(method: "turn/interrupt").count
+    }
+
     func upsertPreviewItem(
         id: String,
         kind: CodexThreadItem.Kind,
@@ -265,6 +272,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
         let container = CodexModelContainer(appServer: runtime.server)
         self.runtime = runtime
         try await rebindRuntimeToCurrentThreadStore(runtime)
+        await runtime.transport.stubJSON("{}", for: "turn/interrupt")
         self.container = container
         modelSource.install(container: container)
     }

@@ -64,11 +64,10 @@ extension ReviewUITests {
         #expect(sidebar.sidebarKindForTesting == .chatList)
     }
 
-    @Test func previewChatContextMenuCancelCancelsMatchingReviewRun() async throws {
+    @Test func previewChatContextMenuCancelInterruptsActiveFakeAppServerChat() async throws {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
-        let run = try #require(store.cancellableReviewRun(forChatID: selectedChatID.rawValue))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewContent: previewContent
         )
@@ -83,6 +82,8 @@ extension ReviewUITests {
             sidebar.sidebarKindForTesting == .chatList
                 && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
         }
+        #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
+        #expect(store.hasNonTerminalReviewRun(forChatID: selectedChatID.rawValue) == false)
 
         var presentedCancelItem = false
         var cancelItemWasEnabled = false
@@ -97,10 +98,13 @@ extension ReviewUITests {
 
         #expect(presentedCancelItem)
         #expect(cancelItemWasEnabled)
-        try await waitForCondition {
-            store.reviewRun(id: run.id)?.core.lifecycle.status == .cancelled
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.interruptRequestCountForTesting() == 0 {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
         }
-        #expect(store.reviewRun(id: run.id)?.core.lifecycle.cancellation?.source == .userInterface)
+        #expect(await previewContent.interruptRequestCountForTesting() == 1)
         #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
 
         var cancelItemEnabledAfterCancellation = false

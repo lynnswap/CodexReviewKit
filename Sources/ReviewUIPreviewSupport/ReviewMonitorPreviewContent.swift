@@ -44,6 +44,10 @@ public final class ReviewMonitorPreviewContentSource {
     public func snapshotForTesting(chatID: CodexThreadID) async -> CodexChatSnapshot? {
         await runtime.snapshotForTesting(chatID: chatID)
     }
+
+    public func interruptRequestCountForTesting() async -> Int {
+        await runtime.interruptRequestCountForTesting()
+    }
 }
 
 @MainActor
@@ -170,28 +174,7 @@ public enum ReviewMonitorPreviewContent {
         let cycle: Int
     }
 
-    private struct PreviewSidebarContent {
-        var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture]
-        var reviewRuns: [ReviewRunRecord]
-    }
-
     public static func makeStore() -> CodexReviewStore {
-        makeStore(previewContent: makeSidebarContent())
-    }
-
-    public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
-        let previewContent = makeSidebarContent()
-        let store = makeStore(previewContent: previewContent)
-        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
-            fixtures: previewContent.chatLogFixtures
-        )
-        return ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: previewRuntime
-        )
-    }
-
-    private static func makeStore(previewContent: PreviewSidebarContent) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
         )
@@ -200,10 +183,21 @@ public enum ReviewMonitorPreviewContent {
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            reviewRuns: previewContent.reviewRuns
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         return store
+    }
+
+    public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
+        let chatLogFixtures = makeChatLogFixtures()
+        let store = makeStore()
+        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
+            fixtures: chatLogFixtures
+        )
+        return ReviewMonitorPreviewContentSource(
+            store: store,
+            runtime: previewRuntime
+        )
     }
 
     public static func makeCommandOutputStore() -> CodexReviewStore {
@@ -238,13 +232,7 @@ public enum ReviewMonitorPreviewContent {
             serverState: .running,
             account: accounts.first,
             persistedAccounts: accounts,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            reviewRuns: [
-                makeReviewRunRecord(
-                    for: chatFixture,
-                    runIndex: 0
-                )
-            ]
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let fixture = makeChatLogFixture(
             for: chatFixture
@@ -632,7 +620,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    private static func makeSidebarContent() -> PreviewSidebarContent {
+    private static func makeChatLogFixtures() -> [ReviewMonitorPreviewChatLogFixture] {
         let now = Date()
         let workspacePaths = [
             "/path/to/workspace-alpha",
@@ -641,7 +629,6 @@ public enum ReviewMonitorPreviewContent {
         ]
 
         var chatLogFixtures: [ReviewMonitorPreviewChatLogFixture] = []
-        var reviewRuns: [ReviewRunRecord] = []
         for (workspaceIndex, cwd) in workspacePaths.enumerated() {
             let workspaceName = URL(fileURLWithPath: cwd).lastPathComponent
             for (chatIndex, definition) in makeChatDefinitions(for: workspaceName).enumerated() {
@@ -666,45 +653,9 @@ public enum ReviewMonitorPreviewContent {
                     makeChatLogFixture(
                         for: chatFixture
                     ))
-                reviewRuns.append(
-                    makeReviewRunRecord(
-                        for: chatFixture,
-                        runIndex: workspaceIndex * 100 + chatIndex
-                    ))
             }
         }
-        return PreviewSidebarContent(
-            chatLogFixtures: chatLogFixtures,
-            reviewRuns: reviewRuns
-        )
-    }
-
-    private static func makeReviewRunRecord(
-        for chatFixture: PreviewChatFixture,
-        runIndex: Int
-    ) -> ReviewRunRecord {
-        ReviewRunRecord(
-            id: "preview-run-\(runIndex)",
-            sessionID: "preview-session",
-            cwd: chatFixture.cwd,
-            targetSummary: chatFixture.targetSummary,
-            core: .init(
-                run: .init(
-                    reviewThreadID: chatFixture.chatID.rawValue,
-                    threadID: chatFixture.chatID.rawValue,
-                    turnID: chatFixture.turnID.rawValue,
-                    model: chatFixture.model
-                ),
-                lifecycle: .init(
-                    status: ReviewRunState(chatFixture.lifecycle),
-                    startedAt: chatFixture.startedAt,
-                    endedAt: chatFixture.endedAt,
-                    cancellation: chatFixture.lifecycle == .cancelled ? .system() : nil,
-                    errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil
-                ),
-                lifecycleMessage: chatFixture.summary
-            )
-        )
+        return chatLogFixtures
     }
 
     private static func makeChatLogFixture(
@@ -1121,23 +1072,6 @@ private extension CodexTurnStatus {
             self = .running
         case .succeeded:
             self = .completed
-        case .failed:
-            self = .failed
-        case .cancelled:
-            self = .cancelled
-        }
-    }
-}
-
-private extension ReviewRunState {
-    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle) {
-        switch lifecycle {
-        case .queued:
-            self = .queued
-        case .running:
-            self = .running
-        case .succeeded:
-            self = .succeeded
         case .failed:
             self = .failed
         case .cancelled:
