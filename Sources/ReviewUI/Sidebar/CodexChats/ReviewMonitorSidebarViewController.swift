@@ -97,8 +97,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarFetchedResults: CodexFetchedResults<CodexChat>?
     private var codexSidebarModelContext: CodexModelContext?
-    private var codexSidebarUnfilteredSections: [CodexFetchSection<CodexChat>] = []
-    private var codexSidebarDisplayedSections: [CodexFetchSection<CodexChat>] = []
     private var codexSidebarPresentationOrder = ReviewMonitorCodexSidebarPresentationOrder()
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
     private var appliedSidebarKind: SidebarKind?
@@ -144,7 +142,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         super.viewDidLoad()
         configureHierarchy()
         configureOutlineView()
-        applyCodexSidebarSections([])
+        applyCodexSidebarSourceSections([])
         bindObservation()
         bindCodexSidebarFetchedResults()
     }
@@ -315,7 +313,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let modelContext else {
             codexSidebarModelContext = nil
             codexSidebarFetchedResults = nil
-            applyCodexSidebarSections([])
+            applyCodexSidebarSourceSections([])
             return
         }
 
@@ -332,7 +330,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard event.kind != .initial else {
                 return
             }
-            self.applyCodexSidebarSections(sections)
+            self.applyCodexSidebarSourceSections(sections)
         }
         codexSidebarFetchTask = Task { @MainActor [weak self, fetchedResults] in
             do {
@@ -343,23 +341,40 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard self?.codexSidebarFetchedResults === fetchedResults else {
                 return
             }
-            self?.applyCodexSidebarSections(fetchedResults.sections)
+            self?.applyCodexSidebarSourceSections(fetchedResults.sections)
             self?.codexSidebarFetchTask = nil
         }
     }
 
-    private func applyCodexSidebarSections(_ sections: [CodexFetchSection<CodexChat>]) {
-        codexSidebarUnfilteredSections = sections
+    private var codexSidebarSourceSections: [CodexFetchSection<CodexChat>] {
+        codexSidebarFetchedResults?.sections ?? []
+    }
+
+    private func codexSidebarVisibleSections(
+        from sourceSections: [CodexFetchSection<CodexChat>]
+    ) -> [CodexFetchSection<CodexChat>] {
+        codexSidebarPresentationOrder
+            .applying(to: sourceSections)
+            .filtered(by: uiState.sidebarReviewChatFilter)
+    }
+
+    private var currentCodexSidebarVisibleSections: [CodexFetchSection<CodexChat>] {
+        codexSidebarVisibleSections(from: codexSidebarSourceSections)
+    }
+
+    private func applyCodexSidebarSourceSections(_ sections: [CodexFetchSection<CodexChat>]) {
         codexSidebarPresentationOrder.prune(to: sections)
-        applyFilteredCodexSidebarSections()
+        applyCodexSidebarVisibleSections(from: sections)
     }
 
     private func applyFilteredCodexSidebarSections() {
-        let sections =
-            codexSidebarPresentationOrder
-            .applying(to: codexSidebarUnfilteredSections)
-            .filtered(by: uiState.sidebarReviewChatFilter)
-        codexSidebarDisplayedSections = sections
+        applyCodexSidebarVisibleSections(from: codexSidebarSourceSections)
+    }
+
+    private func applyCodexSidebarVisibleSections(
+        from sourceSections: [CodexFetchSection<CodexChat>]
+    ) {
+        let sections = codexSidebarVisibleSections(from: sourceSections)
         let wasUsingCodexSidebarOutline = isUsingCodexSidebarOutline
         let applyResult = codexSidebarOutlineTree.apply(sections: sections)
         applySidebarKind(sidebarKind)
@@ -713,7 +728,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func workspaceGroupID(forWorkspaceCWD cwd: String) -> CodexWorkspaceGroupID? {
         let workspaceID = CodexWorkspaceID(rawValue: cwd)
-        for section in codexSidebarUnfilteredSections {
+        for section in codexSidebarSourceSections {
             if section.workspaces.contains(where: { $0.id == workspaceID })
                 || section.items.contains(where: { $0.workspaceID == workspaceID })
             {
@@ -781,25 +796,25 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func currentChatSelection(id: CodexThreadID) -> CodexChat? {
-        codexSidebarUnfilteredSections.chat(id: id)
+        codexSidebarSourceSections.chat(id: id)
     }
 
     private func displayedCodexSidebarSection(id: CodexWorkspaceGroupID) -> CodexFetchSection<CodexChat>? {
-        codexSidebarDisplayedSections.first { $0.sidebarWorkspaceGroupID == id }
+        currentCodexSidebarVisibleSections.first { $0.sidebarWorkspaceGroupID == id }
     }
 
     private func displayedCodexChat(id: CodexThreadID) -> CodexChat? {
-        codexSidebarDisplayedSections.chat(id: id)
+        currentCodexSidebarVisibleSections.chat(id: id)
             ?? currentChatSelection(id: id)
     }
 
     private func displayedCodexWorkspace(id: CodexWorkspaceID) -> CodexWorkspace? {
-        for section in codexSidebarDisplayedSections {
+        for section in currentCodexSidebarVisibleSections {
             if let workspace = section.workspaces.first(where: { $0.id == id }) {
                 return workspace
             }
         }
-        for section in codexSidebarUnfilteredSections {
+        for section in codexSidebarSourceSections {
             if let workspace = section.workspaces.first(where: { $0.id == id }) {
                 return workspace
             }
@@ -850,7 +865,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func codexWorkspaceGroupSection(
         id: CodexWorkspaceGroupID
     ) -> CodexFetchSection<CodexChat>? {
-        codexSidebarUnfilteredSections.first { $0.sidebarWorkspaceGroupID == id }
+        codexSidebarSourceSections.first { $0.sidebarWorkspaceGroupID == id }
     }
 
     private func codexChatSelection(id: CodexThreadID) -> CodexChat? {
@@ -1201,7 +1216,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func codexUnfilteredChatIDs(in container: ReviewMonitorCodexSidebarRowID) -> [CodexThreadID] {
-        for section in codexSidebarUnfilteredSections {
+        for section in codexSidebarSourceSections {
             if section.rowID == container {
                 if section.displaysWorkspaceNodes == false {
                     return section.items.map(\.id)
@@ -1606,7 +1621,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         func refreshCodexSidebarForTesting() async throws {
             try await codexSidebarFetchedResults?.refresh()
-            applyCodexSidebarSections(codexSidebarFetchedResults?.sections ?? [])
+            applyCodexSidebarSourceSections(codexSidebarFetchedResults?.sections ?? [])
         }
 
         var sidebarFullReloadCountForTesting: Int {
