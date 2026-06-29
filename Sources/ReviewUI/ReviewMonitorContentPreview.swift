@@ -34,7 +34,7 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
             authPhase: authPhase,
             account: account,
             serverState: serverState,
-            previewStore: previewStore()
+            previewContent: previewContent()
         )
         viewController.prepareForSwiftUIPreviewRendering()
         return viewController
@@ -62,7 +62,7 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
         return CGSize(width: width, height: height)
     }
 
-    private func previewStore() -> CodexReviewStore? {
+    private func previewContent() -> ReviewMonitorPreviewContentSource? {
         guard case .running = serverState else {
             return nil
         }
@@ -70,7 +70,7 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
         case .normal:
             return nil
         case .commandOutput:
-            return ReviewMonitorPreviewContent.makeCommandOutputStore()
+            return ReviewMonitorPreviewContent.makeCommandOutputContentSource()
         }
     }
 }

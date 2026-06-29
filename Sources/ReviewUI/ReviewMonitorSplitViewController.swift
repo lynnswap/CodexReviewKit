@@ -59,18 +59,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     ) {
         self.store = store
         self.uiState = uiState
-        #if DEBUG
-            if let codexModelSource {
-                self.codexModelSource = codexModelSource
-            } else if let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) {
-                previewRuntime.start()
-                self.codexModelSource = previewRuntime.modelSource
-            } else {
-                self.codexModelSource = nil
-            }
-        #else
-            self.codexModelSource = codexModelSource
-        #endif
+        self.codexModelSource = codexModelSource
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }

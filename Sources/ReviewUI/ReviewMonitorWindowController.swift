@@ -73,7 +73,9 @@ public final class ReviewMonitorWindowController: NSWindowController {
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
         initialSelection: ReviewMonitorSelection? = nil,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil,
+        appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)? = nil
     ) {
         self.init(
             store: store,
@@ -82,7 +84,9 @@ public final class ReviewMonitorWindowController: NSWindowController {
             initialSelection: initialSelection,
             frameAutosaveName: Self.frameAutosaveName,
             sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults,
-            showSettings: showSettings
+            showSettings: showSettings,
+            dependencyRetainer: dependencyRetainer,
+            appendPreviewChatLogStreamTickHandler: appendPreviewChatLogStreamTickHandler
         )
     }
 
@@ -93,7 +97,9 @@ public final class ReviewMonitorWindowController: NSWindowController {
         initialSelection: ReviewMonitorSelection? = nil,
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil,
+        appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)? = nil
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
@@ -107,7 +113,9 @@ public final class ReviewMonitorWindowController: NSWindowController {
             uiState: uiState,
             codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
-            showSettings: showSettings
+            showSettings: showSettings,
+            dependencyRetainer: dependencyRetainer,
+            appendPreviewChatLogStreamTickHandler: appendPreviewChatLogStreamTickHandler
         )
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
@@ -151,20 +159,35 @@ public final class ReviewMonitorWindowController: NSWindowController {
 @_spi(PreviewSupport)
 public extension ReviewMonitorWindowController {
     convenience init(
-        previewStore store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        previewContent: ReviewMonitorPreviewContentSource,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
-        let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store)
-        ReviewMonitorPreviewContent.retainPreviewRuntimeStreamer(
-            in: store,
-            interval: .milliseconds(40)
+        previewContent.startStreaming(interval: .milliseconds(40))
+        self.init(
+            store: previewContent.store,
+            codexModelSource: previewContent.codexModelSource,
+            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            initialSelection: previewContent.initialSelection,
+            showSettings: showSettings,
+            dependencyRetainer: previewContent,
+            appendPreviewChatLogStreamTickHandler: { tick in
+                let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
+                return nextTick
+            }
         )
+    }
+
+    convenience init(
+        previewStore store: CodexReviewStore,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        initialChatID: CodexThreadID? = nil,
+        showSettings: (@MainActor () -> Void)? = nil
+    ) {
         self.init(
             store: store,
-            codexModelSource: codexModelSource ?? previewRuntime?.modelSource,
+            codexModelSource: codexModelSource,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            initialSelection: previewRuntime?.initialSelection,
+            initialSelection: initialChatID.map(ReviewMonitorSelection.chat),
             showSettings: showSettings
         )
     }

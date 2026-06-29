@@ -17,6 +17,8 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let codexModelSource: ReviewMonitorCodexModelSource?
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
+    private let dependencyRetainer: AnyObject?
+    private let appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)?
     private var observation: PortableObservationTracking.Token?
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
@@ -42,7 +44,9 @@ final class ReviewMonitorRootViewController: NSViewController {
             uiState: uiState,
             codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
             contentTransitionAnimator: contentTransitionAnimator,
-            showSettings: showSettings
+            showSettings: showSettings,
+            dependencyRetainer: nil,
+            appendPreviewChatLogStreamTickHandler: nil
         )
     }
 
@@ -51,13 +55,17 @@ final class ReviewMonitorRootViewController: NSViewController {
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-        showSettings: (@MainActor () -> Void)? = nil
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil,
+        appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)? = nil
     ) {
         self.store = store
         self.uiState = uiState
         self.codexModelSource = codexModelSource
         self.contentTransitionAnimator = contentTransitionAnimator
         self.showSettings = showSettings
+        self.dependencyRetainer = dependencyRetainer
+        self.appendPreviewChatLogStreamTickHandler = appendPreviewChatLogStreamTickHandler
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -254,10 +262,7 @@ extension ReviewMonitorRootViewController {
 
     @discardableResult
     func appendPreviewChatLogStreamTickForTesting(after tick: Int = 0) async -> Int? {
-        guard let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) else {
-            return nil
-        }
-        return await previewRuntime.appendPreviewStreamTick(after: tick)
+        await appendPreviewChatLogStreamTickHandler?(tick)
     }
 
     var splitViewControllerForTesting: ReviewMonitorSplitViewController {
@@ -299,14 +304,27 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
     account: CodexReviewAccount? = nil,
     serverState: CodexReviewServerState = .running,
+    previewContent: ReviewMonitorPreviewContentSource? = nil,
     previewStore: CodexReviewStore? = nil
 ) -> ReviewMonitorRootViewController {
     let store: CodexReviewStore
-    let ownsPreviewStore = previewStore == nil
+    let resolvedPreviewContent: ReviewMonitorPreviewContentSource?
+    let ownsPreviewContent = previewContent == nil && previewStore == nil
     switch serverState {
     case .running:
-        store = previewStore ?? ReviewMonitorPreviewContent.makeStore()
+        if let previewContent {
+            resolvedPreviewContent = previewContent
+            store = previewContent.store
+        } else if let previewStore {
+            resolvedPreviewContent = nil
+            store = previewStore
+        } else {
+            let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+            resolvedPreviewContent = previewContent
+            store = previewContent.store
+        }
     case .failed, .starting, .stopped:
+        resolvedPreviewContent = nil
         store = CodexReviewStore.makePreviewStore()
         store.serverState = serverState
         store.serverURL = nil
@@ -317,24 +335,31 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
     store.auth.selectPersistedAccount(resolvedAccount?.id)
     let uiState = ReviewMonitorUIState(auth: store.auth)
-    if uiState.selection == nil,
-       let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) {
-        uiState.selection = previewRuntime.initialSelection
+    if uiState.selection == nil {
+        uiState.selection = resolvedPreviewContent?.initialSelection
     }
-    if ownsPreviewStore,
-       ReviewMonitorPreviewContent.previewRuntime(from: store) != nil {
-        ReviewMonitorPreviewContent.retainPreviewRuntimeStreamer(
-            in: store,
-            interval: .milliseconds(40)
-        )
+    if let resolvedPreviewContent {
+        if ownsPreviewContent {
+            resolvedPreviewContent.startStreaming(interval: .milliseconds(40))
+        } else {
+            resolvedPreviewContent.start()
+        }
+    }
+    let appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)?
+    if let previewContent = resolvedPreviewContent {
+        appendPreviewChatLogStreamTickHandler = { tick in
+            let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
+            return nextTick
+        }
     } else {
-        ReviewMonitorPreviewContent.previewRuntime(from: store)?.start()
+        appendPreviewChatLogStreamTickHandler = nil
     }
-    let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store)
     return ReviewMonitorRootViewController(
         store: store,
         uiState: uiState,
-        codexModelSource: previewRuntime?.modelSource
+        codexModelSource: resolvedPreviewContent?.codexModelSource,
+        dependencyRetainer: resolvedPreviewContent,
+        appendPreviewChatLogStreamTickHandler: appendPreviewChatLogStreamTickHandler
     )
 }
 #endif

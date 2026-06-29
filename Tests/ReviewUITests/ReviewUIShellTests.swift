@@ -22,10 +22,11 @@ extension ReviewUITests {
     }
 
     @Test func previewPreparationLoadsSelectedChatStreamBeforeWindowAttachment() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
 
         #expect(viewController.isViewLoaded == false)
@@ -62,11 +63,12 @@ extension ReviewUITests {
     }
 
     @Test func previewChatContextMenuCancelCancelsMatchingReviewRun() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
         let run = try #require(store.cancellableReviewRun(forChatID: selectedChatID.rawValue))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -110,13 +112,13 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
-        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
-        let selectedSnapshot = try #require(previewRuntime.snapshotForTesting(chatID: selectedChatID))
+        let selectedSnapshot = try #require(previewContent.snapshotForTesting(chatID: selectedChatID))
         let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
 
         viewController.loadViewIfNeeded()
@@ -132,9 +134,9 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerStreamsSelectedChatLogDuringViewLifecycle() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
 
         viewController.loadViewIfNeeded()
@@ -840,13 +842,13 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
-        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
         let selectedChatID = try #require(previewSelectedChatID(in: store))
-        let selectedSnapshot = try #require(previewRuntime.snapshotForTesting(chatID: selectedChatID))
+        let selectedSnapshot = try #require(previewContent.snapshotForTesting(chatID: selectedChatID))
         let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -864,9 +866,9 @@ extension ReviewUITests {
     }
 
     @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore()
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
-            previewStore: store
+            previewContent: previewContent
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1629,14 +1631,12 @@ extension ReviewUITests {
     }
 
     @Test func previewRunningChatsAppendPseudoStreamWhenTicked() async throws {
-        let source = try #require(ReviewMonitorPreviewContent.previewRuntime(
-            from: ReviewMonitorPreviewContent.makeStore()
-        ))
+        let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
         let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
 
-        await source.appendPreviewStreamTick()
+        await source.appendPreviewChatLogStreamTick()
 
         let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
@@ -1651,16 +1651,14 @@ extension ReviewUITests {
     }
 
     @Test func previewChatStreamUsesMixedLogKinds() async throws {
-        let source = try #require(ReviewMonitorPreviewContent.previewRuntime(
-            from: ReviewMonitorPreviewContent.makeStore()
-        ))
+        let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
         let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
         for _ in 0..<720 {
-            tick = await source.appendPreviewStreamTick(after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
 
         let updatedSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
@@ -1687,32 +1685,30 @@ extension ReviewUITests {
     }
 
     @Test func previewChatStreamWaitsAfterEachCompletedItemAndDrainsChunks() async throws {
-        let source = try #require(ReviewMonitorPreviewContent.previewRuntime(
-            from: ReviewMonitorPreviewContent.makeStore()
-        ))
+        let source = ReviewMonitorPreviewContent.makeContentSource()
         let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
         let initialSnapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
-        tick = await source.appendPreviewStreamTick(after: tick)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
         var snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
         #expect(snapshot.items.last?.kind.rawValue == "event")
 
         for _ in 0..<38 {
-            tick = await source.appendPreviewStreamTick(after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
         snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
 
-        tick = await source.appendPreviewStreamTick(after: tick)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
         snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 2)
         #expect(snapshot.items.last?.kind.rawValue == "plan")
 
         for _ in 0..<180 where snapshot.items.last?.kind.rawValue != "reasoning" {
-            tick = await source.appendPreviewStreamTick(after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
             snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         }
         let firstReasoning = try #require(snapshot.items.last)
@@ -1722,7 +1718,7 @@ extension ReviewUITests {
         var latestReasoningText = initialReasoningText
 
         for _ in 0..<80 {
-            tick = await source.appendPreviewStreamTick(after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
             snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
             let item = try #require(snapshot.items.first { $0.id == reasoningID })
             let text = reasoningText(item)
@@ -1735,12 +1731,12 @@ extension ReviewUITests {
         #expect(latestReasoningText.count > initialReasoningText.count)
         let countAfterReasoning = snapshot.items.count
         for _ in 0..<37 {
-            tick = await source.appendPreviewStreamTick(after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
         snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == countAfterReasoning)
 
-        tick = await source.appendPreviewStreamTick(after: tick)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
         snapshot = try #require(source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == countAfterReasoning + 1)
         #expect(snapshot.items.last?.kind.rawValue == "commandExecution")

@@ -219,18 +219,25 @@ func replaceChatLogTextForTesting(
 }
 
 @MainActor
+@discardableResult
 func installPreviewChatLogSourceForTesting(
     on store: CodexReviewStore,
     fixtures: [ReviewChatFixtureForTesting]
-) {
+) -> ReviewMonitorPreviewAppServerRuntime {
     let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
     let runtime = ReviewMonitorPreviewAppServerRuntime(fixtures: fixtures)
-    store.previewSupportRetainer = runtime
-    runStorePreviewSupportRetainers.append(
-        ReviewChatLogFixtureRetainer(
-            runtime: runtime,
-            chatIDs: Set(fixtures.map(\.chatID))
-        ))
+    let retainer = ReviewChatLogFixtureRetainer(
+        runtime: runtime,
+        chatIDs: Set(fixtures.map(\.chatID))
+    )
+    runStorePreviewSupportRetainers.append(retainer)
+    previewSupportRetainersByStore[ObjectIdentifier(store)] = retainer
+    return runtime
+}
+
+@MainActor
+func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
+    previewSupportRetainersByStore[ObjectIdentifier(store)]?.runtime
 }
 
 @MainActor
@@ -584,6 +591,8 @@ private final class ReviewChatLogFixtureRetainer {
 
 @MainActor
 private var runStorePreviewSupportRetainers: [ReviewChatLogFixtureRetainer] = []
+@MainActor
+private var previewSupportRetainersByStore: [ObjectIdentifier: ReviewChatLogFixtureRetainer] = [:]
 
 @MainActor
 private func makeChatItems(

@@ -18,7 +18,6 @@ public final class CodexReviewStore {
     @ObservationIgnored package let backend: any CodexReviewStoreBackend
     @ObservationIgnored package let networkMonitor: any CodexReviewNetworkMonitoring
     @ObservationIgnored package let networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy
-    @ObservationIgnored package var previewSupportRetainer: AnyObject?
     @ObservationIgnored package let clock: CodexReviewClock
     @ObservationIgnored package let idGenerator: CodexReviewIDGenerator
     @ObservationIgnored let runtimeState = CodexReviewStoreRuntimeState()

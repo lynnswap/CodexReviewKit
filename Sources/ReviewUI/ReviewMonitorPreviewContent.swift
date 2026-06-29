@@ -4,6 +4,44 @@ import CodexKit
 
 @_spi(PreviewSupport)
 @MainActor
+public final class ReviewMonitorPreviewContentSource {
+    public let store: CodexReviewStore
+    public let codexModelSource: ReviewMonitorCodexModelSource
+    let runtime: ReviewMonitorPreviewAppServerRuntime
+
+    init(
+        store: CodexReviewStore,
+        runtime: ReviewMonitorPreviewAppServerRuntime
+    ) {
+        self.store = store
+        self.runtime = runtime
+        self.codexModelSource = runtime.modelSource
+    }
+
+    var initialSelection: ReviewMonitorSelection? {
+        runtime.initialSelection
+    }
+
+    func start() {
+        runtime.start()
+    }
+
+    func startStreaming(interval: Duration) {
+        runtime.startStreaming(interval: interval)
+    }
+
+    @discardableResult
+    func appendPreviewChatLogStreamTick(after tick: Int = 0) async -> Int {
+        await runtime.appendPreviewStreamTick(after: tick)
+    }
+
+    func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
+        runtime.snapshotForTesting(chatID: chatID)
+    }
+}
+
+@_spi(PreviewSupport)
+@MainActor
 public enum ReviewMonitorPreviewContent {
     fileprivate enum PreviewChatLifecycle {
         case queued
@@ -134,11 +172,28 @@ public enum ReviewMonitorPreviewContent {
 
     @_spi(PreviewSupport)
     public static func makeStore() -> CodexReviewStore {
+        let previewContent = makeSidebarContent()
+        return makeStore(previewContent: previewContent)
+    }
+
+    @_spi(PreviewSupport)
+    public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
+        let previewContent = makeSidebarContent()
+        let store = makeStore(previewContent: previewContent)
+        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
+            fixtures: previewContent.chatLogFixtures
+        )
+        return ReviewMonitorPreviewContentSource(
+            store: store,
+            runtime: previewRuntime
+        )
+    }
+
+    private static func makeStore(previewContent: PreviewSidebarContent) -> CodexReviewStore {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
         )
         let accounts = makePreviewAccounts()
-        let previewContent = makeSidebarContent()
         store.loadForTesting(
             serverState: .running,
             account: accounts.first,
@@ -146,23 +201,16 @@ public enum ReviewMonitorPreviewContent {
             serverURL: URL(string: "http://localhost:9417/mcp"),
             reviewRuns: previewContent.reviewRuns
         )
-        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
-            fixtures: previewContent.chatLogFixtures
-        )
-        store.previewSupportRetainer = previewRuntime
         return store
-    }
-
-    static func previewRuntime(from store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
-        store.previewSupportRetainer as? ReviewMonitorPreviewAppServerRuntime
-    }
-
-    static func retainPreviewRuntimeStreamer(in store: CodexReviewStore, interval: Duration) {
-        previewRuntime(from: store)?.startStreaming(interval: interval)
     }
 
     @_spi(PreviewSupport)
     public static func makeCommandOutputStore() -> CodexReviewStore {
+        makeCommandOutputContentSource().store
+    }
+
+    @_spi(PreviewSupport)
+    public static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
         )
@@ -201,8 +249,10 @@ public enum ReviewMonitorPreviewContent {
         let fixture = makeChatLogFixture(
             for: chatFixture
         )
-        store.previewSupportRetainer = ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
-        return store
+        return ReviewMonitorPreviewContentSource(
+            store: store,
+            runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
+        )
     }
 
     package static func streamFrame(

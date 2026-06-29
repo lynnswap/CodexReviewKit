@@ -2313,10 +2313,12 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
+        let previewRuntime = try #require(previewRuntimeForTesting(on: store))
+        previewRuntime.start()
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth)
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            codexModelSource: previewRuntime.modelSource
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2358,10 +2360,12 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
+        let previewRuntime = try #require(previewRuntimeForTesting(on: store))
+        previewRuntime.start()
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth)
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            codexModelSource: previewRuntime.modelSource
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2799,10 +2803,12 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
+        let previewRuntime = try #require(previewRuntimeForTesting(on: store))
+        previewRuntime.start()
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth)
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            codexModelSource: previewRuntime.modelSource
         )
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
