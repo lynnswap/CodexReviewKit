@@ -515,16 +515,19 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 
 }
 
-#if DEBUG
 @MainActor
 extension ReviewMonitorSplitViewController {
-    func prepareForImmediateRenderingForTesting() {
+    func prepareForImmediateRenderingForPreviewSupport() {
         loadViewIfNeeded()
         sidebarViewController?.loadViewIfNeeded()
         transportViewController?.loadViewIfNeeded()
         view.layoutSubtreeIfNeeded()
     }
+}
 
+#if DEBUG
+@MainActor
+extension ReviewMonitorSplitViewController {
     enum AddAccountToolbarItemModeForTesting: Equatable {
         case add
         case progress

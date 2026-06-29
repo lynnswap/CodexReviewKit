@@ -89,7 +89,7 @@ public extension NSViewController {
             view.layoutSubtreeIfNeeded()
             return
         }
-        rootViewController.prepareForImmediateRenderingForTesting()
+        rootViewController.prepareForImmediateRenderingForPreviewSupport()
     }
 
     @discardableResult

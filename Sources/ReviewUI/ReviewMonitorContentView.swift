@@ -266,16 +266,19 @@ public final class ReviewMonitorRootViewController: NSViewController {
     }
 }
 
-#if DEBUG
 @MainActor
 extension ReviewMonitorRootViewController {
     @_spi(PreviewSupport)
-    public func prepareForImmediateRenderingForTesting() {
+    public func prepareForImmediateRenderingForPreviewSupport() {
         loadViewIfNeeded()
-        splitViewController.prepareForImmediateRenderingForTesting()
+        splitViewController.prepareForImmediateRenderingForPreviewSupport()
         view.layoutSubtreeIfNeeded()
     }
+}
 
+#if DEBUG
+@MainActor
+extension ReviewMonitorRootViewController {
     var splitViewControllerForTesting: ReviewMonitorSplitViewController {
         splitViewController
     }
