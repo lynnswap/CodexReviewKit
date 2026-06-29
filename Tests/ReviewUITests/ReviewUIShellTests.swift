@@ -198,6 +198,90 @@ extension ReviewUITests {
         #expect(interruptRequestCount == 1)
     }
 
+    @Test func activeChatContextMenuCancelDoesNotBypassPendingReviewCancellation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-with-pending-run-cancel")
+        let turnID = CodexTurnID(rawValue: "pending-turn")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Pending cancellation chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: []),
+                        turns: [
+                            .init(id: turnID, status: .running)
+                        ]
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: chatID,
+                status: .active(activeFlags: []),
+                turns: [
+                    .init(id: turnID, status: .running)
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+        let pendingRun = ReviewRunRecord.makeForTesting(
+            id: "pending-cancellation-run",
+            cwd: repo.path,
+            targetSummary: "Pending cancellation review run",
+            threadID: chatID.rawValue,
+            turnID: "pending-review-turn",
+            status: .running,
+            cancellationRequested: true,
+            startedAt: Date(timeIntervalSince1970: 4_000),
+            summary: "Cancellation requested."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [pendingRun]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Pending cancellation chat"
+        }
+
+        #expect(store.hasReviewRun(forChatID: chatID.rawValue))
+        #expect(store.hasCancellableReview(forChatID: chatID.rawValue) == false)
+
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        #expect(cancelItemWasEnabled)
+        try await Task.sleep(for: .milliseconds(100))
+        let resumeRequestCount = await runtime.transport.recordedRequests(method: "thread/resume").count
+        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        #expect(resumeRequestCount == 0)
+        #expect(interruptRequestCount == 0)
+    }
+
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
         let store = previewContent.store

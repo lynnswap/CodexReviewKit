@@ -30,9 +30,19 @@ struct ReviewMonitorChatContextMenuView: View {
         Task {
             if store.hasCancellableReview(forChatID: chatID) {
                 _ = try? await store.cancelReview(chatID: chatID, cancellation: .userInterface())
-            } else if chat.status?.isActive == true {
+            } else if shouldCancelActiveChatDirectly(chatID: chatID) {
                 _ = try? await chat.cancel()
             }
         }
+    }
+
+    private func shouldCancelActiveChatDirectly(chatID: String) -> Bool {
+        guard chat.status?.isActive == true else {
+            return false
+        }
+        guard let reviewRun = store.reviewRun(forChatID: chatID) else {
+            return true
+        }
+        return reviewRun.isTerminal
     }
 }
