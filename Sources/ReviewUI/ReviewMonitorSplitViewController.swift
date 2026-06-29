@@ -32,6 +32,8 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private var addAccountToolbarItem: ReviewMonitorAddAccountToolbarItem?
     private var toolbarMembershipObservation: PortableObservationTracking.Token?
     private var windowTitleObservation: PortableObservationTracking.Token?
+    private var codexSelectionTitleResolver: ReviewMonitorCodexSelectionTitleResolver?
+    private weak var codexSelectionTitleResolverContext: CodexModelContext?
     private var sidebarCollapseObservation: NSKeyValueObservation?
     private var windowCancellable: AnyCancellable?
     private weak var attachedWindow: NSWindow?
@@ -81,12 +83,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             uiState: uiState,
             codexModelSource: codexModelSource
         )
-        sidebarViewController.codexSidebarContentDidChange = { [weak self] in
-            guard let self else {
-                return
-            }
-            self.applyWindowTitle(self.windowTitlePresentation(for: self.uiState.selection))
-        }
         let transportViewController = ReviewMonitorTransportViewController(
             uiState: uiState,
             codexModelSource: codexModelSource
@@ -209,6 +205,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
             guard let self else {
                 return
             }
+            _ = self.codexModelSource?.modelContext
             let presentation = self.windowTitlePresentation(for: uiState.selection)
             self.applyWindowTitle(presentation)
         }
@@ -244,28 +241,36 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private func windowTitlePresentation(
         for selection: ReviewMonitorSelection?
     ) -> WindowTitlePresentation {
-        switch selection {
-        case .workspaceGroup(let id):
-            guard let presentation = sidebarViewController?.codexWorkspaceGroupTitlePresentation(id: id) else {
-                return WindowTitlePresentation(title: "", subtitle: "")
-            }
-            return WindowTitlePresentation(title: presentation.title, subtitle: presentation.subtitle)
-        case .workspace(let id):
-            guard let presentation = sidebarViewController?.codexWorkspaceTitlePresentation(id: id) else {
-                return WindowTitlePresentation(title: "", subtitle: "")
-            }
-            return WindowTitlePresentation(title: presentation.title, subtitle: presentation.subtitle)
-        case .chat(let id):
-            guard let presentation = sidebarViewController?.codexChatTitlePresentation(id: id) else {
-                return WindowTitlePresentation(title: "", subtitle: "")
-            }
-            return WindowTitlePresentation(
-                title: presentation.title,
-                subtitle: presentation.subtitle
-            )
-        case nil:
+        guard let presentation = codexSelectionTitlePresentation(for: selection) else {
             return WindowTitlePresentation(title: "", subtitle: "")
         }
+        return WindowTitlePresentation(
+            title: presentation.title,
+            subtitle: presentation.subtitle
+        )
+    }
+
+    private func codexSelectionTitlePresentation(
+        for selection: ReviewMonitorSelection?
+    ) -> ReviewMonitorCodexSelectionTitlePresentation? {
+        guard let modelContext = codexModelSource?.modelContext else {
+            return nil
+        }
+        let resolver = codexSelectionTitleResolver(for: modelContext)
+        return resolver.titlePresentation(for: selection)
+    }
+
+    private func codexSelectionTitleResolver(
+        for modelContext: CodexModelContext
+    ) -> ReviewMonitorCodexSelectionTitleResolver {
+        if let codexSelectionTitleResolver,
+           codexSelectionTitleResolverContext === modelContext {
+            return codexSelectionTitleResolver
+        }
+        let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: modelContext)
+        codexSelectionTitleResolver = resolver
+        codexSelectionTitleResolverContext = modelContext
+        return resolver
     }
 
     private func applyWindowTitle(_ presentation: WindowTitlePresentation) {

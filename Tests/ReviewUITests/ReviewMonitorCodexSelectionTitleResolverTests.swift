@@ -33,8 +33,8 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                 ]
             ))
 
+        try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
-        try await resolver.refresh()
 
         let appWorkspace = try #require(context.model(for: workspaceID(for: app)))
         let workspaceGroup = try #require(appWorkspace.workspaceGroup)
@@ -77,8 +77,8 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                 ]
             ))
 
+        try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
-        try await resolver.refresh()
 
         let workspace = try #require(context.model(for: workspaceID(for: repo)))
         let workspaceGroup = try #require(workspace.workspaceGroup)
@@ -109,8 +109,8 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                 ]
             ))
 
+        try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
-        try await resolver.refresh()
 
         #expect(
             resolver.titlePresentation(for: .chat(floatingThreadID))
@@ -129,8 +129,8 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
 
         try await runtime.transport.enqueueThreadList(.init(threads: []))
 
+        try await loadReviewChats(in: context)
         let resolver = ReviewMonitorCodexSelectionTitleResolver(modelContext: context)
-        try await resolver.refresh()
 
         #expect(resolver.titlePresentation(for: nil) == nil)
         #expect(
@@ -140,6 +140,18 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
             resolver.titlePresentation(for: .workspace(CodexWorkspaceID(rawValue: "/missing"))) == nil
         )
     }
+}
+
+@MainActor
+private func loadReviewChats(in context: CodexModelContext) async throws {
+    let results = context.fetchedResults(
+        for: CodexFetchDescriptor<CodexChat>(
+            predicate: .init(sourceKinds: [.subAgentReview]),
+            sortBy: [CodexSortDescriptor(\.updatedAt, order: .reverse)]
+        ),
+        sectionedBy: .workspaceGroup
+    )
+    try await results.performFetch()
 }
 
 private func workspaceID(for url: URL) -> CodexWorkspaceID {

@@ -9,18 +9,9 @@ struct ReviewMonitorCodexSelectionTitlePresentation: Equatable, Sendable {
 @MainActor
 final class ReviewMonitorCodexSelectionTitleResolver {
     private let modelContext: CodexModelContext
-    private let fetchedChats: CodexFetchedResults<CodexChat>
 
     init(modelContext: CodexModelContext) {
         self.modelContext = modelContext
-        self.fetchedChats = modelContext.fetchedResults(
-            for: Self.codexReviewChatsDescriptor,
-            sectionedBy: .workspaceGroup
-        )
-    }
-
-    func refresh() async throws {
-        try await fetchedChats.performFetch()
     }
 
     func titlePresentation(
@@ -51,7 +42,7 @@ final class ReviewMonitorCodexSelectionTitleResolver {
     }
 
     private func loadedChat(id: CodexThreadID) -> CodexChat? {
-        fetchedChats.items.first { $0.id == id }
+        modelContext.registeredModel(for: id)
     }
 
     private static func titlePresentation(
@@ -86,13 +77,6 @@ final class ReviewMonitorCodexSelectionTitleResolver {
         ReviewMonitorCodexSelectionTitlePresentation(
             title: chat.title,
             subtitle: chat.workspace?.url.path ?? ""
-        )
-    }
-
-    private static var codexReviewChatsDescriptor: CodexFetchDescriptor<CodexChat> {
-        CodexFetchDescriptor<CodexChat>(
-            predicate: .init(sourceKinds: [.subAgentReview]),
-            sortBy: [CodexSortDescriptor(\.updatedAt, order: .reverse)]
         )
     }
 }
