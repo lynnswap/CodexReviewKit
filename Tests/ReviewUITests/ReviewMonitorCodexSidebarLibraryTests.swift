@@ -276,6 +276,25 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(filtered.chat(id: idleThreadID) == nil)
     }
 
+    @Test func sidebarChatRunningStateUsesThreadStatus() {
+        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+        let runningChat = sidebarChat(
+            id: CodexThreadID(rawValue: "thread-running"),
+            title: "Running review",
+            workspaceID: workspaceID,
+            status: .active(activeFlags: [])
+        )
+        let idleChat = sidebarChat(
+            id: CodexThreadID(rawValue: "thread-idle"),
+            title: "Idle review",
+            workspaceID: workspaceID,
+            status: .idle
+        )
+
+        #expect(runningChat.isRunning)
+        #expect(idleChat.isRunning == false)
+    }
+
     @Test func sidebarSnapshotLatestFinishedFilterUsesSectionActivityDate() throws {
         let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
         let olderFinishedID = CodexThreadID(rawValue: "thread-older-finished")

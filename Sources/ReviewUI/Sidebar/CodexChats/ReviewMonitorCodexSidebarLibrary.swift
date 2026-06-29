@@ -162,11 +162,14 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
 
         private enum Source: Equatable {
             case codex(CodexChat)
+            case preview(ReviewMonitorPreviewChat)
             case fixture(Fixture)
 
             static func == (lhs: Source, rhs: Source) -> Bool {
                 switch (lhs, rhs) {
                 case (.codex(let lhs), .codex(let rhs)):
+                    lhs === rhs
+                case (.preview(let lhs), .preview(let rhs)):
                     lhs === rhs
                 case (.fixture(let lhs), .fixture(let rhs)):
                     lhs == rhs
@@ -211,11 +214,28 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             self.source = .codex(chat)
         }
 
+        package init(previewChat: ReviewMonitorPreviewChat) {
+            self.rowID = .chat(previewChat.id)
+            self.id = previewChat.id
+            self.source = .preview(previewChat)
+        }
+
         package var codexChat: CodexChat? {
             switch source {
             case .codex(let chat):
                 chat
+            case .preview, .fixture:
+                nil
+            }
+        }
+
+        package var previewChat: ReviewMonitorPreviewChat? {
+            switch source {
+            case .preview(let chat):
+                chat
             case .fixture:
+                nil
+            case .codex:
                 nil
             }
         }
@@ -223,6 +243,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
         package var title: String {
             switch source {
             case .codex(let chat):
+                chat.title
+            case .preview(let chat):
                 chat.title
             case .fixture(let fixture):
                 fixture.title
@@ -233,6 +255,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             switch source {
             case .codex(let chat):
                 chat.preview
+            case .preview(let chat):
+                chat.preview
             case .fixture(let fixture):
                 fixture.preview
             }
@@ -242,6 +266,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             switch source {
             case .codex(let chat):
                 chat.modelProvider
+            case .preview(let chat):
+                chat.model
             case .fixture(let fixture):
                 fixture.model
             }
@@ -251,6 +277,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             switch source {
             case .codex(let chat):
                 chat.workspace?.url.path
+            case .preview(let chat):
+                chat.workspaceCWD
             case .fixture(let fixture):
                 fixture.workspaceCWD
             }
@@ -259,6 +287,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
         package var updatedAt: Date? {
             switch source {
             case .codex(let chat):
+                chat.updatedAt
+            case .preview(let chat):
                 chat.updatedAt
             case .fixture(let fixture):
                 fixture.updatedAt
@@ -269,6 +299,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
             switch source {
             case .codex(let chat):
                 chat.recencyAt
+            case .preview(let chat):
+                chat.recencyAt
             case .fixture(let fixture):
                 fixture.recencyAt
             }
@@ -277,6 +309,8 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
         package var status: CodexThreadStatus? {
             switch source {
             case .codex(let chat):
+                chat.status
+            case .preview(let chat):
                 chat.status
             case .fixture(let fixture):
                 fixture.status

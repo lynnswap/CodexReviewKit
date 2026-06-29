@@ -32,20 +32,20 @@ final class ReviewMonitorPreviewChatLogSource {
     let snapshot: ReviewMonitorCodexSidebarSnapshot
     let initialChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
-    private let previewChats: [PreviewReviewChat]
-    private let previewChatsByID: [CodexThreadID: PreviewReviewChat]
+    private let previewChats: [ReviewMonitorPreviewChat]
+    private let previewChatsByID: [CodexThreadID: ReviewMonitorPreviewChat]
 
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
         var sections: [ReviewMonitorCodexSidebarSnapshot.Section] = []
         var sectionIndexesByCWD: [String: Int] = [:]
-        var previewChats: [PreviewReviewChat] = []
-        var previewChatsByID: [CodexThreadID: PreviewReviewChat] = [:]
+        var previewChats: [ReviewMonitorPreviewChat] = []
+        var previewChatsByID: [CodexThreadID: ReviewMonitorPreviewChat] = [:]
         var initialRunningChat: ReviewMonitorCodexSidebarSnapshot.Chat?
         var firstChat: ReviewMonitorCodexSidebarSnapshot.Chat?
 
         for fixture in fixtures {
-            let previewChat = PreviewReviewChat(fixture: fixture)
-            let chat = previewChat.chat
+            let previewChat = ReviewMonitorPreviewChat(fixture: fixture)
+            let chat = ReviewMonitorCodexSidebarSnapshot.Chat(previewChat: previewChat)
             previewChats.append(previewChat)
             previewChatsByID[chat.id] = previewChat
             firstChat = firstChat ?? chat
@@ -108,6 +108,10 @@ final class ReviewMonitorPreviewChatLogSource {
         previewChatsByID[chatID]?.appendTextDelta(delta, itemID: itemID, kind: kind, content: content)
     }
 
+    func previewChat(id: CodexThreadID) -> ReviewMonitorPreviewChat? {
+        previewChatsByID[id]
+    }
+
     func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
         previewChatsByID[chatID]?.snapshot()
     }
@@ -135,21 +139,37 @@ final class ReviewMonitorPreviewChatLogSource {
 
 @MainActor
 @Observable
-private final class PreviewReviewChat {
-    let chat: ReviewMonitorCodexSidebarSnapshot.Chat
+package final class ReviewMonitorPreviewChat {
+    package let id: CodexThreadID
+    package let title: String
+    package let preview: String?
+    package let model: String?
+    package let workspaceCWD: String?
+    package private(set) var updatedAt: Date?
+    package private(set) var recencyAt: Date?
+    package private(set) var status: CodexThreadStatus?
     let cwd: String
     let streamID: String
-    let isRunning: Bool
 
     private var revision = 0
     private var snapshotStorage: CodexChatSnapshot
 
     init(fixture: ReviewMonitorPreviewChatLogFixture) {
-        self.chat = fixture.chat
+        self.id = fixture.chat.id
+        self.title = fixture.chat.title
+        self.preview = fixture.chat.preview
+        self.model = fixture.chat.model
+        self.workspaceCWD = fixture.chat.workspaceCWD
+        self.updatedAt = fixture.chat.updatedAt
+        self.recencyAt = fixture.chat.recencyAt
+        self.status = fixture.chat.status
         self.cwd = fixture.cwd
         self.streamID = fixture.streamID
-        self.isRunning = fixture.isRunning
         self.snapshotStorage = fixture.initialSnapshot
+    }
+
+    package var isRunning: Bool {
+        status?.isActive == true
     }
 
     func trackRevision() {
@@ -186,6 +206,17 @@ private final class PreviewReviewChat {
 
     private var currentTurnID: CodexTurnID? {
         snapshotStorage.turns.last?.id
+    }
+
+    package func cancel() {
+        guard isRunning else {
+            return
+        }
+        status = .idle
+        let now = Date()
+        updatedAt = now
+        recencyAt = now
+        updateTurnStatus(.cancelled)
     }
 
     func upsertItem(
@@ -303,13 +334,13 @@ final class ReviewMonitorPreviewRuntimeSupport {
 
 @MainActor
 private final class PreviewChatLogSubscription {
-    private let previewChat: PreviewReviewChat
+    private let previewChat: ReviewMonitorPreviewChat
     private let continuation: AsyncStream<CodexChatChange>.Continuation
     private var observation: PortableObservationTracking.Token?
     private var previousSnapshot: CodexChatSnapshot?
 
     init(
-        previewChat: PreviewReviewChat,
+        previewChat: ReviewMonitorPreviewChat,
         continuation: AsyncStream<CodexChatChange>.Continuation
     ) {
         self.previewChat = previewChat

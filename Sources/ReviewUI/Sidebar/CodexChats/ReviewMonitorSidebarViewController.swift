@@ -691,34 +691,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
 
-        let menu = NSMenu()
-        if store.hasCancellableReview(forChatID: chat.id.rawValue) {
-            let item = NSMenuItem(
-                title: "Cancel Review",
-                action: #selector(cancelReviewFromContextMenu(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = chat.id.rawValue
-            menu.addItem(item)
-        }
-        return menu.items.isEmpty ? nil : menu
-    }
-
-    @objc
-    private func cancelReviewFromContextMenu(_ sender: NSMenuItem) {
-        guard let chatID = sender.representedObject as? String else {
-            return
-        }
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-            _ = try? await self.store.cancelReview(
-                chatID: chatID,
-                cancellation: .userInterface()
+        if let codexChat = chat.codexChat {
+            return NSHostingMenu(
+                rootView: ReviewMonitorChatContextMenuView(chat: codexChat)
             )
         }
+        if let previewChat = chat.previewChat ?? previewChatLogSource?.previewChat(id: chat.id) {
+            return NSHostingMenu(
+                rootView: ReviewMonitorChatContextMenuView(previewChat: previewChat)
+            )
+        }
+        return nil
     }
 
     private func codexSidebarNode(from item: Any?) -> ReviewMonitorCodexSidebarOutlineNode? {
@@ -1645,44 +1628,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 return false
             }
             return cellView.isHostingReviewMonitorChatRowViewForTesting
-        }
-
-        func reviewChatContextMenuTitlesForTesting(_ chatID: CodexThreadID) -> [String] {
-            var titles: [String] = []
-            presentReviewChatContextMenuForTesting(chatID) { menu in
-                titles = menu.items.map(\.title)
-            }
-            return titles
-        }
-
-        @discardableResult
-        func activateReviewChatContextMenuItemForTesting(
-            _ chatID: CodexThreadID,
-            title: String
-        ) -> Bool {
-            var didActivate = false
-            presentReviewChatContextMenuForTesting(chatID) { menu in
-                guard let itemIndex = menu.items.firstIndex(where: { $0.title == title }) else {
-                    return
-                }
-                menu.performActionForItem(at: itemIndex)
-                didActivate = true
-            }
-            return didActivate
-        }
-
-        private func presentReviewChatContextMenuForTesting(
-            _ chatID: CodexThreadID,
-            presenter: @escaping (NSMenu) -> Void
-        ) {
-            guard let row = row(for: chatID) else {
-                return
-            }
-            view.layoutSubtreeIfNeeded()
-            outlineView.layoutSubtreeIfNeeded()
-            let rowRect = outlineView.rect(ofRow: row)
-            let point = NSPoint(x: rowRect.midX, y: rowRect.midY)
-            outlineView.presentContextMenuForTesting(at: point, presenter: presenter)
         }
 
         func clickBlankAreaForTesting() {
