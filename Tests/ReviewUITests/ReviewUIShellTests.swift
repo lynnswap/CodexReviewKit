@@ -230,8 +230,19 @@ extension ReviewUITests {
             ))
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
 
+        let terminalRun = ReviewRunRecord.makeForTesting(
+            id: "a-terminal-run",
+            cwd: repo.path,
+            targetSummary: "Terminal review run",
+            threadID: chatID.rawValue,
+            turnID: "terminal-review-turn",
+            status: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 4_100),
+            endedAt: Date(timeIntervalSince1970: 4_200),
+            summary: "Completed review."
+        )
         let pendingRun = ReviewRunRecord.makeForTesting(
-            id: "pending-cancellation-run",
+            id: "z-pending-cancellation-run",
             cwd: repo.path,
             targetSummary: "Pending cancellation review run",
             threadID: chatID.rawValue,
@@ -244,7 +255,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadReviewCancellationStateForTesting(
             serverState: .running,
-            reviewRuns: [pendingRun]
+            reviewRuns: [terminalRun, pendingRun]
         )
         let viewController = ReviewMonitorSplitViewController(
             store: store,

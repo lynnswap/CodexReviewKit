@@ -40,9 +40,6 @@ struct ReviewMonitorChatContextMenuView: View {
         guard chat.status?.isActive == true else {
             return false
         }
-        guard let reviewRun = store.reviewRun(forChatID: chatID) else {
-            return true
-        }
-        return reviewRun.isTerminal
+        return store.hasNonTerminalReviewRun(forChatID: chatID) == false
     }
 }

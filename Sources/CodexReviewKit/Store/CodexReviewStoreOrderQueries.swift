@@ -24,6 +24,15 @@ extension CodexReviewStore {
         reviewRun(forChatID: chatID) != nil
     }
 
+    package func hasNonTerminalReviewRun(forChatID chatID: String) -> Bool {
+        orderedReviewRuns.contains { runRecord in
+            guard runRecord.isTerminal == false else {
+                return false
+            }
+            return runRecord.matchesChatID(chatID)
+        }
+    }
+
     package func reviewRun(forChatID chatID: String) -> ReviewRunRecord? {
         orderedReviewRuns.first { runRecord in
             runRecord.matchesChatID(chatID)
