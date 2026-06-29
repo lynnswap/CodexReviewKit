@@ -316,7 +316,7 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
             resolvedPreviewContent = previewContent
             store = previewContent.store
         } else if let previewStore {
-            resolvedPreviewContent = nil
+            resolvedPreviewContent = ReviewMonitorPreviewContent.contentSource(for: previewStore)
             store = previewStore
         } else {
             let previewContent = ReviewMonitorPreviewContent.makeContentSource()

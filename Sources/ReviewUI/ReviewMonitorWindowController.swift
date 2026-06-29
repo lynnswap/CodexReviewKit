@@ -183,6 +183,16 @@ public extension ReviewMonitorWindowController {
         initialChatID: CodexThreadID? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
+        if codexModelSource == nil,
+           initialChatID == nil,
+           let previewContent = ReviewMonitorPreviewContent.contentSource(for: store)
+        {
+            self.init(
+                previewContent: previewContent,
+                showSettings: showSettings
+            )
+            return
+        }
         self.init(
             store: store,
             codexModelSource: codexModelSource,

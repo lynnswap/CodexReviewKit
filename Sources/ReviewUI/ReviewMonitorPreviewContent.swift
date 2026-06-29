@@ -172,8 +172,7 @@ public enum ReviewMonitorPreviewContent {
 
     @_spi(PreviewSupport)
     public static func makeStore() -> CodexReviewStore {
-        let previewContent = makeSidebarContent()
-        return makeStore(previewContent: previewContent)
+        makeContentSource().store
     }
 
     @_spi(PreviewSupport)
@@ -183,10 +182,10 @@ public enum ReviewMonitorPreviewContent {
         let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
             fixtures: previewContent.chatLogFixtures
         )
-        return ReviewMonitorPreviewContentSource(
+        return registerContentSource(ReviewMonitorPreviewContentSource(
             store: store,
             runtime: previewRuntime
-        )
+        ))
     }
 
     private static func makeStore(previewContent: PreviewSidebarContent) -> CodexReviewStore {
@@ -249,11 +248,25 @@ public enum ReviewMonitorPreviewContent {
         let fixture = makeChatLogFixture(
             for: chatFixture
         )
-        return ReviewMonitorPreviewContentSource(
+        return registerContentSource(ReviewMonitorPreviewContentSource(
             store: store,
             runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
-        )
+        ))
     }
+
+    static func contentSource(for store: CodexReviewStore) -> ReviewMonitorPreviewContentSource? {
+        contentSourcesByStoreID[ObjectIdentifier(store)]
+    }
+
+    private static func registerContentSource(
+        _ contentSource: ReviewMonitorPreviewContentSource
+    ) -> ReviewMonitorPreviewContentSource {
+        contentSourcesByStoreID[ObjectIdentifier(contentSource.store)] = contentSource
+        return contentSource
+    }
+
+    @MainActor
+    private static var contentSourcesByStoreID: [ObjectIdentifier: ReviewMonitorPreviewContentSource] = [:]
 
     package static func streamFrame(
         forRunningChatAt runningChatIndex: Int,
