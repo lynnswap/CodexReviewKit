@@ -31,8 +31,14 @@ public final class ReviewMonitorPreviewContentSource {
     }
 
     @discardableResult
-    func appendPreviewChatLogStreamTick(after tick: Int = 0) async -> Int {
-        await runtime.appendPreviewStreamTick(after: tick)
+    func appendPreviewChatLogStreamTick(
+        after tick: Int = 0,
+        emitsNotifications: Bool = false
+    ) async -> Int {
+        await runtime.appendPreviewStreamTick(
+            after: tick,
+            emitsNotifications: emitsNotifications
+        )
     }
 
     func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {

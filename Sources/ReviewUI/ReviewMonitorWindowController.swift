@@ -171,7 +171,10 @@ public extension ReviewMonitorWindowController {
             showSettings: showSettings,
             dependencyRetainer: previewContent,
             appendPreviewChatLogStreamTickHandler: { tick in
-                let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
+                let nextTick = await previewContent.appendPreviewChatLogStreamTick(
+                    after: tick,
+                    emitsNotifications: true
+                )
                 return nextTick
             }
         )

@@ -344,7 +344,10 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     let appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)?
     if let previewContent = resolvedPreviewContent {
         appendPreviewChatLogStreamTickHandler = { tick in
-            let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
+            let nextTick = await previewContent.appendPreviewChatLogStreamTick(
+                after: tick,
+                emitsNotifications: true
+            )
             return nextTick
         }
     } else {

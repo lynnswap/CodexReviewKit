@@ -181,22 +181,30 @@ final class ReviewMonitorPreviewAppServerRuntime {
                 guard let self, Task.isCancelled == false else {
                     return
                 }
-                _ = await self.appendPreviewStreamTick(after: self.tick)
+                _ = await self.appendPreviewStreamTick(
+                    after: self.tick,
+                    emitsNotifications: true
+                )
             }
         }
     }
 
     @discardableResult
-    func appendPreviewStreamTick(after currentTick: Int = 0) async -> Int {
-        do {
-            try await ensureStarted()
-        } catch {
-            return currentTick
-        }
-
+    func appendPreviewStreamTick(
+        after currentTick: Int = 0,
+        emitsNotifications: Bool = false
+    ) async -> Int {
         let runningFixtures = fixtures.filter(\.isRunning)
         guard runningFixtures.isEmpty == false else {
             return currentTick
+        }
+
+        if emitsNotifications {
+            do {
+                try await ensureStarted()
+            } catch {
+                return currentTick
+            }
         }
 
         let nextTick = currentTick + 1
@@ -208,7 +216,11 @@ final class ReviewMonitorPreviewAppServerRuntime {
                 continue
             }
             apply(frame.step, cycle: frame.cycle, for: fixture)
-            await emit(frame.step, cycle: frame.cycle, for: fixture)
+            if emitsNotifications {
+                enqueueNotification { [weak self] in
+                    await self?.emit(frame.step, cycle: frame.cycle, for: fixture)
+                }
+            }
         }
         tick = nextTick
         return nextTick
