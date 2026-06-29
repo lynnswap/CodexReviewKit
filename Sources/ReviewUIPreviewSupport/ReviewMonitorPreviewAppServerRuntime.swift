@@ -54,7 +54,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
 
     private let fixtures: [ReviewMonitorPreviewChatLogFixture]
     private let fixturesByChatID: [CodexThreadID: ReviewMonitorPreviewChatLogFixture]
-    private let threadStore: CodexAppServerTestThreadStore
+    private var threadStore: CodexAppServerTestThreadStore
     private var runtime: CodexAppServerTestRuntime?
     private var container: CodexModelContainer?
     private var startTask: Task<Void, Never>?
@@ -365,8 +365,39 @@ final class ReviewMonitorPreviewAppServerRuntime {
               let item = mutation(&snapshot) else {
             return nil
         }
-        await threadStore.upsert(fixture.threadSnapshot(snapshot))
+        await replaceThreadStorePreservingFixtureOrder(
+            with: fixture.threadSnapshot(snapshot)
+        )
         return item
+    }
+
+    private func replaceThreadStorePreservingFixtureOrder(
+        with updatedSnapshot: CodexThreadSnapshot
+    ) async {
+        let currentStore = threadStore
+        let storedSnapshots = await currentStore.snapshots()
+        let fixtureSnapshotIDs = Set(fixtures.map(\.chatID))
+        var orderedFixtureSnapshots: [CodexThreadSnapshot] = []
+        for fixture in fixtures {
+            if fixture.chatID == updatedSnapshot.id {
+                orderedFixtureSnapshots.append(updatedSnapshot)
+                continue
+            }
+            orderedFixtureSnapshots.append(
+                await currentStore.snapshot(id: fixture.chatID) ?? fixture.threadSnapshot
+            )
+        }
+        let nonFixtureSnapshots = storedSnapshots.filter { snapshot in
+            fixtureSnapshotIDs.contains(snapshot.id) == false
+        }
+        let replacementStore = CodexAppServerTestThreadStore(
+            threads: orderedFixtureSnapshots + nonFixtureSnapshots
+        )
+        threadStore = replacementStore
+        do {
+            try await runtime?.transport.stubThreads(replacementStore)
+        } catch {
+        }
     }
 
     private func emitItem(
