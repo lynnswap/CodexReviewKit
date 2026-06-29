@@ -74,19 +74,10 @@ private struct ReviewMonitorChatRowLayout: View {
 
 @MainActor
 struct ReviewMonitorChatRowView: View {
-    var node: ReviewMonitorCodexSidebarOutlineNode
-
-    var chat: CodexChat? {
-        guard case .chat(let chat) = node.item else {
-            return nil
-        }
-        return chat
-    }
+    var chat: CodexChat
 
     var body: some View {
-        if let chat {
-            ReviewMonitorChatRowContent(chat: chat)
-        }
+        ReviewMonitorChatRowContent(chat: chat)
     }
 }
 

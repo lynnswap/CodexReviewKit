@@ -39,11 +39,16 @@ extension CodexFetchSection where Model == CodexChat {
     }
 
     package var displayTitle: String {
-        title ?? "Unknown"
+        workspaceGroup?.name ?? title ?? "Unknown"
     }
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
         .workspaceGroup(workspaceGroupID)
+    }
+
+    package var workspaceGroup: CodexWorkspaceGroup? {
+        items.lazy.compactMap { $0.workspace?.workspaceGroup }.first { $0.id == workspaceGroupID }
+            ?? items.lazy.compactMap { $0.workspace?.workspaceGroup }.first
     }
 
     package var workspaces: [CodexWorkspace] {
@@ -95,6 +100,7 @@ extension CodexFetchSection where Model == CodexChat {
 
     package func hasSameIdentity(as other: Self) -> Bool {
         workspaceGroupID == other.workspaceGroupID
+            && workspaceGroup === other.workspaceGroup
             && displayTitle == other.displayTitle
             && items.elementsEqual(other.items) { $0 === $1 }
     }
@@ -307,14 +313,17 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
 
 @MainActor
 package enum ReviewMonitorCodexSidebarOutlineItem {
-    case section(CodexFetchSection<CodexChat>)
+    case workspaceGroup(CodexWorkspaceGroup)
+    case fallbackWorkspaceGroup(id: CodexWorkspaceGroupID, title: String)
     case workspace(CodexWorkspace)
     case chat(CodexChat)
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
         switch self {
-        case .section(let section):
-            section.rowID
+        case .workspaceGroup(let workspaceGroup):
+            .workspaceGroup(workspaceGroup.id)
+        case .fallbackWorkspaceGroup(let id, _):
+            .workspaceGroup(id)
         case .workspace(let workspace):
             .workspace(workspace.id)
         case .chat(let chat):
@@ -324,8 +333,10 @@ package enum ReviewMonitorCodexSidebarOutlineItem {
 
     package var title: String {
         switch self {
-        case .section(let section):
-            section.displayTitle
+        case .workspaceGroup(let workspaceGroup):
+            workspaceGroup.name
+        case .fallbackWorkspaceGroup(_, let title):
+            title
         case .workspace(let workspace):
             workspace.name
         case .chat(let chat):
@@ -335,8 +346,10 @@ package enum ReviewMonitorCodexSidebarOutlineItem {
 
     var selectionID: ReviewMonitorSelectionID {
         switch self {
-        case .section(let section):
-            .workspaceGroup(section.workspaceGroupID)
+        case .workspaceGroup(let workspaceGroup):
+            .workspaceGroup(workspaceGroup.id)
+        case .fallbackWorkspaceGroup(let id, _):
+            .workspaceGroup(id)
         case .workspace(let workspace):
             .workspace(workspace.id)
         case .chat(let chat):
@@ -346,8 +359,10 @@ package enum ReviewMonitorCodexSidebarOutlineItem {
 
     package func hasSameIdentity(as other: Self) -> Bool {
         switch (self, other) {
-        case (.section(let lhs), .section(let rhs)):
-            lhs.hasSameIdentity(as: rhs)
+        case (.workspaceGroup(let lhs), .workspaceGroup(let rhs)):
+            lhs === rhs
+        case (.fallbackWorkspaceGroup(let lhsID, let lhsTitle), .fallbackWorkspaceGroup(let rhsID, let rhsTitle)):
+            lhsID == rhsID && lhsTitle == rhsTitle
         case (.workspace(let lhs), .workspace(let rhs)):
             lhs === rhs
         case (.chat(let lhs), .chat(let rhs)):
@@ -431,7 +446,12 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         for section: CodexFetchSection<CodexChat>,
         activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
     ) -> ReviewMonitorCodexSidebarOutlineNode {
-        let item = ReviewMonitorCodexSidebarOutlineItem.section(section)
+        let item: ReviewMonitorCodexSidebarOutlineItem =
+            if let workspaceGroup = section.workspaceGroup {
+                .workspaceGroup(workspaceGroup)
+            } else {
+                .fallbackWorkspaceGroup(id: section.workspaceGroupID, title: section.displayTitle)
+            }
         let node = node(for: item, activeRowIDs: &activeRowIDs)
         let children: [ReviewMonitorCodexSidebarOutlineNode]
         if section.displaysWorkspaceNodes {
@@ -524,6 +544,17 @@ final class ReviewMonitorCodexSidebarOutlineNode {
 
     var selectionID: ReviewMonitorSelectionID {
         item.selectionID
+    }
+
+    var workspaceGroupID: CodexWorkspaceGroupID? {
+        switch item {
+        case .workspaceGroup(let workspaceGroup):
+            workspaceGroup.id
+        case .fallbackWorkspaceGroup(let id, _):
+            id
+        case .workspace, .chat:
+            nil
+        }
     }
 
     var isExpandable: Bool {
