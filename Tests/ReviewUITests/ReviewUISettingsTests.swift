@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
-@_spi(PreviewSupport) @testable import ReviewUI
+@testable import ReviewUI
 import CodexReviewTesting
 
 @Suite(.serialized)

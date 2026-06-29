@@ -11,8 +11,7 @@ typealias ReviewMonitorContentTransitionAnimator = @MainActor (
 ) -> Void
 
 @MainActor
-@_spi(PreviewSupport)
-public final class ReviewMonitorRootViewController: NSViewController {
+package final class ReviewMonitorRootViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let codexModelSource: ReviewMonitorCodexModelSource?
@@ -49,8 +48,7 @@ public final class ReviewMonitorRootViewController: NSViewController {
         )
     }
 
-    @_spi(PreviewSupport)
-    public convenience init(
+    package convenience init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
@@ -93,7 +91,7 @@ public final class ReviewMonitorRootViewController: NSViewController {
         observation?.cancel()
     }
 
-    public override func loadView() {
+    package override func loadView() {
         let backgroundView = NSVisualEffectView()
         backgroundView.material = .underWindowBackground
         backgroundView.blendingMode = .behindWindow
@@ -101,7 +99,7 @@ public final class ReviewMonitorRootViewController: NSViewController {
         view = backgroundView
     }
 
-    public override func viewDidLoad() {
+    package override func viewDidLoad() {
         super.viewDidLoad()
         bindWindowState()
         bindWindowAttachment()
@@ -268,8 +266,7 @@ public final class ReviewMonitorRootViewController: NSViewController {
 
 @MainActor
 extension ReviewMonitorRootViewController {
-    @_spi(PreviewSupport)
-    public func prepareForImmediateRenderingForPreviewSupport() {
+    package func prepareForImmediateRenderingForPreviewSupport() {
         loadViewIfNeeded()
         splitViewController.prepareForImmediateRenderingForPreviewSupport()
         view.layoutSubtreeIfNeeded()

@@ -9,7 +9,7 @@ import AppKit
 import CodexDataKit
 import CodexReviewKit
 import CodexReviewHost
-@_spi(PreviewSupport) import ReviewUI
+import ReviewUI
 import ReviewUIPreviewSupport
 
 enum ReviewMonitorLaunchMode: Sendable {
@@ -304,7 +304,7 @@ struct ReviewMonitorAppComposition {
                     )
                 }
                 return ReviewMonitorWindowController(
-                    store: store,
+                    previewSupportStore: store,
                     codexModelSource: codexModelSource,
                     showSettings: showSettings
                 )

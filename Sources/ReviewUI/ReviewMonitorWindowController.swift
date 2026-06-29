@@ -40,8 +40,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    @_spi(PreviewSupport)
-    public convenience init(
+    package convenience init(
         store: CodexReviewStore,
         showSettings: @escaping @MainActor () -> Void
     ) {
@@ -53,8 +52,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    @_spi(PreviewSupport)
-    public convenience init(
+    package convenience init(
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource,
         showSettings: @escaping @MainActor () -> Void
@@ -88,8 +86,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         )
     }
 
-    @_spi(PreviewSupport)
-    public convenience init(
+    package convenience init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,

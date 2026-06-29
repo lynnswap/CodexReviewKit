@@ -28,13 +28,11 @@ public final class ReviewMonitorUIState {
         self.persistSidebarReviewChatFilter = persistSidebarReviewChatFilter
     }
 
-    @_spi(PreviewSupport)
-    public convenience init(previewSupportAuth auth: CodexReviewAuthModel) {
+    package convenience init(previewSupportAuth auth: CodexReviewAuthModel) {
         self.init(auth: auth)
     }
 
-    @_spi(PreviewSupport)
-    public func selectChat(id: CodexThreadID?) {
+    package func selectChat(id: CodexThreadID?) {
         selection = id.map(ReviewMonitorSelection.chat)
     }
 

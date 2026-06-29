@@ -3,7 +3,7 @@ import CodexKit
 import CodexReviewKit
 import Foundation
 import ObjectiveC
-@_spi(PreviewSupport) import ReviewUI
+import ReviewUI
 
 nonisolated(unsafe) private var previewContentSourceAssociationKey: UInt8 = 0
 
@@ -64,6 +64,18 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
 }
 
 public extension ReviewMonitorWindowController {
+    convenience init(
+        previewSupportStore store: CodexReviewStore,
+        codexModelSource: ReviewMonitorCodexModelSource,
+        showSettings: @escaping @MainActor () -> Void
+    ) {
+        self.init(
+            store: store,
+            codexModelSource: codexModelSource,
+            showSettings: showSettings
+        )
+    }
+
     convenience init(
         previewContent: ReviewMonitorPreviewContentSource,
         showSettings: (@MainActor () -> Void)? = nil

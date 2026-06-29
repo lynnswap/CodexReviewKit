@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import CodexKit
 @_spi(Testing) @testable import CodexReviewKit
-@_spi(PreviewSupport) @testable import ReviewUI
+@testable import ReviewUI
 @testable import ReviewUIPreviewSupport
 
 @MainActor

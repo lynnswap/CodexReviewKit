@@ -7,7 +7,7 @@ import CodexReviewKit
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
-@_spi(PreviewSupport) @testable import ReviewUI
+@testable import ReviewUI
 @testable import ReviewUIPreviewSupport
 import CodexReviewTesting
 
