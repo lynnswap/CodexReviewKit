@@ -1,4 +1,5 @@
 import AppKit
+import CodexAppServerKitTesting
 import CodexKit
 import Foundation
 import ObservationBridge
@@ -102,14 +103,99 @@ extension ReviewUITests {
         #expect(store.reviewRun(id: run.id)?.core.lifecycle.cancellation?.source == .userInterface)
         #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
 
-        var cancelItemDisabledAfterCancellation = false
+        var cancelItemEnabledAfterCancellation = false
         sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
             guard let cancelItem = menu.items.first(where: { $0.title == "Cancel" }) else {
                 return
             }
-            cancelItemDisabledAfterCancellation = cancelItem.isEnabled == false
+            cancelItemEnabledAfterCancellation = cancelItem.isEnabled
         }
-        #expect(cancelItemDisabledAfterCancellation)
+        #expect(cancelItemEnabledAfterCancellation)
+    }
+
+    @Test func activeChatContextMenuCancelFallsBackWhenMatchingReviewRunIsTerminal() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-with-terminal-run")
+        let turnID = CodexTurnID(rawValue: "active-turn")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Active chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: []),
+                        turns: [
+                            .init(id: turnID, status: .running)
+                        ]
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: chatID,
+                status: .active(activeFlags: []),
+                turns: [
+                    .init(id: turnID, status: .running)
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+        let terminalRun = ReviewRunRecord.makeForTesting(
+            id: "terminal-run",
+            cwd: repo.path,
+            targetSummary: "Terminal review run",
+            threadID: chatID.rawValue,
+            turnID: "terminal-turn",
+            status: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 4_000),
+            endedAt: Date(timeIntervalSince1970: 4_100),
+            summary: "Completed review."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [terminalRun]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Active chat"
+        }
+
+        #expect(store.hasReviewRun(forChatID: chatID.rawValue))
+        #expect(store.hasCancellableReview(forChatID: chatID.rawValue) == false)
+
+        var presentedCancelItem = false
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            presentedCancelItem = true
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        #expect(presentedCancelItem)
+        #expect(cancelItemWasEnabled)
+        await runtime.transport.waitForRequest(method: "turn/interrupt")
+        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        #expect(interruptRequestCount == 1)
     }
 
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
@@ -1749,6 +1835,17 @@ extension ReviewUITests {
 private func previewSelectedChatID(in store: CodexReviewStore) -> CodexThreadID? {
     _ = store
     return CodexThreadID(rawValue: "preview-thread-0-0")
+}
+
+private func makeShellTestGitRepository() throws -> URL {
+    let repo = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: repo.appendingPathComponent(".git", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    return repo
 }
 
 @MainActor
