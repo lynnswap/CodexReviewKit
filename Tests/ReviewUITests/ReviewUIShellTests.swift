@@ -160,7 +160,7 @@ extension ReviewUITests {
 
     @Test func bindingStoreAppliesInitialState() {
         let store = CodexReviewStore.makePreviewStore()
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -177,7 +177,7 @@ extension ReviewUITests {
             serverState: .running,
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -194,7 +194,7 @@ extension ReviewUITests {
         store.loadForTesting(
             serverState: .failed("Embedded server is unavailable in preview mode.")
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -209,7 +209,7 @@ extension ReviewUITests {
         store.loadForTesting(
             serverState: .starting
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -221,7 +221,7 @@ extension ReviewUITests {
         store.loadForTesting(
             serverState: .stopped
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -234,7 +234,7 @@ extension ReviewUITests {
             serverState: .running,
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -250,7 +250,7 @@ extension ReviewUITests {
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .chatList)
@@ -365,7 +365,7 @@ extension ReviewUITests {
             serverState: .running,
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -707,7 +707,7 @@ extension ReviewUITests {
     @Test func sidebarPickerToolbarItemTracksExternalSelectionChanges() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
 
@@ -730,7 +730,7 @@ extension ReviewUITests {
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         viewController.attach(to: window)
@@ -773,7 +773,7 @@ extension ReviewUITests {
     @Test func splitViewShowsAddAccountToolbarItemOnlyForAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -799,7 +799,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -980,7 +980,7 @@ extension ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
 
         viewController.loadViewIfNeeded()
 
@@ -1615,7 +1615,7 @@ extension ReviewUITests {
     @Test func splitViewAttachIsIdempotentForSameWindow() {
         let backend = CountingStartBackend()
         let store = makeStore(backend: backend)
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }

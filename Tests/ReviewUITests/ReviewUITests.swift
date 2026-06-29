@@ -42,7 +42,7 @@ struct ReviewUITests {
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -68,7 +68,7 @@ struct ReviewUITests {
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -107,7 +107,7 @@ struct ReviewUITests {
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -151,7 +151,7 @@ struct ReviewUITests {
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .workspace
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -182,7 +182,7 @@ struct ReviewUITests {
 
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .workspace
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -213,7 +213,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         let accountsViewController = viewController
@@ -245,7 +245,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         let accountsViewController = viewController
@@ -300,7 +300,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         let accountsViewController = viewController
@@ -389,7 +389,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -444,7 +444,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -486,7 +486,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         let accountsViewController = viewController
@@ -520,7 +520,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -557,7 +557,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -610,7 +610,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
         let accountsViewController = viewController
@@ -649,7 +649,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -719,7 +719,7 @@ struct ReviewUITests {
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -757,7 +757,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [activeChat, recentChat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -1663,7 +1663,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1703,7 +1703,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [activeChat, recentChat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1763,7 +1763,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [activeChat, recentChat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1816,7 +1816,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1866,7 +1866,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -1957,7 +1957,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [shortChat, recentChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2013,7 +2013,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [activeChat, recentChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2064,7 +2064,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [chat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2099,7 +2099,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [chat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2127,7 +2127,7 @@ struct ReviewUITests {
         let activeChat = makeReviewChatFixtureForTesting(status: .running, targetSummary: "Uncommitted changes")
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running)
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
@@ -2175,7 +2175,7 @@ struct ReviewUITests {
 
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running)
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
             modelContext: context
@@ -2274,7 +2274,7 @@ struct ReviewUITests {
             serverState: .running,
             fixtures: [chat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2315,7 +2315,7 @@ struct ReviewUITests {
         store.loadForTesting(serverState: .running, fixtures: [chat])
         let previewRuntime = try #require(previewRuntimeForTesting(on: store))
         previewRuntime.start()
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
             codexModelSource: previewRuntime.modelSource
@@ -2362,7 +2362,7 @@ struct ReviewUITests {
         store.loadForTesting(serverState: .running, fixtures: [chat])
         let previewRuntime = try #require(previewRuntimeForTesting(on: store))
         previewRuntime.start()
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
             codexModelSource: previewRuntime.modelSource
@@ -2404,7 +2404,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2437,7 +2437,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2475,7 +2475,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2513,7 +2513,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2606,7 +2606,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2712,7 +2712,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2751,7 +2751,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2805,7 +2805,7 @@ struct ReviewUITests {
         store.loadForTesting(serverState: .running, fixtures: [chat])
         let previewRuntime = try #require(previewRuntimeForTesting(on: store))
         previewRuntime.start()
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store,
             uiState: ReviewMonitorUIState(auth: store.auth),
             codexModelSource: previewRuntime.modelSource
@@ -2845,7 +2845,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2911,7 +2911,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -3047,7 +3047,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3146,7 +3146,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3194,7 +3194,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3235,7 +3235,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3274,7 +3274,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3320,7 +3320,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3371,7 +3371,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3411,7 +3411,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3450,7 +3450,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -3558,7 +3558,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -3688,7 +3688,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3845,7 +3845,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3909,7 +3909,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -3972,7 +3972,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [firstChat, secondChat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4020,7 +4020,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4065,7 +4065,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4121,7 +4121,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4179,7 +4179,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4223,7 +4223,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4270,7 +4270,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4319,7 +4319,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4367,7 +4367,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4437,7 +4437,7 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -4482,7 +4482,7 @@ struct ReviewUITests {
             authState: .signedOut,
             fixtures: [chat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -4511,7 +4511,7 @@ struct ReviewUITests {
             authState: .signedIn(accountID: "review@example.com"),
             fixtures: [chat]
         )
-        let viewController = ReviewMonitorSplitViewController(
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
             store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -4560,8 +4560,11 @@ func makeWindowHarness(
         .defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
+    let previewRuntime = previewRuntimeForTesting(on: store)
+    previewRuntime?.start()
     let windowController = ReviewMonitorWindowController(
         store: store,
+        codexModelSource: previewRuntime?.modelSource,
         contentTransitionAnimator: contentTransitionAnimator,
         sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
     )

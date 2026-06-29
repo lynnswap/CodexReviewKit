@@ -241,6 +241,38 @@ func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPrevie
 }
 
 @MainActor
+func makeReviewMonitorSplitViewControllerForTesting(
+    store: CodexReviewStore,
+    uiState: ReviewMonitorUIState,
+    codexModelSource: ReviewMonitorCodexModelSource? = nil,
+    showSettings: (@MainActor () -> Void)? = nil
+) -> ReviewMonitorSplitViewController {
+    let previewRuntime = previewRuntimeForTesting(on: store)
+    previewRuntime?.start()
+    return ReviewMonitorSplitViewController(
+        store: store,
+        uiState: uiState,
+        codexModelSource: codexModelSource ?? previewRuntime?.modelSource,
+        showSettings: showSettings
+    )
+}
+
+@MainActor
+func makeReviewMonitorSplitViewControllerForTesting(
+    store: CodexReviewStore,
+    uiState: ReviewMonitorUIState,
+    modelContext: CodexModelContext,
+    showSettings: (@MainActor () -> Void)? = nil
+) -> ReviewMonitorSplitViewController {
+    ReviewMonitorSplitViewController(
+        store: store,
+        uiState: uiState,
+        modelContext: modelContext,
+        showSettings: showSettings
+    )
+}
+
+@MainActor
 func reviewChatLogText(for fixture: ReviewChatFixtureForTesting) -> String {
     reviewChatLogText(
         for: codexChatSnapshotForTesting(fixture),

@@ -298,7 +298,7 @@ struct CodexReviewMonitorCITests {
         }
         #expect(initialSnapshot.log.isEmpty == false)
 
-        let nextTick = try #require(rootViewController.appendPreviewChatLogStreamTickForTesting())
+        let nextTick = try #require(await rootViewController.appendPreviewChatLogStreamTickForTesting())
         #expect(nextTick == 1)
         let updatedSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
             snapshot.log.count > initialSnapshot.log.count
