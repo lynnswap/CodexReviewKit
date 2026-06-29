@@ -176,37 +176,6 @@ public extension ReviewMonitorWindowController {
             }
         )
     }
-
-    convenience init(
-        previewStore store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        initialChatID: CodexThreadID? = nil,
-        showSettings: (@MainActor () -> Void)? = nil
-    ) {
-        if let previewContent = ReviewMonitorPreviewContent.contentSource(for: store) {
-            previewContent.startStreaming(interval: .milliseconds(40))
-            self.init(
-                store: store,
-                codexModelSource: codexModelSource ?? previewContent.codexModelSource,
-                contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-                initialSelection: initialChatID.map(ReviewMonitorSelection.chat) ?? previewContent.initialSelection,
-                showSettings: showSettings,
-                dependencyRetainer: previewContent,
-                appendPreviewChatLogStreamTickHandler: { tick in
-                    let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
-                    return nextTick
-                }
-            )
-            return
-        }
-        self.init(
-            store: store,
-            codexModelSource: codexModelSource,
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            initialSelection: initialChatID.map(ReviewMonitorSelection.chat),
-            showSettings: showSettings
-        )
-    }
 }
 
 enum ReviewMonitorSidebar {}

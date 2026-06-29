@@ -304,20 +304,16 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     authPhase: CodexReviewAuthModel.Phase = .signedOut,
     account: CodexReviewAccount? = nil,
     serverState: CodexReviewServerState = .running,
-    previewContent: ReviewMonitorPreviewContentSource? = nil,
-    previewStore: CodexReviewStore? = nil
+    previewContent: ReviewMonitorPreviewContentSource? = nil
 ) -> ReviewMonitorRootViewController {
     let store: CodexReviewStore
     let resolvedPreviewContent: ReviewMonitorPreviewContentSource?
-    let ownsPreviewContent = previewContent == nil && previewStore == nil
+    let ownsPreviewContent = previewContent == nil
     switch serverState {
     case .running:
         if let previewContent {
             resolvedPreviewContent = previewContent
             store = previewContent.store
-        } else if let previewStore {
-            resolvedPreviewContent = ReviewMonitorPreviewContent.contentSource(for: previewStore)
-            store = previewStore
         } else {
             let previewContent = ReviewMonitorPreviewContent.makeContentSource()
             resolvedPreviewContent = previewContent

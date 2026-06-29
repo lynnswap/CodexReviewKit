@@ -170,28 +170,9 @@ public enum ReviewMonitorPreviewContent {
         var reviewRuns: [ReviewRunRecord]
     }
 
-    private final class PreviewContentRegistryEntry {
-        weak var store: CodexReviewStore?
-        weak var contentSource: ReviewMonitorPreviewContentSource?
-        let fixtures: [ReviewMonitorPreviewChatLogFixture]
-
-        init(
-            store: CodexReviewStore,
-            fixtures: [ReviewMonitorPreviewChatLogFixture],
-            contentSource: ReviewMonitorPreviewContentSource? = nil
-        ) {
-            self.store = store
-            self.fixtures = fixtures
-            self.contentSource = contentSource
-        }
-    }
-
     @_spi(PreviewSupport)
     public static func makeStore() -> CodexReviewStore {
-        let previewContent = makeSidebarContent()
-        let store = makeStore(previewContent: previewContent)
-        registerPreviewStore(store, fixtures: previewContent.chatLogFixtures)
-        return store
+        makeStore(previewContent: makeSidebarContent())
     }
 
     @_spi(PreviewSupport)
@@ -201,10 +182,10 @@ public enum ReviewMonitorPreviewContent {
         let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
             fixtures: previewContent.chatLogFixtures
         )
-        return registerContentSource(ReviewMonitorPreviewContentSource(
+        return ReviewMonitorPreviewContentSource(
             store: store,
             runtime: previewRuntime
-        ), fixtures: previewContent.chatLogFixtures)
+        )
     }
 
     private static func makeStore(previewContent: PreviewSidebarContent) -> CodexReviewStore {
@@ -267,60 +248,11 @@ public enum ReviewMonitorPreviewContent {
         let fixture = makeChatLogFixture(
             for: chatFixture
         )
-        return registerContentSource(ReviewMonitorPreviewContentSource(
+        return ReviewMonitorPreviewContentSource(
             store: store,
             runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
-        ), fixtures: [fixture])
-    }
-
-    static func contentSource(for store: CodexReviewStore) -> ReviewMonitorPreviewContentSource? {
-        pruneDeadContentSources()
-        guard let entry = contentSourcesByStoreID[ObjectIdentifier(store)] else {
-            return nil
-        }
-        if let contentSource = entry.contentSource {
-            return contentSource
-        }
-        let contentSource = ReviewMonitorPreviewContentSource(
-            store: store,
-            runtime: ReviewMonitorPreviewAppServerRuntime(fixtures: entry.fixtures)
-        )
-        entry.contentSource = contentSource
-        return contentSource
-    }
-
-    private static func registerPreviewStore(
-        _ store: CodexReviewStore,
-        fixtures: [ReviewMonitorPreviewChatLogFixture]
-    ) {
-        pruneDeadContentSources()
-        contentSourcesByStoreID[ObjectIdentifier(store)] = PreviewContentRegistryEntry(
-            store: store,
-            fixtures: fixtures
         )
     }
-
-    private static func registerContentSource(
-        _ contentSource: ReviewMonitorPreviewContentSource,
-        fixtures: [ReviewMonitorPreviewChatLogFixture]
-    ) -> ReviewMonitorPreviewContentSource {
-        pruneDeadContentSources()
-        contentSourcesByStoreID[ObjectIdentifier(contentSource.store)] = PreviewContentRegistryEntry(
-            store: contentSource.store,
-            fixtures: fixtures,
-            contentSource: contentSource
-        )
-        return contentSource
-    }
-
-    private static func pruneDeadContentSources() {
-        contentSourcesByStoreID = contentSourcesByStoreID.filter { _, entry in
-            entry.store != nil
-        }
-    }
-
-    @MainActor
-    private static var contentSourcesByStoreID: [ObjectIdentifier: PreviewContentRegistryEntry] = [:]
 
     package static func streamFrame(
         forRunningChatAt runningChatIndex: Int,
