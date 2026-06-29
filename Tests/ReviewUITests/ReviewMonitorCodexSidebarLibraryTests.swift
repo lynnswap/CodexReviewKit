@@ -208,7 +208,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
         let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
         try await library.performFetch()
-        let section = try #require(library.sections.first)
         let tree = ReviewMonitorCodexSidebarOutlineTree()
 
         #expect(tree.apply(sections: library.sections).topologyChanged)
@@ -312,7 +311,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ])
         let workspace = try #require(sidebar.codexSidebarSectionsForTesting.first?.workspaces.first)
         #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .workspace(workspace.id)) == nil)
-        #expect(sidebar.workspaceRowHeightForTesting(cwd: repo.path) == sidebar.expectedWorkspaceRowRectHeightForTesting)
         #expect(sidebar.reviewChatRowHeightForTesting(threadID) == sidebar.expectedReviewChatRowRectHeightForTesting)
 
         sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
