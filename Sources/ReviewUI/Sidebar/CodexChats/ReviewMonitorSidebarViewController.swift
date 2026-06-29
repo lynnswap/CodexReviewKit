@@ -285,7 +285,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     ) -> CodexFetchedResults<CodexChat> {
         modelContext.fetchedResults(
             for: defaultCodexSidebarDescriptor,
-            sectionedBy: .workspaceGroup
+            sectionedBy: CodexSectionDescriptor(\CodexChat.workspaceGroupID)
         )
     }
 

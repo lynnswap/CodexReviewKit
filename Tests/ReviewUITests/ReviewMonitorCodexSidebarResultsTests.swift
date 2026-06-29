@@ -676,7 +676,7 @@ private func makeCodexSidebarFetchedResults(
 ) -> CodexFetchedResults<CodexChat> {
     context.fetchedResults(
         for: ReviewMonitorSidebarViewController.defaultCodexSidebarDescriptor,
-        sectionedBy: .workspaceGroup
+        sectionedBy: CodexSectionDescriptor(\CodexChat.workspaceGroupID)
     )
 }
 
