@@ -681,7 +681,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         return NSHostingMenu(
-            rootView: ReviewMonitorChatContextMenuView(chat: chat)
+            rootView: ReviewMonitorChatContextMenuView(chat: chat, store: store)
         )
     }
 
@@ -1505,6 +1505,21 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+
+        func presentContextMenuForTesting(
+            chatID: CodexThreadID,
+            presenter: @escaping (NSMenu) -> Void
+        ) {
+            view.layoutSubtreeIfNeeded()
+            guard let row = row(for: chatID) else {
+                return
+            }
+            let rowRect = outlineView.rect(ofRow: row)
+            outlineView.presentContextMenuForTesting(
+                at: NSPoint(x: rowRect.midX, y: rowRect.midY),
+                presenter: presenter
+            )
         }
 
         func selectWorkspaceForTesting(cwd: String) {

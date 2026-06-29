@@ -61,6 +61,54 @@ extension ReviewUITests {
         #expect(sidebar.sidebarKindForTesting == .chatList)
     }
 
+    @Test func previewChatContextMenuCancelCancelsMatchingReviewRun() async throws {
+        let store = ReviewMonitorPreviewContent.makeStore()
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let run = try #require(store.cancellableReviewRun(forChatID: selectedChatID.rawValue))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewStore: store
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+
+        var presentedCancelItem = false
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            presentedCancelItem = true
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        #expect(presentedCancelItem)
+        #expect(cancelItemWasEnabled)
+        try await waitForCondition {
+            store.reviewRun(id: run.id)?.core.lifecycle.status == .cancelled
+        }
+        #expect(store.reviewRun(id: run.id)?.core.lifecycle.cancellation?.source == .userInterface)
+        #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
+
+        var cancelItemDisabledAfterCancellation = false
+        sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
+            guard let cancelItem = menu.items.first(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            cancelItemDisabledAfterCancellation = cancelItem.isEnabled == false
+        }
+        #expect(cancelItemDisabledAfterCancellation)
+    }
+
     @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
         let store = ReviewMonitorPreviewContent.makeStore()
         let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))

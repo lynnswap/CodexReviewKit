@@ -973,7 +973,11 @@ struct ReviewUITests {
 
         let panelBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "cmd-direct")
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
-        await awaitNativeLayoutTurn()
+        try await waitForCondition {
+            transport.logRenderIsIdleForTesting
+                && transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?
+                    .contains("Tests passed") == true
+        }
         #expect(
             transport.logCommandOutputPanelTerminalTextForTesting(blockID: panelBlockID)?.contains("$ swift test")
                 == true)

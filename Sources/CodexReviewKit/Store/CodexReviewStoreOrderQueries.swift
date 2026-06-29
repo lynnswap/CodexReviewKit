@@ -20,6 +20,16 @@ extension CodexReviewStore {
         cancellableReviewRun(forChatID: chatID) != nil
     }
 
+    package func hasReviewRun(forChatID chatID: String) -> Bool {
+        reviewRun(forChatID: chatID) != nil
+    }
+
+    package func reviewRun(forChatID chatID: String) -> ReviewRunRecord? {
+        orderedReviewRuns.first { runRecord in
+            runRecord.matchesChatID(chatID)
+        }
+    }
+
     package func cancellableReviewRun(forChatID chatID: String) -> ReviewRunRecord? {
         orderedReviewRuns.first { runRecord in
             guard isCancellableReviewRun(runRecord) else {

@@ -1,12 +1,15 @@
 import CodexKit
+import CodexReviewKit
 import SwiftUI
 
 @MainActor
 struct ReviewMonitorChatContextMenuView: View {
     private var chat: CodexChat
+    private var store: CodexReviewStore
 
-    init(chat: CodexChat) {
+    init(chat: CodexChat, store: CodexReviewStore) {
         self.chat = chat
+        self.store = store
     }
 
     var body: some View {
@@ -17,12 +20,24 @@ struct ReviewMonitorChatContextMenuView: View {
     }
 
     private var isRunning: Bool {
-        chat.status?.isActive == true
+        let chatID = chat.id.rawValue
+        if store.hasCancellableReview(forChatID: chatID) {
+            return true
+        }
+        if store.hasReviewRun(forChatID: chatID) {
+            return false
+        }
+        return chat.status?.isActive == true
     }
 
     private func cancel() {
+        let chatID = chat.id.rawValue
         Task {
-            try? await chat.cancel()
+            if store.hasCancellableReview(forChatID: chatID) {
+                _ = try? await store.cancelReview(chatID: chatID, cancellation: .userInterface())
+            } else if store.hasReviewRun(forChatID: chatID) == false {
+                _ = try? await chat.cancel()
+            }
         }
     }
 }
