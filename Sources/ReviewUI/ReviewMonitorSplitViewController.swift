@@ -518,7 +518,7 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
 #if DEBUG
 @MainActor
 extension ReviewMonitorSplitViewController {
-    func prepareForSwiftUIPreviewRendering() {
+    func prepareForImmediateRenderingForTesting() {
         loadViewIfNeeded()
         sidebarViewController?.loadViewIfNeeded()
         transportViewController?.loadViewIfNeeded()

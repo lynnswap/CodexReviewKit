@@ -11,6 +11,7 @@
 		F0A100000000000000000004 /* ReviewUI in Frameworks */ = {isa = PBXBuildFile; productRef = F0A100000000000000000005 /* ReviewUI */; };
 		F0A10000000000000000000A /* CodexReviewKit in Frameworks */ = {isa = PBXBuildFile; productRef = F0A10000000000000000000B /* CodexReviewKit */; };
 		F0A10000000000000000000C /* CodexReviewHost in Frameworks */ = {isa = PBXBuildFile; productRef = F0A10000000000000000000D /* CodexReviewHost */; };
+		F0A10000000000000000000E /* ReviewUIPreviewSupport in Frameworks */ = {isa = PBXBuildFile; productRef = F0A10000000000000000000F /* ReviewUIPreviewSupport */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +62,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F0A100000000000000000004 /* ReviewUI in Frameworks */,
+				F0A10000000000000000000E /* ReviewUIPreviewSupport in Frameworks */,
 				F0A10000000000000000000A /* CodexReviewKit in Frameworks */,
 				F0A10000000000000000000C /* CodexReviewHost in Frameworks */,
 			);
@@ -116,6 +118,7 @@
 			name = CodexReviewMonitor;
 			packageProductDependencies = (
 				F0A100000000000000000005 /* ReviewUI */,
+				F0A10000000000000000000F /* ReviewUIPreviewSupport */,
 				F0A10000000000000000000B /* CodexReviewKit */,
 				F0A10000000000000000000D /* CodexReviewHost */,
 			);
@@ -574,6 +577,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = F0A100000000000000000002 /* XCLocalSwiftPackageReference "../.." */;
 			productName = CodexReviewHost;
+		};
+		F0A10000000000000000000F /* ReviewUIPreviewSupport */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F0A100000000000000000002 /* XCLocalSwiftPackageReference "../.." */;
+			productName = ReviewUIPreviewSupport;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

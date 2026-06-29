@@ -3,6 +3,7 @@ import Foundation
 import CodexReviewKit
 import CodexReviewHost
 @_spi(PreviewSupport) @testable import ReviewUI
+import ReviewUIPreviewSupport
 import Testing
 @testable import CodexReviewMonitor
 

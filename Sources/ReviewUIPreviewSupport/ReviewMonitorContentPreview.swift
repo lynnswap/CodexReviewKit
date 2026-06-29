@@ -1,6 +1,7 @@
 #if DEBUG
 import AppKit
 import CodexReviewKit
+import ReviewUI
 import SwiftUI
 
 #Preview("Normal") {
@@ -29,7 +30,7 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     var account: CodexReviewAccount?
     var serverState: CodexReviewServerState = .running
 
-    func makeNSViewController(context: Context) -> ReviewMonitorRootViewController {
+    func makeNSViewController(context: Context) -> NSViewController {
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             authPhase: authPhase,
             account: account,
@@ -41,14 +42,14 @@ private struct ReviewMonitorContentPreviewHost: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(
-        _ nsViewController: ReviewMonitorRootViewController,
+        _ nsViewController: NSViewController,
         context: Context
     ) {
     }
 
     func sizeThatFits(
         _ proposal: ProposedViewSize,
-        nsViewController: ReviewMonitorRootViewController,
+        nsViewController: NSViewController,
         context: Context
     ) -> CGSize? {
         guard

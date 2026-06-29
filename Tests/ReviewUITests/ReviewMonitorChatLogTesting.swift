@@ -3,6 +3,26 @@ import Testing
 import CodexKit
 @_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
+@testable import ReviewUIPreviewSupport
+
+@MainActor
+func makeReviewMonitorPreviewContentViewControllerForPreview(
+    authPhase: CodexReviewAuthModel.Phase = .signedOut,
+    account: CodexReviewAccount? = nil,
+    serverState: CodexReviewServerState = .running,
+    previewContent: ReviewMonitorPreviewContentSource? = nil
+) -> ReviewMonitorRootViewController {
+    let viewController = ReviewUIPreviewSupport.makeReviewMonitorPreviewContentViewControllerForPreview(
+        authPhase: authPhase,
+        account: account,
+        serverState: serverState,
+        previewContent: previewContent
+    )
+    guard let rootViewController = viewController as? ReviewMonitorRootViewController else {
+        fatalError("Expected ReviewMonitorRootViewController.")
+    }
+    return rootViewController
+}
 
 struct ReviewChatLogEntryForTesting: Sendable, Hashable {
     enum Kind: String, Sendable, Hashable {

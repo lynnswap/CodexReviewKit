@@ -10,6 +10,7 @@ import CodexDataKit
 import CodexReviewKit
 import CodexReviewHost
 @_spi(PreviewSupport) import ReviewUI
+import ReviewUIPreviewSupport
 
 enum ReviewMonitorLaunchMode: Sendable {
     case application

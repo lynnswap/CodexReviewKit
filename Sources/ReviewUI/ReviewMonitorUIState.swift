@@ -1,9 +1,10 @@
 import Observation
+import CodexKit
 import CodexReviewKit
 
 @MainActor
 @Observable
-final class ReviewMonitorUIState {
+public final class ReviewMonitorUIState {
     let auth: CodexReviewAuthModel
     private let persistSidebarReviewChatFilter: (SidebarReviewChatFilter) -> Void
     var selection: ReviewMonitorSelection?
@@ -25,6 +26,16 @@ final class ReviewMonitorUIState {
         self.auth = auth
         self.sidebarReviewChatFilter = sidebarReviewChatFilter
         self.persistSidebarReviewChatFilter = persistSidebarReviewChatFilter
+    }
+
+    @_spi(PreviewSupport)
+    public convenience init(previewSupportAuth auth: CodexReviewAuthModel) {
+        self.init(auth: auth)
+    }
+
+    @_spi(PreviewSupport)
+    public func selectChat(id: CodexThreadID?) {
+        selection = id.map(ReviewMonitorSelection.chat)
     }
 
     var selectionID: ReviewMonitorSelectionID? {

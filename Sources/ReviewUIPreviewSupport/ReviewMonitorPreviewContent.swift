@@ -1,8 +1,8 @@
 import Foundation
 import CodexKit
 @_spi(Testing) import CodexReviewKit
+import ReviewUI
 
-@_spi(PreviewSupport)
 @MainActor
 public final class ReviewMonitorPreviewContentSource {
     public let store: CodexReviewStore
@@ -18,8 +18,8 @@ public final class ReviewMonitorPreviewContentSource {
         self.codexModelSource = runtime.modelSource
     }
 
-    var initialSelection: ReviewMonitorSelection? {
-        runtime.initialSelection
+    var initialChatID: CodexThreadID? {
+        runtime.initialChatID
     }
 
     func start() {
@@ -31,7 +31,7 @@ public final class ReviewMonitorPreviewContentSource {
     }
 
     @discardableResult
-    func appendPreviewChatLogStreamTick(
+    public func appendPreviewChatLogStreamTick(
         after tick: Int = 0,
         emitsNotifications: Bool = false
     ) async -> Int {
@@ -41,12 +41,11 @@ public final class ReviewMonitorPreviewContentSource {
         )
     }
 
-    func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
+    public func snapshotForTesting(chatID: CodexThreadID) -> CodexChatSnapshot? {
         runtime.snapshotForTesting(chatID: chatID)
     }
 }
 
-@_spi(PreviewSupport)
 @MainActor
 public enum ReviewMonitorPreviewContent {
     fileprivate enum PreviewChatLifecycle {
@@ -176,12 +175,10 @@ public enum ReviewMonitorPreviewContent {
         var reviewRuns: [ReviewRunRecord]
     }
 
-    @_spi(PreviewSupport)
     public static func makeStore() -> CodexReviewStore {
         makeStore(previewContent: makeSidebarContent())
     }
 
-    @_spi(PreviewSupport)
     public static func makeContentSource() -> ReviewMonitorPreviewContentSource {
         let previewContent = makeSidebarContent()
         let store = makeStore(previewContent: previewContent)
@@ -209,12 +206,10 @@ public enum ReviewMonitorPreviewContent {
         return store
     }
 
-    @_spi(PreviewSupport)
     public static func makeCommandOutputStore() -> CodexReviewStore {
         makeCommandOutputContentSource().store
     }
 
-    @_spi(PreviewSupport)
     public static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
         let store = CodexReviewStore.makePreviewStore(
             seed: .init(initialSettingsSnapshot: makePreviewSettingsSnapshot())
@@ -546,7 +541,6 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    @_spi(PreviewSupport)
     public static func makePreviewAccounts() -> [CodexReviewAccount] {
         [
             makePreviewAccount(
@@ -564,7 +558,6 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    @_spi(PreviewSupport)
     public static func makePreviewAccount(
         email: String = "review@example.com",
         usedPercents: (short: Int, long: Int) = (short: 34, long: 61)

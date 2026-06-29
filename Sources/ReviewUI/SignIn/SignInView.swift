@@ -57,33 +57,3 @@ struct SignInView: View {
         return trimmedMessage.isEmpty ? nil : trimmedMessage
     }
 }
-
-#if DEBUG
-#Preview("Signed Out") {
-    SignInView(store: makeSignInPreviewStore())
-}
-
-#Preview("Authenticating") {
-    SignInView(store: makeAuthenticatingSignInPreviewStore())
-}
-
-@MainActor
-func makeSignInPreviewStore() -> CodexReviewStore {
-    ReviewMonitorPreviewContent.makeStore()
-}
-
-@MainActor
-func makeAuthenticatingSignInPreviewStore() -> CodexReviewStore {
-    let store = makeSignInPreviewStore()
-    store.auth.updatePhase(
-        .signingIn(
-            .init(
-                title: "Sign in with ChatGPT",
-                detail: "Open the browser to continue.",
-                browserURL: "https://auth.openai.com/oauth/authorize"
-            )
-        )
-    )
-    return store
-}
-#endif

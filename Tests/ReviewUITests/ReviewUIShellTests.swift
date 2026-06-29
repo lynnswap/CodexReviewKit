@@ -6,6 +6,7 @@ import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
 @_spi(PreviewSupport) @testable import ReviewUI
+import ReviewUIPreviewSupport
 import CodexReviewTesting
 
 @MainActor

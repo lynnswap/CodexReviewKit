@@ -74,8 +74,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         initialSelection: ReviewMonitorSelection? = nil,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil,
-        dependencyRetainer: AnyObject? = nil,
-        appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)? = nil
+        dependencyRetainer: AnyObject? = nil
     ) {
         self.init(
             store: store,
@@ -85,12 +84,32 @@ public final class ReviewMonitorWindowController: NSWindowController {
             frameAutosaveName: Self.frameAutosaveName,
             sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults,
             showSettings: showSettings,
-            dependencyRetainer: dependencyRetainer,
-            appendPreviewChatLogStreamTickHandler: appendPreviewChatLogStreamTickHandler
+            dependencyRetainer: dependencyRetainer
         )
     }
 
-    init(
+    @_spi(PreviewSupport)
+    public convenience init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil
+    ) {
+        let rootViewController = ReviewMonitorRootViewController(
+            store: store,
+            uiState: uiState,
+            codexModelSource: codexModelSource,
+            showSettings: showSettings,
+            dependencyRetainer: dependencyRetainer
+        )
+        self.init(
+            rootViewController: rootViewController,
+            frameAutosaveName: Self.frameAutosaveName
+        )
+    }
+
+    convenience init(
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
@@ -98,8 +117,7 @@ public final class ReviewMonitorWindowController: NSWindowController {
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil,
-        dependencyRetainer: AnyObject? = nil,
-        appendPreviewChatLogStreamTickHandler: (@MainActor (Int) async -> Int?)? = nil
+        dependencyRetainer: AnyObject? = nil
     ) {
         let uiState = Self.makeUIState(
             auth: store.auth,
@@ -114,9 +132,18 @@ public final class ReviewMonitorWindowController: NSWindowController {
             codexModelSource: codexModelSource,
             contentTransitionAnimator: contentTransitionAnimator,
             showSettings: showSettings,
-            dependencyRetainer: dependencyRetainer,
-            appendPreviewChatLogStreamTickHandler: appendPreviewChatLogStreamTickHandler
+            dependencyRetainer: dependencyRetainer
         )
+        self.init(
+            rootViewController: rootViewController,
+            frameAutosaveName: frameAutosaveName
+        )
+    }
+
+    private init(
+        rootViewController: ReviewMonitorRootViewController,
+        frameAutosaveName: NSWindow.FrameAutosaveName
+    ) {
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -151,31 +178,6 @@ public final class ReviewMonitorWindowController: NSWindowController {
             sidebarReviewChatFilter: ReviewMonitorSidebar.ReviewChatFilterPersistence.load(from: sidebarReviewChatFilterDefaults),
             persistSidebarReviewChatFilter: { filter in
                 ReviewMonitorSidebar.ReviewChatFilterPersistence.save(filter, to: sidebarReviewChatFilterDefaults)
-            }
-        )
-    }
-}
-
-@_spi(PreviewSupport)
-public extension ReviewMonitorWindowController {
-    convenience init(
-        previewContent: ReviewMonitorPreviewContentSource,
-        showSettings: (@MainActor () -> Void)? = nil
-    ) {
-        previewContent.startStreaming(interval: .milliseconds(40))
-        self.init(
-            store: previewContent.store,
-            codexModelSource: previewContent.codexModelSource,
-            contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            initialSelection: previewContent.initialSelection,
-            showSettings: showSettings,
-            dependencyRetainer: previewContent,
-            appendPreviewChatLogStreamTickHandler: { tick in
-                let nextTick = await previewContent.appendPreviewChatLogStreamTick(
-                    after: tick,
-                    emitsNotifications: true
-                )
-                return nextTick
             }
         )
     }

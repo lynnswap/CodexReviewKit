@@ -2,8 +2,7 @@ import CodexKit
 import CodexAppServerKitTesting
 import CodexReviewKit
 import Foundation
-import Observation
-import ObservationBridge
+import ReviewUI
 
 @MainActor
 struct ReviewMonitorPreviewChatLogFixture {
@@ -71,8 +70,8 @@ final class ReviewMonitorPreviewAppServerRuntime {
         })
     }
 
-    var initialSelection: ReviewMonitorSelection? {
-        fixtures.first.map { .chat($0.chatID) }
+    var initialChatID: CodexThreadID? {
+        fixtures.first?.chatID
     }
 
     func chatPresentation(id: CodexThreadID) -> (title: String, subtitle: String)? {

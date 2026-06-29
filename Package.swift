@@ -21,6 +21,10 @@ let package = Package(
             targets: ["ReviewUI"]
         ),
         .library(
+            name: "ReviewUIPreviewSupport",
+            targets: ["ReviewUIPreviewSupport"]
+        ),
+        .library(
             name: "TextTransitions",
             targets: ["TextTransitions"]
         ),
@@ -97,8 +101,19 @@ let package = Package(
                 "CodexReviewKit",
                 "TextTransitions",
                 .product(name: "CodexKit", package: "CodexKit"),
-                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "ReviewUIPreviewSupport",
+            dependencies: [
+                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
+                "CodexReviewKit",
+                "ReviewUI",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -163,6 +178,7 @@ let package = Package(
                 "CodexReviewKit",
                 "CodexReviewTesting",
                 "ReviewUI",
+                "ReviewUIPreviewSupport",
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
