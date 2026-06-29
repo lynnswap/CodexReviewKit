@@ -183,13 +183,19 @@ public extension ReviewMonitorWindowController {
         initialChatID: CodexThreadID? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
-        if codexModelSource == nil,
-           initialChatID == nil,
-           let previewContent = ReviewMonitorPreviewContent.contentSource(for: store)
-        {
+        if let previewContent = ReviewMonitorPreviewContent.contentSource(for: store) {
+            previewContent.startStreaming(interval: .milliseconds(40))
             self.init(
-                previewContent: previewContent,
-                showSettings: showSettings
+                store: store,
+                codexModelSource: codexModelSource ?? previewContent.codexModelSource,
+                contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+                initialSelection: initialChatID.map(ReviewMonitorSelection.chat) ?? previewContent.initialSelection,
+                showSettings: showSettings,
+                dependencyRetainer: previewContent,
+                appendPreviewChatLogStreamTickHandler: { tick in
+                    let nextTick = await previewContent.appendPreviewChatLogStreamTick(after: tick)
+                    return nextTick
+                }
             )
             return
         }
