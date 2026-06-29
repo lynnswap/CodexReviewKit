@@ -83,7 +83,7 @@ final class ReviewMonitorSelectedCodexChat {
             return
         }
         modelSourceObservation = withPortableContinuousObservation { [weak self, modelSource] _ in
-            _ = modelSource.generation
+            _ = modelSource.modelContext
             self?.refreshBinding()
         }
     }

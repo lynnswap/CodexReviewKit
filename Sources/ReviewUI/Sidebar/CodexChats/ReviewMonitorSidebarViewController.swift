@@ -101,7 +101,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
     private var appliedSidebarKind: SidebarKind?
     private var isReconcilingSelection = false
-    var codexSidebarContentDidChange: (@MainActor () -> Void)?
     #if DEBUG
         private var fullReloadCountForTesting = 0
     #endif
@@ -293,7 +292,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         codexSidebarObservation?.cancel()
         codexSidebarObservation = withPortableContinuousObservation { [weak self, codexModelSource] _ in
-            _ = codexModelSource.generation
             self?.installCodexSidebarFetchedResults(modelContext: codexModelSource.modelContext)
         }
     }
@@ -387,7 +385,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             updateVisibleCodexSidebarCells()
             reconcileOutlineSelection()
         }
-        codexSidebarContentDidChange?()
     }
 
     private func applyCodexSidebarOutlineTopologyChanges(
