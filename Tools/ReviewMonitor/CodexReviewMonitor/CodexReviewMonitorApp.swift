@@ -270,15 +270,11 @@ struct ReviewMonitorAppComposition {
         }
     ) -> ReviewMonitorAppComposition {
         let codexModelSource = ReviewMonitorCodexModelSource()
-        var previewContent: ReviewMonitorPreviewContentSource?
         return ReviewMonitorAppComposition(
             makeStore: { context, presentationAnchorProvider in
                 if context.requestsPreviewContent {
-                    let content = ReviewMonitorPreviewContent.makeContentSource()
-                    previewContent = content
-                    return content.store
+                    return ReviewMonitorPreviewContent.makeContentSource().store
                 }
-                previewContent = nil
                 return makeLiveStore(
                     runtimePreferencesStore.load(),
                     .init(
@@ -296,13 +292,6 @@ struct ReviewMonitorAppComposition {
                 )
             },
             makeWindowController: { store, showSettings in
-                if let content = previewContent,
-                   content.store === store {
-                    return ReviewMonitorWindowController(
-                        previewContent: content,
-                        showSettings: showSettings
-                    )
-                }
                 return ReviewMonitorWindowController(
                     previewSupportStore: store,
                     codexModelSource: codexModelSource,

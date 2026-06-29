@@ -6,6 +6,7 @@ import ObjectiveC
 import ReviewUI
 
 nonisolated(unsafe) private var previewContentSourceAssociationKey: UInt8 = 0
+nonisolated(unsafe) private var previewContentDependenciesAssociationKey: UInt8 = 0
 
 @MainActor
 func makeReviewMonitorPreviewContentViewController() -> NSViewController {
@@ -69,28 +70,25 @@ public extension ReviewMonitorWindowController {
         codexModelSource: ReviewMonitorCodexModelSource,
         showSettings: @escaping @MainActor () -> Void
     ) {
+        guard let previewDependencies = store.previewContentDependenciesForPreviewSupport else {
+            self.init(
+                store: store,
+                codexModelSource: codexModelSource,
+                showSettings: showSettings
+            )
+            return
+        }
+        previewDependencies.startStreaming(interval: .milliseconds(40))
+        let uiState = ReviewMonitorUIState(previewSupportAuth: store.auth)
+        uiState.selectChat(id: previewDependencies.initialChatID)
         self.init(
             store: store,
-            codexModelSource: codexModelSource,
-            showSettings: showSettings
-        )
-    }
-
-    convenience init(
-        previewContent: ReviewMonitorPreviewContentSource,
-        showSettings: (@MainActor () -> Void)? = nil
-    ) {
-        previewContent.startStreaming(interval: .milliseconds(40))
-        let uiState = ReviewMonitorUIState(previewSupportAuth: previewContent.store.auth)
-        uiState.selectChat(id: previewContent.initialChatID)
-        self.init(
-            store: previewContent.store,
             uiState: uiState,
-            codexModelSource: previewContent.codexModelSource,
+            codexModelSource: previewDependencies.codexModelSource,
             showSettings: showSettings,
-            dependencyRetainer: previewContent
+            dependencyRetainer: previewDependencies
         )
-        window?.contentViewController?.installPreviewContentSourceForTesting(previewContent)
+        window?.contentViewController?.installPreviewContentDependenciesForTesting(previewDependencies)
     }
 }
 
@@ -106,10 +104,16 @@ public extension NSViewController {
 
     @discardableResult
     func appendPreviewChatLogStreamTickForTesting(after tick: Int = 0) async -> Int? {
-        guard let previewContent = previewContentSourceForTesting else {
+        if let previewContent = previewContentSourceForTesting {
+            return await previewContent.appendPreviewChatLogStreamTick(
+                after: tick,
+                emitsNotifications: true
+            )
+        }
+        guard let previewDependencies = previewContentDependenciesForTesting else {
             return nil
         }
-        return await previewContent.appendPreviewChatLogStreamTick(
+        return await previewDependencies.appendPreviewChatLogStreamTick(
             after: tick,
             emitsNotifications: true
         )
@@ -129,6 +133,24 @@ private extension NSViewController {
             self,
             &previewContentSourceAssociationKey,
             previewContent,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+    }
+
+    var previewContentDependenciesForTesting: ReviewMonitorPreviewContentDependencies? {
+        objc_getAssociatedObject(
+            self,
+            &previewContentDependenciesAssociationKey
+        ) as? ReviewMonitorPreviewContentDependencies
+    }
+
+    func installPreviewContentDependenciesForTesting(
+        _ dependencies: ReviewMonitorPreviewContentDependencies?
+    ) {
+        objc_setAssociatedObject(
+            self,
+            &previewContentDependenciesAssociationKey,
+            dependencies,
             .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
     }
