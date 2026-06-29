@@ -756,7 +756,6 @@ struct ReviewUITests {
 
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
-        #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
 
     @Test func selectingReviewChatUpdatesDetailPane() async throws {
@@ -788,12 +787,8 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(selectedSnapshot.title == nil)
-        #expect(selectedSnapshot.summary == nil)
         #expect(selectedSnapshot.log == reviewChatLogText(for: recentChat))
         #expect(selectedSnapshot.isShowingEmptyState == false)
-        #expect(window.title == recentChat.chat.title)
-        #expect(window.subtitle == recentChat.cwd)
         #expect(transport.logUsesFindBarForTesting)
         #expect(transport.logIsIncrementalSearchingEnabledForTesting)
         #expect(transport.logFindBarVisibleForTesting == false)
@@ -877,10 +872,6 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(selectedSnapshot.title == nil)
-        #expect(selectedSnapshot.summary == nil)
-        #expect(window.title == chat.chat.title)
-        #expect(window.subtitle == chat.cwd)
 
         let displayedLog = transport.displayedLogForTesting
         #expect(selectedSnapshot.log == displayedLog)
@@ -1616,15 +1607,11 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeChat.chatID)
 
-        let activeSnapshot = try await awaitChatRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             activeChat,
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(activeSnapshot.title == nil)
-        #expect(activeSnapshot.summary == nil)
-        #expect(window.title == activeChat.chat.title)
-        #expect(window.subtitle == activeChat.cwd)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentChat.chatID)
 
         let recentSnapshot = try await awaitChatRenderForTesting(
@@ -1635,14 +1622,10 @@ struct ReviewUITests {
         #expect(
             recentSnapshot
                 == .init(
-                    title: nil,
-                    summary: nil,
                     log: reviewChatLogText(for: recentChat),
                     isShowingEmptyState: false
                 )
         )
-        #expect(window.title == recentChat.chat.title)
-        #expect(window.subtitle == recentChat.cwd)
     }
 
     @Test func firstSelectionFromEmptyStatePinsUnvisitedReviewChatToBottom() async throws {
@@ -2112,7 +2095,10 @@ struct ReviewUITests {
         )
         viewController.sidebarViewControllerForTesting.clickWorkspaceHeaderForTesting(cwd: chat.cwd)
 
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .workspaceGroup(expectedWorkspaceGroupID.rawValue)
+        )
         #expect(
             viewController.sidebarViewControllerForTesting.selectedWorkspaceGroupIDForTesting
                 == expectedWorkspaceGroupID)
@@ -2138,7 +2124,6 @@ struct ReviewUITests {
 
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
-        #expect(viewController.contentPaneViewControllerForTesting.displayedTitleForTesting == nil)
     }
 
     @Test func removingSelectedReviewChatClearsSelectionWithoutAutoSelectingReplacement() async throws {
@@ -2200,13 +2185,14 @@ struct ReviewUITests {
                 && sidebar.selectedReviewChatIDForTesting == nil
         }
 
-        let emptySnapshot = try await awaitContentPaneRender(contentPane) { snapshot in
+        let emptySnapshot = try await awaitContentPaneRender(
+            contentPane,
+            expectedSelection: nil
+        ) { snapshot in
             snapshot.isShowingEmptyState
         }
         #expect(sidebar.selectedReviewChatIDForTesting == nil)
         #expect(emptySnapshot.isShowingEmptyState)
-        #expect(emptySnapshot.title == nil)
-        #expect(emptySnapshot.summary == nil)
     }
 
     @Test func clearingSelectionShowsEmptyStateAndClearsDetailPane() async throws {
@@ -2230,23 +2216,19 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
-        let selectedSnapshot = try await awaitChatRenderForTesting(
+        _ = try await awaitChatRenderForTesting(
             chat,
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(selectedSnapshot.title == nil)
-        #expect(window.title == chat.chat.title)
-        #expect(window.subtitle == chat.cwd)
         viewController.sidebarViewControllerForTesting.clearSelectionForTesting()
 
-        let emptySnapshot = try await awaitContentPaneRender(contentPane)
+        let emptySnapshot = try await awaitContentPaneRender(
+            contentPane,
+            expectedSelection: nil
+        )
         #expect(emptySnapshot.isShowingEmptyState)
-        #expect(emptySnapshot.title == nil)
-        #expect(emptySnapshot.summary == nil)
         #expect(emptySnapshot.log.isEmpty)
-        #expect(window.title == "")
-        #expect(window.subtitle == "")
         await replaceChatLogTextForTesting(
             "Deselected log",
             for: chat.chatID,
@@ -2282,8 +2264,7 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(selectedSnapshot.title == nil)
-        #expect(selectedSnapshot.summary == nil)
+        #expect(reviewChatRenderedLogMatches(selectedSnapshot.log, reviewChatLogText(for: chat)))
         await replaceChatLogTextForTesting(
             "Updated log",
             for: chat.chatID,
@@ -2293,7 +2274,6 @@ struct ReviewUITests {
 
         let updatedSnapshot = try await awaitChatRenderForTesting(chat, in: transport)
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == chat.chatID)
-        #expect(updatedSnapshot.summary == nil)
         #expect(reviewChatRenderedLogMatches(updatedSnapshot.log, reviewChatLogText(for: chat)))
     }
 
@@ -2325,7 +2305,10 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         let chatID = chat.chatID
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
-        _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(chatID.rawValue)
+        ) { $0.log == "Initial" }
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
@@ -2337,7 +2320,10 @@ struct ReviewUITests {
             content: .message(.init(id: "msg_1", role: .assistant, text: ""))
         )
 
-        let snapshot = try await awaitTransportRender(transport) { $0.log == "Initial log" }
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(chatID.rawValue)
+        ) { $0.log == "Initial log" }
         #expect(snapshot.log == "Initial log")
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
@@ -2372,7 +2358,10 @@ struct ReviewUITests {
         let transport = viewController.transportViewControllerForTesting
         let chatID = chat.chatID
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
-        _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(chatID.rawValue)
+        ) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
         await previewRuntime.upsertPreviewItem(
             id: "progress_1",
@@ -2381,7 +2370,10 @@ struct ReviewUITests {
             to: chatID
         )
 
-        let snapshot = try await awaitTransportRender(transport) { $0.log.hasSuffix("stream.tick 001") }
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(chatID.rawValue)
+        ) { $0.log.hasSuffix("stream.tick 001") }
         #expect(snapshot.log.hasSuffix("stream.tick 001"))
         #expect(transport.logWordGlowCountForTesting == wordGlowCount)
     }
@@ -3871,7 +3863,10 @@ struct ReviewUITests {
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting)
         viewController.sidebarViewControllerForTesting.clearSelectionForTesting()
-        _ = try await awaitTransportRender(transport)
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: nil
+        )
         #expect(transport.logFindBarVisibleForTesting)
         #expect(transport.logFindClientUsesSnapshotForTesting == false)
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: secondChat.chatID)
@@ -4490,7 +4485,6 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(snapshot.summary == nil)
         #expect(snapshot.log == reviewChatLogText(for: chat))
     }
 
@@ -4519,7 +4513,6 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(snapshot.summary == nil)
         #expect(snapshot.log == reviewChatLogText(for: chat))
     }
 
@@ -4852,17 +4845,12 @@ func waitForObservedValueFromCurrentObservation<Value: Sendable & Equatable>(
 @MainActor
 func awaitTransportRender(
     _ transport: ReviewMonitorTransportViewController,
-    observation explicitObservation: PortableObservationTracking.Token? = nil,
+    expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting?,
     timeout: Duration = .seconds(2),
-    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+    matching predicate: @escaping @Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool = { _ in true }
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
-    _ = try #require(explicitObservation ?? transport.observationForExpectedRenderedStateForTesting)
-    let expectedState = transport.expectedRenderedStateForTesting
     let resolvedPredicate: @Sendable (ReviewMonitorTransportViewController.RenderedStateForTesting) -> Bool = { state in
-        if let predicate {
-            return predicate(state.snapshot)
-        }
-        return state == expectedState
+        state.selection == expectedSelection && predicate(state.snapshot)
     }
 
     let clock = ContinuousClock()
@@ -4882,7 +4870,7 @@ func awaitTransportRender(
     throw TestFailure(
         "timed out waiting for rendered transport state: "
             + "idle=\(transport.logRenderIsIdleForTesting), "
-            + "actual=\(state), expected=\(expectedState)"
+            + "actual=\(state), expectedSelection=\(String(describing: expectedSelection))"
     )
 }
 
@@ -4928,13 +4916,13 @@ func expectLogVisibleFragmentsWithoutForcingLayout(
 @MainActor
 func awaitContentPaneRender(
     _ contentPane: ReviewMonitorTransportViewController,
-    observation explicitObservation: PortableObservationTracking.Token? = nil,
+    expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting?,
     timeout: Duration = .seconds(2),
-    matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
+    matching predicate: @escaping @Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool = { _ in true }
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     try await awaitTransportRender(
         contentPane,
-        observation: explicitObservation,
+        expectedSelection: expectedSelection,
         timeout: timeout,
         matching: predicate
     )

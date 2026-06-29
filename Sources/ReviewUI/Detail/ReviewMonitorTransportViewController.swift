@@ -346,8 +346,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     @MainActor
     extension ReviewMonitorTransportViewController {
         struct RenderSnapshotForTesting: Sendable, Equatable {
-            let title: String?
-            let summary: String?
             let log: String
             let isShowingEmptyState: Bool
         }
@@ -383,29 +381,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             selectedCodexChat.chat?.items.compactMap(\.text) ?? []
         }
 
-        var observationForExpectedRenderedStateForTesting: PortableObservationTracking.Token? {
-            let expectedSelection = expectedRenderedStateForTesting.selection
-            if displayedSelectionForTesting != expectedSelection {
-                return selectionObservation
-            }
-            switch expectedSelection {
-            case .workspaceGroup, .workspace, .chat:
-                return selectionObservation
-            case nil:
-                return selectionObservation
-            }
-        }
-
-        var displayedTitleForTesting: String? {
-            nil
-        }
-
         var displayedLogForTesting: String {
             logScrollView.displayedTextForTesting
-        }
-
-        var displayedSummaryForTesting: String? {
-            nil
         }
 
         var isShowingEmptyStateForTesting: Bool {
@@ -718,15 +695,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
         var renderSnapshotForTesting: RenderSnapshotForTesting {
             if isShowingEmptyStateForTesting {
                 return .init(
-                    title: nil,
-                    summary: nil,
                     log: "",
                     isShowingEmptyState: true
                 )
             }
             return .init(
-                title: displayedTitleForTesting,
-                summary: displayedSummaryForTesting,
                 log: displayedLogForTesting,
                 isShowingEmptyState: false
             )
@@ -739,61 +712,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
             )
         }
 
-        var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
-            switch uiState.selection {
-            case .workspaceGroup:
-                .init(
-                    title: nil,
-                    summary: nil,
-                    log: "",
-                    isShowingEmptyState: false
-                )
-            case .workspace:
-                .init(
-                    title: nil,
-                    summary: nil,
-                    log: "",
-                    isShowingEmptyState: false
-                )
-            case .chat:
-                .init(
-                    title: nil,
-                    summary: nil,
-                    log: displayedLogForTesting,
-                    isShowingEmptyState: false
-                )
-            case nil:
-                .init(
-                    title: nil,
-                    summary: nil,
-                    log: "",
-                    isShowingEmptyState: true
-                )
-            }
-        }
-
-        var expectedRenderedStateForTesting: RenderedStateForTesting {
-            .init(
-                snapshot: expectedRenderSnapshotForTesting,
-                selection: expectedDisplayedSelectionForTesting
-            )
-        }
-
         private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
             switch displayedSelection {
-            case .workspaceGroup(let id):
-                .workspaceGroup(id.rawValue)
-            case .workspace(let id):
-                .workspace(id.rawValue)
-            case .chat(let id):
-                .chat(id.rawValue)
-            case nil:
-                nil
-            }
-        }
-
-        private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
-            switch uiState.selection {
             case .workspaceGroup(let id):
                 .workspaceGroup(id.rawValue)
             case .workspace(let id):

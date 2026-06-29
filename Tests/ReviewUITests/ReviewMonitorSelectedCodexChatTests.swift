@@ -166,7 +166,10 @@ struct ReviewMonitorSelectedCodexChatTests {
 
         selectChat(id: "review-thread", in: uiState)
 
-        let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let initialSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
             snapshot.log.contains("Chat snapshot")
         }
         #expect(initialSnapshot.log.contains("Legacy fallback") == false)
@@ -185,7 +188,10 @@ struct ReviewMonitorSelectedCodexChatTests {
             )
         )
 
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
             snapshot.log.contains("Chat stream update")
         }
         #expect(updatedSnapshot.log.contains("Chat snapshot") == false)
@@ -230,7 +236,10 @@ struct ReviewMonitorSelectedCodexChatTests {
 
         selectChat(id: "review-thread", in: uiState)
 
-        _ = try await awaitTransportRender(transport) { snapshot in
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
             snapshot.log == "Initial"
         }
         transport.setLogReduceMotionForTesting(false)
@@ -251,7 +260,10 @@ struct ReviewMonitorSelectedCodexChatTests {
             )
         )
 
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
             snapshot.log == "Initial log"
         }
         #expect(updatedSnapshot.log == "Initial log")
@@ -297,7 +309,10 @@ struct ReviewMonitorSelectedCodexChatTests {
 
         uiState.selection = .chat(CodexThreadID(rawValue: "chat-thread"))
 
-        _ = try await awaitTransportRender(transport) { snapshot in
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("chat-thread")
+        ) { snapshot in
             snapshot.log.contains("Generic chat snapshot")
         }
         #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
@@ -317,7 +332,10 @@ struct ReviewMonitorSelectedCodexChatTests {
             )
         )
 
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("chat-thread")
+        ) { snapshot in
             snapshot.log.contains("Generic chat stream update")
         }
         #expect(updatedSnapshot.log.contains("Generic chat snapshot") == false)

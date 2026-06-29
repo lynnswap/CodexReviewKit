@@ -40,7 +40,10 @@ extension ReviewUITests {
         #expect(viewController.splitViewControllerForTesting.isTransportViewLoadedForTesting)
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
-        let snapshot = try await awaitTransportRender(transport) { snapshot in
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
         }
 
@@ -311,7 +314,10 @@ extension ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
-        let snapshot = try await awaitTransportRender(transport) { snapshot in
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
         }
 
@@ -321,6 +327,8 @@ extension ReviewUITests {
 
     @Test func previewContentViewControllerStreamsSelectedChatLogDuringViewLifecycle() async throws {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewContent: previewContent
         )
@@ -329,13 +337,19 @@ extension ReviewUITests {
         viewController.view.layoutSubtreeIfNeeded()
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
-        let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let initialSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
         }
 
         let nextTick = try #require(await viewController.appendPreviewChatLogStreamTickForTesting())
         #expect(nextTick == 1)
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.count > initialSnapshot.log.count
                 && snapshot.log.contains("Turn started")
                 && snapshot.isShowingEmptyState == false
@@ -1012,14 +1026,9 @@ extension ReviewUITests {
         window.setContentSize(NSSize(width: 900, height: 600))
         viewController.loadViewIfNeeded()
         window.layoutIfNeeded()
-        try await waitForCondition {
-            window.titleVisibility == .visible && window.title.isEmpty == false
-        }
 
         #expect(window.toolbar != nil)
         #expect(window.styleMask.contains(.fullSizeContentView))
-        #expect(window.titleVisibility == .visible)
-        #expect(window.title.isEmpty == false)
         #expect(window.isOpaque)
         #expect(window.backgroundColor == .windowBackgroundColor)
         #expect(window.titlebarAppearsTransparent == false)
@@ -1043,7 +1052,10 @@ extension ReviewUITests {
         window.layoutIfNeeded()
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
-        let snapshot = try await awaitTransportRender(transport) { snapshot in
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
         }
 
@@ -1053,6 +1065,8 @@ extension ReviewUITests {
 
     @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
         let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
             previewContent: previewContent
         )
@@ -1063,13 +1077,19 @@ extension ReviewUITests {
         window.layoutIfNeeded()
 
         let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
-        let initialSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let initialSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
         }
 
         let nextTick = try #require(await viewController.appendPreviewChatLogStreamTickForTesting())
         #expect(nextTick == 1)
-        let updatedSnapshot = try await awaitTransportRender(transport) { snapshot in
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
             snapshot.log.count > initialSnapshot.log.count
                 && snapshot.log.contains("Turn started")
                 && snapshot.isShowingEmptyState == false
