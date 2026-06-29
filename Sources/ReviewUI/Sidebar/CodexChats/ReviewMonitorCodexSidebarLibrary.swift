@@ -567,7 +567,8 @@ package final class ReviewMonitorCodexSidebarLibrary {
     package static var defaultDescriptor: CodexFetchDescriptor<CodexChat> {
         CodexFetchDescriptor<CodexChat>(
             predicate: .init(sourceKinds: [.subAgentReview]),
-            sortBy: [.updatedAt(.reverse)]
+            sort: \.updatedAt,
+            order: .reverse
         )
     }
 
