@@ -95,7 +95,11 @@ final class ReviewMonitorSelectedCodexChat {
         logProjection.reset()
         boundModelContext = nextModelContext
 
-        guard let nextChatID, let modelContext = nextModelContext else {
+        guard let nextChatID else {
+            return
+        }
+
+        guard let modelContext = nextModelContext else {
             return
         }
 

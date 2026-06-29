@@ -27,18 +27,6 @@ final class ReviewMonitorUIState {
         self.persistSidebarReviewChatFilter = persistSidebarReviewChatFilter
     }
 
-    var selectedWorkspaceSectionEntry: ReviewMonitorWorkspaceSectionSelection? {
-        get {
-            guard case .workspaceSection(let section) = selection else {
-                return nil
-            }
-            return section
-        }
-        set {
-            selection = newValue.map(ReviewMonitorSelection.workspaceSection)
-        }
-    }
-
     var selectionID: ReviewMonitorSelectionID? {
         selection?.id
     }

@@ -144,36 +144,19 @@ public enum ReviewMonitorPreviewContent {
             persistedAccounts: accounts,
             serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let chatLogSource = ReviewMonitorPreviewChatLogSource(
+        let previewRuntime = ReviewMonitorPreviewAppServerRuntime(
             fixtures: previewContent.chatLogFixtures
         )
-        store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
-            chatLogSource: chatLogSource
-        )
+        store.previewSupportRetainer = previewRuntime
         return store
     }
 
-    static func makeChatLogSource(from store: CodexReviewStore) -> ReviewMonitorPreviewChatLogSource {
-        if let previewSupport = store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport {
-            return previewSupport.chatLogSource
-        }
-        return ReviewMonitorPreviewChatLogSource(fixtures: [])
+    static func previewRuntime(from store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
+        store.previewSupportRetainer as? ReviewMonitorPreviewAppServerRuntime
     }
 
-    static func retainChatLogStreamer(
-        source: ReviewMonitorPreviewChatLogSource,
-        in store: CodexReviewStore,
-        interval: Duration
-    ) {
-        let previewSupport: ReviewMonitorPreviewRuntimeSupport
-        if let existingSupport = store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport,
-           existingSupport.chatLogSource === source {
-            previewSupport = existingSupport
-        } else {
-            previewSupport = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
-            store.previewSupportRetainer = previewSupport
-        }
-        previewSupport.startStreaming(interval: interval)
+    static func retainPreviewRuntimeStreamer(in store: CodexReviewStore, interval: Duration) {
+        previewRuntime(from: store)?.startStreaming(interval: interval)
     }
 
     @_spi(PreviewSupport)
@@ -210,9 +193,7 @@ public enum ReviewMonitorPreviewContent {
         let fixture = makeChatLogFixture(
             for: chatFixture
         )
-        store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(
-            chatLogSource: ReviewMonitorPreviewChatLogSource(fixtures: [fixture])
-        )
+        store.previewSupportRetainer = ReviewMonitorPreviewAppServerRuntime(fixtures: [fixture])
         return store
     }
 
@@ -638,17 +619,6 @@ public enum ReviewMonitorPreviewContent {
     private static func makeChatLogFixture(
         for chatFixture: PreviewChatFixture
     ) -> ReviewMonitorPreviewChatLogFixture {
-        let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(chatFixture.chatID),
-            id: chatFixture.chatID,
-            title: chatFixture.targetSummary,
-            preview: chatFixture.initialMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
-            model: chatFixture.model,
-            workspaceCWD: chatFixture.cwd,
-            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
-            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt,
-            status: CodexThreadStatus(previewLifecycle: chatFixture.lifecycle)
-        )
         let turn = CodexChatTurnStateSnapshot(
             id: chatFixture.turnID,
             status: CodexTurnStatus(chatFixture.lifecycle),
@@ -656,7 +626,7 @@ public enum ReviewMonitorPreviewContent {
             usage: nil
         )
         let initialSnapshot = CodexChatSnapshot(
-            chatID: chat.id,
+            chatID: chatFixture.chatID,
             phase: CodexDataPhase(
                 chatFixture.lifecycle,
                 errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil
@@ -669,7 +639,14 @@ public enum ReviewMonitorPreviewContent {
             )
         )
         return ReviewMonitorPreviewChatLogFixture(
-            chat: chat,
+            chatID: chatFixture.chatID,
+            title: chatFixture.targetSummary,
+            preview: chatFixture.initialMessage.nilIfEmpty ?? chatFixture.summary.nilIfEmpty,
+            model: chatFixture.model,
+            workspaceCWD: chatFixture.cwd,
+            updatedAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            recencyAt: chatFixture.endedAt ?? chatFixture.startedAt,
+            status: CodexThreadStatus(previewLifecycle: chatFixture.lifecycle),
             cwd: chatFixture.cwd,
             streamID: chatFixture.id,
             isRunning: chatFixture.lifecycle == .running,

@@ -15,7 +15,6 @@ final class ReviewMonitorRootViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
     private let codexModelSource: ReviewMonitorCodexModelSource?
-    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
     private var observation: PortableObservationTracking.Token?
@@ -26,7 +25,6 @@ final class ReviewMonitorRootViewController: NSViewController {
         store: store,
         uiState: uiState,
         codexModelSource: codexModelSource,
-        previewChatLogSource: previewChatLogSource,
         showSettings: showSettings
     )
 
@@ -36,7 +34,6 @@ final class ReviewMonitorRootViewController: NSViewController {
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         modelContext: CodexModelContext,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
@@ -44,7 +41,6 @@ final class ReviewMonitorRootViewController: NSViewController {
             store: store,
             uiState: uiState,
             codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
-            previewChatLogSource: previewChatLogSource,
             contentTransitionAnimator: contentTransitionAnimator,
             showSettings: showSettings
         )
@@ -54,14 +50,12 @@ final class ReviewMonitorRootViewController: NSViewController {
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
         self.codexModelSource = codexModelSource
-        self.previewChatLogSource = previewChatLogSource
         self.contentTransitionAnimator = contentTransitionAnimator
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
@@ -259,8 +253,11 @@ extension ReviewMonitorRootViewController {
     }
 
     @discardableResult
-    func appendPreviewChatLogStreamTickForTesting(after tick: Int = 0) -> Int? {
-        previewChatLogSource?.appendPreviewStreamTick(after: tick)
+    func appendPreviewChatLogStreamTickForTesting(after tick: Int = 0) async -> Int? {
+        guard let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) else {
+            return nil
+        }
+        return await previewRuntime.appendPreviewStreamTick(after: tick)
     }
 
     var splitViewControllerForTesting: ReviewMonitorSplitViewController {
@@ -320,26 +317,24 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
     store.auth.selectPersistedAccount(resolvedAccount?.id)
     let uiState = ReviewMonitorUIState(auth: store.auth)
-    let previewChatLogSource: ReviewMonitorPreviewChatLogSource? =
-        if case .running = serverState {
-            ReviewMonitorPreviewContent.makeChatLogSource(from: store)
-        } else {
-            nil
-        }
-    if let initialChat = previewChatLogSource?.initialChat {
-        uiState.selection = .chat(initialChat.id)
+    if uiState.selection == nil,
+       let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) {
+        uiState.selection = previewRuntime.initialSelection
     }
-    if ownsPreviewStore, let previewChatLogSource {
-        ReviewMonitorPreviewContent.retainChatLogStreamer(
-            source: previewChatLogSource,
+    if ownsPreviewStore,
+       ReviewMonitorPreviewContent.previewRuntime(from: store) != nil {
+        ReviewMonitorPreviewContent.retainPreviewRuntimeStreamer(
             in: store,
             interval: .milliseconds(40)
         )
+    } else {
+        ReviewMonitorPreviewContent.previewRuntime(from: store)?.start()
     }
+    let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store)
     return ReviewMonitorRootViewController(
         store: store,
         uiState: uiState,
-        previewChatLogSource: previewChatLogSource
+        codexModelSource: previewRuntime?.modelSource
     )
 }
 #endif

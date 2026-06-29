@@ -10,8 +10,8 @@ package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringC
         self.rawValue = rawValue
     }
 
-    package static func section(_ id: String) -> Self {
-        .init(rawValue: "section:\(id)")
+    package static func workspaceGroup(_ id: CodexWorkspaceGroupID) -> Self {
+        .init(rawValue: "workspaceGroup:\(id.rawValue)")
     }
 
     package static func workspace(_ id: CodexWorkspaceID) -> Self {
@@ -28,385 +28,119 @@ package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringC
 }
 
 @MainActor
-package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
-    @MainActor
-    package struct Section: Equatable {
-        package var rowID: ReviewMonitorCodexSidebarRowID
-        package var id: String
-        package var title: String
-        package var workspaces: [Workspace]
-        package var uncategorizedChats: [Chat]
-
-        package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
-            [rowID] + workspaces.flatMap(\.rowIDs) + uncategorizedChats.map(\.rowID)
-        }
-
-        var selection: ReviewMonitorWorkspaceSectionSelection {
-            var workspaceCWDs = workspaces.map(\.cwd)
-            for chat in uncategorizedChats {
-                guard let cwd = chat.workspaceCWD,
-                    workspaceCWDs.contains(cwd) == false
-                else {
-                    continue
-                }
-                workspaceCWDs.append(cwd)
-            }
-            return ReviewMonitorWorkspaceSectionSelection(
-                id: id,
-                title: title,
-                workspaceCWDs: workspaceCWDs
-            )
+extension CodexFetchSection where Model == CodexChat {
+    package var workspaceGroupID: CodexWorkspaceGroupID {
+        switch id {
+        case .workspaceGroup(let id):
+            id
+        default:
+            CodexWorkspaceGroupID(rawValue: id.description)
         }
     }
 
-    @MainActor
-    package struct Workspace: Equatable {
-        private struct Fixture: Equatable {
-            var cwd: String
-            var title: String
-        }
-
-        private enum Source: Equatable {
-            case codex(CodexWorkspace)
-            case fixture(Fixture)
-
-            static func == (lhs: Source, rhs: Source) -> Bool {
-                switch (lhs, rhs) {
-                case (.codex(let lhs), .codex(let rhs)):
-                    lhs === rhs
-                case (.fixture(let lhs), .fixture(let rhs)):
-                    lhs == rhs
-                default:
-                    false
-                }
-            }
-        }
-
-        package var rowID: ReviewMonitorCodexSidebarRowID
-        package var id: CodexWorkspaceID
-        package var chats: [Chat]
-        private var source: Source
-
-        package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
-            [rowID] + chats.map(\.rowID)
-        }
-
-        package var codexWorkspace: CodexWorkspace? {
-            switch source {
-            case .codex(let workspace):
-                workspace
-            case .fixture:
-                nil
-            }
-        }
-
-        package var cwd: String {
-            switch source {
-            case .codex(let workspace):
-                workspace.url.path
-            case .fixture(let fixture):
-                fixture.cwd
-            }
-        }
-
-        package var title: String {
-            switch source {
-            case .codex(let workspace):
-                workspace.name
-            case .fixture(let fixture):
-                fixture.title
-            }
-        }
-
-        func replacingChats(_ chats: [Chat]) -> Self {
-            var copy = self
-            copy.chats = chats
-            return copy
-        }
-
-        package init(
-            rowID: ReviewMonitorCodexSidebarRowID,
-            id: CodexWorkspaceID,
-            cwd: String,
-            title: String,
-            chats: [Chat]
-        ) {
-            self.rowID = rowID
-            self.id = id
-            self.chats = chats
-            self.source = .fixture(Fixture(cwd: cwd, title: title))
-        }
-
-        package init(
-            workspace: CodexWorkspace,
-            chats: [Chat]
-        ) {
-            self.rowID = .workspace(workspace.id)
-            self.id = workspace.id
-            self.chats = chats
-            self.source = .codex(workspace)
-        }
+    package var displayTitle: String {
+        title ?? "Unknown"
     }
 
-    @MainActor
-    package struct Chat: Equatable {
-        private struct Fixture: Equatable {
-            var title: String
-            var preview: String?
-            var model: String?
-            var workspaceCWD: String?
-            var updatedAt: Date?
-            var recencyAt: Date?
-            var status: CodexThreadStatus?
-        }
-
-        private enum Source: Equatable {
-            case codex(CodexChat)
-            case preview(ReviewMonitorPreviewChat)
-            case fixture(Fixture)
-
-            static func == (lhs: Source, rhs: Source) -> Bool {
-                switch (lhs, rhs) {
-                case (.codex(let lhs), .codex(let rhs)):
-                    lhs === rhs
-                case (.preview(let lhs), .preview(let rhs)):
-                    lhs === rhs
-                case (.fixture(let lhs), .fixture(let rhs)):
-                    lhs == rhs
-                default:
-                    false
-                }
-            }
-        }
-
-        package var rowID: ReviewMonitorCodexSidebarRowID
-        package var id: CodexThreadID
-        private var source: Source
-
-        package init(
-            rowID: ReviewMonitorCodexSidebarRowID,
-            id: CodexThreadID,
-            title: String,
-            preview: String?,
-            model: String? = nil,
-            workspaceCWD: String?,
-            updatedAt: Date?,
-            recencyAt: Date? = nil,
-            status: CodexThreadStatus? = nil
-        ) {
-            self.rowID = rowID
-            self.id = id
-            self.source = .fixture(
-                Fixture(
-                    title: title,
-                    preview: preview,
-                    model: model,
-                    workspaceCWD: workspaceCWD,
-                    updatedAt: updatedAt,
-                    recencyAt: recencyAt,
-                    status: status
-                ))
-        }
-
-        package init(chat: CodexChat) {
-            self.rowID = .chat(chat.id)
-            self.id = chat.id
-            self.source = .codex(chat)
-        }
-
-        package init(previewChat: ReviewMonitorPreviewChat) {
-            self.rowID = .chat(previewChat.id)
-            self.id = previewChat.id
-            self.source = .preview(previewChat)
-        }
-
-        package var codexChat: CodexChat? {
-            switch source {
-            case .codex(let chat):
-                chat
-            case .preview, .fixture:
-                nil
-            }
-        }
-
-        package var previewChat: ReviewMonitorPreviewChat? {
-            switch source {
-            case .preview(let chat):
-                chat
-            case .fixture:
-                nil
-            case .codex:
-                nil
-            }
-        }
-
-        package var title: String {
-            switch source {
-            case .codex(let chat):
-                chat.title
-            case .preview(let chat):
-                chat.title
-            case .fixture(let fixture):
-                fixture.title
-            }
-        }
-
-        package var preview: String? {
-            switch source {
-            case .codex(let chat):
-                chat.preview
-            case .preview(let chat):
-                chat.preview
-            case .fixture(let fixture):
-                fixture.preview
-            }
-        }
-
-        package var model: String? {
-            switch source {
-            case .codex(let chat):
-                chat.modelProvider
-            case .preview(let chat):
-                chat.model
-            case .fixture(let fixture):
-                fixture.model
-            }
-        }
-
-        package var workspaceCWD: String? {
-            switch source {
-            case .codex(let chat):
-                chat.workspace?.url.path
-            case .preview(let chat):
-                chat.workspaceCWD
-            case .fixture(let fixture):
-                fixture.workspaceCWD
-            }
-        }
-
-        package var updatedAt: Date? {
-            switch source {
-            case .codex(let chat):
-                chat.updatedAt
-            case .preview(let chat):
-                chat.updatedAt
-            case .fixture(let fixture):
-                fixture.updatedAt
-            }
-        }
-
-        package var recencyAt: Date? {
-            switch source {
-            case .codex(let chat):
-                chat.recencyAt
-            case .preview(let chat):
-                chat.recencyAt
-            case .fixture(let fixture):
-                fixture.recencyAt
-            }
-        }
-
-        package var status: CodexThreadStatus? {
-            switch source {
-            case .codex(let chat):
-                chat.status
-            case .preview(let chat):
-                chat.status
-            case .fixture(let fixture):
-                fixture.status
-            }
-        }
-
-        var activityDate: Date? {
-            recencyAt ?? updatedAt
-        }
-
-        var isRunning: Bool {
-            status?.isActive == true
-        }
-
-        var isFinished: Bool {
-            status.map { $0.isActive == false } ?? false
-        }
+    package var rowID: ReviewMonitorCodexSidebarRowID {
+        .workspaceGroup(workspaceGroupID)
     }
 
-    package var sections: [Section]
+    package var workspaces: [CodexWorkspace] {
+        var workspaces: [CodexWorkspace] = []
+        var workspaceIDs = Set<CodexWorkspaceID>()
+        for chat in items {
+            guard let workspace = chat.workspace,
+                workspaceIDs.contains(workspace.id) == false
+            else {
+                continue
+            }
+            workspaceIDs.insert(workspace.id)
+            workspaces.append(workspace)
+        }
+        return workspaces
+    }
+
+    package var chats: [CodexChat] {
+        items
+    }
+
+    package var uncategorizedChats: [CodexChat] {
+        items.filter { $0.workspace == nil }
+    }
+
+    package var displaysWorkspaceNodes: Bool {
+        workspaces.count > 1 || (workspaces.isEmpty == false && uncategorizedChats.isEmpty == false)
+    }
 
     package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
-        sections.flatMap(\.rowIDs)
-    }
-
-    package var outlineItems: [ReviewMonitorCodexSidebarOutlineItem] {
-        sections.map(ReviewMonitorCodexSidebarOutlineItem.section)
-    }
-
-    package func chat(id: CodexThreadID) -> Chat? {
-        for section in sections {
-            for workspace in section.workspaces {
-                if let chat = workspace.chats.first(where: { $0.id == id }) {
-                    return chat
+        if displaysWorkspaceNodes {
+            return [rowID]
+                + workspaces.flatMap { workspace in
+                    [ReviewMonitorCodexSidebarRowID.workspace(workspace.id)]
+                        + chats(in: workspace.id).map { .chat($0.id) }
                 }
-            }
-            if let chat = section.uncategorizedChats.first(where: { $0.id == id }) {
+                + uncategorizedChats.map { .chat($0.id) }
+        }
+        return [rowID] + items.map { .chat($0.id) }
+    }
+
+    package func chats(in workspaceID: CodexWorkspaceID) -> [CodexChat] {
+        items.filter { $0.workspace?.id == workspaceID }
+    }
+
+    package func chat(id: CodexThreadID) -> CodexChat? {
+        items.first { $0.id == id }
+    }
+
+    package func hasSameIdentity(as other: Self) -> Bool {
+        workspaceGroupID == other.workspaceGroupID
+            && displayTitle == other.displayTitle
+            && items.elementsEqual(other.items) { $0 === $1 }
+    }
+}
+
+@MainActor
+extension Array where Element == CodexFetchSection<CodexChat> {
+    var rowIDs: [ReviewMonitorCodexSidebarRowID] {
+        flatMap(\.rowIDs)
+    }
+
+    func chat(id: CodexThreadID) -> CodexChat? {
+        for section in self {
+            if let chat = section.chat(id: id) {
                 return chat
             }
         }
         return nil
     }
 
-    package func outlineItem(rowID: ReviewMonitorCodexSidebarRowID) -> ReviewMonitorCodexSidebarOutlineItem? {
-        for section in sections {
-            if section.rowID == rowID {
-                return .section(section)
-            }
-            for workspace in section.workspaces {
-                if workspace.rowID == rowID {
-                    return .workspace(workspace)
-                }
-                if let chat = workspace.chats.first(where: { $0.rowID == rowID }) {
-                    return .chat(chat)
-                }
-            }
-            if let chat = section.uncategorizedChats.first(where: { $0.rowID == rowID }) {
-                return .chat(chat)
-            }
-        }
-        return nil
-    }
-
-    func filtered(by filter: SidebarReviewChatFilter) -> ReviewMonitorCodexSidebarSnapshot {
+    func filtered(by filter: SidebarReviewChatFilter) -> [CodexFetchSection<CodexChat>] {
         guard filter.isActive else {
             return self
         }
 
-        return ReviewMonitorCodexSidebarSnapshot(
-            sections: sections.map { section in
-                let latestFinishedChatID =
-                    filter.contains(.latestFinished)
-                    ? Self.latestFinishedChat(in: section.allChats)?.id
-                    : nil
-                var filteredSection = section
-                filteredSection.workspaces = section.workspaces.map { workspace in
-                    workspace.replacingChats(
-                        workspace.chats.filter {
-                            Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
-                        }
-                    )
-                }
-                filteredSection.uncategorizedChats = section.uncategorizedChats.filter {
+        return map { section in
+            let latestFinishedChatID =
+                filter.contains(.latestFinished)
+                ? Self.latestFinishedChat(in: section.chats)?.id
+                : nil
+            return CodexFetchSection(
+                id: section.id,
+                title: section.title,
+                items: section.items.filter {
                     Self.includes($0, filter: filter, latestFinishedChatID: latestFinishedChatID)
                 }
-                return filteredSection
-            }
-        )
+            )
+        }
     }
 
     private static func includes(
-        _ chat: Chat,
+        _ chat: CodexChat,
         filter: SidebarReviewChatFilter,
         latestFinishedChatID: CodexThreadID?
     ) -> Bool {
-        if filter.contains(.running), chat.isRunning {
+        if filter.contains(.running), chat.status?.isActive == true {
             return true
         }
         if filter.contains(.latestFinished), chat.id == latestFinishedChatID {
@@ -415,11 +149,11 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
         return false
     }
 
-    private static func latestFinishedChat(in chats: [Chat]) -> Chat? {
-        var latestChat: Chat?
+    private static func latestFinishedChat(in chats: [CodexChat]) -> CodexChat? {
+        var latestChat: CodexChat?
         var latestDate = Date.distantPast
         for chat in chats {
-            guard chat.isFinished else {
+            guard chat.status.map({ $0.isActive == false }) ?? false else {
                 continue
             }
             let finishedAt = chat.activityDate ?? .distantPast
@@ -432,42 +166,55 @@ package struct ReviewMonitorCodexSidebarSnapshot: Equatable {
     }
 }
 
-private extension ReviewMonitorCodexSidebarSnapshot.Section {
-    var allChats: [ReviewMonitorCodexSidebarSnapshot.Chat] {
-        workspaces.flatMap(\.chats) + uncategorizedChats
+private extension CodexChat {
+    var activityDate: Date? {
+        recencyAt ?? updatedAt
     }
 }
 
 @MainActor
 struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
-    private var sectionIDs: [String] = []
+    private var workspaceGroupIDs: [CodexWorkspaceGroupID] = []
     private var chatIDsByContainer: [ReviewMonitorCodexSidebarRowID: [CodexThreadID]] = [:]
 
-    func applying(to snapshot: ReviewMonitorCodexSidebarSnapshot) -> ReviewMonitorCodexSidebarSnapshot {
-        ReviewMonitorCodexSidebarSnapshot(
-            sections: ordered(snapshot.sections, by: sectionIDs, id: \.id).map { section in
-                var orderedSection = section
-                orderedSection.workspaces = section.workspaces.map { workspace in
-                    workspace.replacingChats(
-                        ordered(
-                            workspace.chats,
-                            by: chatIDsByContainer[workspace.rowID] ?? [],
-                            id: \.id
-                        )
+    func applying(
+        to sections: [CodexFetchSection<CodexChat>]
+    ) -> [CodexFetchSection<CodexChat>] {
+        ordered(sections, by: workspaceGroupIDs, id: \.workspaceGroupID).map { section in
+            if section.displaysWorkspaceNodes == false {
+                return CodexFetchSection(
+                    id: section.id,
+                    title: section.title,
+                    items: ordered(
+                        section.items,
+                        by: chatIDsByContainer[section.rowID] ?? [],
+                        id: \.id
                     )
-                }
-                orderedSection.uncategorizedChats = ordered(
+                )
+            }
+
+            var items: [CodexChat] = []
+            for workspace in section.workspaces {
+                let container = ReviewMonitorCodexSidebarRowID.workspace(workspace.id)
+                items.append(
+                    contentsOf: ordered(
+                        section.chats(in: workspace.id),
+                        by: chatIDsByContainer[container] ?? [],
+                        id: \.id
+                    ))
+            }
+            items.append(
+                contentsOf: ordered(
                     section.uncategorizedChats,
                     by: chatIDsByContainer[section.rowID] ?? [],
                     id: \.id
-                )
-                return orderedSection
-            }
-        )
+                ))
+            return CodexFetchSection(id: section.id, title: section.title, items: items)
+        }
     }
 
-    mutating func reorderSection(id: String, before targetID: String?) -> Bool {
-        Self.reorder(id: id, before: targetID, in: &sectionIDs)
+    mutating func reorderWorkspaceGroup(id: CodexWorkspaceGroupID, before targetID: CodexWorkspaceGroupID?) -> Bool {
+        Self.reorder(id: id, before: targetID, in: &workspaceGroupIDs)
     }
 
     mutating func reorderChat(
@@ -482,15 +229,19 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
         return didChange
     }
 
-    mutating func prune(to snapshot: ReviewMonitorCodexSidebarSnapshot) {
-        let activeSectionIDs = snapshot.sections.map(\.id)
-        sectionIDs = sectionIDs.filter { activeSectionIDs.contains($0) }
+    mutating func prune(to sections: [CodexFetchSection<CodexChat>]) {
+        let activeWorkspaceGroupIDs = sections.map(\.workspaceGroupID)
+        workspaceGroupIDs = workspaceGroupIDs.filter { activeWorkspaceGroupIDs.contains($0) }
 
         var activeChatIDsByContainer: [ReviewMonitorCodexSidebarRowID: Set<CodexThreadID>] = [:]
-        for section in snapshot.sections {
-            activeChatIDsByContainer[section.rowID] = Set(section.uncategorizedChats.map(\.id))
-            for workspace in section.workspaces {
-                activeChatIDsByContainer[workspace.rowID] = Set(workspace.chats.map(\.id))
+        for section in sections {
+            if section.displaysWorkspaceNodes {
+                activeChatIDsByContainer[section.rowID] = Set(section.uncategorizedChats.map(\.id))
+                for workspace in section.workspaces {
+                    activeChatIDsByContainer[.workspace(workspace.id)] = Set(section.chats(in: workspace.id).map(\.id))
+                }
+            } else {
+                activeChatIDsByContainer[section.rowID] = Set(section.items.map(\.id))
             }
         }
         let currentChatIDsByContainer = chatIDsByContainer
@@ -555,28 +306,28 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
 }
 
 @MainActor
-package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
-    case section(ReviewMonitorCodexSidebarSnapshot.Section)
-    case workspace(ReviewMonitorCodexSidebarSnapshot.Workspace)
-    case chat(ReviewMonitorCodexSidebarSnapshot.Chat)
+package enum ReviewMonitorCodexSidebarOutlineItem {
+    case section(CodexFetchSection<CodexChat>)
+    case workspace(CodexWorkspace)
+    case chat(CodexChat)
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
         switch self {
         case .section(let section):
             section.rowID
         case .workspace(let workspace):
-            workspace.rowID
+            .workspace(workspace.id)
         case .chat(let chat):
-            chat.rowID
+            .chat(chat.id)
         }
     }
 
     package var title: String {
         switch self {
         case .section(let section):
-            section.title
+            section.displayTitle
         case .workspace(let workspace):
-            workspace.title
+            workspace.name
         case .chat(let chat):
             chat.title
         }
@@ -585,7 +336,7 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
     var selectionID: ReviewMonitorSelectionID {
         switch self {
         case .section(let section):
-            .workspaceSection(section.id)
+            .workspaceGroup(section.workspaceGroupID)
         case .workspace(let workspace):
             .workspace(workspace.id)
         case .chat(let chat):
@@ -593,21 +344,19 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
         }
     }
 
-    package var children: [ReviewMonitorCodexSidebarOutlineItem] {
-        switch self {
-        case .section(let section):
-            section.workspaces.map(ReviewMonitorCodexSidebarOutlineItem.workspace)
-                + section.uncategorizedChats.map(ReviewMonitorCodexSidebarOutlineItem.chat)
-        case .workspace(let workspace):
-            workspace.chats.map(ReviewMonitorCodexSidebarOutlineItem.chat)
-        case .chat:
-            []
+    package func hasSameIdentity(as other: Self) -> Bool {
+        switch (self, other) {
+        case (.section(let lhs), .section(let rhs)):
+            lhs.hasSameIdentity(as: rhs)
+        case (.workspace(let lhs), .workspace(let rhs)):
+            lhs === rhs
+        case (.chat(let lhs), .chat(let rhs)):
+            lhs === rhs
+        default:
+            false
         }
     }
 
-    package var isExpandable: Bool {
-        children.isEmpty == false
-    }
 }
 
 @MainActor
@@ -620,10 +369,10 @@ final class ReviewMonitorCodexSidebarOutlineTree {
     private var nodesByRowID: [ReviewMonitorCodexSidebarRowID: ReviewMonitorCodexSidebarOutlineNode] = [:]
     private(set) var roots: [ReviewMonitorCodexSidebarOutlineNode] = []
 
-    func apply(snapshot: ReviewMonitorCodexSidebarSnapshot) -> ApplyResult {
+    func apply(sections: [CodexFetchSection<CodexChat>]) -> ApplyResult {
         let oldTopology = topology
         var activeRowIDs: Set<ReviewMonitorCodexSidebarRowID> = []
-        roots = snapshot.outlineItems.map { node(for: $0, activeRowIDs: &activeRowIDs) }
+        roots = sections.map { sectionNode(for: $0, activeRowIDs: &activeRowIDs) }
         nodesByRowID = nodesByRowID.filter { activeRowIDs.contains($0.key) }
         let newTopology = topology
         return ApplyResult(
@@ -678,6 +427,47 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         return changes
     }
 
+    private func sectionNode(
+        for section: CodexFetchSection<CodexChat>,
+        activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
+    ) -> ReviewMonitorCodexSidebarOutlineNode {
+        let item = ReviewMonitorCodexSidebarOutlineItem.section(section)
+        let node = node(for: item, activeRowIDs: &activeRowIDs)
+        let children: [ReviewMonitorCodexSidebarOutlineNode]
+        if section.displaysWorkspaceNodes {
+            children =
+                section.workspaces.map { workspace in
+                    workspaceNode(
+                        for: workspace,
+                        chats: section.chats(in: workspace.id),
+                        activeRowIDs: &activeRowIDs
+                    )
+                }
+                + section.uncategorizedChats.map { chat in
+                    self.node(for: .chat(chat), activeRowIDs: &activeRowIDs)
+                }
+        } else {
+            children = section.items.map { chat in
+                self.node(for: .chat(chat), activeRowIDs: &activeRowIDs)
+            }
+        }
+        updateChildren(of: node, to: children)
+        return node
+    }
+
+    private func workspaceNode(
+        for workspace: CodexWorkspace,
+        chats: [CodexChat],
+        activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
+    ) -> ReviewMonitorCodexSidebarOutlineNode {
+        let node = node(for: .workspace(workspace), activeRowIDs: &activeRowIDs)
+        let children = chats.map { child in
+            self.node(for: .chat(child), activeRowIDs: &activeRowIDs)
+        }
+        updateChildren(of: node, to: children)
+        return node
+    }
+
     private func node(
         for item: ReviewMonitorCodexSidebarOutlineItem,
         activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
@@ -685,16 +475,19 @@ final class ReviewMonitorCodexSidebarOutlineTree {
         activeRowIDs.insert(item.rowID)
         let node = nodesByRowID[item.rowID] ?? ReviewMonitorCodexSidebarOutlineNode(item: item)
         nodesByRowID[item.rowID] = node
-        if node.item != item {
+        if node.item.hasSameIdentity(as: item) == false {
             node.item = item
         }
-        let children = item.children.map { child in
-            self.node(for: child, activeRowIDs: &activeRowIDs)
-        }
+        return node
+    }
+
+    private func updateChildren(
+        of node: ReviewMonitorCodexSidebarOutlineNode,
+        to children: [ReviewMonitorCodexSidebarOutlineNode]
+    ) {
         if node.children.map(\.rowID) != children.map(\.rowID) {
             node.children = children
         }
-        return node
     }
 }
 
@@ -739,50 +532,11 @@ final class ReviewMonitorCodexSidebarOutlineNode {
 }
 
 @MainActor
-package struct ReviewMonitorCodexSidebarWorkspace {
-    package var workspace: CodexWorkspace
-    package var chats: [CodexChat]
-
-    package var id: CodexWorkspaceID {
-        workspace.id
-    }
-
-    package var cwd: String {
-        workspace.url.path
-    }
-
-    package var title: String {
-        workspace.name
-    }
-}
-
-@MainActor
-package struct ReviewMonitorCodexSidebarSection {
-    package var id: String
-    package var title: String
-    package var workspaces: [ReviewMonitorCodexSidebarWorkspace]
-    package var uncategorizedChats: [CodexChat]
-
-    package var chats: [CodexChat] {
-        workspaces.flatMap(\.chats) + uncategorizedChats
-    }
-
-    var selection: ReviewMonitorWorkspaceSectionSelection {
-        ReviewMonitorWorkspaceSectionSelection(
-            id: id,
-            title: title,
-            workspaceCWDs: workspaces.map(\.cwd)
-        )
-    }
-}
-
-@MainActor
 package final class ReviewMonitorCodexSidebarLibrary {
-    package static var defaultRequest: CodexFetchRequest<CodexChat> {
-        CodexFetchRequest<CodexChat>(
-            filter: .init(sourceKinds: [.subAgentReview]),
-            sortDescriptors: [.updatedAt(.reverse)],
-            sectionDescriptor: .workspaceGroup
+    package static var defaultDescriptor: CodexFetchDescriptor<CodexChat> {
+        CodexFetchDescriptor<CodexChat>(
+            predicate: .init(sourceKinds: [.subAgentReview]),
+            sortBy: [.updatedAt(.reverse)]
         )
     }
 
@@ -790,9 +544,13 @@ package final class ReviewMonitorCodexSidebarLibrary {
 
     package init(
         modelContext: CodexModelContext,
-        request: CodexFetchRequest<CodexChat> = ReviewMonitorCodexSidebarLibrary.defaultRequest
+        descriptor: CodexFetchDescriptor<CodexChat> =
+            ReviewMonitorCodexSidebarLibrary.defaultDescriptor
     ) {
-        self.fetchedResults = modelContext.fetchedResults(for: request)
+        self.fetchedResults = modelContext.fetchedResults(
+            for: descriptor,
+            sectionedBy: .workspaceGroup
+        )
     }
 
     package var phase: CodexDataPhase {
@@ -807,12 +565,8 @@ package final class ReviewMonitorCodexSidebarLibrary {
         fetchedResults.nextCursor
     }
 
-    package var sections: [ReviewMonitorCodexSidebarSection] {
-        Self.sidebarSections(from: fetchedResults.sections)
-    }
-
-    package var snapshot: ReviewMonitorCodexSidebarSnapshot {
-        Self.sidebarSnapshot(from: sections)
+    package var sections: [CodexFetchSection<CodexChat>] {
+        fetchedResults.sections
     }
 
     package func performFetch() async throws {
@@ -831,63 +585,4 @@ package final class ReviewMonitorCodexSidebarLibrary {
         fetchedResults.items.first { $0.id == id }
     }
 
-    private static func sidebarSections(
-        from fetchSections: [CodexFetchSection<CodexChat>]
-    ) -> [ReviewMonitorCodexSidebarSection] {
-        fetchSections.map { fetchSection in
-            var workspaces: [ReviewMonitorCodexSidebarWorkspace] = []
-            var workspaceIndexesByID: [CodexWorkspaceID: Int] = [:]
-            var uncategorizedChats: [CodexChat] = []
-
-            for chat in fetchSection.items {
-                guard let workspace = chat.workspace else {
-                    uncategorizedChats.append(chat)
-                    continue
-                }
-
-                if let index = workspaceIndexesByID[workspace.id] {
-                    workspaces[index].chats.append(chat)
-                } else {
-                    workspaceIndexesByID[workspace.id] = workspaces.count
-                    workspaces.append(
-                        ReviewMonitorCodexSidebarWorkspace(
-                            workspace: workspace,
-                            chats: [chat]
-                        ))
-                }
-            }
-
-            return ReviewMonitorCodexSidebarSection(
-                id: fetchSection.id,
-                title: fetchSection.title ?? "Unknown",
-                workspaces: workspaces,
-                uncategorizedChats: uncategorizedChats
-            )
-        }
-    }
-
-    private static func sidebarSnapshot(
-        from sections: [ReviewMonitorCodexSidebarSection]
-    ) -> ReviewMonitorCodexSidebarSnapshot {
-        ReviewMonitorCodexSidebarSnapshot(
-            sections: sections.map { section in
-                ReviewMonitorCodexSidebarSnapshot.Section(
-                    rowID: .section(section.id),
-                    id: section.id,
-                    title: section.title,
-                    workspaces: section.workspaces.map { workspace in
-                        ReviewMonitorCodexSidebarSnapshot.Workspace(
-                            workspace: workspace.workspace,
-                            chats: workspace.chats.map(Self.snapshotChat(_:))
-                        )
-                    },
-                    uncategorizedChats: section.uncategorizedChats.map(Self.snapshotChat(_:))
-                )
-            }
-        )
-    }
-
-    private static func snapshotChat(_ chat: CodexChat) -> ReviewMonitorCodexSidebarSnapshot.Chat {
-        ReviewMonitorCodexSidebarSnapshot.Chat(chat: chat)
-    }
 }

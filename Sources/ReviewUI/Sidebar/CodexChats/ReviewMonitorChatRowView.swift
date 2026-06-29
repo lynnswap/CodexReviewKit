@@ -1,8 +1,26 @@
 import Foundation
 import SwiftUI
+import CodexKit
 
 @MainActor
-struct ReviewMonitorSidebarChatRow: Equatable {
+private struct ReviewMonitorChatRowContent: View {
+    var chat: CodexChat
+
+    var body: some View {
+        ReviewMonitorChatRowLayout(
+            id: chat.id.rawValue,
+            title: chat.title,
+            model: chat.modelProvider,
+            subtitle: chat.preview?.trimmedNonEmpty,
+            startedAt: chat.status?.isActive == true ? chat.activityDate : nil,
+            endedAt: nil,
+            isRunning: chat.status?.isActive == true
+        )
+    }
+}
+
+@MainActor
+private struct ReviewMonitorChatRowLayout: View {
     var id: String
     var title: String
     var model: String?
@@ -11,58 +29,23 @@ struct ReviewMonitorSidebarChatRow: Equatable {
     var endedAt: Date?
     var isRunning: Bool
 
-    init(
-        id: String,
-        title: String,
-        model: String?,
-        subtitle: String?,
-        startedAt: Date?,
-        endedAt: Date?,
-        isRunning: Bool
-    ) {
-        self.id = id
-        self.title = title
-        self.model = model
-        self.subtitle = subtitle
-        self.startedAt = startedAt
-        self.endedAt = endedAt
-        self.isRunning = isRunning
-    }
-
-    init(chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
-        self.init(
-            id: chat.id.rawValue,
-            title: chat.title,
-            model: chat.model,
-            subtitle: chat.preview?.trimmedNonEmpty,
-            startedAt: chat.isRunning ? chat.activityDate : nil,
-            endedAt: chat.isRunning ? nil : chat.activityDate,
-            isRunning: chat.isRunning
-        )
-    }
-}
-
-@MainActor
-struct ReviewMonitorChatRowContentView: View {
-    var row: ReviewMonitorSidebarChatRow
-
     var body: some View {
         Label {
             VStack {
                 HStack {
-                    Text(row.title)
+                    Text(title)
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
-                    ReviewMonitorChatRowTimerLabel(row: row)
+                    ReviewMonitorChatRowTimerLabel(startedAt: startedAt, endedAt: endedAt)
                         .foregroundStyle(.secondary)
                         .layoutPriority(1)
                 }
                 .lineLimit(1)
                 HStack {
-                    if let model = row.model {
+                    if let model {
                         Text(model)
                     }
-                    if let subtitle = row.subtitle {
+                    if let subtitle {
                         Text(subtitle)
                     }
                     Spacer(minLength: 0)
@@ -75,15 +58,15 @@ struct ReviewMonitorChatRowContentView: View {
             ZStack {
                 Image(systemName: "circle.fill")
                     .foregroundStyle(.clear)
-                if row.isRunning {
+                if isRunning {
                     ProgressView()
                         .controlSize(.mini)
                 }
             }
-            .animation(.default, value: row.isRunning)
+            .animation(.default, value: isRunning)
             .padding(.leading, SidebarLayout.disclosureGutterWidth)
         }
-        .transaction(value: row.id) { transaction in
+        .transaction(value: id) { transaction in
             transaction.disablesAnimations = true
         }
     }
@@ -93,29 +76,30 @@ struct ReviewMonitorChatRowContentView: View {
 struct ReviewMonitorChatRowView: View {
     var node: ReviewMonitorCodexSidebarOutlineNode
 
-    var row: ReviewMonitorSidebarChatRow? {
+    var chat: CodexChat? {
         guard case .chat(let chat) = node.item else {
             return nil
         }
-        return ReviewMonitorSidebarChatRow(chat: chat)
+        return chat
     }
 
     var body: some View {
-        if let row {
-            ReviewMonitorChatRowContentView(row: row)
+        if let chat {
+            ReviewMonitorChatRowContent(chat: chat)
         }
     }
 }
 
 @MainActor
 struct ReviewMonitorChatRowTimerLabel: View {
-    var row: ReviewMonitorSidebarChatRow
+    var startedAt: Date?
+    var endedAt: Date?
 
     var body: some View {
-        if let startedAt = row.startedAt {
+        if let startedAt {
             Text(
-                timerInterval: startedAt...(row.endedAt ?? .distantFuture),
-                pauseTime: row.endedAt,
+                timerInterval: startedAt...(endedAt ?? .distantFuture),
+                pauseTime: endedAt,
                 countsDown: false,
                 showsHours: true
             )
@@ -124,47 +108,38 @@ struct ReviewMonitorChatRowTimerLabel: View {
     }
 }
 
-#if DEBUG
-    #Preview {
-        NavigationSplitView {
-            List {
-                Section("workspace-alpha") {
-                    ReviewMonitorChatRowContentView(
-                        row: ReviewMonitorSidebarChatRow(
-                            id: "preview-running",
-                            title: "Uncommitted changes",
-                            model: "gpt-5.5",
-                            subtitle: "Inspecting recent changes",
-                            startedAt: Date(timeIntervalSinceNow: -640),
-                            endedAt: nil,
-                            isRunning: true
-                        )
-                    )
-                    ReviewMonitorChatRowContentView(
-                        row: ReviewMonitorSidebarChatRow(
-                            id: "preview-completed",
-                            title: "Base branch: main",
-                            model: "gpt-5.5-codex",
-                            subtitle: "No findings",
-                            startedAt: Date(timeIntervalSinceNow: -3_600),
-                            endedAt: Date(timeIntervalSinceNow: -2_900),
-                            isRunning: false
-                        )
-                    )
-                }
-            }
-            .frame(minWidth: 320)
-        } detail: {
-            ContentUnavailableView {
-                Text(verbatim: "Preview")
-            }
-        }
-    }
-#endif
-
 private extension String {
     var trimmedNonEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private extension CodexChat {
+    var activityDate: Date? {
+        recencyAt ?? updatedAt
+    }
+}
+
+@MainActor
+package func measuredReviewMonitorChatRowHeight() -> CGFloat {
+    ReviewMonitorChatRowLayout.measureMeasuredHeight()
+}
+
+@MainActor
+extension ReviewMonitorChatRowLayout {
+    static func measureMeasuredHeight() -> CGFloat {
+        let hostingView = NSHostingView(
+            rootView: ReviewMonitorChatRowLayout(
+                id: "row-height-measurement",
+                title: "Uncommitted changes",
+                model: "gpt-5.5",
+                subtitle: "Review output preview",
+                startedAt: Date(timeIntervalSince1970: 0),
+                endedAt: nil,
+                isRunning: true
+            )
+        )
+        return ceil(hostingView.fittingSize.height)
     }
 }

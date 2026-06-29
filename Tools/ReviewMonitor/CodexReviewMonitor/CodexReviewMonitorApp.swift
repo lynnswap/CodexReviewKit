@@ -298,7 +298,6 @@ struct ReviewMonitorAppComposition {
                 if previewStore === store {
                     return ReviewMonitorWindowController(
                         previewStore: store,
-                        codexModelSource: codexModelSource,
                         showSettings: showSettings
                     )
                 }

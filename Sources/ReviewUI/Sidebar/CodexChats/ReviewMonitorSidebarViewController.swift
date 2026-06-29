@@ -35,7 +35,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         static func measure() -> SidebarRowHeights {
             SidebarRowHeights(
                 workspace: measuredWorkspaceRowHeight(),
-                reviewChat: measuredReviewChatRowHeight()
+                reviewChat: measuredReviewMonitorChatRowHeight()
             )
         }
 
@@ -45,34 +45,20 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             cellView.configure(title: "workspace-alpha", toolTip: "/tmp/workspace-alpha")
             return ceil(cellView.fittingSize.height)
         }
-
-        @MainActor
-        private static func measuredReviewChatRowHeight() -> CGFloat {
-            let chatID = CodexThreadID(rawValue: "row-height-measurement")
-            let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
-                rowID: .chat(chatID),
-                id: chatID,
-                title: "Uncommitted changes",
-                preview: "Review output preview",
-                model: "gpt-5.5",
-                workspaceCWD: "/tmp/workspace",
-                updatedAt: Date(timeIntervalSince1970: 0)
-            )
-            let cellView = ReviewMonitorReviewChatCellView()
-            cellView.configure(with: ReviewMonitorCodexSidebarOutlineNode(item: .chat(chat)))
-            return ceil(cellView.fittingSize.height)
-        }
     }
 
     private enum SidebarDragPayload: Codable, Equatable {
-        case codexSection(id: String)
+        case codexWorkspaceGroup(id: String)
         case codexChat(id: String, containerRowID: String)
     }
 
     private struct SidebarResolvedDrop {
         enum Operation {
             case none
-            case reorderCodexSection(id: String, beforeID: String?)
+            case reorderCodexWorkspaceGroup(
+                id: CodexWorkspaceGroupID,
+                beforeID: CodexWorkspaceGroupID?
+            )
             case reorderCodexChat(
                 id: CodexThreadID,
                 container: ReviewMonitorCodexSidebarRowID,
@@ -96,7 +82,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let codexModelSource: ReviewMonitorCodexModelSource?
-    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let scrollView = NSScrollView()
     private let outlineView = ReviewMonitorSidebarOutlineView()
     private let accountsViewController: ReviewMonitorAccountsViewController
@@ -108,15 +93,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var sidebarFilterObservation: PortableObservationTracking.Token?
     private var sidebarSelectionObservation: PortableObservationTracking.Token?
     private var codexSidebarObservation: PortableObservationTracking.Token?
-    private var codexSidebarSnapshotObservation: PortableObservationTracking.Token?
+    private var codexSidebarSectionsObservation: PortableObservationTracking.Token?
     private var codexSidebarFetchTask: Task<Void, Never>?
     private var codexSidebarLibrary: ReviewMonitorCodexSidebarLibrary?
     private var codexSidebarModelContext: CodexModelContext?
-    private var codexSidebarUnfilteredSnapshot = ReviewMonitorCodexSidebarSnapshot(sections: [])
+    private var codexSidebarUnfilteredSections: [CodexFetchSection<CodexChat>] = []
     private var codexSidebarPresentationOrder = ReviewMonitorCodexSidebarPresentationOrder()
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
     private var appliedSidebarKind: SidebarKind?
     private var isReconcilingSelection = false
+    var codexSidebarContentDidChange: (@MainActor () -> Void)?
     #if DEBUG
         private var fullReloadCountForTesting = 0
     #endif
@@ -124,13 +110,22 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
+        codexModelSource: ReviewMonitorCodexModelSource? = nil
     ) {
         self.store = store
         self.uiState = uiState
-        self.codexModelSource = codexModelSource
-        self.previewChatLogSource = previewChatLogSource
+        #if DEBUG
+            if let codexModelSource {
+                self.codexModelSource = codexModelSource
+            } else if let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) {
+                previewRuntime.start()
+                self.codexModelSource = previewRuntime.modelSource
+            } else {
+                self.codexModelSource = nil
+            }
+        #else
+            self.codexModelSource = codexModelSource
+        #endif
         self.accountsViewController = ReviewMonitorAccountsViewController(store: store)
         self.unavailableView = NSHostingView(rootView: MCPServerUnavailableView(store: store))
         self.rowHeights = SidebarRowHeights.measure()
@@ -147,7 +142,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         sidebarFilterObservation?.cancel()
         sidebarSelectionObservation?.cancel()
         codexSidebarObservation?.cancel()
-        codexSidebarSnapshotObservation?.cancel()
+        codexSidebarSectionsObservation?.cancel()
         codexSidebarFetchTask?.cancel()
     }
 
@@ -159,7 +154,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         super.viewDidLoad()
         configureHierarchy()
         configureOutlineView()
-        applyPreviewCodexSidebarSnapshotIfNeeded()
+        applyCodexSidebarSections([])
         bindObservation()
         bindCodexSidebarLibrary()
     }
@@ -273,7 +268,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard event.kind != .initial else {
                 return
             }
-            self?.applyFilteredCodexSidebarSnapshot()
+            self?.applyFilteredCodexSidebarSections()
         }
 
         sidebarSelectionObservation = withPortableContinuousObservation { [weak self, uiState] event in
@@ -309,29 +304,29 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         codexSidebarFetchTask?.cancel()
         codexSidebarFetchTask = nil
-        codexSidebarSnapshotObservation?.cancel()
-        codexSidebarSnapshotObservation = nil
+        codexSidebarSectionsObservation?.cancel()
+        codexSidebarSectionsObservation = nil
         guard let modelContext else {
             codexSidebarModelContext = nil
             codexSidebarLibrary = nil
-            applyPreviewCodexSidebarSnapshotIfNeeded()
+            applyCodexSidebarSections([])
             return
         }
 
         let library = ReviewMonitorCodexSidebarLibrary(modelContext: modelContext)
         codexSidebarModelContext = modelContext
         codexSidebarLibrary = library
-        codexSidebarSnapshotObservation = withPortableContinuousObservation { [weak self, library] event in
+        codexSidebarSectionsObservation = withPortableContinuousObservation { [weak self, library] event in
             guard let self,
                 self.codexSidebarLibrary === library
             else {
                 return
             }
-            let snapshot = library.snapshot
+            let sections = library.sections
             guard event.kind != .initial else {
                 return
             }
-            self.applyCodexSidebarSnapshot(snapshot)
+            self.applyCodexSidebarSections(sections)
         }
         codexSidebarFetchTask = Task { @MainActor [weak self, library] in
             do {
@@ -342,32 +337,24 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard self?.codexSidebarLibrary === library else {
                 return
             }
-            self?.applyCodexSidebarSnapshot(library.snapshot)
+            self?.applyCodexSidebarSections(library.sections)
             self?.codexSidebarFetchTask = nil
         }
     }
 
-    private func applyPreviewCodexSidebarSnapshotIfNeeded() {
-        if let previewChatLogSource {
-            applyCodexSidebarSnapshot(previewChatLogSource.snapshot)
-        } else {
-            applyCodexSidebarSnapshot(ReviewMonitorCodexSidebarSnapshot(sections: []))
-        }
+    private func applyCodexSidebarSections(_ sections: [CodexFetchSection<CodexChat>]) {
+        codexSidebarUnfilteredSections = sections
+        codexSidebarPresentationOrder.prune(to: sections)
+        applyFilteredCodexSidebarSections()
     }
 
-    private func applyCodexSidebarSnapshot(_ snapshot: ReviewMonitorCodexSidebarSnapshot) {
-        codexSidebarUnfilteredSnapshot = snapshot
-        codexSidebarPresentationOrder.prune(to: snapshot)
-        applyFilteredCodexSidebarSnapshot()
-    }
-
-    private func applyFilteredCodexSidebarSnapshot() {
-        let snapshot =
+    private func applyFilteredCodexSidebarSections() {
+        let sections =
             codexSidebarPresentationOrder
-            .applying(to: codexSidebarUnfilteredSnapshot)
+            .applying(to: codexSidebarUnfilteredSections)
             .filtered(by: uiState.sidebarReviewChatFilter)
         let wasUsingCodexSidebarOutline = isUsingCodexSidebarOutline
-        let applyResult = codexSidebarOutlineTree.apply(snapshot: snapshot)
+        let applyResult = codexSidebarOutlineTree.apply(sections: sections)
         applySidebarKind(sidebarKind)
         guard wasUsingCodexSidebarOutline || isUsingCodexSidebarOutline else {
             return
@@ -377,6 +364,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         } else if isUsingCodexSidebarOutline {
             reconcileOutlineSelection()
         }
+        codexSidebarContentDidChange?()
     }
 
     private func applyCodexSidebarOutlineTopologyChanges(
@@ -600,17 +588,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         switch selection {
-        case .workspaceSection(let selectedSection):
-            guard let currentSection = codexWorkspaceSectionSelection(id: selectedSection.id),
-                let row = row(forCodexSidebarSelectionID: .workspaceSection(selectedSection.id))
+        case .workspaceGroup(let selectedWorkspaceGroupID):
+            guard codexWorkspaceGroupSelection(id: selectedWorkspaceGroupID) != nil,
+                let row = row(forCodexSidebarSelectionID: .workspaceGroup(selectedWorkspaceGroupID))
             else {
+                guard codexSidebarContentIsAuthoritative else {
+                    return
+                }
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
                 return
-            }
-
-            if currentSection.selection != selectedSection {
-                uiState.selection = .workspaceSection(currentSection.selection)
             }
 
             guard outlineView.selectedRow != row else {
@@ -618,17 +605,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
 
-        case .workspace(let selectedWorkspace):
-            guard let currentWorkspace = codexWorkspaceSelection(id: selectedWorkspace.id),
-                let row = row(forCodexSidebarSelectionID: .workspace(selectedWorkspace.id))
+        case .workspace(let selectedWorkspaceID):
+            guard codexWorkspaceSelection(id: selectedWorkspaceID) != nil,
+                let row = row(forCodexSidebarSelectionID: .workspace(selectedWorkspaceID))
             else {
+                guard codexSidebarContentIsAuthoritative else {
+                    return
+                }
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
                 return
-            }
-
-            if currentWorkspace != selectedWorkspace {
-                uiState.selection = .workspace(currentWorkspace)
             }
 
             guard outlineView.selectedRow != row else {
@@ -638,6 +624,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         case .chat(let selectedChatID):
             guard currentChatSelection(id: selectedChatID) != nil else {
+                guard codexSidebarContentIsAuthoritative else {
+                    return
+                }
                 uiState.selection = nil
                 outlineView.deselectAll(nil)
                 return
@@ -671,9 +660,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if let node = codexSidebarNode(from: item) {
             switch node.item {
             case .section(let section):
-                uiState.selection = .workspaceSection(section.selection)
+                uiState.selection = .workspaceGroup(section.workspaceGroupID)
             case .workspace(let workspace):
-                uiState.selection = .workspace(workspace)
+                uiState.selection = .workspace(workspace.id)
             case .chat(let chat):
                 uiState.selection = .chat(chat.id)
             }
@@ -691,17 +680,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return nil
         }
 
-        if let codexChat = chat.codexChat {
-            return NSHostingMenu(
-                rootView: ReviewMonitorChatContextMenuView(chat: codexChat)
-            )
-        }
-        if let previewChat = chat.previewChat ?? previewChatLogSource?.previewChat(id: chat.id) {
-            return NSHostingMenu(
-                rootView: ReviewMonitorChatContextMenuView(previewChat: previewChat)
-            )
-        }
-        return nil
+        return NSHostingMenu(
+            rootView: ReviewMonitorChatContextMenuView(chat: chat)
+        )
     }
 
     private func codexSidebarNode(from item: Any?) -> ReviewMonitorCodexSidebarOutlineNode? {
@@ -717,7 +698,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func row(forWorkspaceCWD cwd: String) -> Int? {
         row(forCodexSidebarSelectionID: .workspace(CodexWorkspaceID(rawValue: cwd)))
-            ?? row(forCodexSidebarSelectionID: .workspaceSection(cwd))
+            ?? row(forCodexSidebarSelectionID: .workspaceGroup(CodexWorkspaceGroupID(rawValue: cwd)))
     }
 
     private func row(for chatID: CodexThreadID) -> Int? {
@@ -735,8 +716,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             rowID = .workspace(id)
         case .chat(let id):
             rowID = .chat(id)
-        case .workspaceSection(let id):
-            rowID = .section(id)
+        case .workspaceGroup(let id):
+            rowID = .workspaceGroup(id)
         }
         guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
             return nil
@@ -749,23 +730,38 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let selection else {
             return true
         }
+        guard codexSidebarContentIsAuthoritative else {
+            return true
+        }
         switch selection {
-        case .workspaceSection(let section):
-            return codexWorkspaceSectionSelection(id: section.id) != nil
-        case .workspace(let workspace):
-            return codexWorkspaceSelection(id: workspace.id) != nil
+        case .workspaceGroup(let id):
+            return codexWorkspaceGroupSelection(id: id) != nil
+        case .workspace(let id):
+            return codexWorkspaceSelection(id: id) != nil
         case .chat(let id):
             return currentChatSelection(id: id) != nil
         }
     }
 
-    private func currentChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
-        codexSidebarUnfilteredSnapshot.chat(id: id)
+    private var codexSidebarContentIsAuthoritative: Bool {
+        guard let codexSidebarLibrary else {
+            return false
+        }
+        switch codexSidebarLibrary.phase {
+        case .loaded, .failed:
+            return true
+        case .idle, .loading:
+            return false
+        }
+    }
+
+    private func currentChatSelection(id: CodexThreadID) -> CodexChat? {
+        codexSidebarUnfilteredSections.chat(id: id)
     }
 
     private func codexWorkspaceSelection(
         id: CodexWorkspaceID
-    ) -> ReviewMonitorCodexSidebarSnapshot.Workspace? {
+    ) -> CodexWorkspace? {
         guard let node = codexSidebarOutlineTree.node(rowID: .workspace(id)),
             case .workspace(let workspace) = node.item
         else {
@@ -774,10 +770,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return workspace
     }
 
-    private func codexWorkspaceSectionSelection(
-        id: String
-    ) -> ReviewMonitorCodexSidebarSnapshot.Section? {
-        guard let node = codexSidebarOutlineTree.node(rowID: .section(id)),
+    private func codexWorkspaceGroupSelection(
+        id: CodexWorkspaceGroupID
+    ) -> CodexFetchSection<CodexChat>? {
+        guard let node = codexSidebarOutlineTree.node(rowID: .workspaceGroup(id)),
             case .section(let section) = node.item
         else {
             return nil
@@ -785,7 +781,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return section
     }
 
-    private func codexChatSelection(id: CodexThreadID) -> ReviewMonitorCodexSidebarSnapshot.Chat? {
+    private func codexChatSelection(id: CodexThreadID) -> CodexChat? {
         guard let node = codexSidebarOutlineTree.node(rowID: .chat(id)),
             case .chat(let chat) = node.item
         else {
@@ -806,8 +802,30 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         return (
             title: chat.title,
-            subtitle: chat.workspaceCWD ?? ""
+            subtitle: chat.workspace?.url.path ?? ""
         )
+    }
+
+    func codexWorkspaceGroupTitlePresentation(
+        id: CodexWorkspaceGroupID
+    ) -> (title: String, subtitle: String)? {
+        guard let section = codexWorkspaceGroupSelection(id: id) else {
+            return nil
+        }
+        let workspaceCWDs = section.workspaces.map(\.url.path)
+        return (
+            title: section.displayTitle,
+            subtitle: workspaceCWDs.count == 1 ? (workspaceCWDs.first ?? "") : "\(workspaceCWDs.count) workspaces"
+        )
+    }
+
+    func codexWorkspaceTitlePresentation(
+        id: CodexWorkspaceID
+    ) -> (title: String, subtitle: String)? {
+        guard let workspace = codexWorkspaceSelection(id: id) else {
+            return nil
+        }
+        return (title: workspace.name, subtitle: workspace.url.path)
     }
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
@@ -816,7 +834,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         switch node.item {
         case .section(let section):
-            return .codexSection(id: section.id)
+            return .codexWorkspaceGroup(id: section.workspaceGroupID.rawValue)
         case .workspace:
             return nil
         case .chat(let chat):
@@ -857,9 +875,9 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
         switch payload {
-        case .codexSection(let id):
-            resolvedCodexSectionDrop(
-                id: id,
+        case .codexWorkspaceGroup(let id):
+            resolvedCodexWorkspaceGroupDrop(
+                id: CodexWorkspaceGroupID(rawValue: id),
                 draggingLocation: draggingLocation,
                 proposedItem: proposedItem,
                 proposedChildIndex: index
@@ -875,13 +893,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
     }
 
-    private func resolvedCodexSectionDrop(
-        id: String,
+    private func resolvedCodexWorkspaceGroupDrop(
+        id: CodexWorkspaceGroupID,
         draggingLocation: NSPoint?,
         proposedItem: Any?,
         proposedChildIndex index: Int
     ) -> SidebarResolvedDrop? {
-        guard let sourceNode = codexSidebarOutlineTree.node(rowID: .section(id)),
+        guard let sourceNode = codexSidebarOutlineTree.node(rowID: .workspaceGroup(id)),
             let sourceIndex = codexRootIndex(for: sourceNode),
             let destinationIndex = codexRootInsertionIndex(
                 draggingLocation: draggingLocation,
@@ -902,17 +920,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let remainingRoots = codexSidebarOutlineTree.roots.filter { $0 !== sourceNode }
-        let beforeID: String?
+        let beforeID: CodexWorkspaceGroupID?
         if displayDestinationIndex < remainingRoots.count,
             case .section(let section) = remainingRoots[displayDestinationIndex].item
         {
-            beforeID = section.id
+            beforeID = section.workspaceGroupID
         } else {
             beforeID = nil
         }
 
         return SidebarResolvedDrop(
-            operation: .reorderCodexSection(id: id, beforeID: beforeID),
+            operation: .reorderCodexWorkspaceGroup(id: id, beforeID: beforeID),
             dropItem: nil,
             dropChildIndex: clampedDestinationIndex
         )
@@ -1092,8 +1110,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private func isCodexChatContainer(_ node: ReviewMonitorCodexSidebarOutlineNode) -> Bool {
         switch node.item {
-        case .section(let section):
-            return section.uncategorizedChats.isEmpty == false
+        case .section:
+            return node.children.contains { child in
+                if case .chat = child.item {
+                    return true
+                }
+                return false
+            }
         case .workspace:
             return true
         case .chat:
@@ -1114,12 +1137,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func codexUnfilteredChatIDs(in container: ReviewMonitorCodexSidebarRowID) -> [CodexThreadID] {
-        for section in codexSidebarUnfilteredSnapshot.sections {
+        for section in codexSidebarUnfilteredSections {
             if section.rowID == container {
+                if section.displaysWorkspaceNodes == false {
+                    return section.items.map(\.id)
+                }
                 return section.uncategorizedChats.map(\.id)
             }
-            for workspace in section.workspaces where workspace.rowID == container {
-                return workspace.chats.map(\.id)
+            for workspace in section.workspaces where ReviewMonitorCodexSidebarRowID.workspace(workspace.id) == container {
+                return section.chats(in: workspace.id).map(\.id)
             }
         }
         return []
@@ -1154,11 +1180,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         switch resolvedDrop.operation {
         case .none:
             return false
-        case .reorderCodexSection(let id, let beforeID):
-            guard codexSidebarPresentationOrder.reorderSection(id: id, before: beforeID) else {
+        case .reorderCodexWorkspaceGroup(let id, let beforeID):
+            guard codexSidebarPresentationOrder.reorderWorkspaceGroup(id: id, before: beforeID) else {
                 return false
             }
-            applyFilteredCodexSidebarSnapshot()
+            applyFilteredCodexSidebarSections()
             return true
         case .reorderCodexChat(let id, let container, let currentOrder, let beforeID):
             guard
@@ -1171,7 +1197,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             else {
                 return false
             }
-            applyFilteredCodexSidebarSnapshot()
+            applyFilteredCodexSidebarSections()
             return true
         }
     }
@@ -1369,12 +1395,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return id
         }
 
-        var selectedWorkspaceSectionForTesting: ReviewMonitorWorkspaceSectionSelection? {
-            uiState.selectedWorkspaceSectionEntry
+        var selectedWorkspaceGroupIDForTesting: CodexWorkspaceGroupID? {
+            guard case .workspaceGroup(let id) = uiState.selection else {
+                return nil
+            }
+            return id
         }
 
-        var codexSidebarSnapshotForTesting: ReviewMonitorCodexSidebarSnapshot? {
-            codexSidebarLibrary?.snapshot
+        var codexSidebarSectionsForTesting: [CodexFetchSection<CodexChat>] {
+            codexSidebarLibrary?.sections ?? []
         }
 
         var codexSidebarRootTitlesForTesting: [String] {
@@ -1403,10 +1432,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         @discardableResult
-        func performCodexSectionDropForTesting(id: String, toIndex index: Int) -> Bool {
+        func performCodexWorkspaceGroupDropForTesting(id: CodexWorkspaceGroupID, toIndex index: Int) -> Bool {
             guard
                 let resolvedDrop = resolvedDrop(
-                    for: .codexSection(id: id),
+                    for: .codexWorkspaceGroup(id: id.rawValue),
                     proposedItem: nil,
                     proposedChildIndex: index
                 )
@@ -1486,6 +1515,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
 
+        func refreshCodexSidebarForTesting() async throws {
+            try await codexSidebarLibrary?.refresh()
+            applyCodexSidebarSections(codexSidebarLibrary?.sections ?? [])
+        }
+
         var sidebarFullReloadCountForTesting: Int {
             fullReloadCountForTesting
         }
@@ -1494,7 +1528,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             emptyStateViewController.view.isHidden == false
         }
 
-        func selectReviewChatForTesting(chat: ReviewMonitorCodexSidebarSnapshot.Chat) {
+        func selectReviewChatForTesting(chat: CodexChat) {
             guard let row = row(forCodexSidebarSelectionID: .chat(chat.id)) else {
                 uiState.selection = .chat(chat.id)
                 return
@@ -1516,7 +1550,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
         func selectWorkspaceForTesting(cwd: String) {
             guard let row = row(forWorkspaceCWD: cwd) else {
-                uiState.selection = fallbackWorkspaceSectionSelection(cwd: cwd)
+                uiState.selection = fallbackWorkspaceGroupSelection(cwd: cwd)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -1645,7 +1679,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         func clickWorkspaceHeaderForTesting(cwd: String) {
             view.layoutSubtreeIfNeeded()
             guard let row = row(forWorkspaceCWD: cwd) else {
-                uiState.selection = fallbackWorkspaceSectionSelection(cwd: cwd)
+                uiState.selection = fallbackWorkspaceGroupSelection(cwd: cwd)
                 return
             }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -1724,18 +1758,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return rowView.isFloating
         }
 
-        private func fallbackWorkspaceSectionSelection(cwd: String) -> ReviewMonitorSelection {
-            .workspaceSection(
-                .init(
-                    id: cwd,
-                    title: workspaceDisplayTitle(cwd: cwd),
-                    workspaceCWDs: [cwd]
-                ))
-        }
-
-        private func workspaceDisplayTitle(cwd: String) -> String {
-            let title = (cwd as NSString).lastPathComponent
-            return title.isEmpty ? cwd : title
+        private func fallbackWorkspaceGroupSelection(cwd: String) -> ReviewMonitorSelection {
+            .workspaceGroup(CodexWorkspaceGroupID(rawValue: cwd))
         }
 
         func scrollSidebarToOffsetForTesting(_ yOffset: CGFloat) {
@@ -2048,7 +2072,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
             else {
                 return
             }
-            self.toolTip = chat.workspaceCWD ?? chat.preview ?? chat.title
+            self.toolTip = chat.workspace?.url.path ?? chat.preview ?? chat.title
         }
         if let hostingView {
             hostingView.rootView.node = node
@@ -2079,7 +2103,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         }
 
         var hostedRowIDForTesting: String? {
-            hostingView?.rootView.row?.id
+            hostingView?.rootView.chat?.id.rawValue
         }
 
         var hostingViewIdentityForTesting: ObjectIdentifier? {
@@ -2111,7 +2135,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
 #if DEBUG
     @MainActor
     func makeReviewMonitorReviewChatCellViewForTesting(
-        chat: ReviewMonitorCodexSidebarSnapshot.Chat
+        chat: CodexChat
     ) -> NSTableCellView {
         let cellView = ReviewMonitorReviewChatCellView()
         cellView.configure(
@@ -2133,7 +2157,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     @MainActor
     func configureReviewMonitorReviewChatCellViewForTesting(
         _ cellView: NSTableCellView,
-        chat: ReviewMonitorCodexSidebarSnapshot.Chat
+        chat: CodexChat
     ) {
         guard let cellView = cellView as? ReviewMonitorReviewChatCellView else {
             fatalError("Expected ReviewMonitorReviewChatCellView.")
@@ -2247,9 +2271,9 @@ private final class ReviewMonitorWorkspaceCellView: NSTableCellView {
     private func render(_ item: ReviewMonitorCodexSidebarOutlineItem) {
         switch item {
         case .section(let section):
-            configure(title: section.title, toolTip: section.title, systemSymbolName: "folder")
+            configure(title: section.displayTitle, toolTip: section.displayTitle, systemSymbolName: "folder")
         case .workspace(let workspace):
-            configure(title: workspace.title, toolTip: workspace.cwd, systemSymbolName: "folder")
+            configure(title: workspace.name, toolTip: workspace.url.path, systemSymbolName: "folder")
         case .chat(let chat):
             configure(
                 title: chat.title,

@@ -38,49 +38,42 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await library.performFetch()
 
         let section = try #require(library.sections.first)
-        let snapshotSection = try #require(library.snapshot.sections.first)
         let appWorkspace = try #require(section.workspaces.first)
-        let appChat = try #require(appWorkspace.chats.first)
-        let snapshotAppWorkspace = try #require(snapshotSection.workspaces.first)
-        let snapshotAppChat = try #require(snapshotAppWorkspace.chats.first)
+        let appChat = try #require(section.chats(in: appWorkspace.id).first)
         let resolvedAppPath = app.standardizedFileURL.resolvingSymlinksInPath().path
         let resolvedToolsPath = tools.standardizedFileURL.resolvingSymlinksInPath().path
 
         #expect(library.sections.count == 1)
-        #expect(section.title == repo.lastPathComponent)
-        #expect(section.selection.workspaceCWDs == [resolvedAppPath, resolvedToolsPath])
-        #expect(section.workspaces.map(\.title) == ["App", "Tools"])
+        #expect(section.displayTitle == repo.lastPathComponent)
+        #expect(section.workspaces.map(\.url.path) == [resolvedAppPath, resolvedToolsPath])
+        #expect(section.workspaces.map(\.name) == ["App", "Tools"])
         #expect(section.chats.map(\.title) == ["App chat", "Tools chat"])
         #expect(appChat === library.chat(id: CodexThreadID(rawValue: "thread-app")))
-        #expect(snapshotSection.selection.workspaceCWDs == [resolvedAppPath, resolvedToolsPath])
-        #expect(snapshotAppWorkspace.cwd == resolvedAppPath)
-        #expect(snapshotAppChat.id == CodexThreadID(rawValue: "thread-app"))
-        #expect(snapshotAppChat.title == "App chat")
-        #expect(snapshotAppChat.workspaceCWD == resolvedAppPath)
-        #expect(library.snapshot.chat(id: CodexThreadID(rawValue: "thread-app")) == snapshotAppChat)
-        let outlineSection = try #require(library.snapshot.outlineItems.first)
-        let outlineAppWorkspace = try #require(outlineSection.children.first)
-        #expect(outlineSection.rowID == snapshotSection.rowID)
-        #expect(outlineSection.title == section.title)
-        #expect(outlineSection.selectionID == .workspaceSection(section.id))
+        #expect(appChat.workspace?.url.path == resolvedAppPath)
+
+        let tree = ReviewMonitorCodexSidebarOutlineTree()
+        #expect(tree.apply(sections: library.sections).topologyChanged)
+        let outlineSection = try #require(tree.roots.first)
+        let outlineAppWorkspace = try #require(tree.node(rowID: .workspace(appWorkspace.id)))
+        let outlineAppChat = try #require(tree.node(rowID: .chat(appChat.id)))
+
+        #expect(outlineSection.rowID == section.rowID)
+        #expect(outlineSection.title == section.displayTitle)
+        #expect(outlineSection.selectionID == .workspaceGroup(section.workspaceGroupID))
         #expect(outlineSection.isExpandable)
         #expect(
             outlineSection.children.map(\.rowID.rawValue) == [
                 "workspace:\(resolvedAppPath)",
                 "workspace:\(resolvedToolsPath)",
             ])
-        #expect(outlineAppWorkspace.rowID == snapshotAppWorkspace.rowID)
         #expect(outlineAppWorkspace.title == "App")
-        #expect(outlineAppWorkspace.selectionID == .workspace(snapshotAppWorkspace.id))
+        #expect(outlineAppWorkspace.selectionID == .workspace(appWorkspace.id))
         #expect(outlineAppWorkspace.isExpandable)
-        let outlineAppChat = try #require(outlineAppWorkspace.children.first)
-        #expect(outlineAppChat.selectionID == .chat(snapshotAppChat.id))
         #expect(outlineAppWorkspace.children.map(\.rowID.rawValue) == ["chat:thread-app"])
+        #expect(outlineAppChat.selectionID == .chat(appChat.id))
         #expect(
-            library.snapshot.outlineItem(rowID: .chat(CodexThreadID(rawValue: "thread-app"))) == .chat(snapshotAppChat))
-        #expect(
-            library.snapshot.rowIDs.map(\.rawValue) == [
-                "section:\(section.id)",
+            library.sections.rowIDs.map(\.rawValue) == [
+                "workspaceGroup:\(section.workspaceGroupID.rawValue)",
                 "workspace:\(resolvedAppPath)",
                 "chat:thread-app",
                 "workspace:\(resolvedToolsPath)",
@@ -117,27 +110,29 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
         let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
         try await library.performFetch()
-        let snapshot = library.snapshot
-        let originalWorkspace = try #require(snapshot.sections.first?.workspaces.first)
-        let originalCodexWorkspace = try #require(originalWorkspace.codexWorkspace)
+        let sections = library.sections
+        let originalWorkspace = try #require(sections.first?.workspaces.first)
 
-        let filteredWorkspace = try #require(snapshot.filtered(by: .running).sections.first?.workspaces.first)
-        #expect(filteredWorkspace.codexWorkspace === originalCodexWorkspace)
-        #expect(filteredWorkspace.chats.map(\.id) == [runningThreadID])
+        let filteredWorkspace = try #require(sections.filtered(by: .running).first?.workspaces.first)
+        #expect(filteredWorkspace === originalWorkspace)
+        #expect(sections.filtered(by: .running).first?.chats(in: originalWorkspace.id).map(\.id) == [runningThreadID])
 
         var order = ReviewMonitorCodexSidebarPresentationOrder()
         _ = order.reorderChat(
             id: idleThreadID,
-            in: originalWorkspace.rowID,
+            in: sections[0].rowID,
             currentOrder: [runningThreadID, idleThreadID],
             before: runningThreadID
         )
-        let orderedWorkspace = try #require(order.applying(to: snapshot).sections.first?.workspaces.first)
-        #expect(orderedWorkspace.codexWorkspace === originalCodexWorkspace)
-        #expect(orderedWorkspace.chats.map(\.id) == [idleThreadID, runningThreadID])
+        let orderedWorkspace = try #require(order.applying(to: sections).first?.workspaces.first)
+        #expect(orderedWorkspace === originalWorkspace)
+        #expect(order.applying(to: sections).first?.chats(in: originalWorkspace.id).map(\.id) == [
+            idleThreadID,
+            runningThreadID,
+        ])
     }
 
-    @Test func defaultRequestFetchesReviewThreadsOnly() async throws {
+    @Test func defaultDescriptorFetchesReviewThreadsOnly() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
 
@@ -151,7 +146,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(params.sourceKinds == ["subAgentReview"])
     }
 
-    @Test func sidebarSnapshotIncludesUncategorizedChatsWithStableRowIDs() async throws {
+    @Test func sidebarIncludesUncategorizedChatsWithStableRowIDs() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
 
@@ -170,220 +165,108 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
         try await library.performFetch()
 
-        let section = try #require(library.snapshot.sections.first)
+        let section = try #require(library.sections.first)
         let chat = try #require(section.uncategorizedChats.first)
 
         #expect(section.workspaces.isEmpty)
         #expect(chat.id == CodexThreadID(rawValue: "thread-uncategorized"))
-        #expect(chat.rowID.rawValue == "chat:thread-uncategorized")
         #expect(chat.title == "Floating review")
         #expect(chat.preview == "Uncategorized preview")
-        #expect(chat.workspaceCWD == nil)
-        let outlineSection = try #require(library.snapshot.outlineItems.first)
-        let outlineChat = try #require(outlineSection.children.first)
-        #expect(outlineSection.children.map(\.rowID.rawValue) == ["chat:thread-uncategorized"])
-        #expect(outlineChat == .chat(chat))
-        #expect(outlineChat.selectionID == .chat(chat.id))
-        #expect(outlineChat.isExpandable == false)
-        #expect(library.snapshot.outlineItem(rowID: chat.rowID) == .chat(chat))
+        #expect(chat.workspace == nil)
         #expect(
             section.rowIDs.map(\.rawValue) == [
                 section.rowID.rawValue,
                 "chat:thread-uncategorized",
             ])
+
+        let tree = ReviewMonitorCodexSidebarOutlineTree()
+        #expect(tree.apply(sections: library.sections).topologyChanged)
+        let outlineSection = try #require(tree.roots.first)
+        let outlineChat = try #require(tree.node(rowID: .chat(chat.id)))
+        #expect(outlineSection.children.map(\.rowID.rawValue) == ["chat:thread-uncategorized"])
+        #expect(outlineChat.selectionID == .chat(chat.id))
+        #expect(outlineChat.isExpandable == false)
     }
 
-    @Test func sidebarOutlineTreePreservesNodeIdentityAcrossSnapshots() throws {
-        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+    @Test func sidebarOutlineTreePreservesNodeIdentityAcrossSectionUpdates() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
         let threadID = CodexThreadID(rawValue: "thread-app")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: threadID,
+                        workspace: repo,
+                        name: "Initial review",
+                        updatedAt: Date(timeIntervalSince1970: 1_000)
+                    )
+                ]
+            ))
+
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
+        try await library.performFetch()
+        let section = try #require(library.sections.first)
         let tree = ReviewMonitorCodexSidebarOutlineTree()
 
-        #expect(
-            tree.apply(
-                snapshot: sidebarSnapshot(
-                    workspaceID: workspaceID,
-                    threadID: threadID,
-                    chatTitle: "Initial review",
-                    includesChat: true
-                )
-            ).topologyChanged)
-
+        #expect(tree.apply(sections: library.sections).topologyChanged)
         let root = try #require(tree.roots.first)
-        let workspace = try #require(tree.node(rowID: .workspace(workspaceID)))
-        let chat = try #require(tree.node(rowID: .chat(threadID)))
+        let chatNode = try #require(tree.node(rowID: .chat(threadID)))
 
-        #expect(
-            tree.apply(
-                snapshot: sidebarSnapshot(
-                    workspaceID: workspaceID,
-                    threadID: threadID,
-                    chatTitle: "Updated review",
-                    includesChat: true
-                )
-            ).topologyChanged == false)
+        try await runtime.transport.enqueueThreadResume(.init(id: threadID))
+        try await runtime.transport.enqueueThreadRead(
+            .init(
+                id: threadID,
+                workspace: repo,
+                name: "Updated review",
+                updatedAt: Date(timeIntervalSince1970: 2_000)
+            ))
+        try await context.model(for: threadID).refresh(includeTurns: false)
 
-        let updatedRoot = try #require(tree.roots.first)
-        let updatedWorkspace = try #require(tree.node(rowID: .workspace(workspaceID)))
-        let updatedChat = try #require(tree.node(rowID: .chat(threadID)))
-        #expect(updatedRoot === root)
-        #expect(updatedWorkspace === workspace)
-        #expect(updatedChat === chat)
-        #expect(chat.title == "Updated review")
-        #expect(root.children.first === workspace)
-        #expect(workspace.children.first === chat)
-
-        #expect(
-            tree.apply(
-                snapshot: sidebarSnapshot(
-                    workspaceID: workspaceID,
-                    threadID: threadID,
-                    chatTitle: "Removed review",
-                    includesChat: false
-                )
-            ).topologyChanged)
-
-        #expect(tree.node(rowID: .chat(threadID)) == nil)
-        #expect(workspace.children.isEmpty)
+        #expect(tree.apply(sections: library.sections).topologyChanged == false)
+        #expect(tree.roots.first === root)
+        #expect(tree.node(rowID: .chat(threadID)) === chatNode)
+        #expect(chatNode.title == "Updated review")
+        #expect(root.children.map(\.rowID) == [.chat(threadID)])
+        #expect(root.children.first === chatNode)
     }
 
-    @Test func sidebarSnapshotRunningFilterUsesThreadStatus() throws {
-        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
+    @Test func sidebarRunningFilterUsesThreadStatus() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
         let runningThreadID = CodexThreadID(rawValue: "thread-running")
         let idleThreadID = CodexThreadID(rawValue: "thread-idle")
-        let snapshot = sidebarSnapshot(
-            workspaceID: workspaceID,
-            chats: [
-                sidebarChat(
-                    id: runningThreadID,
-                    title: "Running review",
-                    workspaceID: workspaceID,
-                    updatedAt: Date(timeIntervalSince1970: 20),
-                    status: .active(activeFlags: [])
-                ),
-                sidebarChat(
-                    id: idleThreadID,
-                    title: "Idle review",
-                    workspaceID: workspaceID,
-                    updatedAt: Date(timeIntervalSince1970: 30),
-                    status: .idle
-                ),
-            ]
-        )
 
-        let filtered = snapshot.filtered(by: .running)
-        let workspace = try #require(filtered.sections.first?.workspaces.first)
-        #expect(workspace.chats.map(\.id) == [runningThreadID])
-        #expect(filtered.chat(id: idleThreadID) == nil)
-    }
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: runningThreadID,
+                        workspace: repo,
+                        name: "Running review",
+                        updatedAt: Date(timeIntervalSince1970: 20),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: idleThreadID,
+                        workspace: repo,
+                        name: "Idle review",
+                        updatedAt: Date(timeIntervalSince1970: 30),
+                        status: .idle
+                    ),
+                ]
+            ))
 
-    @Test func sidebarChatRunningStateUsesThreadStatus() {
-        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
-        let runningChat = sidebarChat(
-            id: CodexThreadID(rawValue: "thread-running"),
-            title: "Running review",
-            workspaceID: workspaceID,
-            status: .active(activeFlags: [])
-        )
-        let idleChat = sidebarChat(
-            id: CodexThreadID(rawValue: "thread-idle"),
-            title: "Idle review",
-            workspaceID: workspaceID,
-            status: .idle
-        )
+        let library = ReviewMonitorCodexSidebarLibrary(modelContext: context)
+        try await library.performFetch()
+        let section = try #require(library.sections.filtered(by: .running).first)
+        let workspace = try #require(section.workspaces.first)
 
-        #expect(runningChat.isRunning)
-        #expect(idleChat.isRunning == false)
-    }
-
-    @Test func sidebarSnapshotLatestFinishedFilterUsesSectionActivityDate() throws {
-        let workspaceID = CodexWorkspaceID(rawValue: "/tmp/App")
-        let olderFinishedID = CodexThreadID(rawValue: "thread-older-finished")
-        let newerFinishedID = CodexThreadID(rawValue: "thread-newer-finished")
-        let runningThreadID = CodexThreadID(rawValue: "thread-running")
-        let snapshot = sidebarSnapshot(
-            workspaceID: workspaceID,
-            chats: [
-                sidebarChat(
-                    id: olderFinishedID,
-                    title: "Older finished",
-                    workspaceID: workspaceID,
-                    updatedAt: Date(timeIntervalSince1970: 100),
-                    status: .idle
-                ),
-                sidebarChat(
-                    id: newerFinishedID,
-                    title: "Newer finished",
-                    workspaceID: workspaceID,
-                    updatedAt: Date(timeIntervalSince1970: 300),
-                    status: .idle
-                ),
-                sidebarChat(
-                    id: runningThreadID,
-                    title: "Running review",
-                    workspaceID: workspaceID,
-                    updatedAt: Date(timeIntervalSince1970: 400),
-                    status: .active(activeFlags: [])
-                ),
-            ]
-        )
-
-        let latestFinished = snapshot.filtered(by: .latestFinished)
-        let combined: SidebarReviewChatFilter = [.running, .latestFinished]
-        let combinedFiltered = snapshot.filtered(by: combined)
-
-        #expect(latestFinished.sections.first?.workspaces.first?.chats.map(\.id) == [newerFinishedID])
-        #expect(
-            combinedFiltered.sections.first?.workspaces.first?.chats.map(\.id) == [
-                newerFinishedID,
-                runningThreadID,
-            ])
-    }
-
-    @Test func sidebarPresentationOrderReordersSectionsAndChatsLocally() throws {
-        let alphaWorkspaceID = CodexWorkspaceID(rawValue: "/tmp/Alpha")
-        let betaWorkspaceID = CodexWorkspaceID(rawValue: "/tmp/Beta")
-        let alphaFirstID = CodexThreadID(rawValue: "thread-alpha-first")
-        let alphaSecondID = CodexThreadID(rawValue: "thread-alpha-second")
-        let betaThreadID = CodexThreadID(rawValue: "thread-beta")
-        let alpha = sidebarSection(
-            id: "alpha",
-            title: "Alpha",
-            workspaceID: alphaWorkspaceID,
-            chats: [
-                sidebarChat(id: alphaFirstID, title: "Alpha first", workspaceID: alphaWorkspaceID),
-                sidebarChat(id: alphaSecondID, title: "Alpha second", workspaceID: alphaWorkspaceID),
-            ]
-        )
-        let beta = sidebarSection(
-            id: "beta",
-            title: "Beta",
-            workspaceID: betaWorkspaceID,
-            chats: [
-                sidebarChat(id: betaThreadID, title: "Beta", workspaceID: betaWorkspaceID)
-            ]
-        )
-        var order = ReviewMonitorCodexSidebarPresentationOrder()
-
-        let didReorderSection = order.reorderSection(id: "beta", before: "alpha")
-        let didReorderChat = order.reorderChat(
-            id: alphaSecondID,
-            in: .workspace(alphaWorkspaceID),
-            currentOrder: [alphaFirstID, alphaSecondID],
-            before: alphaFirstID
-        )
-
-        #expect(didReorderSection)
-        #expect(didReorderChat)
-
-        let ordered = order.applying(to: ReviewMonitorCodexSidebarSnapshot(sections: [alpha, beta]))
-
-        #expect(ordered.sections.map(\.id) == ["beta", "alpha"])
-        #expect(
-            ordered.sections[1].workspaces.first?.chats.map(\.id) == [
-                alphaSecondID,
-                alphaFirstID,
-            ])
-        #expect(ordered.sections[0].workspaces.first?.chats.map(\.id) == [betaThreadID])
+        #expect(section.chats(in: workspace.id).map(\.id) == [runningThreadID])
+        #expect(section.chats(in: workspace.id).contains { $0.id == idleThreadID } == false)
     }
 
     @Test func sidebarViewControllerInstallsCodexSidebarLibraryFromModelContext() async throws {
@@ -405,9 +288,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
-            serverState: .running
-        )
+        store.loadForTesting(serverState: .running)
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
@@ -418,9 +299,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
         let sidebar = viewController.sidebarViewControllerForTesting
         try await waitForCondition {
-            sidebar.codexSidebarSnapshotForTesting?
-                .chat(id: threadID)?
-                .title == "App review"
+            sidebar.codexSidebarSectionsForTesting.first?.chat(id: threadID)?.title == "App review"
         }
         try await waitForCondition {
             sidebar.codexSidebarRootTitlesForTesting == [repo.lastPathComponent]
@@ -429,9 +308,12 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(
             sidebar.displayedCodexSidebarTitlesForTesting == [
                 repo.lastPathComponent,
-                repo.lastPathComponent,
                 "App review",
             ])
+        let workspace = try #require(sidebar.codexSidebarSectionsForTesting.first?.workspaces.first)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .workspace(workspace.id)) == nil)
+        #expect(sidebar.workspaceRowHeightForTesting(cwd: repo.path) == sidebar.expectedWorkspaceRowRectHeightForTesting)
+        #expect(sidebar.reviewChatRowHeightForTesting(threadID) == sidebar.expectedReviewChatRowRectHeightForTesting)
         #expect(sidebar.codexSidebarChatRowUsesReviewMonitorChatRowViewForTesting(threadID))
 
         sidebar.selectCodexSidebarRowForTesting(rowID: .chat(threadID))
@@ -472,14 +354,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             startedAt: Date(timeIntervalSince1970: 4_000),
             summary: "Running review."
         )
-        let runBackedChat = ReviewMonitorCodexSidebarSnapshot.Chat(
-            rowID: .chat(hiddenRunThreadID),
-            id: hiddenRunThreadID,
-            title: "Run-backed review row",
-            preview: "Running review.",
-            workspaceCWD: repo.path,
-            updatedAt: Date(timeIntervalSince1970: 4_000)
-        )
         let store = CodexReviewStore.makePreviewStore()
         store.loadReviewCancellationStateForTesting(
             serverState: .running,
@@ -497,9 +371,9 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(visibleThreadID)) == "App review"
         }
-        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(runBackedChat.id)) == nil)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(hiddenRunThreadID)) == nil)
 
-        uiState.selection = .chat(runBackedChat.id)
+        uiState.selection = .chat(hiddenRunThreadID)
 
         try await waitForCondition {
             uiState.selection == nil && sidebar.selectedReviewChatIDForTesting == nil
@@ -507,6 +381,46 @@ struct ReviewMonitorCodexSidebarLibraryTests {
     }
 
     @Test func sidebarViewControllerTracksCodexSidebarFetchResultChanges() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let threadID = CodexThreadID(rawValue: "thread-app")
+
+        try await runtime.transport.enqueueThreadList(.init(threads: []))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        try await waitForCondition {
+            sidebar.isShowingEmptyStateForTesting
+        }
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: threadID,
+                        workspace: repo,
+                        name: "App review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000)
+                    )
+                ]
+            ))
+        try await sidebar.refreshCodexSidebarForTesting()
+
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
+        }
+    }
+
+    @Test func sidebarViewControllerDoesNotRebindCodexChatCellWhenContentChanges() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeGitRepository()
@@ -525,9 +439,7 @@ struct ReviewMonitorCodexSidebarLibraryTests {
             ))
 
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(
-            serverState: .running
-        )
+        store.loadForTesting(serverState: .running)
         let uiState = ReviewMonitorUIState(auth: store.auth)
         let viewController = ReviewMonitorSplitViewController(
             store: store,
@@ -539,11 +451,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         viewController.loadViewIfNeeded()
 
         let sidebar = viewController.sidebarViewControllerForTesting
-        try await waitForCondition(timeout: .milliseconds(500)) {
-            sidebar.codexSidebarSnapshotForTesting?
-                .chat(id: threadID)?
-                .title == "App review"
-        }
         try await waitForCondition(timeout: .milliseconds(500)) {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
         }
@@ -586,11 +493,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await chat.refresh(includeTurns: false)
 
         try await waitForCondition {
-            sidebar.codexSidebarSnapshotForTesting?
-                .chat(id: threadID)?
-                .title == "App review renamed"
-        }
-        try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review renamed"
         }
         #expect(uiState.selectionID == .chat(threadID))
@@ -609,12 +511,11 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         #expect(
             sidebar.displayedCodexSidebarTitlesForTesting == [
                 repo.lastPathComponent,
-                repo.lastPathComponent,
                 "App review renamed",
             ])
     }
 
-    @Test func sidebarViewControllerReordersCodexSectionsLocally() async throws {
+    @Test func sidebarViewControllerReordersCodexWorkspaceGroupsLocally() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let firstRepo = try makeGitRepository()
@@ -654,22 +555,22 @@ struct ReviewMonitorCodexSidebarLibraryTests {
                 secondRepo.lastPathComponent,
             ]
         }
-        let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
-        let firstSection = try #require(snapshot.sections.first)
-        let secondSection = try #require(snapshot.sections.dropFirst().first)
+        let sections = sidebar.codexSidebarSectionsForTesting
+        let firstSection = try #require(sections.first)
+        let secondSection = try #require(sections.dropFirst().first)
         let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: secondSection.rowID))
-        #expect(sidebar.performCodexSectionDropForTesting(id: secondSection.id, toIndex: 0))
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondSection.workspaceGroupID, toIndex: 0))
         #expect(
             sidebar.codexSidebarRootTitlesForTesting == [
-                secondSection.title,
-                firstSection.title,
+                secondSection.displayTitle,
+                firstSection.displayTitle,
             ])
         #expect(
-            sidebar.codexSidebarSnapshotForTesting?.sections.map(\.id) == [
-                firstSection.id,
-                secondSection.id,
+            sidebar.codexSidebarSectionsForTesting.map(\.workspaceGroupID) == [
+                firstSection.workspaceGroupID,
+                secondSection.workspaceGroupID,
             ])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
@@ -712,19 +613,16 @@ struct ReviewMonitorCodexSidebarLibraryTests {
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(secondThreadID)) == "Second review"
         }
-        let snapshot = try #require(sidebar.codexSidebarSnapshotForTesting)
-        let container = try #require(snapshot.sections.first?.workspaces.first?.rowID)
+        let section = try #require(sidebar.codexSidebarSectionsForTesting.first)
+        let workspace = try #require(section.workspaces.first)
+        let container = section.rowID
         let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.displayedCodexChatIDsForTesting(container: container) == [firstThreadID, secondThreadID])
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: .chat(secondThreadID)))
         #expect(sidebar.performCodexChatDropForTesting(id: secondThreadID, container: container, childIndex: 0))
         #expect(sidebar.displayedCodexChatIDsForTesting(container: container) == [secondThreadID, firstThreadID])
-        #expect(
-            sidebar.codexSidebarSnapshotForTesting?.sections.first?.workspaces.first?.chats.map(\.id) == [
-                firstThreadID,
-                secondThreadID,
-            ])
+        #expect(section.chats(in: workspace.id).map(\.id) == [firstThreadID, secondThreadID])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
 
@@ -784,80 +682,6 @@ struct ReviewMonitorCodexSidebarLibraryTests {
 
 private struct ThreadListParams: Decodable {
     var sourceKinds: [String]?
-}
-
-@MainActor
-private func sidebarSnapshot(
-    workspaceID: CodexWorkspaceID,
-    threadID: CodexThreadID,
-    chatTitle: String,
-    includesChat: Bool
-) -> ReviewMonitorCodexSidebarSnapshot {
-    let chat = sidebarChat(
-        id: threadID,
-        title: chatTitle,
-        workspaceID: workspaceID
-    )
-    return sidebarSnapshot(
-        workspaceID: workspaceID,
-        chats: includesChat ? [chat] : []
-    )
-}
-
-@MainActor
-private func sidebarSnapshot(
-    workspaceID: CodexWorkspaceID,
-    chats: [ReviewMonitorCodexSidebarSnapshot.Chat]
-) -> ReviewMonitorCodexSidebarSnapshot {
-    return ReviewMonitorCodexSidebarSnapshot(
-        sections: [
-            sidebarSection(id: "repo", title: "Repo", workspaceID: workspaceID, chats: chats)
-        ]
-    )
-}
-
-@MainActor
-private func sidebarSection(
-    id: String,
-    title: String,
-    workspaceID: CodexWorkspaceID,
-    chats: [ReviewMonitorCodexSidebarSnapshot.Chat]
-) -> ReviewMonitorCodexSidebarSnapshot.Section {
-    ReviewMonitorCodexSidebarSnapshot.Section(
-        rowID: .section(id),
-        id: id,
-        title: title,
-        workspaces: [
-            ReviewMonitorCodexSidebarSnapshot.Workspace(
-                rowID: .workspace(workspaceID),
-                id: workspaceID,
-                cwd: workspaceID.rawValue,
-                title: URL(fileURLWithPath: workspaceID.rawValue).lastPathComponent,
-                chats: chats
-            )
-        ],
-        uncategorizedChats: []
-    )
-}
-
-@MainActor
-private func sidebarChat(
-    id: CodexThreadID,
-    title: String,
-    workspaceID: CodexWorkspaceID,
-    updatedAt: Date? = nil,
-    status: CodexThreadStatus? = nil
-) -> ReviewMonitorCodexSidebarSnapshot.Chat {
-    ReviewMonitorCodexSidebarSnapshot.Chat(
-        rowID: .chat(id),
-        id: id,
-        title: title,
-        preview: nil,
-        workspaceCWD: workspaceID.rawValue,
-        updatedAt: updatedAt,
-        recencyAt: updatedAt,
-        status: status
-    )
 }
 
 private func makeDirectory(_ name: String, in parent: URL) throws -> URL {

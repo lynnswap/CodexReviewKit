@@ -278,6 +278,14 @@ struct CodexReviewMonitorCITests {
         )
         rootViewController.prepareForSwiftUIPreviewRendering()
 
+        let sidebar = rootViewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForPreviewCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("workspace-alpha")
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+        #expect(sidebar.isShowingEmptyStateForTesting == false)
+
         let transport = rootViewController.splitViewControllerForTesting.transportViewControllerForTesting
         let initialSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
             snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
@@ -822,6 +830,19 @@ private func awaitPreviewTransportRender(
         "Timed out waiting for preview transport render: selection=\(String(describing: state.selection)), log=\(state.snapshot.log)"
     )
     return state.snapshot
+}
+
+@MainActor
+private func waitForPreviewCondition(
+    _ condition: @escaping @MainActor () -> Bool
+) async throws {
+    for _ in 0..<100 {
+        if condition() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    Issue.record("Timed out waiting for preview condition.")
 }
 
 @MainActor

@@ -148,7 +148,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                 projectedBlock(
                     item,
                     kind: logKind(for: item, fallback: .event),
-                    text: [title, raw.text].compactMap { $0 }.joined(separator: "\n"),
+                    text: unknownText(title: title, detail: raw.text),
                     metadata: metadata(
                         for: item,
                         sourceType: item.kind.rawValue,
@@ -159,6 +159,13 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                 )
             ]
         }
+    }
+
+    private func unknownText(title: String, detail: String?) -> String {
+        guard let detail, detail != title else {
+            return title
+        }
+        return "\(title)\n\(detail)"
     }
 
     private func commandBlocks(

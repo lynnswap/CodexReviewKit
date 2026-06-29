@@ -97,6 +97,7 @@ let package = Package(
                 "CodexReviewKit",
                 "TextTransitions",
                 .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
             swiftSettings: [

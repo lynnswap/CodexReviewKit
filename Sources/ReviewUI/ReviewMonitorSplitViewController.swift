@@ -21,7 +21,6 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
     private let store: CodexReviewStore
     private let uiState: ReviewMonitorUIState
     private let codexModelSource: ReviewMonitorCodexModelSource?
-    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let showSettings: (@MainActor () -> Void)?
     private var sidebarViewController: ReviewMonitorSidebarViewController?
     private var transportViewController: ReviewMonitorTransportViewController?
@@ -42,14 +41,12 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         modelContext: CodexModelContext,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             uiState: uiState,
             codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
-            previewChatLogSource: previewChatLogSource,
             showSettings: showSettings
         )
     }
@@ -58,14 +55,22 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.store = store
         self.uiState = uiState
-        self.codexModelSource = codexModelSource
-        self.previewChatLogSource = previewChatLogSource
-            ?? (store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport)?.chatLogSource
+        #if DEBUG
+            if let codexModelSource {
+                self.codexModelSource = codexModelSource
+            } else if let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store) {
+                previewRuntime.start()
+                self.codexModelSource = previewRuntime.modelSource
+            } else {
+                self.codexModelSource = nil
+            }
+        #else
+            self.codexModelSource = codexModelSource
+        #endif
         self.showSettings = showSettings
         super.init(nibName: nil, bundle: nil)
     }
@@ -85,13 +90,17 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         let sidebarViewController = ReviewMonitorSidebarViewController(
             store: store,
             uiState: uiState,
-            codexModelSource: codexModelSource,
-            previewChatLogSource: previewChatLogSource
+            codexModelSource: codexModelSource
         )
+        sidebarViewController.codexSidebarContentDidChange = { [weak self] in
+            guard let self else {
+                return
+            }
+            self.applyWindowTitle(self.windowTitlePresentation(for: self.uiState.selection))
+        }
         let transportViewController = ReviewMonitorTransportViewController(
             uiState: uiState,
-            codexModelSource: codexModelSource,
-            previewChatLogSource: previewChatLogSource
+            codexModelSource: codexModelSource
         )
         let statusAccessoryViewController = ReviewMonitorServerStatusAccessoryViewController(
             store: store,
@@ -247,16 +256,16 @@ final class ReviewMonitorSplitViewController: NSSplitViewController, NSToolbarDe
         for selection: ReviewMonitorSelection?
     ) -> WindowTitlePresentation {
         switch selection {
-        case .workspaceSection(let section):
-            return WindowTitlePresentation(
-                title: section.title,
-                subtitle: section.subtitle
-            )
-        case .workspace(let workspace):
-            return WindowTitlePresentation(
-                title: workspace.title,
-                subtitle: workspace.cwd
-            )
+        case .workspaceGroup(let id):
+            guard let presentation = sidebarViewController?.codexWorkspaceGroupTitlePresentation(id: id) else {
+                return WindowTitlePresentation(title: "", subtitle: "")
+            }
+            return WindowTitlePresentation(title: presentation.title, subtitle: presentation.subtitle)
+        case .workspace(let id):
+            guard let presentation = sidebarViewController?.codexWorkspaceTitlePresentation(id: id) else {
+                return WindowTitlePresentation(title: "", subtitle: "")
+            }
+            return WindowTitlePresentation(title: presentation.title, subtitle: presentation.subtitle)
         case .chat(let id):
             guard let presentation = sidebarViewController?.codexChatTitlePresentation(id: id) else {
                 return WindowTitlePresentation(title: "", subtitle: "")

@@ -9,7 +9,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     private let codexModelSource: ReviewMonitorCodexModelSource?
-    private let previewChatLogSource: ReviewMonitorPreviewChatLogSource?
     private let uiState: ReviewMonitorUIState
     private let selectedCodexChat: ReviewMonitorSelectedCodexChat
     private let logScrollView = ReviewMonitorLogScrollView()
@@ -28,25 +27,23 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     convenience init(
         uiState: ReviewMonitorUIState,
-        modelContext: CodexModelContext,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
+        modelContext: CodexModelContext
     ) {
         self.init(
             uiState: uiState,
-            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
-            previewChatLogSource: previewChatLogSource
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext)
         )
     }
 
     init(
         uiState: ReviewMonitorUIState,
-        codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil
+        codexModelSource: ReviewMonitorCodexModelSource? = nil
     ) {
         self.codexModelSource = codexModelSource
-        self.previewChatLogSource = previewChatLogSource
         self.uiState = uiState
-        self.selectedCodexChat = ReviewMonitorSelectedCodexChat(modelSource: codexModelSource)
+        self.selectedCodexChat = ReviewMonitorSelectedCodexChat(
+            modelSource: codexModelSource
+        )
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -121,7 +118,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
         switch selection {
-        case .workspaceSection:
+        case .workspaceGroup:
             return displayedSelection != selection?.id
         case .workspace:
             return displayedSelection != selection?.id
@@ -135,7 +132,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     private func updatePresentation(selection: ReviewMonitorSelection?) {
         switch selection {
-        case .workspaceSection:
+        case .workspaceGroup:
             clearDisplayedLogSelection()
             displayPlaceholder(.noFindings)
             logScrollView.isHidden = true
@@ -175,15 +172,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         boundChatID = selectedChatID
         let restorationTarget = restorationTarget(chatID: selectedChatID)
         selectedCodexChat.bind(toChatID: selectedChatID)
-        if let previewStream = previewChatLogSource?.chatChangeStream(for: selectedChatID) {
-            startPreviewChatChangeStream(
-                previewStream,
-                chatUpdatedAt: previewChatLogSource?.snapshot.chat(id: selectedChatID)?.updatedAt,
-                target: .chat(selectedChatID),
-                initialRestorationTarget: restorationTarget
-            )
-            return
-        }
         startSelectedCodexChatLogStream(
             target: .chat(selectedChatID),
             initialRestorationTarget: restorationTarget
@@ -257,43 +245,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
             target: target,
             initialRestorationTarget: initialRestorationTarget
         )
-    }
-
-    private func startPreviewChatChangeStream(
-        _ stream: AsyncStream<CodexChatChange>,
-        chatUpdatedAt: Date?,
-        target: LogRenderTarget,
-        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
-    ) {
-        selectedChatLogTask?.cancel()
-        selectedChatLogTask = Task { @MainActor [weak self] in
-            var projection = ReviewMonitorSelectedCodexChatLogProjection()
-            for await change in stream {
-                guard let self,
-                    self.isCurrentLogRenderTarget(target)
-                else {
-                    return
-                }
-                guard
-                    let logChange = projection.apply(
-                        change,
-                        chatCreatedAt: nil,
-                        chatUpdatedAt: chatUpdatedAt
-                    )
-                else {
-                    continue
-                }
-                let hasAppliedInitialDocument = self.hasAppliedBoundLog
-                self.applySelectedCodexChatLogChange(
-                    logChange,
-                    target: target,
-                    restorationTarget: hasAppliedInitialDocument
-                        ? self.logScrollView.currentScrollRestorationTarget
-                        : initialRestorationTarget,
-                    allowIncrementalUpdate: hasAppliedInitialDocument && logChange.allowsIncrementalRender
-                )
-            }
-        }
     }
 
     private func startLogSourceChangeStream(
@@ -375,7 +326,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .chat:
             return logScrollView.performDisplayedTextFinderAction(sender)
-        case .workspaceSection, .workspace, nil:
+        case .workspaceGroup, .workspace, nil:
             return false
         }
     }
@@ -384,7 +335,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .chat:
             return logScrollView.validateDisplayedTextFinderAction(item)
-        case .workspaceSection, .workspace, nil:
+        case .workspaceGroup, .workspace, nil:
             return false
         }
     }
@@ -402,7 +353,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         enum DisplayedSelectionForTesting: Sendable, Equatable {
-            case workspaceSection(String)
+            case workspaceGroup(String)
             case workspace(String)
             case chat(String)
         }
@@ -438,7 +389,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 return selectionObservation
             }
             switch expectedSelection {
-            case .workspaceSection, .workspace, .chat:
+            case .workspaceGroup, .workspace, .chat:
                 return selectionObservation
             case nil:
                 return selectionObservation
@@ -790,7 +741,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         var expectedRenderSnapshotForTesting: RenderSnapshotForTesting {
             switch uiState.selection {
-            case .workspaceSection:
+            case .workspaceGroup:
                 .init(
                     title: nil,
                     summary: nil,
@@ -830,8 +781,8 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         private var displayedSelectionForTesting: DisplayedSelectionForTesting? {
             switch displayedSelection {
-            case .workspaceSection(let id):
-                .workspaceSection(id)
+            case .workspaceGroup(let id):
+                .workspaceGroup(id.rawValue)
             case .workspace(let id):
                 .workspace(id.rawValue)
             case .chat(let id):
@@ -843,10 +794,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         private var expectedDisplayedSelectionForTesting: DisplayedSelectionForTesting? {
             switch uiState.selection {
-            case .workspaceSection(let section):
-                .workspaceSection(section.id)
-            case .workspace(let workspace):
-                .workspace(workspace.id.rawValue)
+            case .workspaceGroup(let id):
+                .workspaceGroup(id.rawValue)
+            case .workspace(let id):
+                .workspace(id.rawValue)
             case .chat(let id):
                 .chat(id.rawValue)
             case nil:
@@ -990,7 +941,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             switch target ?? displayedSelectionForTesting {
             case .chat(let id):
                 resolvedTarget = .chat(CodexThreadID(rawValue: id))
-            case .workspaceSection, .workspace, nil:
+            case .workspaceGroup, .workspace, nil:
                 return false
             }
             let resolvedRestorationTarget =
@@ -1030,7 +981,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 hidePlaceholder()
                 logScrollView.isHidden = false
                 displayedSelection = .chat(chatID)
-            case .workspaceSection, .workspace:
+            case .workspaceGroup, .workspace:
                 break
             }
         }

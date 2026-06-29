@@ -70,16 +70,16 @@ public final class ReviewMonitorWindowController: NSWindowController {
     convenience init(
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
+        initialSelection: ReviewMonitorSelection? = nil,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
         self.init(
             store: store,
             codexModelSource: codexModelSource,
-            previewChatLogSource: previewChatLogSource,
             contentTransitionAnimator: contentTransitionAnimator,
+            initialSelection: initialSelection,
             frameAutosaveName: Self.frameAutosaveName,
             sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults,
             showSettings: showSettings
@@ -89,8 +89,8 @@ public final class ReviewMonitorWindowController: NSWindowController {
     init(
         store: CodexReviewStore,
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
-        previewChatLogSource: ReviewMonitorPreviewChatLogSource? = nil,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator,
+        initialSelection: ReviewMonitorSelection? = nil,
         frameAutosaveName: NSWindow.FrameAutosaveName,
         sidebarReviewChatFilterDefaults: UserDefaults? = .standard,
         showSettings: (@MainActor () -> Void)? = nil
@@ -99,14 +99,13 @@ public final class ReviewMonitorWindowController: NSWindowController {
             auth: store.auth,
             sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
         )
-        if let initialChat = previewChatLogSource?.initialChat {
-            uiState.selection = .chat(initialChat.id)
+        if uiState.selection == nil {
+            uiState.selection = initialSelection
         }
         let rootViewController = ReviewMonitorRootViewController(
             store: store,
             uiState: uiState,
             codexModelSource: codexModelSource,
-            previewChatLogSource: previewChatLogSource,
             contentTransitionAnimator: contentTransitionAnimator,
             showSettings: showSettings
         )
@@ -156,17 +155,16 @@ public extension ReviewMonitorWindowController {
         codexModelSource: ReviewMonitorCodexModelSource? = nil,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
-        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
-        ReviewMonitorPreviewContent.retainChatLogStreamer(
-            source: previewChatLogSource,
+        let previewRuntime = ReviewMonitorPreviewContent.previewRuntime(from: store)
+        ReviewMonitorPreviewContent.retainPreviewRuntimeStreamer(
             in: store,
             interval: .milliseconds(40)
         )
         self.init(
             store: store,
-            codexModelSource: codexModelSource,
-            previewChatLogSource: previewChatLogSource,
+            codexModelSource: codexModelSource ?? previewRuntime?.modelSource,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+            initialSelection: previewRuntime?.initialSelection,
             showSettings: showSettings
         )
     }

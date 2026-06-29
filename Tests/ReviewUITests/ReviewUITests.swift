@@ -345,13 +345,13 @@ struct ReviewUITests {
             ])
     }
 
-    @Test func reviewChatCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() throws {
-        let placeholderChat = reviewChatCellTestChat(
+    @Test func reviewChatCellViewUpdatesHostedObservationReferenceWithoutReplacingHostingView() async throws {
+        let placeholderChat = try await reviewChatCellTestChat(
             id: "chat-placeholder",
             title: "Queued review",
             workspaceCWD: "/tmp/placeholder"
         )
-        let loadedChat = reviewChatCellTestChat(
+        let loadedChat = try await reviewChatCellTestChat(
             id: "chat-loaded",
             title: "Uncommitted changes",
             workspaceCWD: "/tmp/loaded"
@@ -379,11 +379,11 @@ struct ReviewUITests {
             return
         }
         #expect(objectChat.id == loadedChat.id)
-        #expect(cellView.toolTip == loadedChat.workspaceCWD)
+        #expect(cellView.toolTip == (loadedChat.workspace?.url.path ?? loadedChat.preview ?? loadedChat.title))
     }
 
-    @Test func reviewChatCellViewSkipsSameNodeConfigureWithoutRebindingHostedContent() throws {
-        let chat = reviewChatCellTestChat(
+    @Test func reviewChatCellViewSkipsSameNodeConfigureWithoutRebindingHostedContent() async throws {
+        let chat = try await reviewChatCellTestChat(
             id: "chat-stable",
             title: "Stable review",
             workspaceCWD: "/tmp/stable"
@@ -834,9 +834,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: recentChat.chat
-        )
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentChat.chatID)
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
             recentChat,
@@ -925,9 +923,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: chat.chat
-        )
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
             chat,
@@ -1667,9 +1663,7 @@ struct ReviewUITests {
         let window = backend.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: activeChat.chat
-        )
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: activeChat.chatID)
 
         let activeSnapshot = try await awaitChatRenderForTesting(
             activeChat,
@@ -1680,9 +1674,7 @@ struct ReviewUITests {
         #expect(activeSnapshot.summary == nil)
         #expect(window.title == activeChat.chat.title)
         #expect(window.subtitle == activeChat.cwd)
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: recentChat.chat
-        )
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: recentChat.chatID)
 
         let recentSnapshot = try await awaitChatRenderForTesting(
             recentChat,
@@ -2168,9 +2160,7 @@ struct ReviewUITests {
 
         _ = try await awaitTransportRender(transport)
         #expect(
-            viewController.sidebarViewControllerForTesting.selectedWorkspaceSectionForTesting?.workspaceCWDs == [
-                chat.cwd
-            ])
+            viewController.sidebarViewControllerForTesting.selectedWorkspaceGroupIDForTesting?.rawValue == chat.cwd)
         #expect(viewController.sidebarViewControllerForTesting.selectedReviewChatIDForTesting == nil)
         #expect(transport.isShowingNoFindingsStateForTesting)
     }
@@ -2283,9 +2273,7 @@ struct ReviewUITests {
         defer { window.close() }
         let contentPane = viewController.contentPaneViewControllerForTesting
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(
-            chat: chat.chat
-        )
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         let selectedSnapshot = try await awaitChatRenderForTesting(
             chat,
@@ -2367,11 +2355,10 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth),
-            previewChatLogSource: previewChatLogSource
+            uiState: ReviewMonitorUIState(auth: store.auth)
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2385,7 +2372,7 @@ struct ReviewUITests {
         transport.setLogReduceMotionForTesting(false)
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        previewChatLogSource.appendPreviewText(
+        previewRuntime.appendPreviewText(
             " log",
             to: chatID,
             itemID: "msg_1",
@@ -2413,11 +2400,10 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth),
-            previewChatLogSource: previewChatLogSource
+            uiState: ReviewMonitorUIState(auth: store.auth)
         )
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -2429,7 +2415,7 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chatID)
         _ = try await awaitTransportRender(transport) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
-        previewChatLogSource.upsertPreviewItem(
+        previewRuntime.upsertPreviewItem(
             id: "progress_1",
             kind: CodexThreadItem.Kind(rawValue: "progress"),
             content: .diagnostic("stream.tick 001"),
@@ -2855,11 +2841,10 @@ struct ReviewUITests {
         )
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(serverState: .running, fixtures: [chat])
-        let previewChatLogSource = ReviewMonitorPreviewContent.makeChatLogSource(from: store)
+        let previewRuntime = try #require(ReviewMonitorPreviewContent.previewRuntime(from: store))
         let viewController = ReviewMonitorSplitViewController(
             store: store,
-            uiState: ReviewMonitorUIState(auth: store.auth),
-            previewChatLogSource: previewChatLogSource
+            uiState: ReviewMonitorUIState(auth: store.auth)
         )
         viewController.loadViewIfNeeded()
         let transport = viewController.transportViewControllerForTesting
@@ -2871,7 +2856,7 @@ struct ReviewUITests {
         )
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
-        previewChatLogSource.upsertPreviewItem(
+        previewRuntime.upsertPreviewItem(
             id: "fixture-log-\(chat.id)",
             kind: .agentMessage,
             content: .message(.init(id: "fixture-log-\(chat.id)", role: .assistant, text: "Initial log")),
@@ -4611,11 +4596,8 @@ func makeWindowHarness(
         .defaultContentTransitionAnimator
 ) -> ReviewMonitorWindowHarness {
     applyTestAuthState(auth: store.auth, state: authState)
-    let previewChatLogSource =
-        (store.previewSupportRetainer as? ReviewMonitorPreviewRuntimeSupport)?.chatLogSource
     let windowController = ReviewMonitorWindowController(
         store: store,
-        previewChatLogSource: previewChatLogSource,
         contentTransitionAnimator: contentTransitionAnimator,
         sidebarReviewChatFilterDefaults: sidebarReviewChatFilterDefaults
     )
@@ -5069,18 +5051,34 @@ func reviewChatCellTestChat(
     id: String,
     title: String,
     workspaceCWD: String
-) -> ReviewMonitorCodexSidebarSnapshot.Chat {
+) async throws -> CodexChat {
     let chatID = CodexThreadID(rawValue: id)
-    return ReviewMonitorCodexSidebarSnapshot.Chat(
-        rowID: .chat(chatID),
-        id: chatID,
-        title: title,
-        preview: nil,
-        workspaceCWD: workspaceCWD,
-        updatedAt: Date(timeIntervalSince1970: 200),
-        recencyAt: Date(timeIntervalSince1970: 200),
-        status: .idle
+    let workspaceURL = URL(fileURLWithPath: workspaceCWD, isDirectory: true)
+    try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: workspaceURL.appendingPathComponent(".git", isDirectory: true),
+        withIntermediateDirectories: true
     )
+    let runtime = try await CodexAppServerTestRuntime.start()
+    let context = CodexModelContainer(appServer: runtime.server).mainContext
+    try await runtime.transport.enqueueThreadList(
+        .init(
+            threads: [
+                .init(
+                    id: chatID,
+                    workspace: workspaceURL,
+                    name: title,
+                    updatedAt: Date(timeIntervalSince1970: 200),
+                    status: .idle
+                )
+            ]
+        ))
+    let results = context.fetchedResults(for: CodexFetchDescriptor<CodexChat>())
+    try await results.performFetch()
+    guard let chat = results.items.first else {
+        throw TestFailure("Expected test CodexChat for \(id).")
+    }
+    return chat
 }
 
 struct LinkedWorktreeFixtureForTesting {

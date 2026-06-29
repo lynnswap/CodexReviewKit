@@ -89,9 +89,21 @@ struct ReviewChatLogEntryForTesting: Sendable, Hashable {
 
 @MainActor
 struct ReviewChatFixtureForTesting {
+    struct Chat: Sendable {
+        var rowID: ReviewMonitorCodexSidebarRowID
+        var id: CodexThreadID
+        var title: String
+        var preview: String?
+        var model: String?
+        var workspaceCWD: String?
+        var updatedAt: Date?
+        var recencyAt: Date?
+        var status: CodexThreadStatus?
+    }
+
     var id: String
     var cwd: String
-    var chat: ReviewMonitorCodexSidebarSnapshot.Chat
+    var chat: Chat
     var turnID: CodexTurnID
     var streamID: String
     var isRunning: Bool
@@ -152,7 +164,7 @@ func makeReviewChatFixtureForTesting(
     let resolvedChatID = chatID ?? CodexThreadID(rawValue: id)
     let resolvedTurnID = turnID ?? CodexTurnID(rawValue: "\(id):preview-turn")
     let resolvedUpdatedAt = updatedAt ?? startedAt
-    let chat = ReviewMonitorCodexSidebarSnapshot.Chat(
+    let chat = ReviewChatFixtureForTesting.Chat(
         rowID: .chat(resolvedChatID),
         id: resolvedChatID,
         title: title,
@@ -212,12 +224,12 @@ func installPreviewChatLogSourceForTesting(
     fixtures: [ReviewChatFixtureForTesting]
 ) {
     let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
-    let source = ReviewMonitorPreviewChatLogSource(fixtures: fixtures)
-    store.previewSupportRetainer = ReviewMonitorPreviewRuntimeSupport(chatLogSource: source)
+    let runtime = ReviewMonitorPreviewAppServerRuntime(fixtures: fixtures)
+    store.previewSupportRetainer = runtime
     runStorePreviewSupportRetainers.append(
         ReviewChatLogFixtureRetainer(
-            source: source,
-            chatIDs: Set(fixtures.map(\.chat.id))
+            runtime: runtime,
+            chatIDs: Set(fixtures.map(\.chatID))
         ))
 }
 
@@ -330,14 +342,14 @@ func reviewChatRenderedLogMatches(_ actual: String, _ expected: String) -> Bool 
 }
 
 @MainActor
-func makePreviewChatLogSourceForTesting(
-    chat: ReviewMonitorCodexSidebarSnapshot.Chat,
+func makePreviewAppServerRuntimeForTesting(
+    chat: ReviewChatFixtureForTesting.Chat,
     cwd: String,
     streamID: String,
     isRunning: Bool,
     initialSnapshot: CodexChatSnapshot
-) -> ReviewMonitorPreviewChatLogSource {
-    ReviewMonitorPreviewChatLogSource(
+) -> ReviewMonitorPreviewAppServerRuntime {
+    ReviewMonitorPreviewAppServerRuntime(
         fixtures: [
             makePreviewChatLogFixtureForTesting(
                 chat: chat,
@@ -452,14 +464,21 @@ func makeCodexChatSnapshotForTesting(
 
 @MainActor
 func makePreviewChatLogFixtureForTesting(
-    chat: ReviewMonitorCodexSidebarSnapshot.Chat,
+    chat: ReviewChatFixtureForTesting.Chat,
     cwd: String,
     streamID: String,
     isRunning: Bool,
     initialSnapshot: CodexChatSnapshot
 ) -> ReviewMonitorPreviewChatLogFixture {
     ReviewMonitorPreviewChatLogFixture(
-        chat: chat,
+        chatID: chat.id,
+        title: chat.title,
+        preview: chat.preview,
+        model: chat.model,
+        workspaceCWD: chat.workspaceCWD,
+        updatedAt: chat.updatedAt,
+        recencyAt: chat.recencyAt,
+        status: chat.status,
         cwd: cwd,
         streamID: streamID,
         isRunning: isRunning,
@@ -519,11 +538,11 @@ private enum ReviewChatLogFixtureStore {
 
 @MainActor
 private final class ReviewChatLogFixtureRetainer {
-    let source: ReviewMonitorPreviewChatLogSource
+    let runtime: ReviewMonitorPreviewAppServerRuntime
     private var chatIDs: Set<CodexThreadID>
 
-    init(source: ReviewMonitorPreviewChatLogSource, chatIDs: Set<CodexThreadID>) {
-        self.source = source
+    init(runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
+        self.runtime = runtime
         self.chatIDs = chatIDs
     }
 
@@ -532,8 +551,33 @@ private final class ReviewChatLogFixtureRetainer {
     }
 
     func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) {
+        let previousItemsByID = Dictionary(
+            uniqueKeysWithValues: runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
+        )
         for item in items {
-            source.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+            guard let previousItem = previousItemsByID[item.id] else {
+                runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                continue
+            }
+            if let outputDelta = previousItem.outputDeltaForTesting(to: item) {
+                runtime.appendPreviewText(
+                    outputDelta,
+                    to: chatID,
+                    itemID: item.id,
+                    kind: item.kind,
+                    content: previousItem.content
+                )
+            } else if let textDelta = previousItem.textDeltaForTesting(to: item) {
+                runtime.appendPreviewText(
+                    textDelta,
+                    to: chatID,
+                    itemID: item.id,
+                    kind: item.kind,
+                    content: previousItem.content
+                )
+            } else {
+                runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+            }
         }
     }
 }
@@ -815,6 +859,19 @@ private extension CodexChatChange {
 }
 
 private extension CodexChatItemSnapshot {
+    func outputDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
+        guard turnID == item.turnID,
+              kind == item.kind,
+              let previousOutput = commandOutputForTesting,
+              let nextOutput = item.commandOutputForTesting,
+              nextOutput.hasPrefix(previousOutput),
+              nextOutput.count > previousOutput.count
+        else {
+            return nil
+        }
+        return String(nextOutput.dropFirst(previousOutput.count))
+    }
+
     func textDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
         guard
             turnID == item.turnID,
@@ -828,6 +885,13 @@ private extension CodexChatItemSnapshot {
             return nil
         }
         return String(nextText.dropFirst(previousText.count))
+    }
+
+    private var commandOutputForTesting: String? {
+        if case .command(let command) = content {
+            return command.output
+        }
+        return nil
     }
 
     private func sameContentShapeForTesting(as item: CodexChatItemSnapshot) -> Bool {

@@ -1,15 +1,5 @@
 import Foundation
 
-struct ReviewMonitorWorkspaceSectionSelection: Hashable, Sendable {
-    var id: String
-    var title: String
-    var workspaceCWDs: [String]
-
-    var subtitle: String {
-        workspaceCWDs.count == 1 ? (workspaceCWDs.first ?? "") : "\(workspaceCWDs.count) workspaces"
-    }
-}
-
 struct ReviewMonitorWorkspaceSectionIdentity: Hashable, Sendable {
     var id: String
     var title: String
