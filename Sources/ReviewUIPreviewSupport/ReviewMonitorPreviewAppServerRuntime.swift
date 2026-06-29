@@ -264,8 +264,17 @@ final class ReviewMonitorPreviewAppServerRuntime {
         let runtime = try await CodexAppServerTestRuntime.start(threadStore: threadStore)
         let container = CodexModelContainer(appServer: runtime.server)
         self.runtime = runtime
+        try await rebindRuntimeToCurrentThreadStore(runtime)
         self.container = container
         modelSource.install(container: container)
+    }
+
+    private func rebindRuntimeToCurrentThreadStore(_ runtime: CodexAppServerTestRuntime) async throws {
+        var reboundStore: CodexAppServerTestThreadStore
+        repeat {
+            reboundStore = threadStore
+            try await runtime.transport.stubThreads(reboundStore)
+        } while reboundStore !== threadStore
     }
 
     private func emit(
@@ -417,7 +426,9 @@ final class ReviewMonitorPreviewAppServerRuntime {
         )
         threadStore = replacementStore
         do {
-            try await runtime?.transport.stubThreads(replacementStore)
+            if let runtime {
+                try await rebindRuntimeToCurrentThreadStore(runtime)
+            }
         } catch {
         }
     }
