@@ -227,6 +227,7 @@ func installPreviewChatLogSourceForTesting(
     let fixtures = fixtures.map(makePreviewChatLogFixtureForTesting)
     let runtime = ReviewMonitorPreviewAppServerRuntime(fixtures: fixtures)
     let retainer = ReviewChatLogFixtureRetainer(
+        store: store,
         runtime: runtime,
         chatIDs: Set(fixtures.map(\.chatID))
     )
@@ -237,7 +238,21 @@ func installPreviewChatLogSourceForTesting(
 
 @MainActor
 func previewRuntimeForTesting(on store: CodexReviewStore) -> ReviewMonitorPreviewAppServerRuntime? {
-    previewSupportRetainersByStore[ObjectIdentifier(store)]?.runtime
+    prunePreviewSupportRetainersByStore()
+    guard let retainer = previewSupportRetainersByStore[ObjectIdentifier(store)],
+          retainer.store === store
+    else {
+        previewSupportRetainersByStore[ObjectIdentifier(store)] = nil
+        return nil
+    }
+    return retainer.runtime
+}
+
+@MainActor
+private func prunePreviewSupportRetainersByStore() {
+    previewSupportRetainersByStore = previewSupportRetainersByStore.filter { _, retainer in
+        retainer.store != nil
+    }
 }
 
 @MainActor
@@ -569,6 +584,7 @@ private enum ReviewChatLogFixtureStore {
     }
 
     private static func updateRetainedPreviewSource(for chatID: CodexThreadID, turnID: CodexTurnID) {
+        prunePreviewSupportRetainersByStore()
         for support in runStorePreviewSupportRetainers where support.contains(chatID: chatID) {
             support.upsert(chatID: chatID, items: items(for: chatID, turnID: turnID))
         }
@@ -577,10 +593,12 @@ private enum ReviewChatLogFixtureStore {
 
 @MainActor
 private final class ReviewChatLogFixtureRetainer {
+    weak var store: CodexReviewStore?
     let runtime: ReviewMonitorPreviewAppServerRuntime
     private var chatIDs: Set<CodexThreadID>
 
-    init(runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
+    init(store: CodexReviewStore, runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
+        self.store = store
         self.runtime = runtime
         self.chatIDs = chatIDs
     }
