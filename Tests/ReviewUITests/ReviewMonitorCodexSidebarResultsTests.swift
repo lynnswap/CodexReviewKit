@@ -38,6 +38,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         try await results.performFetch()
 
         let section = try #require(results.sections.first)
+        let sectionWorkspaceGroupID = try #require(section.sidebarWorkspaceGroupID)
         let appWorkspace = try #require(section.workspaces.first)
         let appChat = try #require(section.chats(in: appWorkspace.id).first)
         let resolvedAppPath = app.standardizedFileURL.resolvingSymlinksInPath().path
@@ -58,8 +59,8 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let outlineAppChat = try #require(tree.node(rowID: .chat(appChat.id)))
 
         #expect(outlineSection.rowID == section.rowID)
-        #expect(outlineSection.item == .workspaceGroup(section.sidebarWorkspaceGroupID))
-        #expect(outlineSection.selectionID == .workspaceGroup(section.sidebarWorkspaceGroupID))
+        #expect(outlineSection.item == .workspaceGroup(sectionWorkspaceGroupID))
+        #expect(outlineSection.selectionID == .workspaceGroup(sectionWorkspaceGroupID))
         #expect(outlineSection.isExpandable)
         #expect(
             outlineSection.children.map(\.rowID.rawValue) == [
@@ -74,7 +75,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(outlineAppChat.selectionID == .chat(appChat.id))
         #expect(
             results.sections.rowIDs.map(\.rawValue) == [
-                "workspaceGroup:\(section.sidebarWorkspaceGroupID.rawValue)",
+                "workspaceGroup:\(sectionWorkspaceGroupID.rawValue)",
                 "workspace:\(resolvedAppPath)",
                 "chat:thread-app",
                 "workspace:\(resolvedToolsPath)",
@@ -117,6 +118,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let filteredWorkspace = try #require(sections.filtered(by: .running).first?.workspaces.first)
         #expect(filteredWorkspace === originalWorkspace)
         #expect(sections.filtered(by: .running).first?.chats(in: originalWorkspace.id).map(\.id) == [runningThreadID])
+        #expect(sections.filtered(by: .latestFinished).first?.chats(in: originalWorkspace.id).map(\.id) == [idleThreadID])
 
         var order = ReviewMonitorCodexSidebarPresentationOrder()
         _ = order.reorderChat(
@@ -131,6 +133,31 @@ struct ReviewMonitorCodexSidebarResultsTests {
             idleThreadID,
             runningThreadID,
         ])
+    }
+
+    @Test func sidebarFilterDropsSectionsWithoutMatchingChats() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: "thread-idle",
+                        workspace: repo,
+                        name: "Idle review",
+                        updatedAt: Date(timeIntervalSince1970: 2_000),
+                        status: .idle
+                    )
+                ]
+            ))
+
+        let results = makeCodexSidebarFetchedResults(context: context)
+        try await results.performFetch()
+
+        #expect(results.sections.count == 1)
+        #expect(results.sections.filtered(by: .running).isEmpty)
     }
 
     @Test func defaultCodexSidebarDescriptorFetchesReviewThreadsOnly() async throws {
@@ -169,6 +196,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let section = try #require(results.sections.first)
         let chat = try #require(section.uncategorizedChats.first)
 
+        #expect(section.sidebarWorkspaceGroupID == nil)
         #expect(section.workspaces.isEmpty)
         #expect(chat.id == CodexThreadID(rawValue: "thread-uncategorized"))
         #expect(chat.title == "Floating review")
@@ -176,7 +204,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(chat.workspace == nil)
         #expect(
             section.rowIDs.map(\.rawValue) == [
-                section.rowID.rawValue,
+                "section:unknown:unknown",
                 "chat:thread-uncategorized",
             ])
 
@@ -184,6 +212,9 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(tree.apply(sections: results.sections).topologyChanged)
         let outlineSection = try #require(tree.roots.first)
         let outlineChat = try #require(tree.node(rowID: .chat(chat.id)))
+        #expect(section.rowID == .section(.unknown("unknown")))
+        #expect(outlineSection.item == .section(.unknown("unknown")))
+        #expect(outlineSection.selectionID == nil)
         #expect(outlineSection.children.map(\.rowID.rawValue) == ["chat:thread-uncategorized"])
         #expect(outlineChat.selectionID == .chat(chat.id))
         #expect(outlineChat.isExpandable == false)
@@ -419,6 +450,41 @@ struct ReviewMonitorCodexSidebarResultsTests {
         }
     }
 
+    @Test func sidebarViewControllerShowsEmptyStateWhenFilterHasNoMatches() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: "thread-idle",
+                        workspace: repo,
+                        name: "Idle review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .idle
+                    )
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let uiState = ReviewMonitorUIState(auth: store.auth, sidebarReviewChatFilter: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.isShowingEmptyStateForTesting
+        }
+        #expect(sidebar.codexSidebarRootTitlesForTesting.isEmpty)
+    }
+
     @Test func sidebarViewControllerPreservesSelectionAndAvoidsFullReloadWhenCodexChatContentChanges() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
@@ -544,19 +610,21 @@ struct ReviewMonitorCodexSidebarResultsTests {
         let sections = sidebar.codexSidebarSectionsForTesting
         let firstSection = try #require(sections.first)
         let secondSection = try #require(sections.dropFirst().first)
+        let firstWorkspaceGroupID = try #require(firstSection.sidebarWorkspaceGroupID)
+        let secondWorkspaceGroupID = try #require(secondSection.sidebarWorkspaceGroupID)
         let fullReloadCountBeforeReorder = sidebar.sidebarFullReloadCountForTesting
 
         #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: secondSection.rowID))
-        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondSection.sidebarWorkspaceGroupID, toIndex: 0))
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondWorkspaceGroupID, toIndex: 0))
         #expect(
             sidebar.codexSidebarRootTitlesForTesting == [
                 secondSection.displayTitle,
                 firstSection.displayTitle,
             ])
         #expect(
-            sidebar.codexSidebarSectionsForTesting.map(\.sidebarWorkspaceGroupID) == [
-                firstSection.sidebarWorkspaceGroupID,
-                secondSection.sidebarWorkspaceGroupID,
+            sidebar.codexSidebarSectionsForTesting.compactMap(\.sidebarWorkspaceGroupID) == [
+                firstWorkspaceGroupID,
+                secondWorkspaceGroupID,
             ])
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
