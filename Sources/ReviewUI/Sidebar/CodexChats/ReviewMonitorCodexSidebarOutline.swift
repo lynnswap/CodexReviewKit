@@ -240,22 +240,36 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
         guard workspaceGroupIDs.isEmpty == false else {
             return sections
         }
-        let currentDomainIDs = sections.compactMap(\.sidebarWorkspaceGroupID)
-        var orderedDomainIDs = mergedOrder(preferredIDs: workspaceGroupIDs, currentOrder: currentDomainIDs)
+
+        var orderedSections: [CodexFetchSection<CodexChat>] = []
+        var segment: [CodexFetchSection<CodexChat>] = []
+        for section in sections {
+            guard section.sidebarWorkspaceGroupID == nil else {
+                segment.append(section)
+                continue
+            }
+            orderedSections.append(contentsOf: orderedWorkspaceGroupSegment(segment))
+            segment.removeAll(keepingCapacity: true)
+            orderedSections.append(section)
+        }
+        orderedSections.append(contentsOf: orderedWorkspaceGroupSegment(segment))
+        return orderedSections
+    }
+
+    private func orderedWorkspaceGroupSegment(
+        _ segment: [CodexFetchSection<CodexChat>]
+    ) -> [CodexFetchSection<CodexChat>] {
+        guard segment.count > 1 else {
+            return segment
+        }
+        let currentDomainIDs = segment.compactMap(\.sidebarWorkspaceGroupID)
+        let orderedDomainIDs = mergedOrder(preferredIDs: workspaceGroupIDs, currentOrder: currentDomainIDs)
         let sectionsByDomainID = Dictionary(
-            uniqueKeysWithValues: sections.compactMap { section in
+            uniqueKeysWithValues: segment.compactMap { section in
                 section.sidebarWorkspaceGroupID.map { ($0, section) }
             }
         )
-        return sections.map { section in
-            guard section.sidebarWorkspaceGroupID != nil,
-                orderedDomainIDs.isEmpty == false
-            else {
-                return section
-            }
-            let nextID = orderedDomainIDs.removeFirst()
-            return sectionsByDomainID[nextID] ?? section
-        }
+        return orderedDomainIDs.compactMap { sectionsByDomainID[$0] }
     }
 
     private func ordered<Element, ID: Hashable>(
