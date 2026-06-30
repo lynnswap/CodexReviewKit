@@ -352,8 +352,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         from sourceSections: [CodexFetchSection<CodexChat>]
     ) -> [CodexFetchSection<CodexChat>] {
         codexSidebarPresentationOrder
-            .applying(to: sourceSections)
-            .filtered(by: uiState.sidebarReviewChatFilter)
+            .applying(to: sourceSections.filtered(by: uiState.sidebarReviewChatFilter))
     }
 
     private var currentCodexSidebarVisibleSections: [CodexFetchSection<CodexChat>] {

@@ -707,6 +707,80 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: leadingWorkspaceGroupID, toIndex: 4) == false)
     }
 
+    @Test func sidebarViewControllerReordersWorkspaceGroupsAcrossFilteredOutSectionRows() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let leadingRepo = try makeGitRepository()
+        let firstRepo = try makeGitRepository()
+        let secondRepo = try makeGitRepository()
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: "thread-leading-repo",
+                        workspace: leadingRepo,
+                        name: "Leading repo review",
+                        updatedAt: Date(timeIntervalSince1970: 7_000),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: "thread-uncategorized",
+                        name: "Uncategorized review",
+                        updatedAt: Date(timeIntervalSince1970: 6_000),
+                        status: .idle
+                    ),
+                    .init(
+                        id: "thread-first-repo",
+                        workspace: firstRepo,
+                        name: "First repo review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: "thread-second-repo",
+                        workspace: secondRepo,
+                        name: "Second repo review",
+                        updatedAt: Date(timeIntervalSince1970: 4_000),
+                        status: .active(activeFlags: [])
+                    ),
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let uiState = ReviewMonitorUIState(auth: store.auth, sidebarReviewChatFilter: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarRootTitlesForTesting == [
+                leadingRepo.lastPathComponent,
+                firstRepo.lastPathComponent,
+                secondRepo.lastPathComponent,
+            ]
+        }
+
+        let sections = sidebar.codexSidebarSectionsForTesting
+        let secondSection = try #require(
+            sections.first { $0.displayTitle == secondRepo.lastPathComponent }
+        )
+        let secondWorkspaceGroupID = try #require(secondSection.sidebarWorkspaceGroupID)
+
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondWorkspaceGroupID, toIndex: 0))
+        #expect(
+            sidebar.codexSidebarRootTitlesForTesting == [
+                secondRepo.lastPathComponent,
+                leadingRepo.lastPathComponent,
+                firstRepo.lastPathComponent,
+            ])
+    }
+
     @Test func sidebarViewControllerReordersCodexChatsLocallyWithinContainer() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
