@@ -273,8 +273,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     static var defaultCodexSidebarDescriptor: CodexFetchDescriptor<CodexChat> {
         CodexFetchDescriptor<CodexChat>(
-            predicate: .init(sourceKinds: [.subAgentReview]),
-            sortBy: [CodexSortDescriptor(\.updatedAt, order: .reverse)]
+            sortBy: [CodexSortDescriptor(\.recencyAt, order: .reverse)]
         )
     }
 

@@ -9,7 +9,7 @@ import CodexReviewMCPServer
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "live-store-backend")
 private typealias ExternalURLOpener = @MainActor @Sendable (URL) -> Void
-public typealias CodexReviewAppServerLifecycleHandler = @MainActor @Sendable (CodexAppServer?) -> Void
+public typealias CodexReviewAppServerLifecycleHandler = @MainActor @Sendable (CodexModelContainer?) -> Void
 
 private let defaultExternalURLOpener: ExternalURLOpener = { url in
     _ = NSWorkspace.shared.open(url)
@@ -184,9 +184,14 @@ public extension CodexReviewStore {
                 appServerLifecycleHandler: appServerLifecycleHandler,
                 appServerRuntimeFactory: { codexHomeURL in
                     let appServer = try await appServerFactory(codexHomeURL)
+                    let modelContainer = CodexModelContainer(appServer: appServer)
                     return .init(
                         appServer: appServer,
-                        backend: AppServerCodexReviewBackend(appServer: appServer)
+                        modelContainer: modelContainer,
+                        backend: AppServerCodexReviewBackend(
+                            appServer: appServer,
+                            modelContext: modelContainer.mainContext
+                        )
                     )
                 }
             ),
@@ -416,9 +421,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     )
                 ))
             }.value
+            let modelContainer = CodexModelContainer(appServer: appServer)
             return .init(
                 appServer: appServer,
-                backend: AppServerCodexReviewBackend(appServer: appServer)
+                modelContainer: modelContainer,
+                backend: AppServerCodexReviewBackend(
+                    appServer: appServer,
+                    modelContext: modelContainer.mainContext
+                )
             )
         }
     }
@@ -447,12 +457,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let runtime = try await appServerRuntimeFactory(codexHomeURL)
             let appServer = runtime.appServer
             let backend = runtime.backend
-            let modelContainer = CodexModelContainer(appServer: appServer)
+            let modelContainer = runtime.modelContainer
             startedAppServer = appServer
             self.appServer = appServer
             self.appServerModelContainer = modelContainer
             self.appServerBackend = backend
-            appServerLifecycleHandler?(appServer)
+            appServerLifecycleHandler?(modelContainer)
             observeAuthNotifications(appServer: appServer, backend: backend, store: store)
             if let mcpHTTPServerFactory {
                 let logProjectionProvider = CodexReviewMCPServer.chatLogProjectionProvider(
@@ -1647,6 +1657,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 @MainActor
 private struct AppServerRuntime: Sendable {
     var appServer: CodexAppServer
+    var modelContainer: CodexModelContainer
     var backend: AppServerCodexReviewBackend
 }
 

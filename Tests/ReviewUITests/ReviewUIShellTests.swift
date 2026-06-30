@@ -112,12 +112,19 @@ extension ReviewUITests {
             }
         }
         #expect(await previewContent.interruptRequestCountForTesting() == 1)
-        #expect(
-            store.chatCancellationCapability(
-                forChatID: selectedChatID.rawValue,
-                isChatActive: true
-            ).isEnabled
-        )
+        try await withTestTimeout(.seconds(2)) {
+            while true {
+                let snapshot = await previewContent.snapshotForTesting(chatID: selectedChatID)
+                if snapshot?.turns.last?.status == .cancelled {
+                    break
+                }
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarSectionsForTesting.chat(id: selectedChatID)?.status == .idle
+        }
 
         var cancelItemEnabledAfterCancellation = false
         sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
@@ -126,7 +133,7 @@ extension ReviewUITests {
             }
             cancelItemEnabledAfterCancellation = cancelItem.isEnabled
         }
-        #expect(cancelItemEnabledAfterCancellation)
+        #expect(cancelItemEnabledAfterCancellation == false)
     }
 
     @Test func inactiveChatContextMenuArchiveSkipsConfirmationAndRemovesSidebarChat() async throws {

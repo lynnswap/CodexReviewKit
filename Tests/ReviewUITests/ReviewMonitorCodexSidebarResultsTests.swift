@@ -153,7 +153,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(controller.sections.filtered(by: .running).isEmpty)
     }
 
-    @Test func defaultCodexSidebarDescriptorFetchesReviewThreadsOnly() async throws {
+    @Test func defaultCodexSidebarDescriptorUsesDedicatedHomeWithoutSourceFiltering() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
 
@@ -164,7 +164,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
 
         let request = try #require(await runtime.transport.recordedRequests(method: "thread/list").first)
         let params = try request.decodeParams(ThreadListParams.self)
-        #expect(params.sourceKinds == ["subAgentReview"])
+        #expect(params.sourceKinds == nil)
     }
 
     @Test func sidebarIncludesUncategorizedChatsWithStableRowIDs() async throws {
@@ -872,6 +872,91 @@ struct ReviewMonitorCodexSidebarResultsTests {
             sidebar.selectedReviewChatIDForTesting == secondThreadID
         }
 
+        #expect(sidebar.sidebarFullReloadCountForTesting == reloadCountAfterInitialFetch)
+    }
+
+    @Test func sidebarViewControllerKeepsWorkspaceGroupOrderWhenSelectedChatRefreshesUpdatedAt() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let firstRepo = try makeGitRepository()
+        let secondRepo = try makeGitRepository()
+        let firstThreadID = CodexThreadID(rawValue: "thread-first-repo")
+        let secondThreadID = CodexThreadID(rawValue: "thread-second-repo")
+        let firstRecencyAt = Date(timeIntervalSince1970: 5_000)
+        let secondRecencyAt = Date(timeIntervalSince1970: 4_000)
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: firstThreadID,
+                        workspace: firstRepo,
+                        name: "First repo review",
+                        updatedAt: firstRecencyAt,
+                        recencyAt: firstRecencyAt
+                    ),
+                    .init(
+                        id: secondThreadID,
+                        workspace: secondRepo,
+                        name: "Second repo review",
+                        updatedAt: secondRecencyAt,
+                        recencyAt: secondRecencyAt
+                    ),
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.loadViewIfNeeded()
+        let sidebar = viewController.sidebarViewControllerForTesting
+
+        try await waitForCondition {
+            sidebar.codexSidebarRootTitlesForTesting == [
+                firstRepo.lastPathComponent,
+                secondRepo.lastPathComponent,
+            ]
+        }
+        let reloadCountAfterInitialFetch = sidebar.sidebarFullReloadCountForTesting
+
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: secondThreadID,
+                workspace: secondRepo,
+                name: "Second repo review",
+                updatedAt: Date(timeIntervalSince1970: 9_000),
+                recencyAt: secondRecencyAt
+            ))
+        try await runtime.transport.enqueueThreadRead(
+            .init(
+                id: secondThreadID,
+                workspace: secondRepo,
+                name: "Second repo review",
+                updatedAt: Date(timeIntervalSince1970: 9_000),
+                recencyAt: secondRecencyAt
+            ))
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(secondThreadID))
+
+        try await waitForCondition {
+            window.title == "Second repo review"
+                && sidebar.selectedReviewChatIDForTesting == secondThreadID
+        }
+        try await waitForCondition {
+            context.model(for: secondThreadID).updatedAt == Date(timeIntervalSince1970: 9_000)
+        }
+
+        #expect(
+            sidebar.codexSidebarRootTitlesForTesting == [
+                firstRepo.lastPathComponent,
+                secondRepo.lastPathComponent,
+            ])
         #expect(sidebar.sidebarFullReloadCountForTesting == reloadCountAfterInitialFetch)
     }
 }

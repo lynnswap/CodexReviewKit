@@ -21,12 +21,16 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
             documentProjection.reset()
             return nil
         }
+        let suppressUserMessages = snapshot.items.contains { item in
+            item.kind == .enteredReviewMode || item.kind == .exitedReviewMode
+        }
         let blocks = snapshot.items.flatMap {
             projectedBlocks(
                 from: $0,
                 turnSnapshot: snapshot.turn,
                 chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt
+                chatUpdatedAt: chatUpdatedAt,
+                suppressUserMessages: suppressUserMessages
             )
         }
         guard blocks.isEmpty == false else {
@@ -40,10 +44,14 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         from item: CodexChatItemSnapshot,
         turnSnapshot: CodexChatTurnStateSnapshot,
         chatCreatedAt: Date?,
-        chatUpdatedAt: Date?
+        chatUpdatedAt: Date?,
+        suppressUserMessages: Bool
     ) -> [ReviewMonitorLogProjectedBlock] {
         switch item.content {
         case .message(let message):
+            guard suppressUserMessages == false || message.role != .user else {
+                return []
+            }
             return [
                 projectedBlock(
                     item,

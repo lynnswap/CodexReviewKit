@@ -50,6 +50,7 @@ let package = Package(
         .target(
             name: "CodexReviewAppServer",
             dependencies: [
+                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKit", package: "CodexKit"),
                 "CodexReviewKit",
             ],

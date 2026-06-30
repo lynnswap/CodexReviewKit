@@ -54,14 +54,20 @@ struct ReviewMonitorSelectedCodexChatLogProjection {
         }
 
         switch update.kind {
-        case .snapshot,
-            .turnUpdated,
-            .phaseChanged:
+        case .snapshot:
             return renderSnapshot(
                 from: snapshot,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt,
                 allowIncrementalUpdate: false
+            )
+        case .turnUpdated,
+            .phaseChanged:
+            return renderSnapshot(
+                from: snapshot,
+                chatCreatedAt: chatCreatedAt,
+                chatUpdatedAt: chatUpdatedAt,
+                allowIncrementalUpdate: hasLogDocument
             )
         case .itemUpserted(let item):
             return renderSnapshot(

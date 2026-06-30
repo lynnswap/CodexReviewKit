@@ -309,9 +309,9 @@ struct ReviewMonitorAppComposition {
                         browserSessionPolicy: .ephemeral,
                         presentationAnchorProvider: presentationAnchorProvider
                     )
-                ) { appServer in
-                    if let appServer {
-                        codexModelSource.install(container: CodexModelContainer(appServer: appServer))
+                ) { modelContainer in
+                    if let modelContainer {
+                        codexModelSource.install(container: modelContainer)
                     } else {
                         codexModelSource.clear()
                     }

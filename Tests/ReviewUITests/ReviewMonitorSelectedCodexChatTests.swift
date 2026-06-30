@@ -271,6 +271,95 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
+    @Test func codexChatLogProjectionSkipsUserPromptWhenReviewModeLogExists() {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let document = projection.render(
+            from: .init(
+                turn: .init(id: CodexTurnID(rawValue: "turn-review"), status: .running),
+                items: [
+                    .init(
+                        id: "user-message",
+                        turnID: CodexTurnID(rawValue: "turn-review"),
+                        kind: .userMessage,
+                        content: .message(.init(
+                            id: "user-message",
+                            role: .user,
+                            text: "Review the current code changes."
+                        ))
+                    ),
+                    .init(
+                        id: "entered-review",
+                        turnID: CodexTurnID(rawValue: "turn-review"),
+                        kind: .enteredReviewMode,
+                        content: .log("Review the current code changes.")
+                    ),
+                ]
+            ),
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.text == "Review the current code changes.")
+    }
+
+    @Test func codexChatLogProjectionRendersUserMessageWithoutReviewModeLog() {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let document = projection.render(
+            from: .init(
+                turn: .init(id: CodexTurnID(rawValue: "turn-chat"), status: .running),
+                items: [
+                    .init(
+                        id: "user-message",
+                        turnID: CodexTurnID(rawValue: "turn-chat"),
+                        kind: .userMessage,
+                        content: .message(.init(
+                            id: "user-message",
+                            role: .user,
+                            text: "Explain the current diff."
+                        ))
+                    ),
+                ]
+            ),
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.text == "Explain the current diff.")
+    }
+
+    @Test func selectedCodexChatStatusOnlyChangesKeepIncrementalLogUpdates() {
+        var projection = ReviewMonitorSelectedCodexChatLogProjection()
+        let turnID = CodexTurnID(rawValue: "turn-review")
+        let snapshot = CodexChatSnapshot(
+            chatID: CodexThreadID(rawValue: "review-thread"),
+            phase: .loading,
+            turns: [.init(id: turnID, status: .running)],
+            items: [
+                .init(
+                    id: "message-review",
+                    turnID: turnID,
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "message-review",
+                        role: .assistant,
+                        text: "Running review"
+                    ))
+                ),
+            ]
+        )
+
+        let initialChange = projection.apply(snapshotChange(snapshot), chatCreatedAt: nil, chatUpdatedAt: nil)
+        let statusChange = projection.apply(
+            .turnUpdated(.init(id: turnID, status: .running)),
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(initialChange?.allowsIncrementalRender == false)
+        #expect(statusChange?.allowsIncrementalRender == true)
+        #expect(statusChange?.sourceDocument?.text == "Running review")
+    }
+
     @Test func selectedCodexChatRendersThreadAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
@@ -348,6 +437,10 @@ struct ReviewMonitorSelectedCodexChatTests {
     ) {
         let chatID = CodexThreadID(rawValue: id)
         uiState.selection = .chat(chatID)
+    }
+
+    private func snapshotChange(_ snapshot: CodexChatSnapshot) -> CodexChatChange {
+        .snapshot(snapshot)
     }
 }
 
