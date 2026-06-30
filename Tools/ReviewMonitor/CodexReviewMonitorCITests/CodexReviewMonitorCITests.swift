@@ -88,12 +88,13 @@ struct CodexReviewMonitorCITests {
         let recorder = WindowControllerFactoryRecorder()
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeStore: { context, _ in
+            makeDependencies: { context, _ in
                 capturedContext = context
-                return expectedStore
+                return ReviewMonitorAppDependencies(store: expectedStore)
             },
-            makeWindowController: { store, showSettings in
-                #expect(store === expectedStore)
+            makeWindowController: { dependencies, showSettings in
+                #expect(dependencies.store === expectedStore)
+                #expect(dependencies.previewContent == nil)
                 capturedShowSettings = showSettings
                 return recorder.makeWindowController()
             },
@@ -145,8 +146,8 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -192,8 +193,8 @@ struct CodexReviewMonitorCITests {
     @Test func appDelegateShowsInjectedSettingsWindowController() {
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -239,12 +240,14 @@ struct CodexReviewMonitorCITests {
         )
         var didRequestPresentationAnchor = false
 
-        _ = composition.makeStore(context) {
+        let dependencies = composition.makeDependencies(context) {
             didRequestPresentationAnchor = true
             Issue.record("Preview store creation should not request a presentation anchor.")
             return nil
         }
 
+        #expect(dependencies.previewContent != nil)
+        #expect(dependencies.previewContent?.store === dependencies.store)
         #expect(didRequestPresentationAnchor == false)
         #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
@@ -268,12 +271,12 @@ struct CodexReviewMonitorCITests {
             arguments: [],
             launchMode: .application
         )
-        let store = composition.makeStore(context) {
+        let dependencies = composition.makeDependencies(context) {
             Issue.record("Preview store creation should not request a presentation anchor.")
             return nil
         }
 
-        let windowController = composition.makeWindowController(store) {}
+        let windowController = composition.makeWindowController(dependencies) {}
         let rootViewController = try #require(
             windowController.window?.contentViewController as? ReviewMonitorRootViewController
         )
@@ -340,12 +343,14 @@ struct CodexReviewMonitorCITests {
         )
         var didRequestPresentationAnchor = false
 
-        let store = composition.makeStore(context) {
+        let dependencies = composition.makeDependencies(context) {
             didRequestPresentationAnchor = true
             return nil
         }
+        let store = dependencies.store
 
         #expect(store === expectedStore)
+        #expect(dependencies.previewContent == nil)
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
         #expect(didRequestPresentationAnchor == false)
         #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
@@ -374,9 +379,11 @@ struct CodexReviewMonitorCITests {
             launchMode: .application
         )
 
-        let store = composition.makeStore(context) { nil }
+        let dependencies = composition.makeDependencies(context) { nil }
+        let store = dependencies.store
 
         #expect(store === expectedStore)
+        #expect(dependencies.previewContent == nil)
         #expect(capturedLifecycleHandler != nil)
     }
 
@@ -611,8 +618,8 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()

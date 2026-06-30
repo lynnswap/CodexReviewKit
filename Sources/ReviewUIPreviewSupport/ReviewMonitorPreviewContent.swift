@@ -1,54 +1,15 @@
 import Foundation
 import CodexKit
-import ObjectiveC
 @_spi(Testing) import CodexReviewKit
 import ReviewUI
-
-nonisolated(unsafe) private var previewContentDependenciesAssociationKey: UInt8 = 0
-
-@MainActor
-final class ReviewMonitorPreviewContentDependencies {
-    let runtime: ReviewMonitorPreviewAppServerRuntime
-    let codexModelSource: ReviewMonitorCodexModelSource
-
-    init(runtime: ReviewMonitorPreviewAppServerRuntime) {
-        self.runtime = runtime
-        self.codexModelSource = runtime.modelSource
-    }
-
-    var initialChatID: CodexThreadID? {
-        runtime.initialChatID
-    }
-
-    func start() {
-        runtime.start()
-    }
-
-    func startStreaming(interval: Duration) {
-        runtime.startStreaming(interval: interval)
-    }
-
-    @discardableResult
-    func appendPreviewChatLogStreamTick(
-        after tick: Int = 0,
-        emitsNotifications: Bool = false
-    ) async -> Int {
-        await runtime.appendPreviewStreamTick(
-            after: tick,
-            emitsNotifications: emitsNotifications
-        )
-    }
-}
 
 @MainActor
 public final class ReviewMonitorPreviewContentSource {
     public let store: CodexReviewStore
-    let dependencies: ReviewMonitorPreviewContentDependencies
+    let runtime: ReviewMonitorPreviewAppServerRuntime
+
     public var codexModelSource: ReviewMonitorCodexModelSource {
-        dependencies.codexModelSource
-    }
-    var runtime: ReviewMonitorPreviewAppServerRuntime {
-        dependencies.runtime
+        runtime.modelSource
     }
 
     init(
@@ -56,8 +17,7 @@ public final class ReviewMonitorPreviewContentSource {
         runtime: ReviewMonitorPreviewAppServerRuntime
     ) {
         self.store = store
-        self.dependencies = ReviewMonitorPreviewContentDependencies(runtime: runtime)
-        store.installPreviewContentDependenciesForPreviewSupport(dependencies)
+        self.runtime = runtime
     }
 
     var initialChatID: CodexThreadID? {
@@ -89,27 +49,6 @@ public final class ReviewMonitorPreviewContentSource {
 
     public func interruptRequestCountForTesting() async -> Int {
         await runtime.interruptRequestCountForTesting()
-    }
-}
-
-@MainActor
-extension CodexReviewStore {
-    func installPreviewContentDependenciesForPreviewSupport(
-        _ dependencies: ReviewMonitorPreviewContentDependencies?
-    ) {
-        objc_setAssociatedObject(
-            self,
-            &previewContentDependenciesAssociationKey,
-            dependencies,
-            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        )
-    }
-
-    var previewContentDependenciesForPreviewSupport: ReviewMonitorPreviewContentDependencies? {
-        objc_getAssociatedObject(
-            self,
-            &previewContentDependenciesAssociationKey
-        ) as? ReviewMonitorPreviewContentDependencies
     }
 }
 
