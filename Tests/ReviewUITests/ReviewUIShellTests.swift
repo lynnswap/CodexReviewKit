@@ -243,7 +243,6 @@ extension ReviewUITests {
         try await waitForCondition {
             confirmedChatIDs == [chatID]
         }
-        try await Task.sleep(for: .milliseconds(100))
         #expect(await runtime.transport.recordedRequests(method: "thread/archive").isEmpty)
         #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat")
     }
