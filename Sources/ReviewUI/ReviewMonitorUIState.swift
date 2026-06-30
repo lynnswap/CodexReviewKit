@@ -18,7 +18,7 @@ public final class ReviewMonitorUIState {
         }
     }
 
-    init(
+    package init(
         auth: CodexReviewAuthModel,
         sidebarReviewChatFilter: SidebarReviewChatFilter = .all,
         persistSidebarReviewChatFilter: @escaping (SidebarReviewChatFilter) -> Void = { _ in }
@@ -26,10 +26,6 @@ public final class ReviewMonitorUIState {
         self.auth = auth
         self.sidebarReviewChatFilter = sidebarReviewChatFilter
         self.persistSidebarReviewChatFilter = persistSidebarReviewChatFilter
-    }
-
-    package convenience init(previewSupportAuth auth: CodexReviewAuthModel) {
-        self.init(auth: auth)
     }
 
     package func selectChat(id: CodexThreadID?) {

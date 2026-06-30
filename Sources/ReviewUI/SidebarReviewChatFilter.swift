@@ -1,18 +1,18 @@
 import Foundation
 
-struct SidebarReviewChatFilter: OptionSet, Hashable, Sendable {
-    let rawValue: Int
+package struct SidebarReviewChatFilter: OptionSet, Hashable, Sendable {
+    package let rawValue: Int
 
-    static let all: SidebarReviewChatFilter = []
-    static let running = SidebarReviewChatFilter(rawValue: 1 << 0)
-    static let latestFinished = SidebarReviewChatFilter(rawValue: 1 << 1)
-    static let menuFilters: [SidebarReviewChatFilter] = [.running, .latestFinished]
+    package static let all: SidebarReviewChatFilter = []
+    package static let running = SidebarReviewChatFilter(rawValue: 1 << 0)
+    package static let latestFinished = SidebarReviewChatFilter(rawValue: 1 << 1)
+    package static let menuFilters: [SidebarReviewChatFilter] = [.running, .latestFinished]
 
-    init(rawValue: Int) {
+    package init(rawValue: Int) {
         self.rawValue = rawValue
     }
 
-    var localized: LocalizedStringResource {
+    package var localized: LocalizedStringResource {
         if self == .all {
             "All Items"
         } else if self == .running {
@@ -24,15 +24,15 @@ struct SidebarReviewChatFilter: OptionSet, Hashable, Sendable {
         }
     }
 
-    var isActive: Bool {
+    package var isActive: Bool {
         isEmpty == false
     }
 
-    var allowsReviewChatReordering: Bool {
+    package var allowsReviewChatReordering: Bool {
         self == .all || contains(.running)
     }
 
-    var persistedValue: String {
+    package var persistedValue: String {
         guard isActive else {
             return "all"
         }
@@ -41,7 +41,7 @@ struct SidebarReviewChatFilter: OptionSet, Hashable, Sendable {
         }.joined(separator: ",")
     }
 
-    init?(persistedValue: String) {
+    package init?(persistedValue: String) {
         if persistedValue == "all" {
             self = .all
             return

@@ -45,7 +45,7 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
     store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
     store.auth.selectPersistedAccount(resolvedAccount?.id)
 
-    let uiState = ReviewMonitorUIState(previewSupportAuth: store.auth)
+    let uiState = ReviewMonitorUIState(auth: store.auth)
     uiState.selectChat(id: resolvedPreviewContent?.initialChatID)
     if let resolvedPreviewContent {
         if ownsPreviewContent {
@@ -79,7 +79,7 @@ public extension ReviewMonitorWindowController {
             return
         }
         previewDependencies.startStreaming(interval: .milliseconds(40))
-        let uiState = ReviewMonitorUIState(previewSupportAuth: store.auth)
+        let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.selectChat(id: previewDependencies.initialChatID)
         self.init(
             store: store,
