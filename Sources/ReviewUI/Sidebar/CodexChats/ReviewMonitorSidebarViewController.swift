@@ -857,45 +857,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         return displayedCodexChat(id: id)
     }
 
-    func codexChatTitlePresentation(id: CodexThreadID) -> (title: String, subtitle: String)? {
-        if let chat = codexSidebarFetchedResults?.items.first(where: { $0.id == id }) {
-            return (
-                title: chat.title,
-                subtitle: chat.workspace?.url.path ?? ""
-            )
-        }
-        guard let chat = currentChatSelection(id: id) else {
-            return nil
-        }
-        return (
-            title: chat.title,
-            subtitle: chat.workspace?.url.path ?? ""
-        )
-    }
-
-    func codexWorkspaceGroupTitlePresentation(
-        id: CodexWorkspaceGroupID
-    ) -> (title: String, subtitle: String)? {
-        guard let node = codexWorkspaceGroupSelection(id: id) else {
-            return nil
-        }
-        let title = codexSidebarTitle(for: node) ?? id.rawValue
-        let workspaceCWDs = codexWorkspaceGroupSection(id: id)?.workspaces.map(\.url.path) ?? []
-        return (
-            title: title,
-            subtitle: workspaceCWDs.count == 1 ? (workspaceCWDs.first ?? "") : "\(workspaceCWDs.count) workspaces"
-        )
-    }
-
-    func codexWorkspaceTitlePresentation(
-        id: CodexWorkspaceID
-    ) -> (title: String, subtitle: String)? {
-        guard let workspace = codexWorkspaceSelection(id: id) else {
-            return nil
-        }
-        return (title: workspace.name, subtitle: workspace.url.path)
-    }
-
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
         guard let node = codexSidebarNode(from: item) else {
             return nil
