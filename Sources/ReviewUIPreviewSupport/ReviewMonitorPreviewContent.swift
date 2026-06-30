@@ -50,6 +50,10 @@ public final class ReviewMonitorPreviewContentSource {
     public func interruptRequestCountForTesting() async -> Int {
         await runtime.interruptRequestCountForTesting()
     }
+
+    public func archiveRequestCountForTesting() async -> Int {
+        await runtime.archiveRequestCountForTesting()
+    }
 }
 
 @MainActor
