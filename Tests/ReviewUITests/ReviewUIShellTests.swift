@@ -129,6 +129,231 @@ extension ReviewUITests {
         #expect(cancelItemEnabledAfterCancellation)
     }
 
+    @Test func inactiveChatContextMenuArchiveSkipsConfirmationAndRemovesSidebarChat() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "inactive-chat-to-archive")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Inactive archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .idle
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Inactive archive chat"
+        }
+
+        var confirmationRequestCount = 0
+        sidebar.setChatArchiveConfirmationForTesting { _, _ in
+            confirmationRequestCount += 1
+            return false
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        await runtime.transport.waitForRequest(method: "thread/archive")
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
+        }
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(confirmationRequestCount == 0)
+    }
+
+    @Test func activeChatContextMenuArchiveDoesNotArchiveWhenConfirmationIsRejected() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-archive-rejected")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Rejected active archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    )
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat"
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return false
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        try await waitForCondition {
+            confirmedChatIDs == [chatID]
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").isEmpty)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat")
+    }
+
+    @Test func activeChatContextMenuArchiveArchivesAfterConfirmationApproval() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-archive-approved")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Approved active archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Approved active archive chat"
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return true
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        await runtime.transport.waitForRequest(method: "thread/archive")
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
+        }
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(confirmedChatIDs == [chatID])
+    }
+
+    @Test func previewChatContextMenuArchiveUsesFakeAppServerThreadArchivePath() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) != nil
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return true
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: selectedChatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.archiveRequestCountForTesting() == 0 {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) == nil
+        }
+        #expect(await previewContent.archiveRequestCountForTesting() == 1)
+        #expect(confirmedChatIDs == [selectedChatID])
+    }
+
     @Test func activeChatContextMenuCancelFallsBackWhenMatchingReviewRunIsTerminal() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
@@ -1982,6 +2207,25 @@ private func makeShellTestGitRepository() throws -> URL {
         withIntermediateDirectories: true
     )
     return repo
+}
+
+@MainActor
+private func performChatContextMenuItemForTesting(
+    title: String,
+    chatID: CodexThreadID,
+    sidebar: ReviewMonitorSidebarViewController
+) -> (presented: Bool, enabled: Bool) {
+    var presented = false
+    var enabled = false
+    sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+        guard let itemIndex = menu.items.firstIndex(where: { $0.title == title }) else {
+            return
+        }
+        presented = true
+        enabled = menu.items[itemIndex].isEnabled
+        menu.performActionForItem(at: itemIndex)
+    }
+    return (presented: presented, enabled: enabled)
 }
 
 @MainActor

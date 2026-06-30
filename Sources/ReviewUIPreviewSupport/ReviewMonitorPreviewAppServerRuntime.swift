@@ -22,6 +22,18 @@ private actor ReviewMonitorPreviewSnapshotMutationQueue {
     }
 }
 
+private actor ReviewMonitorPreviewArchivedChatIDs {
+    private var ids: Set<CodexThreadID> = []
+
+    func insert(_ id: CodexThreadID) {
+        ids.insert(id)
+    }
+
+    func contains(_ id: CodexThreadID) -> Bool {
+        ids.contains(id)
+    }
+}
+
 @MainActor
 struct ReviewMonitorPreviewChatLogFixture {
     let chatID: CodexThreadID
@@ -79,6 +91,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
     private var streamTask: Task<Void, Never>?
     private var notificationTask: Task<Void, Never>?
     private let snapshotMutationQueue = ReviewMonitorPreviewSnapshotMutationQueue()
+    private let archivedChatIDs = ReviewMonitorPreviewArchivedChatIDs()
     private var tick = 0
 
     init(fixtures: [ReviewMonitorPreviewChatLogFixture]) {
@@ -109,6 +122,13 @@ final class ReviewMonitorPreviewAppServerRuntime {
             return 0
         }
         return await runtime.transport.recordedRequests(method: "turn/interrupt").count
+    }
+
+    func archiveRequestCountForTesting() async -> Int {
+        guard let runtime else {
+            return 0
+        }
+        return await runtime.transport.recordedRequests(method: "thread/archive").count
     }
 
     func upsertPreviewItem(
@@ -282,6 +302,15 @@ final class ReviewMonitorPreviewAppServerRuntime {
         repeat {
             reboundStore = threadStore
             try await runtime.transport.stubThreads(reboundStore)
+            let archivedChatIDs = archivedChatIDs
+            let store = reboundStore
+            await runtime.transport.handle(method: "thread/archive") { params in
+                let request = try JSONDecoder().decode(PreviewThreadArchiveParams.self, from: params)
+                let threadID = CodexThreadID(rawValue: request.threadID)
+                await archivedChatIDs.insert(threadID)
+                await store.remove(id: threadID)
+                return Data("{}".utf8)
+            }
         } while reboundStore !== threadStore
     }
 
@@ -418,6 +447,9 @@ final class ReviewMonitorPreviewAppServerRuntime {
         let fixtureSnapshotIDs = Set(fixtures.map(\.chatID))
         var orderedFixtureSnapshots: [CodexThreadSnapshot] = []
         for fixture in fixtures {
+            if await archivedChatIDs.contains(fixture.chatID) {
+                continue
+            }
             if fixture.chatID == updatedSnapshot.id {
                 orderedFixtureSnapshots.append(updatedSnapshot)
                 continue
@@ -608,6 +640,14 @@ private struct PreviewThreadItemParams: Encodable, Sendable {
         var exitCode: Int?
         var status: String?
         var path: String?
+    }
+}
+
+private struct PreviewThreadArchiveParams: Decodable, Sendable {
+    var threadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "threadId"
     }
 }
 

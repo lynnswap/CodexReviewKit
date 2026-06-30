@@ -99,6 +99,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private var codexSidebarModelContext: CodexModelContext?
     private var codexSidebarPresentationOrder = ReviewMonitorCodexSidebarPresentationOrder()
     private let codexSidebarOutlineTree = ReviewMonitorCodexSidebarOutlineTree()
+    private var chatArchiveConfirmation: ReviewMonitorChatArchiveConfirmation = .appKitAlert
     private var appliedSidebarKind: SidebarKind?
     private var isReconcilingSelection = false
     #if DEBUG
@@ -686,7 +687,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         return NSHostingMenu(
-            rootView: ReviewMonitorChatContextMenuView(chat: chat, store: store)
+            rootView: ReviewMonitorChatContextMenuView(
+                chat: chat,
+                store: store,
+                archiveConfirmation: chatArchiveConfirmation
+            )
         )
     }
 
@@ -1628,6 +1633,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 at: NSPoint(x: rowRect.midX, y: rowRect.midY),
                 presenter: presenter
             )
+        }
+
+        func setChatArchiveConfirmationForTesting(
+            _ action: @escaping ReviewMonitorChatArchiveConfirmation.Action
+        ) {
+            chatArchiveConfirmation = ReviewMonitorChatArchiveConfirmation(action: action)
         }
 
         func selectWorkspaceForTesting(cwd: String) {
