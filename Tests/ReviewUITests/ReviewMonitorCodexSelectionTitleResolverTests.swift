@@ -149,7 +149,7 @@ private func loadReviewChats(in context: CodexModelContext) async throws {
             predicate: .init(sourceKinds: [.subAgentReview]),
             sortBy: [CodexSortDescriptor(\.updatedAt, order: .reverse)]
         ),
-        sectionedBy: CodexSectionDescriptor(\CodexChat.workspaceGroupID)
+        sectionedBy: .workspaceGroup
     )
     try await results.performFetch()
 }
