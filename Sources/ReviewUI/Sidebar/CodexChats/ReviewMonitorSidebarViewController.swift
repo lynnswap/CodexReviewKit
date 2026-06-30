@@ -373,15 +373,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         from sourceSections: [CodexFetchSection<CodexChat>]
     ) {
         let sections = codexSidebarVisibleSections(from: sourceSections)
-        let wasUsingCodexSidebarOutline = isUsingCodexSidebarOutline
         let applyResult = codexSidebarOutlineTree.apply(sections: sections)
         applySidebarKind(sidebarKind)
-        guard wasUsingCodexSidebarOutline || isUsingCodexSidebarOutline else {
-            return
-        }
         if applyResult.topologyChanged {
             applyCodexSidebarOutlineTopologyChanges(applyResult.topologyChanges)
-        } else if isUsingCodexSidebarOutline {
+        } else {
             updateVisibleCodexSidebarCells()
             reconcileOutlineSelection()
         }
@@ -406,11 +402,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if appliedIncrementally {
             expandCodexSidebarNodes(codexSidebarOutlineTree.roots)
             updateVisibleCodexSidebarCells()
-            if isUsingCodexSidebarOutline {
-                reconcileOutlineSelection()
-            } else if outlineView.selectedRow != -1 {
-                outlineView.deselectAll(nil)
-            }
+            reconcileOutlineSelection()
             isReconcilingSelection = false
         } else {
             isReconcilingSelection = false
@@ -523,11 +515,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         isReconcilingSelection = true
         outlineView.reloadData()
         expandCodexSidebarNodes(codexSidebarOutlineTree.roots)
-        if isUsingCodexSidebarOutline {
-            reconcileOutlineSelection()
-        } else if outlineView.selectedRow != -1 {
-            outlineView.deselectAll(nil)
-        }
+        reconcileOutlineSelection()
         isReconcilingSelection = false
     }
 
@@ -565,10 +553,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     private var hasCodexSidebarContent: Bool {
         codexSidebarOutlineTree.roots.isEmpty == false
-    }
-
-    private var isUsingCodexSidebarOutline: Bool {
-        true
     }
 
     private func applySidebarKind(_ kind: SidebarKind) {
