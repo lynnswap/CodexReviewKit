@@ -629,6 +629,72 @@ struct ReviewMonitorCodexSidebarResultsTests {
         #expect(sidebar.sidebarFullReloadCountForTesting == fullReloadCountBeforeReorder)
     }
 
+    @Test func sidebarViewControllerRejectsWorkspaceGroupDropsAcrossSectionRows() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let firstRepo = try makeGitRepository()
+        let secondRepo = try makeGitRepository()
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: "thread-uncategorized",
+                        name: "Uncategorized review",
+                        updatedAt: Date(timeIntervalSince1970: 6_000)
+                    ),
+                    .init(
+                        id: "thread-first-repo",
+                        workspace: firstRepo,
+                        name: "First repo review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000)
+                    ),
+                    .init(
+                        id: "thread-second-repo",
+                        workspace: secondRepo,
+                        name: "Second repo review",
+                        updatedAt: Date(timeIntervalSince1970: 4_000)
+                    ),
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarRootTitlesForTesting == [
+                "Unknown",
+                firstRepo.lastPathComponent,
+                secondRepo.lastPathComponent,
+            ]
+        }
+
+        let sections = sidebar.codexSidebarSectionsForTesting
+        let sectionRow = try #require(sections.first { $0.sidebarWorkspaceGroupID == nil })
+        let workspaceGroupSections = sections.filter { $0.sidebarWorkspaceGroupID != nil }
+        let firstSection = try #require(workspaceGroupSections.first)
+        let secondSection = try #require(workspaceGroupSections.dropFirst().first)
+        let firstWorkspaceGroupID = try #require(firstSection.sidebarWorkspaceGroupID)
+        let secondWorkspaceGroupID = try #require(secondSection.sidebarWorkspaceGroupID)
+
+        #expect(sidebar.codexSidebarCanStartDragForTesting(rowID: sectionRow.rowID) == false)
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: firstWorkspaceGroupID, toIndex: 0) == false)
+        #expect(sidebar.performCodexWorkspaceGroupDropForTesting(id: secondWorkspaceGroupID, toIndex: 1))
+        #expect(
+            sidebar.codexSidebarRootTitlesForTesting == [
+                "Unknown",
+                secondRepo.lastPathComponent,
+                firstRepo.lastPathComponent,
+            ])
+    }
+
     @Test func sidebarViewControllerReordersCodexChatsLocallyWithinContainer() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext

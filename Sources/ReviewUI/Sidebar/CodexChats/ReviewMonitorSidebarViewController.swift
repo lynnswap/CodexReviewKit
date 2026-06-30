@@ -957,6 +957,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let clampedDestinationIndex = max(0, min(destinationIndex, codexSidebarOutlineTree.roots.count))
+        let sourceSegment = codexWorkspaceGroupRootSegment(containing: sourceIndex)
+        guard (sourceSegment.lowerBound...sourceSegment.upperBound).contains(clampedDestinationIndex) else {
+            return nil
+        }
         let displayDestinationIndex =
             clampedDestinationIndex > sourceIndex
             ? clampedDestinationIndex - 1
@@ -973,6 +977,23 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             dropItem: nil,
             dropChildIndex: clampedDestinationIndex
         )
+    }
+
+    private func codexWorkspaceGroupRootSegment(containing rootIndex: Int) -> Range<Int> {
+        var lowerBound = rootIndex
+        while lowerBound > 0,
+            codexSidebarOutlineTree.roots[lowerBound - 1].workspaceGroupID != nil
+        {
+            lowerBound -= 1
+        }
+
+        var upperBound = rootIndex + 1
+        while upperBound < codexSidebarOutlineTree.roots.count,
+            codexSidebarOutlineTree.roots[upperBound].workspaceGroupID != nil
+        {
+            upperBound += 1
+        }
+        return lowerBound..<upperBound
     }
 
     private func resolvedCodexChatDrop(
