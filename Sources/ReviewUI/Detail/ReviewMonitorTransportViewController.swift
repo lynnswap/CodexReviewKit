@@ -120,8 +120,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch selection {
         case .workspaceGroup:
             return displayedSelection != selection?.id
-        case .workspace:
-            return displayedSelection != selection?.id
         case .chat(let selectedChatID):
             return boundChatID != selectedChatID
                 || displayedSelection != selection?.id
@@ -133,12 +131,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func updatePresentation(selection: ReviewMonitorSelection?) {
         switch selection {
         case .workspaceGroup:
-            clearDisplayedLogSelection()
-            displayPlaceholder(.noFindings)
-            logScrollView.isHidden = true
-            displayedSelection = selection?.id
-
-        case .workspace:
             clearDisplayedLogSelection()
             displayPlaceholder(.noFindings)
             logScrollView.isHidden = true
@@ -326,7 +318,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .chat:
             return logScrollView.performDisplayedTextFinderAction(sender)
-        case .workspaceGroup, .workspace, nil:
+        case .workspaceGroup, nil:
             return false
         }
     }
@@ -335,7 +327,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         switch displayedSelection {
         case .chat:
             return logScrollView.validateDisplayedTextFinderAction(item)
-        case .workspaceGroup, .workspace, nil:
+        case .workspaceGroup, nil:
             return false
         }
     }
@@ -352,7 +344,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
         enum DisplayedSelectionForTesting: Sendable, Equatable {
             case workspaceGroup(String)
-            case workspace(String)
             case chat(String)
         }
 
@@ -716,8 +707,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
             switch displayedSelection {
             case .workspaceGroup(let id):
                 .workspaceGroup(id.rawValue)
-            case .workspace(let id):
-                .workspace(id.rawValue)
             case .chat(let id):
                 .chat(id.rawValue)
             case nil:
@@ -861,7 +850,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
             switch target ?? displayedSelectionForTesting {
             case .chat(let id):
                 resolvedTarget = .chat(CodexThreadID(rawValue: id))
-            case .workspaceGroup, .workspace, nil:
+            case .workspaceGroup, nil:
                 return false
             }
             let resolvedRestorationTarget =
@@ -901,7 +890,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
                 hidePlaceholder()
                 logScrollView.isHidden = false
                 displayedSelection = .chat(chatID)
-            case .workspaceGroup, .workspace:
+            case .workspaceGroup:
                 break
             }
         }

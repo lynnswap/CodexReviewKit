@@ -24,12 +24,6 @@ final class ReviewMonitorCodexSelectionTitleResolver {
             }
             return Self.titlePresentation(for: workspaceGroup)
 
-        case .workspace(let id):
-            guard let workspace = modelContext.model(for: id) else {
-                return nil
-            }
-            return Self.titlePresentation(for: workspace)
-
         case .chat(let id):
             guard let chat = loadedChat(id: id) else {
                 return nil
@@ -59,15 +53,6 @@ final class ReviewMonitorCodexSelectionTitleResolver {
         return ReviewMonitorCodexSelectionTitlePresentation(
             title: workspaceGroup.name,
             subtitle: subtitle
-        )
-    }
-
-    private static func titlePresentation(
-        for workspace: CodexWorkspace
-    ) -> ReviewMonitorCodexSelectionTitlePresentation {
-        ReviewMonitorCodexSelectionTitlePresentation(
-            title: workspace.name,
-            subtitle: workspace.url.path
         )
     }
 

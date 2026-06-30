@@ -7,7 +7,7 @@ import Testing
 @Suite("ReviewMonitor Codex selection title resolver")
 @MainActor
 struct ReviewMonitorCodexSelectionTitleResolverTests {
-    @Test func resolvesWorkspaceGroupWorkspaceAndChatTitlesFromLoadedCodexModels() async throws {
+    @Test func resolvesWorkspaceGroupAndChatTitlesFromLoadedCodexModels() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
         let repo = try makeTitleResolverGitRepository()
@@ -45,12 +45,6 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                 == ReviewMonitorCodexSelectionTitlePresentation(
                     title: repo.lastPathComponent,
                     subtitle: "2 workspaces"
-                ))
-        #expect(
-            resolver.titlePresentation(for: .workspace(appWorkspace.id))
-                == ReviewMonitorCodexSelectionTitlePresentation(
-                    title: "App",
-                    subtitle: appPath
                 ))
         #expect(
             resolver.titlePresentation(for: .chat(appThreadID))
@@ -123,7 +117,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         )
     }
 
-    @Test func returnsNilForMissingWorkspaceGroupWorkspaceAndEmptySelection() async throws {
+    @Test func returnsNilForMissingWorkspaceGroupAndEmptySelection() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let context = CodexModelContainer(appServer: runtime.server).mainContext
 
@@ -135,9 +129,6 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
         #expect(resolver.titlePresentation(for: nil) == nil)
         #expect(
             resolver.titlePresentation(for: .workspaceGroup(CodexWorkspaceGroupID(rawValue: "missing"))) == nil
-        )
-        #expect(
-            resolver.titlePresentation(for: .workspace(CodexWorkspaceID(rawValue: "/missing"))) == nil
         )
     }
 }

@@ -26,10 +26,6 @@ package struct ReviewMonitorCodexSidebarRowID: Hashable, Sendable, CustomStringC
         }
     }
 
-    package static func workspace(_ id: CodexWorkspaceID) -> Self {
-        .init(rawValue: "workspace:\(id.rawValue)")
-    }
-
     package static func chat(_ id: CodexThreadID) -> Self {
         .init(rawValue: "chat:\(id.rawValue)")
     }
@@ -56,19 +52,7 @@ extension CodexFetchSection where Model == CodexChat {
         return .section(id)
     }
 
-    package var displaysWorkspaceNodes: Bool {
-        workspaces.count > 1 || (workspaces.isEmpty == false && uncategorizedChats.isEmpty == false)
-    }
-
     package var rowIDs: [ReviewMonitorCodexSidebarRowID] {
-        if displaysWorkspaceNodes {
-            return [rowID]
-                + workspaces.flatMap { workspace in
-                    [ReviewMonitorCodexSidebarRowID.workspace(workspace.id)]
-                        + chats(in: workspace.id).map { .chat($0.id) }
-                }
-                + uncategorizedChats.map { .chat($0.id) }
-        }
         return [rowID] + items.map { .chat($0.id) }
     }
 }
@@ -158,35 +142,15 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
         to sections: [CodexFetchSection<CodexChat>]
     ) -> [CodexFetchSection<CodexChat>] {
         orderedSections(sections).map { section in
-            if section.displaysWorkspaceNodes == false {
-                return CodexFetchSection(
-                    id: section.id,
-                    title: section.title,
-                    items: ordered(
-                        section.items,
-                        by: chatIDsByContainer[section.rowID] ?? [],
-                        id: \.id
-                    )
-                )
-            }
-
-            var items: [CodexChat] = []
-            for workspace in section.workspaces {
-                let container = ReviewMonitorCodexSidebarRowID.workspace(workspace.id)
-                items.append(
-                    contentsOf: ordered(
-                        section.chats(in: workspace.id),
-                        by: chatIDsByContainer[container] ?? [],
-                        id: \.id
-                    ))
-            }
-            items.append(
-                contentsOf: ordered(
-                    section.uncategorizedChats,
+            CodexFetchSection(
+                id: section.id,
+                title: section.title,
+                items: ordered(
+                    section.items,
                     by: chatIDsByContainer[section.rowID] ?? [],
                     id: \.id
-                ))
-            return CodexFetchSection(id: section.id, title: section.title, items: items)
+                )
+            )
         }
     }
 
@@ -212,14 +176,7 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
 
         var activeChatIDsByContainer: [ReviewMonitorCodexSidebarRowID: Set<CodexThreadID>] = [:]
         for section in sections {
-            if section.displaysWorkspaceNodes {
-                activeChatIDsByContainer[section.rowID] = Set(section.uncategorizedChats.map(\.id))
-                for workspace in section.workspaces {
-                    activeChatIDsByContainer[.workspace(workspace.id)] = Set(section.chats(in: workspace.id).map(\.id))
-                }
-            } else {
-                activeChatIDsByContainer[section.rowID] = Set(section.items.map(\.id))
-            }
+            activeChatIDsByContainer[section.rowID] = Set(section.items.map(\.id))
         }
         let currentChatIDsByContainer = chatIDsByContainer
         chatIDsByContainer = currentChatIDsByContainer.reduce(into: [:]) { result, entry in
@@ -324,7 +281,6 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
 package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
     case section(CodexFetchSectionID)
     case workspaceGroup(CodexWorkspaceGroupID)
-    case workspace(CodexWorkspaceID)
     case chat(CodexThreadID)
 
     package var rowID: ReviewMonitorCodexSidebarRowID {
@@ -333,8 +289,6 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
             .section(id)
         case .workspaceGroup(let id):
             .workspaceGroup(id)
-        case .workspace(let id):
-            .workspace(id)
         case .chat(let id):
             .chat(id)
         }
@@ -346,8 +300,6 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
             nil
         case .workspaceGroup(let id):
             .workspaceGroup(id)
-        case .workspace(let id):
-            .workspace(id)
         case .chat(let id):
             .chat(id)
         }
@@ -357,7 +309,7 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
         switch self {
         case .workspaceGroup(let id):
             id
-        case .section, .workspace, .chat:
+        case .section, .chat:
             nil
         }
     }
@@ -366,7 +318,7 @@ package enum ReviewMonitorCodexSidebarOutlineItem: Equatable {
         switch self {
         case .chat(let id):
             id
-        case .section, .workspaceGroup, .workspace:
+        case .section, .workspaceGroup:
             nil
         }
     }
@@ -455,36 +407,8 @@ final class ReviewMonitorCodexSidebarOutlineTree {
                 .section(section.id)
             }
         let node = node(for: item, activeRowIDs: &activeRowIDs)
-        let children: [ReviewMonitorCodexSidebarOutlineNode]
-        if section.displaysWorkspaceNodes {
-            children =
-                section.workspaces.map { workspace in
-                    workspaceNode(
-                        for: workspace,
-                        chats: section.chats(in: workspace.id),
-                        activeRowIDs: &activeRowIDs
-                    )
-                }
-                + section.uncategorizedChats.map { chat in
-                    self.node(for: .chat(chat.id), activeRowIDs: &activeRowIDs)
-                }
-        } else {
-            children = section.items.map { chat in
-                self.node(for: .chat(chat.id), activeRowIDs: &activeRowIDs)
-            }
-        }
-        updateChildren(of: node, to: children)
-        return node
-    }
-
-    private func workspaceNode(
-        for workspace: CodexWorkspace,
-        chats: [CodexChat],
-        activeRowIDs: inout Set<ReviewMonitorCodexSidebarRowID>
-    ) -> ReviewMonitorCodexSidebarOutlineNode {
-        let node = node(for: .workspace(workspace.id), activeRowIDs: &activeRowIDs)
-        let children = chats.map { child in
-            self.node(for: .chat(child.id), activeRowIDs: &activeRowIDs)
+        let children = section.items.map { chat in
+            self.node(for: .chat(chat.id), activeRowIDs: &activeRowIDs)
         }
         updateChildren(of: node, to: children)
         return node
