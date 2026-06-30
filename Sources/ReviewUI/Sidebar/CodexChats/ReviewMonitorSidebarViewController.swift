@@ -378,7 +378,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         if applyResult.topologyChanged {
             applyCodexSidebarOutlineTopologyChanges(applyResult.topologyChanges)
         } else {
-            updateVisibleCodexSidebarCells()
             reconcileOutlineSelection()
         }
     }
@@ -401,7 +400,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
         if appliedIncrementally {
             expandCodexSidebarNodes(codexSidebarOutlineTree.roots)
-            updateVisibleCodexSidebarCells()
             reconcileOutlineSelection()
             isReconcilingSelection = false
         } else {
@@ -1259,20 +1257,6 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             }
             applyFilteredCodexSidebarSections()
             return true
-        }
-    }
-
-    private func updateVisibleCodexSidebarCells() {
-        guard outlineView.numberOfRows > 0 else {
-            return
-        }
-        for row in 0..<outlineView.numberOfRows {
-            guard let node = codexSidebarNode(from: outlineView.item(atRow: row)),
-                let cellView = outlineView.view(atColumn: 0, row: row, makeIfNecessary: false)
-            else {
-                continue
-            }
-            configureCodexSidebarCell(cellView, for: node)
         }
     }
 
