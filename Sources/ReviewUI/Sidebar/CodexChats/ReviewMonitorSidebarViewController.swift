@@ -2119,6 +2119,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         let hostingView = NSHostingView(
             rootView: ReviewMonitorChatRowView(chat: chat)
         )
+        hostingView.sizingOptions = []
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         hostingView.setAccessibilityIdentifier("review-monitor.review-chat-row")
         addSubview(hostingView)
