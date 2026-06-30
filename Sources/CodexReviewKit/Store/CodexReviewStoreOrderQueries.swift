@@ -1,3 +1,23 @@
+package struct CodexChatCancellationCapability: Equatable, Sendable {
+    package enum Action: Equatable, Sendable {
+        case reviewRun
+        case directChat
+    }
+
+    package let isEnabled: Bool
+    package let action: Action?
+
+    package static let disabled = CodexChatCancellationCapability(isEnabled: false, action: nil)
+    package static let reviewRun = CodexChatCancellationCapability(isEnabled: true, action: .reviewRun)
+    package static let directChat = CodexChatCancellationCapability(isEnabled: true, action: .directChat)
+    package static let pendingReviewCancellation = CodexChatCancellationCapability(isEnabled: true, action: nil)
+
+    package init(isEnabled: Bool, action: Action?) {
+        self.isEnabled = isEnabled
+        self.action = action
+    }
+}
+
 extension CodexReviewStore {
     package var orderedReviewRuns: [ReviewRunRecord] {
         reviewRuns.sorted {
@@ -31,6 +51,25 @@ extension CodexReviewStore {
             }
             return runRecord.matchesChatID(chatID)
         }
+    }
+
+    package func chatCancellationCapability(
+        forChatID chatID: String,
+        isChatActive: Bool
+    ) -> CodexChatCancellationCapability {
+        if hasCancellableReview(forChatID: chatID) {
+            return .reviewRun
+        }
+
+        guard isChatActive else {
+            return .disabled
+        }
+
+        if hasNonTerminalReviewRun(forChatID: chatID) {
+            return .pendingReviewCancellation
+        }
+
+        return .directChat
     }
 
     package func reviewRun(forChatID chatID: String) -> ReviewRunRecord? {

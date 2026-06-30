@@ -85,8 +85,12 @@ extension ReviewUITests {
             sidebar.sidebarKindForTesting == .chatList
                 && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
         }
-        #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
-        #expect(store.hasNonTerminalReviewRun(forChatID: selectedChatID.rawValue) == false)
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: selectedChatID.rawValue,
+                isChatActive: true
+            ) == .directChat
+        )
 
         var presentedCancelItem = false
         var cancelItemWasEnabled = false
@@ -108,7 +112,12 @@ extension ReviewUITests {
             }
         }
         #expect(await previewContent.interruptRequestCountForTesting() == 1)
-        #expect(store.hasCancellableReview(forChatID: selectedChatID.rawValue) == false)
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: selectedChatID.rawValue,
+                isChatActive: true
+            ).isEnabled
+        )
 
         var cancelItemEnabledAfterCancellation = false
         sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
@@ -184,8 +193,12 @@ extension ReviewUITests {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Active chat"
         }
 
-        #expect(store.hasReviewRun(forChatID: chatID.rawValue))
-        #expect(store.hasCancellableReview(forChatID: chatID.rawValue) == false)
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: chatID.rawValue,
+                isChatActive: true
+            ) == .directChat
+        )
 
         var presentedCancelItem = false
         var cancelItemWasEnabled = false
@@ -280,8 +293,12 @@ extension ReviewUITests {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Pending cancellation chat"
         }
 
-        #expect(store.hasReviewRun(forChatID: chatID.rawValue))
-        #expect(store.hasCancellableReview(forChatID: chatID.rawValue) == false)
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: chatID.rawValue,
+                isChatActive: true
+            ) == .pendingReviewCancellation
+        )
 
         var cancelItemWasEnabled = false
         sidebar.presentContextMenuForTesting(chatID: chatID) { menu in

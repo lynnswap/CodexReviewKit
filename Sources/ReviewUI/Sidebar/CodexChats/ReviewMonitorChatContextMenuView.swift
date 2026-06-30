@@ -16,30 +16,28 @@ struct ReviewMonitorChatContextMenuView: View {
         Button("Cancel") {
             cancel()
         }
-        .disabled(isRunning == false)
-    }
-
-    private var isRunning: Bool {
-        let chatID = chat.id.rawValue
-        return store.hasCancellableReview(forChatID: chatID)
-            || chat.status?.isActive == true
+        .disabled(cancellationCapability.isEnabled == false)
     }
 
     private func cancel() {
         let chatID = chat.id.rawValue
+        let action = cancellationCapability.action
         Task {
-            if store.hasCancellableReview(forChatID: chatID) {
+            switch action {
+            case .some(.reviewRun):
                 _ = try? await store.cancelReview(chatID: chatID, cancellation: .userInterface())
-            } else if shouldCancelActiveChatDirectly(chatID: chatID) {
+            case .some(.directChat):
                 _ = try? await chat.cancel()
+            case nil:
+                break
             }
         }
     }
 
-    private func shouldCancelActiveChatDirectly(chatID: String) -> Bool {
-        guard chat.status?.isActive == true else {
-            return false
-        }
-        return store.hasNonTerminalReviewRun(forChatID: chatID) == false
+    private var cancellationCapability: CodexChatCancellationCapability {
+        store.chatCancellationCapability(
+            forChatID: chat.id.rawValue,
+            isChatActive: chat.status?.isActive == true
+        )
     }
 }
