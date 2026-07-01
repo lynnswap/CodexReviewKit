@@ -3,51 +3,35 @@ import SwiftUI
 import CodexKit
 
 @MainActor
-private struct ReviewMonitorChatRowContent: View {
+struct ReviewMonitorChatRowView: View {
     var chat: CodexChat
 
     var body: some View {
-        ReviewMonitorChatRowLayout(
-            id: chat.id.rawValue,
-            title: chat.title,
-            model: chat.modelProvider,
-            subtitle: chat.preview?.trimmedNonEmpty,
-            startedAt: chat.status?.isActive == true ? chat.activityDate : nil,
-            endedAt: nil,
-            isRunning: chat.status?.isActive == true
-        )
-    }
-}
+        let isRunning = chat.status?.isActive == true
+        let startedAt = isRunning ? chat.activityDate : nil
 
-@MainActor
-private struct ReviewMonitorChatRowLayout: View {
-    var id: String
-    var title: String
-    var model: String?
-    var subtitle: String?
-    var startedAt: Date?
-    var endedAt: Date?
-    var isRunning: Bool
-
-    var body: some View {
         Label {
             VStack {
                 HStack {
-                    Text(title)
+                    Text(chat.title)
                         .truncationMode(.tail)
                     Spacer(minLength: 0)
-                    ReviewMonitorChatRowTimerLabel(startedAt: startedAt, endedAt: endedAt)
+                    if let startedAt {
+                        Text(
+                            timerInterval: startedAt...(.distantFuture),
+                            pauseTime: nil,
+                            countsDown: false,
+                            showsHours: true
+                        )
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .layoutPriority(1)
+                    }
                 }
                 .lineLimit(1)
                 HStack {
-                    if let model {
-                        Text(model)
-                    }
-                    if let subtitle {
-                        Text(subtitle)
-                    }
+                    Text(chat.modelProvider?.trimmedNonEmpty ?? "")
+                    Text(chat.preview?.trimmedNonEmpty ?? "")
                     Spacer(minLength: 0)
                 }
                 .textScale(.secondary)
@@ -66,35 +50,8 @@ private struct ReviewMonitorChatRowLayout: View {
             .animation(.default, value: isRunning)
             .padding(.leading, SidebarLayout.disclosureGutterWidth)
         }
-        .transaction(value: id) { transaction in
+        .transaction(value: chat.id.rawValue) { transaction in
             transaction.disablesAnimations = true
-        }
-    }
-}
-
-@MainActor
-struct ReviewMonitorChatRowView: View {
-    var chat: CodexChat
-
-    var body: some View {
-        ReviewMonitorChatRowContent(chat: chat)
-    }
-}
-
-@MainActor
-struct ReviewMonitorChatRowTimerLabel: View {
-    var startedAt: Date?
-    var endedAt: Date?
-
-    var body: some View {
-        if let startedAt {
-            Text(
-                timerInterval: startedAt...(endedAt ?? .distantFuture),
-                pauseTime: endedAt,
-                countsDown: false,
-                showsHours: true
-            )
-            .monospacedDigit()
         }
     }
 }
@@ -114,22 +71,52 @@ private extension CodexChat {
 
 @MainActor
 package func measuredReviewMonitorChatRowHeight() -> CGFloat {
-    ReviewMonitorChatRowLayout.measureMeasuredHeight()
+    ReviewMonitorChatRowView.measureMeasuredHeight()
 }
 
 @MainActor
-extension ReviewMonitorChatRowLayout {
+extension ReviewMonitorChatRowView {
     static func measureMeasuredHeight() -> CGFloat {
         let hostingView = NSHostingView(
-            rootView: ReviewMonitorChatRowLayout(
-                id: "row-height-measurement",
-                title: "Uncommitted changes",
-                model: "gpt-5.5",
-                subtitle: "Review output preview",
-                startedAt: Date(timeIntervalSince1970: 0),
-                endedAt: nil,
-                isRunning: true
-            )
+            rootView: Label {
+                VStack {
+                    HStack {
+                        Text("Uncommitted changes")
+                            .truncationMode(.tail)
+                        Spacer(minLength: 0)
+                        Text(
+                            timerInterval: Date(timeIntervalSince1970: 0)...(.distantFuture),
+                            pauseTime: nil,
+                            countsDown: false,
+                            showsHours: true
+                        )
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .layoutPriority(1)
+                    }
+                    .lineLimit(1)
+                    HStack {
+                        Text("gpt-5.5")
+                        Text("Review output preview")
+                        Spacer(minLength: 0)
+                    }
+                    .textScale(.secondary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+            } icon: {
+                ZStack {
+                    Image(systemName: "circle.fill")
+                        .foregroundStyle(.clear)
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+                .animation(.default, value: true)
+                .padding(.leading, SidebarLayout.disclosureGutterWidth)
+            }
+            .transaction(value: "row-height-measurement") { transaction in
+                transaction.disablesAnimations = true
+            }
         )
         return ceil(hostingView.fittingSize.height)
     }

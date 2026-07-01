@@ -344,9 +344,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func applyCodexSidebarTransaction(
-        _: CodexFetchedResultsTransaction<CodexChat>,
+        _ transaction: CodexFetchedResultsTransaction<CodexChat>,
         controller: CodexFetchedResultsController<CodexChat>
     ) {
+        print(
+            "[ReviewMonitorSidebarDebug] transaction reason=\(transaction.reason) "
+            + "sections=\(transaction.sectionChanges) items=\(transaction.itemChanges) "
+            + "snapshot=\(debugDescribeSections(controller.sections))"
+        )
         applyCodexSidebarSourceSections(controller.sections)
     }
 
@@ -366,11 +371,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func applyCodexSidebarSourceSections(_ sections: [CodexFetchSection<CodexChat>]) {
+        print("[ReviewMonitorSidebarDebug] source sections \(debugDescribeSections(sections))")
         codexSidebarPresentationOrder.prune(to: sections)
         applyCodexSidebarVisibleSections(from: sections)
     }
 
     private func applyFilteredCodexSidebarSections() {
+        print("[ReviewMonitorSidebarDebug] filter changed source=\(debugDescribeSections(codexSidebarSourceSections))")
         applyCodexSidebarVisibleSections(from: codexSidebarSourceSections)
     }
 
@@ -378,7 +385,12 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         from sourceSections: [CodexFetchSection<CodexChat>]
     ) {
         let sections = codexSidebarVisibleSections(from: sourceSections)
+        print("[ReviewMonitorSidebarDebug] visible sections \(debugDescribeSections(sections))")
         let applyResult = codexSidebarOutlineTree.apply(sections: sections)
+        print(
+            "[ReviewMonitorSidebarDebug] outline apply topologyChanged=\(applyResult.topologyChanged) "
+            + "changes=\(applyResult.topologyChanges.map(debugDescribeTopologyChange))"
+        )
         applySidebarKind(sidebarKind)
         if applyResult.topologyChanged {
             applyCodexSidebarOutlineTopologyChanges(applyResult.topologyChanges)
@@ -398,6 +410,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         isReconcilingSelection = true
         var appliedIncrementally = true
         for change in changes {
+            print("[ReviewMonitorSidebarDebug] apply topology change \(debugDescribeTopologyChange(change))")
             guard applyCodexSidebarOutlineTopologyChange(change) else {
                 appliedIncrementally = false
                 break
@@ -441,6 +454,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     ) -> Bool {
         let oldChildRowIDs = change.oldChildRowIDs
         let newChildRowIDs = change.newChildRowIDs
+        print(
+            "[ReviewMonitorSidebarDebug] child delta parent=\(change.parentRowID?.rawValue ?? "root") "
+            + "old=\(oldChildRowIDs.map(\.rawValue)) new=\(newChildRowIDs.map(\.rawValue))"
+        )
         guard oldChildRowIDs != newChildRowIDs else {
             return true
         }
@@ -465,6 +482,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             newChildRowIDSet.contains(rowID) ? nil : offset
         }
         if removedIndexes.isEmpty == false {
+            print("[ReviewMonitorSidebarDebug] remove indexes=\(Array(removedIndexes)) parent=\(change.parentRowID?.rawValue ?? "root")")
             outlineView.removeItems(
                 at: IndexSet(removedIndexes),
                 inParent: parentItem,
@@ -476,6 +494,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             oldChildRowIDSet.contains(rowID) ? nil : offset
         }
         if insertedIndexes.isEmpty == false {
+            print("[ReviewMonitorSidebarDebug] insert indexes=\(Array(insertedIndexes)) parent=\(change.parentRowID?.rawValue ?? "root")")
             outlineView.insertItems(
                 at: IndexSet(insertedIndexes),
                 inParent: parentItem,
@@ -499,6 +518,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard currentIndex != targetIndex else {
                 continue
             }
+            print(
+                "[ReviewMonitorSidebarDebug] move row=\(targetRowID.rawValue) "
+                + "from=\(currentIndex) to=\(targetIndex) parent=\((parentItem as? ReviewMonitorCodexSidebarOutlineNode)?.rowID.rawValue ?? "root")"
+            )
             outlineView.moveItem(
                 at: currentIndex,
                 inParent: parentItem,
@@ -512,6 +535,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func reloadCodexSidebarOutline() {
+        print("[ReviewMonitorSidebarDebug] reloadData roots=\(codexSidebarOutlineTree.roots.map { $0.rowID.rawValue })")
         #if DEBUG
             fullReloadCountForTesting += 1
         #endif
@@ -1239,6 +1263,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             else {
                 return false
             }
+            print(
+                "[ReviewMonitorSidebarDebug] configure chat row id=\(chat.id.rawValue) "
+                + "title=\(chat.title) active=\(chat.status?.isActive == true) "
+                + "recency=\(String(describing: chat.recencyAt))"
+            )
             cellView.configure(with: chat)
             return true
         case .section:
@@ -1254,8 +1283,10 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             if let workspaceGroup = displayedCodexSidebarSection(id: id)?.workspaceGroup
                 ?? codexWorkspaceGroupSection(id: id)?.workspaceGroup
             {
+                print("[ReviewMonitorSidebarDebug] configure workspace group id=\(id.rawValue) title=\(workspaceGroup.name)")
                 cellView.configure(workspaceGroup: workspaceGroup)
             } else {
+                print("[ReviewMonitorSidebarDebug] configure fallback workspace group id=\(id.rawValue)")
                 cellView.configureFallbackWorkspaceGroup(title: codexSidebarTitle(for: node) ?? id.rawValue)
             }
             return true
@@ -1402,7 +1433,25 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let node = codexSidebarNode(from: item) else {
             return nil
         }
+        print("[ReviewMonitorSidebarDebug] viewFor row=\(node.rowID.rawValue)")
         return makeCodexSidebarCellView(for: node)
+    }
+
+    private func debugDescribeSections(_ sections: [CodexFetchSection<CodexChat>]) -> String {
+        sections.map { section in
+            let chats = section.items.map(\.id.rawValue).joined(separator: ",")
+            return "\(section.rowID.rawValue)[\(chats)]"
+        }
+        .joined(separator: " | ")
+    }
+
+    private func debugDescribeTopologyChange(
+        _ change: ReviewMonitorCodexSidebarOutlineTopologyChange
+    ) -> String {
+        let parent = change.parentRowID?.rawValue ?? "root"
+        let old = change.oldChildRowIDs.map(\.rawValue).joined(separator: ",")
+        let new = change.newChildRowIDs.map(\.rawValue).joined(separator: ",")
+        return "\(parent):[\(old)]->[\(new)]"
     }
 
 }
