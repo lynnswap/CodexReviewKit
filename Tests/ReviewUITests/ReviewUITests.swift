@@ -2681,9 +2681,19 @@ struct ReviewUITests {
             turnID: chat.turnID
         )
 
-        let snapshot = try await awaitChatRenderForTesting(chat, in: transport)
+        let snapshot = try await awaitChatRenderForTesting(
+            chatID: chat.chatID,
+            expectedLog: """
+            Need to inspect files.
+
+            Ran git diff
+
+            Inspecting details after the command starts.
+            """,
+            in: transport
+        )
         #expect(snapshot.log.contains("Need to inspect files."))
-        #expect(snapshot.log.contains("Running git diff"))
+        #expect(snapshot.log.contains("Ran git diff"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
