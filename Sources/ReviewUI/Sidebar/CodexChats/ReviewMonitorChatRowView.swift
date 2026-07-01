@@ -7,7 +7,7 @@ struct ReviewMonitorChatRowView: View {
     var chat: CodexChat
 
     var body: some View {
-        let isRunning = chat.phase == .loading || chat.status?.isActive == true
+        let isRunning = chat.status?.isActive == true
         let startedAt = isRunning ? chat.activityDate : nil
 
         Label {
