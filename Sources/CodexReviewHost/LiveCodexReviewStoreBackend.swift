@@ -190,7 +190,7 @@ public extension CodexReviewStore {
                         modelContainer: modelContainer,
                         backend: AppServerCodexReviewBackend(
                             appServer: appServer,
-                            dataKitModelContext: modelContainer.mainContext
+                            modelContainer: modelContainer
                         )
                     )
                 }
@@ -427,7 +427,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 modelContainer: modelContainer,
                 backend: AppServerCodexReviewBackend(
                     appServer: appServer,
-                    dataKitModelContext: modelContainer.mainContext
+                    modelContainer: modelContainer
                 )
             )
         }
