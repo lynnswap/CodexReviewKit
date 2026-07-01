@@ -247,7 +247,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
                 name: "Updated review",
                 updatedAt: Date(timeIntervalSince1970: 2_000)
             ))
-        try await context.model(for: threadID).refresh(includeTurns: false)
+        try await context.refresh(context.model(for: threadID), includeTurns: false)
 
         #expect(tree.apply(sections: controller.sections).topologyChanged == false)
         #expect(tree.roots.first === root)
@@ -397,8 +397,10 @@ struct ReviewMonitorCodexSidebarResultsTests {
         uiState.selection = .chat(hiddenRunThreadID)
 
         try await waitForCondition {
-            uiState.selection == nil && sidebar.selectedReviewChatIDForTesting == nil
+            sidebar.nativeSelectedReviewChatIDForTesting == nil
         }
+        #expect(uiState.selection == .chat(hiddenRunThreadID))
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(hiddenRunThreadID)) == nil)
     }
 
     @Test func sidebarViewControllerTracksCodexSidebarFetchResultChanges() async throws {
@@ -439,6 +441,90 @@ struct ReviewMonitorCodexSidebarResultsTests {
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review"
         }
+    }
+
+    @Test func sidebarRefreshOmittingSelectedRegisteredChatPreservesSelectionAndDetail() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let selectedThreadID = CodexThreadID(rawValue: "thread-selected")
+        let remainingThreadID = CodexThreadID(rawValue: "thread-remaining")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: selectedThreadID,
+                        workspace: repo,
+                        name: "Selected review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: remainingThreadID,
+                        workspace: repo,
+                        name: "Remaining review",
+                        updatedAt: Date(timeIntervalSince1970: 4_000),
+                        status: .idle
+                    ),
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        let transport = viewController.transportViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedThreadID)) == "Selected review"
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(remainingThreadID)) == "Remaining review"
+        }
+        let selectedChat = try #require(context.registeredModel(for: selectedThreadID))
+        #expect(selectedChat.isArchived == false)
+
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(selectedThreadID))
+        try await waitForCondition {
+            sidebar.selectedReviewChatIDForTesting == selectedThreadID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedThreadID
+                && transport.renderedStateForTesting.selection == .chat(selectedThreadID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+        }
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: remainingThreadID,
+                        workspace: repo,
+                        name: "Remaining review",
+                        updatedAt: Date(timeIntervalSince1970: 6_000),
+                        status: .idle
+                    )
+                ]
+            ))
+        try await sidebar.refreshCodexSidebarForTesting()
+
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedThreadID)) == "Selected review"
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(remainingThreadID)) == "Remaining review"
+                && sidebar.selectedReviewChatIDForTesting == selectedThreadID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedThreadID
+                && transport.renderedStateForTesting.selection == .chat(selectedThreadID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+        }
+        #expect(context.registeredModel(for: selectedThreadID) === selectedChat)
+        #expect(selectedChat.isArchived == false)
     }
 
     @Test func sidebarViewControllerShowsEmptyStateWhenFilterHasNoMatches() async throws {
@@ -540,7 +626,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
                 name: "App review renamed",
                 updatedAt: Date(timeIntervalSince1970: 6_000)
             ))
-        try await chat.refresh(includeTurns: false)
+        try await context.refresh(chat, includeTurns: false)
 
         try await waitForCondition {
             sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(threadID)) == "App review renamed"
@@ -873,6 +959,68 @@ struct ReviewMonitorCodexSidebarResultsTests {
         }
 
         #expect(sidebar.sidebarFullReloadCountForTesting == reloadCountAfterInitialFetch)
+    }
+
+    @Test func sidebarIgnoresProgrammaticNativeSelectionChanges() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeGitRepository()
+        let activeThreadID = CodexThreadID(rawValue: "thread-active")
+        let previousThreadID = CodexThreadID(rawValue: "thread-previous")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: activeThreadID,
+                        workspace: repo,
+                        name: "Active review",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    ),
+                    .init(
+                        id: previousThreadID,
+                        workspace: repo,
+                        name: "Previous review",
+                        updatedAt: Date(timeIntervalSince1970: 4_000),
+                        status: .idle
+                    ),
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let uiState = ReviewMonitorUIState(auth: store.auth)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: uiState,
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        viewController.loadViewIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        let transport = viewController.transportViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(activeThreadID)) == "Active review"
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(previousThreadID)) == "Previous review"
+        }
+
+        sidebar.selectCodexSidebarRowForTesting(rowID: .chat(activeThreadID))
+        try await waitForCondition {
+            sidebar.selectedReviewChatIDForTesting == activeThreadID
+                && sidebar.nativeSelectedReviewChatIDForTesting == activeThreadID
+                && transport.renderedStateForTesting.selection == .chat(activeThreadID.rawValue)
+        }
+
+        sidebar.selectCodexSidebarRowProgrammaticallyForTesting(rowID: .chat(previousThreadID))
+
+        try await waitForCondition {
+            sidebar.selectedReviewChatIDForTesting == activeThreadID
+                && sidebar.nativeSelectedReviewChatIDForTesting == activeThreadID
+                && transport.renderedStateForTesting.selection == .chat(activeThreadID.rawValue)
+        }
     }
 
     @Test func sidebarViewControllerKeepsWorkspaceGroupOrderWhenSelectedChatRefreshesUpdatedAt() async throws {

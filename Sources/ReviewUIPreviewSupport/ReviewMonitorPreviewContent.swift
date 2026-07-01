@@ -43,7 +43,7 @@ public final class ReviewMonitorPreviewContentSource {
         )
     }
 
-    public func snapshotForTesting(chatID: CodexThreadID) async -> CodexChatSnapshot? {
+    public func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
         await runtime.snapshotForTesting(chatID: chatID)
     }
 
@@ -148,10 +148,9 @@ public enum ReviewMonitorPreviewContent {
             self.content = content
         }
 
-        func itemSnapshot(id: String, turnID: CodexTurnID) -> CodexChatItemSnapshot {
-            CodexChatItemSnapshot(
+        func threadItem(id: String) -> CodexThreadItem {
+            CodexThreadItem(
                 id: id,
-                turnID: turnID,
                 kind: kind,
                 content: content
             )
@@ -165,10 +164,9 @@ public enum ReviewMonitorPreviewContent {
         let mode: PreviewStreamMode
         let deltaText: String?
 
-        func itemSnapshot(id: String, turnID: CodexTurnID?) -> CodexChatItemSnapshot {
-            CodexChatItemSnapshot(
+        func threadItem(id: String) -> CodexThreadItem {
+            CodexThreadItem(
                 id: id,
-                turnID: turnID,
                 kind: kind,
                 content: content
             )
@@ -667,24 +665,18 @@ public enum ReviewMonitorPreviewContent {
     private static func makeChatLogFixture(
         for chatFixture: PreviewChatFixture
     ) -> ReviewMonitorPreviewChatLogFixture {
-        let turn = CodexChatTurnStateSnapshot(
+        let turn = CodexTurnSnapshot(
             id: chatFixture.turnID,
             status: CodexTurnStatus(chatFixture.lifecycle),
-            errorDescription: chatFixture.lifecycle == .failed ? chatFixture.summary : nil,
-            usage: nil
-        )
-        let initialSnapshot = CodexChatSnapshot(
-            chatID: chatFixture.chatID,
-            phase: CodexDataPhase(
-                chatFixture.lifecycle,
-                errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil
-            ),
-            turns: [turn],
+            errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil,
             items: makeInitialChatItems(
                 streamID: chatFixture.id,
-                chatItems: chatFixture.chatItems,
-                turnID: turn.id
+                chatItems: chatFixture.chatItems
             )
+        )
+        let initialThreadSnapshot = CodexThreadSnapshot(
+            id: chatFixture.chatID,
+            turns: [turn]
         )
         return ReviewMonitorPreviewChatLogFixture(
             chatID: chatFixture.chatID,
@@ -698,34 +690,32 @@ public enum ReviewMonitorPreviewContent {
             cwd: chatFixture.cwd,
             streamID: chatFixture.id,
             isRunning: chatFixture.lifecycle == .running,
-            initialSnapshot: initialSnapshot
+            initialThreadSnapshot: initialThreadSnapshot
         )
     }
 
     private static func makeInitialChatItems(
         streamID: String,
-        chatItems: [PreviewChatLogItemTemplate],
-        turnID: CodexTurnID
-    ) -> [CodexChatItemSnapshot] {
-        var snapshots: [CodexChatItemSnapshot] = []
+        chatItems: [PreviewChatLogItemTemplate]
+    ) -> [CodexThreadItem] {
+        var items: [CodexThreadItem] = []
         for item in chatItems {
-            let snapshot = item.itemSnapshot(
+            let threadItem = item.threadItem(
                 id: previewChatLogItemID(
                     itemName: item.itemName,
                     streamID: streamID,
                     cycle: 0
-                ),
-                turnID: turnID
+                )
             )
-            if let index = snapshots.firstIndex(where: {
-                $0.id == snapshot.id && $0.turnID == snapshot.turnID
+            if let index = items.firstIndex(where: {
+                $0.id == threadItem.id
             }) {
-                snapshots[index] = snapshot
+                items[index] = threadItem
             } else {
-                snapshots.append(snapshot)
+                items.append(threadItem)
             }
         }
-        return snapshots
+        return items
     }
 
     private static func diagnosticItem(

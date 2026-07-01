@@ -30,80 +30,64 @@ enum ReviewMonitorLogSourceChange: Equatable {
 
 @MainActor
 struct ReviewMonitorCodexChatLogSourceProjection {
-    private var turnProjection = CodexChatTurnProjection()
     private var logProjection = ReviewMonitorCodexChatLogProjection()
     private var hasLogDocument = false
 
     mutating func reset() {
-        turnProjection = CodexChatTurnProjection()
         logProjection.reset()
         hasLogDocument = false
     }
 
-    mutating func apply(
-        _ change: CodexChatChange,
+    mutating func applyBaseline(
+        from chat: CodexChat,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewMonitorLogSourceChange? {
-        let update = turnProjection.apply(change)
-        guard update.affectsSelectedTurn else {
-            return nil
-        }
-        guard let snapshot = update.snapshot else {
-            return clearIfNeeded()
-        }
-
-        switch update.kind {
-        case .snapshot:
-            return renderSnapshot(
-                from: snapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt,
-                allowIncrementalUpdate: false
-            )
-        case .turnUpdated,
-            .phaseChanged:
-            return renderSnapshot(
-                from: snapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt,
-                allowIncrementalUpdate: hasLogDocument
-            )
-        case .itemUpserted(let item):
-            return renderSnapshot(
-                from: snapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt,
-                allowIncrementalUpdate: hasLogDocument && item.turnID == snapshot.turn.id
-            )
-        case .itemTextAppended(_, _, _, let item):
-            return renderSnapshot(
-                from: snapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt,
-                allowIncrementalUpdate: hasLogDocument && item.turnID == snapshot.turn.id
-            )
-        case .itemRemoved:
-            return renderSnapshot(
-                from: snapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt,
-                allowIncrementalUpdate: hasLogDocument
-            )
-        case .ignored:
-            return nil
-        }
+        renderChat(
+            from: chat,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt,
+            allowIncrementalUpdate: false
+        ) ?? .clear
     }
 
-    private mutating func renderSnapshot(
-        from snapshot: CodexChatProjectedTurnSnapshot,
+    mutating func apply(
+        _ update: CodexChatUpdate,
+        in chat: CodexChat,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
+    ) -> ReviewMonitorLogSourceChange? {
+        let allowsIncrementalUpdate: Bool
+        switch update {
+        case .resynchronized:
+            allowsIncrementalUpdate = hasLogDocument
+        case .turnInserted,
+            .turnUpdated,
+            .statusChanged,
+            .phaseChanged,
+            .itemInserted,
+            .itemUpdated,
+            .itemRemoved,
+            .itemTextAppended:
+            allowsIncrementalUpdate = hasLogDocument
+        }
+        return renderChat(
+            from: chat,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt,
+            allowIncrementalUpdate: allowsIncrementalUpdate
+        )
+    }
+
+    private mutating func renderChat(
+        from chat: CodexChat,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
         allowIncrementalUpdate: Bool
     ) -> ReviewMonitorLogSourceChange? {
         guard
             let document = logProjection.render(
-                from: snapshot,
+                from: chat,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt
             )

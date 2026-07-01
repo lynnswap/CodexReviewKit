@@ -128,7 +128,7 @@ struct ReviewChatFixtureForTesting {
     var turnID: CodexTurnID
     var streamID: String
     var isRunning: Bool
-    var initialSnapshot: CodexChatSnapshot
+    var initialSnapshot: CodexThreadSnapshot
 
     var chatID: CodexThreadID {
         chat.id
@@ -197,10 +197,9 @@ func makeReviewChatFixtureForTesting(
         status: CodexThreadStatus(chatFixtureStatusForTesting: status)
     )
     ReviewChatLogFixtureStore.setEntries(chatEntries, for: resolvedChatID)
-    let initialSnapshot = makeCodexChatSnapshotForTesting(
+    let initialSnapshot = makeCodexThreadSnapshotForTesting(
         chatID: resolvedChatID,
         turnID: resolvedTurnID,
-        phase: CodexDataPhase(chatFixtureStatusForTesting: status, errorMessage: errorMessage),
         turnStatus: CodexTurnStatus(chatFixtureStatusForTesting: status),
         turnErrorDescription: errorMessage,
         items: ReviewChatLogFixtureStore.items(for: resolvedChatID, turnID: resolvedTurnID)
@@ -311,14 +310,14 @@ func makeReviewMonitorSplitViewControllerForTesting(
 @MainActor
 func reviewChatLogText(for fixture: ReviewChatFixtureForTesting) -> String {
     reviewChatLogText(
-        for: codexChatSnapshotForTesting(fixture),
+        for: codexThreadSnapshotForTesting(fixture),
         chatUpdatedAt: fixture.chat.updatedAt
     )
 }
 
 @MainActor
 func reviewChatLogText(
-    for snapshot: CodexChatSnapshot,
+    for snapshot: CodexThreadSnapshot,
     chatUpdatedAt: Date? = nil
 ) -> String {
     ReviewChatLogFixtureStore.logText(for: snapshot, chatUpdatedAt: chatUpdatedAt)
@@ -344,14 +343,14 @@ func awaitChatRenderForTesting(
 
 @MainActor
 func awaitChatRenderForTesting(
-    snapshot: CodexChatSnapshot,
+    snapshot: CodexThreadSnapshot,
     in transport: ReviewMonitorTransportViewController,
     allowIncrementalUpdate: Bool = true,
     timeout: Duration = .seconds(2),
     matching predicate: (@Sendable (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool)? = nil
 ) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
     try await awaitChatRenderForTesting(
-        chatID: snapshot.chatID,
+        chatID: snapshot.id,
         expectedLog: reviewChatLogText(for: snapshot),
         in: transport,
         allowIncrementalUpdate: allowIncrementalUpdate,
@@ -422,7 +421,7 @@ func makePreviewAppServerRuntimeForTesting(
     cwd: String,
     streamID: String,
     isRunning: Bool,
-    initialSnapshot: CodexChatSnapshot
+    initialSnapshot: CodexThreadSnapshot
 ) -> ReviewMonitorPreviewAppServerRuntime {
     ReviewMonitorPreviewAppServerRuntime(
         fixtures: [
@@ -442,10 +441,9 @@ func makePreviewMessageItemForTesting(
     id: String,
     text: String,
     turnID: CodexTurnID
-) -> CodexChatItemSnapshot {
-    CodexChatItemSnapshot(
+) -> CodexThreadItem {
+    CodexThreadItem(
         id: id,
-        turnID: turnID,
         kind: .agentMessage,
         content: .message(.init(id: id, role: .assistant, text: text))
     )
@@ -471,12 +469,11 @@ private func makePreviewChatLogFixtureForTesting(
 @MainActor
 private func makePreviewChatLogFixtureForTesting(
     fixture: ReviewChatFixtureForTesting,
-    items makeItems: (CodexTurnID) -> [CodexChatItemSnapshot]
+    items makeItems: (CodexTurnID) -> [CodexThreadItem]
 ) -> ReviewMonitorPreviewChatLogFixture {
-    let initialSnapshot = makeCodexChatSnapshotForTesting(
+    let initialSnapshot = makeCodexThreadSnapshotForTesting(
         chatID: fixture.chatID,
-        phase: fixture.initialSnapshot.phase,
-        turns: fixture.initialSnapshot.turns,
+        turns: fixture.initialSnapshot.turns ?? [],
         items: makeItems(fixture.turnID)
     )
     return makePreviewChatLogFixtureForTesting(
@@ -489,51 +486,51 @@ private func makePreviewChatLogFixtureForTesting(
 }
 
 @MainActor
-func codexChatSnapshotForTesting(_ fixture: ReviewChatFixtureForTesting) -> CodexChatSnapshot {
-    makeCodexChatSnapshotForTesting(
+func codexThreadSnapshotForTesting(_ fixture: ReviewChatFixtureForTesting) -> CodexThreadSnapshot {
+    makeCodexThreadSnapshotForTesting(
         chatID: fixture.chatID,
-        phase: fixture.initialSnapshot.phase,
-        turns: fixture.initialSnapshot.turns,
+        turns: fixture.initialSnapshot.turns ?? [],
         items: ReviewChatLogFixtureStore.items(for: fixture.chatID, turnID: fixture.turnID)
     )
 }
 
 @MainActor
-func makeCodexChatSnapshotForTesting(
+func makeCodexThreadSnapshotForTesting(
     chatID: CodexThreadID,
     turnID: CodexTurnID,
-    phase: CodexDataPhase = .loaded,
     turnStatus: CodexTurnStatus = .completed,
     turnErrorDescription: String? = nil,
-    items: [CodexChatItemSnapshot] = []
-) -> CodexChatSnapshot {
-    makeCodexChatSnapshotForTesting(
+    items: [CodexThreadItem] = []
+) -> CodexThreadSnapshot {
+    makeCodexThreadSnapshotForTesting(
         chatID: chatID,
-        phase: phase,
         turns: [
             .init(
                 id: turnID,
                 status: turnStatus,
-                errorDescription: turnErrorDescription,
-                usage: nil
+                errorMessage: turnErrorDescription,
+                items: items
             )
-        ],
-        items: items
+        ]
     )
 }
 
 @MainActor
-func makeCodexChatSnapshotForTesting(
+func makeCodexThreadSnapshotForTesting(
     chatID: CodexThreadID,
-    phase: CodexDataPhase = .loaded,
-    turns: [CodexChatTurnStateSnapshot],
-    items: [CodexChatItemSnapshot] = []
-) -> CodexChatSnapshot {
-    CodexChatSnapshot(
-        chatID: chatID,
-        phase: phase,
-        turns: turns,
-        items: items
+    turns: [CodexTurnSnapshot],
+    items: [CodexThreadItem] = []
+) -> CodexThreadSnapshot {
+    var resolvedTurns = turns
+    if items.isEmpty == false {
+        if resolvedTurns.isEmpty {
+            resolvedTurns = [CodexTurnSnapshot(id: CodexTurnID(rawValue: "\(chatID.rawValue):preview-turn"))]
+        }
+        resolvedTurns[resolvedTurns.count - 1].items = items
+    }
+    return CodexThreadSnapshot(
+        id: chatID,
+        turns: resolvedTurns
     )
 }
 
@@ -543,7 +540,7 @@ func makePreviewChatLogFixtureForTesting(
     cwd: String,
     streamID: String,
     isRunning: Bool,
-    initialSnapshot: CodexChatSnapshot
+    initialSnapshot: CodexThreadSnapshot
 ) -> ReviewMonitorPreviewChatLogFixture {
     ReviewMonitorPreviewChatLogFixture(
         chatID: chat.id,
@@ -557,7 +554,7 @@ func makePreviewChatLogFixtureForTesting(
         cwd: cwd,
         streamID: streamID,
         isRunning: isRunning,
-        initialSnapshot: initialSnapshot
+        initialThreadSnapshot: initialSnapshot
     )
 }
 
@@ -583,20 +580,17 @@ private enum ReviewChatLogFixtureStore {
         await updateRetainedPreviewSource(for: chatID, turnID: turnID)
     }
 
-    static func items(for chatID: CodexThreadID, turnID: CodexTurnID) -> [CodexChatItemSnapshot] {
+    static func items(for chatID: CodexThreadID, turnID: CodexTurnID) -> [CodexThreadItem] {
         makeChatItems(from: entriesByChatID[chatID, default: []], turnID: turnID)
     }
 
-    static func logText(for snapshot: CodexChatSnapshot, chatUpdatedAt: Date?) -> String {
-        var projection = ReviewMonitorCodexChatLogSourceProjection()
-        var document: ReviewMonitorLog.Document?
-        for change in CodexChatChange.previewChangesForTesting(from: nil, to: snapshot) {
-            document = projection.apply(
-                change,
-                chatCreatedAt: nil,
-                chatUpdatedAt: chatUpdatedAt
-            )?.sourceDocument ?? document
-        }
+    static func logText(for snapshot: CodexThreadSnapshot, chatUpdatedAt: Date?) -> String {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let document = projection.render(
+            from: snapshot,
+            chatCreatedAt: nil,
+            chatUpdatedAt: chatUpdatedAt
+        )
         guard let document else {
             return ""
         }
@@ -628,7 +622,7 @@ private final class ReviewChatLogFixtureRetainer {
         chatIDs.contains(chatID)
     }
 
-    func upsert(chatID: CodexThreadID, items: [CodexChatItemSnapshot]) async {
+    func upsert(chatID: CodexThreadID, items: [CodexThreadItem]) async {
         let previousItemsByID = Dictionary(
             uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
         )
@@ -672,7 +666,7 @@ private var previewSupportRetainersByStore: [ObjectIdentifier: ReviewChatLogFixt
 private func makeChatItems(
     from entries: [ReviewChatLogEntryForTesting],
     turnID: CodexTurnID
-) -> [CodexChatItemSnapshot] {
+) -> [CodexThreadItem] {
     var accumulated: [String: ReviewChatLogAccumulatedItem] = [:]
     var orderedIDs: [String] = []
     for entry in entries {
@@ -688,7 +682,7 @@ private func makeChatItems(
 }
 
 private struct ReviewChatLogAccumulatedItem {
-    var snapshot: CodexChatItemSnapshot
+    var snapshot: CodexThreadItem
 
     init(
         entry: ReviewChatLogEntryForTesting,
@@ -701,7 +695,6 @@ private struct ReviewChatLogAccumulatedItem {
         case .command:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .commandExecution,
                 content: .command(
                     .init(
@@ -715,7 +708,6 @@ private struct ReviewChatLogAccumulatedItem {
         case .commandOutput:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .commandExecution,
                 content: .command(
                     .init(
@@ -729,7 +721,6 @@ private struct ReviewChatLogAccumulatedItem {
         case .fileChange:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .fileChange,
                 content: .fileChange(
                     .init(
@@ -741,7 +732,6 @@ private struct ReviewChatLogAccumulatedItem {
         case .agentMessage:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .agentMessage,
                 content: .message(
                     .init(
@@ -753,42 +743,36 @@ private struct ReviewChatLogAccumulatedItem {
         case .plan, .todoList:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: entry.kind == .todoList ? .init(rawValue: "todoList") : .plan,
                 content: .plan((existing?.plainText ?? "") + entry.text)
             )
         case .reasoning, .rawReasoning:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: entry.kind == .rawReasoning ? .init(rawValue: "rawReasoning") : .reasoning,
                 content: .reasoning(.init(content: (existing?.reasoningText ?? "") + entry.text))
             )
         case .reasoningSummary:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .init(rawValue: "reasoningSummary"),
                 content: .reasoning(.init(summary: (existing?.reasoningText ?? "") + entry.text))
             )
         case .contextCompaction:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .contextCompaction,
                 content: .contextCompaction(entry.text)
             )
         case .toolCall:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .mcpToolCall,
                 content: .toolCall(.init(result: (existing?.toolResult ?? "") + entry.text, status: status))
             )
         case .diagnostic, .error, .progress, .event:
             snapshot = .init(
                 id: itemID,
-                turnID: turnID,
                 kind: .init(rawValue: entry.kind.rawValue),
                 content: .diagnostic((existing?.plainText ?? "") + entry.text)
             )
@@ -902,49 +886,15 @@ private func codexTurnStatus(for entry: ReviewChatLogEntryForTesting) -> CodexTu
     return CodexTurnStatus(rawValue: rawValue)
 }
 
-private extension CodexChatChange {
-    static func previewChangesForTesting(from previous: CodexChatSnapshot?, to current: CodexChatSnapshot) -> [Self] {
-        guard let previous else {
-            return [.snapshot(current)]
-        }
-
-        var changes: [Self] = []
-        let previousTurnsByID = Dictionary(uniqueKeysWithValues: previous.turns.map { ($0.id, $0) })
-        for turn in current.turns where previousTurnsByID[turn.id] != turn {
-            changes.append(.turnUpdated(turn))
-        }
-
-        let previousItemsByID = Dictionary(uniqueKeysWithValues: previous.items.map { ($0.id, $0) })
-        let currentItemIDs = Set(current.items.map(\.id))
-        for removedItem in previous.items where currentItemIDs.contains(removedItem.id) == false {
-            changes.append(.itemRemoved(id: removedItem.id, turnID: removedItem.turnID))
-        }
-        for item in current.items {
-            guard let previousItem = previousItemsByID[item.id] else {
-                changes.append(.itemInserted(item))
-                continue
-            }
-            guard previousItem != item else {
-                continue
-            }
-            if let delta = previousItem.textDeltaForTesting(to: item) {
-                changes.append(.itemTextAppended(id: item.id, turnID: item.turnID, delta: delta, item: item))
-            } else {
-                changes.append(.itemUpdated(item))
-            }
-        }
-
-        if previous.phase != current.phase {
-            changes.append(.phaseChanged(current.phase))
-        }
-        return changes
+extension CodexThreadSnapshot {
+    var items: [CodexThreadItem] {
+        (turns ?? []).flatMap(\.items)
     }
 }
 
-private extension CodexChatItemSnapshot {
-    func outputDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
-        guard turnID == item.turnID,
-              kind == item.kind,
+private extension CodexThreadItem {
+    func outputDeltaForTesting(to item: CodexThreadItem) -> String? {
+        guard kind == item.kind,
               preservesOutputDeltaMetadata(for: item),
               let previousOutput = commandOutputForTesting,
               let nextOutput = item.commandOutputForTesting,
@@ -956,9 +906,8 @@ private extension CodexChatItemSnapshot {
         return String(nextOutput.dropFirst(previousOutput.count))
     }
 
-    func textDeltaForTesting(to item: CodexChatItemSnapshot) -> String? {
+    func textDeltaForTesting(to item: CodexThreadItem) -> String? {
         guard
-            turnID == item.turnID,
             kind == item.kind,
             sameContentShapeForTesting(as: item),
             preservesTextDeltaMetadata(for: item),
@@ -972,7 +921,7 @@ private extension CodexChatItemSnapshot {
         return String(nextText.dropFirst(previousText.count))
     }
 
-    private func preservesTextDeltaMetadata(for item: CodexChatItemSnapshot) -> Bool {
+    private func preservesTextDeltaMetadata(for item: CodexThreadItem) -> Bool {
         switch (content, item.content) {
         case (.command, .command),
             (.fileChange, .fileChange),
@@ -983,7 +932,7 @@ private extension CodexChatItemSnapshot {
         }
     }
 
-    private func preservesOutputDeltaMetadata(for item: CodexChatItemSnapshot) -> Bool {
+    private func preservesOutputDeltaMetadata(for item: CodexThreadItem) -> Bool {
         switch (content, item.content) {
         case (.command(let previous), .command(let next)):
             previous.command == next.command
@@ -1018,7 +967,7 @@ private extension CodexChatItemSnapshot {
         }
     }
 
-    private func sameContentShapeForTesting(as item: CodexChatItemSnapshot) -> Bool {
+    private func sameContentShapeForTesting(as item: CodexThreadItem) -> Bool {
         switch (content, item.content) {
         case (.message, .message),
             (.plan, .plan),

@@ -1,7 +1,8 @@
 import CodexKit
 import Foundation
 
-struct ReviewMonitorCodexChatLogProjection: Sendable {
+@MainActor
+struct ReviewMonitorCodexChatLogProjection {
     private var documentProjection = ReviewMonitorLogDocumentProjection()
 
     var currentDocument: ReviewMonitorLog.Document {
@@ -13,21 +14,87 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
     }
 
     mutating func render(
-        from snapshot: CodexChatProjectedTurnSnapshot,
+        from chat: CodexChat,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?
     ) -> ReviewMonitorLog.Document? {
-        guard snapshot.items.isEmpty == false else {
+        var turnStatusByID: [CodexTurnID: CodexTurnStatus] = [:]
+        for turn in chat.turns {
+            if let status = turn.status {
+                turnStatusByID[turn.id] = status
+            }
+        }
+        return render(
+            items: chat.items.map { item in
+                CodexChatModelLogItem(
+                    item: item,
+                    turnStatus: item.turnID.flatMap { turnStatusByID[$0] }
+                )
+            },
+            turnStatus: nil,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt
+        )
+    }
+
+    mutating func render(
+        from snapshot: CodexTurnSnapshot,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
+    ) -> ReviewMonitorLog.Document? {
+        render(
+            items: snapshot.items.map {
+                CodexThreadSnapshotLogItem(
+                    item: $0,
+                    turnID: snapshot.id,
+                    turnStatus: snapshot.status
+                )
+            },
+            turnStatus: snapshot.status,
+            chatCreatedAt: chatCreatedAt,
+            chatUpdatedAt: chatUpdatedAt
+        )
+    }
+
+    mutating func render(
+        from snapshot: CodexThreadSnapshot,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
+    ) -> ReviewMonitorLog.Document? {
+        let items = (snapshot.turns ?? []).flatMap { turn in
+            turn.items.map {
+                CodexThreadSnapshotLogItem(
+                    item: $0,
+                    turnID: turn.id,
+                    turnStatus: turn.status
+                )
+            }
+        }
+        return render(
+            items: items,
+            turnStatus: nil,
+            chatCreatedAt: chatCreatedAt ?? snapshot.createdAt,
+            chatUpdatedAt: chatUpdatedAt ?? snapshot.updatedAt
+        )
+    }
+
+    private mutating func render<Item: CodexChatLogProjectionItem>(
+        items: [Item],
+        turnStatus: CodexTurnStatus?,
+        chatCreatedAt: Date?,
+        chatUpdatedAt: Date?
+    ) -> ReviewMonitorLog.Document? {
+        guard items.isEmpty == false else {
             documentProjection.reset()
             return nil
         }
-        let suppressUserMessages = snapshot.items.contains { item in
+        let suppressUserMessages = items.contains { item in
             item.kind == .enteredReviewMode || item.kind == .exitedReviewMode
         }
-        let blocks = snapshot.items.flatMap {
+        let blocks = items.flatMap {
             projectedBlocks(
                 from: $0,
-                turnSnapshot: snapshot.turn,
+                turnStatus: turnStatus,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt,
                 suppressUserMessages: suppressUserMessages
@@ -40,9 +107,9 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         return documentProjection.render(projectedBlocks: blocks)
     }
 
-    private func projectedBlocks(
-        from item: CodexChatItemSnapshot,
-        turnSnapshot: CodexChatTurnStateSnapshot,
+    private func projectedBlocks<Item: CodexChatLogProjectionItem>(
+        from item: Item,
+        turnStatus: CodexTurnStatus?,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
         suppressUserMessages: Bool
@@ -79,9 +146,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
             return commandBlocks(
                 item: item,
                 command: command,
-                turnSnapshot: turnSnapshot,
-                chatCreatedAt: chatCreatedAt,
-                chatUpdatedAt: chatUpdatedAt
+                turnStatus: turnStatus
             )
         case .fileChange(let fileChange):
             let title = fileChange.path ?? "File change"
@@ -97,7 +162,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                         status: fileChangeStatus(
                             item: item,
                             fileChange: fileChange,
-                            turnSnapshot: turnSnapshot
+                            turnStatus: turnStatus
                         ),
                         path: fileChange.path
                     )
@@ -118,7 +183,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                     metadata: .init(
                         sourceType: "contextCompaction",
                         title: title,
-                        status: turnSnapshot.status?.rawValue
+                        status: turnStatus?.rawValue
                     )
                 )
             ]
@@ -132,7 +197,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                         for: item,
                         sourceType: item.kind.rawValue,
                         title: message,
-                        status: itemStatus(for: item, turnSnapshot: turnSnapshot).rawValue
+                        status: itemStatus(for: item, turnStatus: turnStatus).rawValue
                     )
                 )
             ]
@@ -146,7 +211,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                         for: item,
                         sourceType: "log",
                         title: message,
-                        status: itemStatus(for: item, turnSnapshot: turnSnapshot).rawValue
+                        status: itemStatus(for: item, turnStatus: turnStatus).rawValue
                     )
                 )
             ]
@@ -176,20 +241,16 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         return "\(title)\n\(detail)"
     }
 
-    private func commandBlocks(
-        item: CodexChatItemSnapshot,
+    private func commandBlocks<Item: CodexChatLogProjectionItem>(
+        item: Item,
         command: CodexCommand,
-        turnSnapshot: CodexChatTurnStateSnapshot,
-        chatCreatedAt: Date?,
-        chatUpdatedAt: Date?
+        turnStatus: CodexTurnStatus?
     ) -> [ReviewMonitorLogProjectedBlock] {
         let groupID = sourceBlockID(for: item)
         let metadata = commandMetadata(
             item: item,
             command: command,
-            turnSnapshot: turnSnapshot,
-            chatCreatedAt: chatCreatedAt,
-            chatUpdatedAt: chatUpdatedAt
+            turnStatus: turnStatus
         )
         let commandLine = command.command.nilIfEmpty
         let output = command.output ?? ""
@@ -203,9 +264,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
                     metadata: outputOnlyCommandMetadata(
                         item: item,
                         command: command,
-                        turnSnapshot: turnSnapshot,
-                        chatCreatedAt: chatCreatedAt,
-                        chatUpdatedAt: chatUpdatedAt
+                        turnStatus: turnStatus
                     )
                 )
             ]
@@ -224,7 +283,7 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         ]
         if output.isEmpty == false {
             blocks.append(
-                .init(
+                ReviewMonitorLogProjectedBlock(
                     id: derivedBlockID(prefix: "commandOutput", item: item),
                     kind: .commandOutput,
                     groupID: groupID,
@@ -235,8 +294,8 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         return blocks
     }
 
-    private func webSearchBlocks(
-        item: CodexChatItemSnapshot,
+    private func webSearchBlocks<Item: CodexChatLogProjectionItem>(
+        item: Item,
         toolCall: CodexToolCall
     ) -> [ReviewMonitorLogProjectedBlock] {
         let query = toolCall.arguments ?? toolCall.name ?? "Web search"
@@ -258,8 +317,8 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         ]
     }
 
-    private func toolCallBlocks(
-        item: CodexChatItemSnapshot,
+    private func toolCallBlocks<Item: CodexChatLogProjectionItem>(
+        item: Item,
         toolCall: CodexToolCall
     ) -> [ReviewMonitorLogProjectedBlock] {
         let label = [toolCall.namespace, toolCall.server, toolCall.name]
@@ -289,8 +348,8 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         ]
     }
 
-    private func projectedBlock(
-        _ item: CodexChatItemSnapshot,
+    private func projectedBlock<Item: CodexChatLogProjectionItem>(
+        _ item: Item,
         kind: ReviewMonitorLog.Kind,
         groupID: String? = nil,
         text: String,
@@ -305,27 +364,27 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         )
     }
 
-    private func derivedBlockID(
+    private func derivedBlockID<Item: CodexChatLogProjectionItem>(
         prefix: String,
-        item: CodexChatItemSnapshot
+        item: Item
     ) -> ReviewMonitorLog.BlockID {
         ReviewMonitorLog.BlockID("\(prefix):\(sourceBlockID(for: item))")
     }
 
-    private func sourceBlockID(for item: CodexChatItemSnapshot) -> String {
-        let rawTurnID = item.turnID?.rawValue ?? "unknown-turn"
+    private func sourceBlockID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
+        let rawTurnID = item.projectionTurnID?.rawValue ?? "unknown-turn"
         return "\(rawTurnID):\(item.id)"
     }
 
-    private func logKind(
-        for item: CodexChatItemSnapshot,
+    private func logKind<Item: CodexChatLogProjectionItem>(
+        for item: Item,
         fallback: ReviewMonitorLog.Kind
     ) -> ReviewMonitorLog.Kind {
         ReviewMonitorLog.Kind(rawValue: item.kind.rawValue) ?? fallback
     }
 
-    private func metadata(
-        for item: CodexChatItemSnapshot,
+    private func metadata<Item: CodexChatLogProjectionItem>(
+        for item: Item,
         sourceType: String,
         title: String? = nil,
         status: String? = nil,
@@ -352,14 +411,12 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         )
     }
 
-    private func commandMetadata(
-        item: CodexChatItemSnapshot,
+    private func commandMetadata<Item: CodexChatLogProjectionItem>(
+        item: Item,
         command: CodexCommand,
-        turnSnapshot: CodexChatTurnStateSnapshot,
-        chatCreatedAt: Date?,
-        chatUpdatedAt: Date?
+        turnStatus: CodexTurnStatus?
     ) -> ReviewMonitorLog.Metadata {
-        let status = commandStatus(item: item, command: command, turnSnapshot: turnSnapshot)
+        let status = commandStatus(item: item, command: command, turnStatus: turnStatus)
         return .init(
             sourceType: "commandExecution",
             status: status,
@@ -367,24 +424,24 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
             command: command.command,
             cwd: command.cwd,
             exitCode: command.exitCode,
-            startedAt: chatCreatedAt,
-            completedAt: terminalStatus(itemStatus(for: item, turnSnapshot: turnSnapshot)) ? chatUpdatedAt : nil,
+            startedAt: command.startedAt,
+            completedAt: command.completedAt,
+            durationMs: command.durationMilliseconds,
             commandStatus: status
         )
     }
 
-    private func outputOnlyCommandMetadata(
-        item: CodexChatItemSnapshot,
+    private func outputOnlyCommandMetadata<Item: CodexChatLogProjectionItem>(
+        item: Item,
         command: CodexCommand,
-        turnSnapshot: CodexChatTurnStateSnapshot,
-        chatCreatedAt: Date?,
-        chatUpdatedAt: Date?
+        turnStatus: CodexTurnStatus?
     ) -> ReviewMonitorLog.Metadata {
         guard
-            command.cwd != nil || command.exitCode != nil || command.status != nil || chatCreatedAt != nil
-                || chatUpdatedAt != nil
+            command.cwd != nil || command.exitCode != nil || command.status != nil
+                || command.startedAt != nil || command.completedAt != nil
+                || command.durationMilliseconds != nil
         else {
-            let status = itemStatus(for: item, turnSnapshot: turnSnapshot)
+            let status = itemStatus(for: item, turnStatus: turnStatus)
             return .init(
                 sourceType: "command",
                 title: "Command output",
@@ -394,18 +451,16 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         return commandMetadata(
             item: item,
             command: command,
-            turnSnapshot: turnSnapshot,
-            chatCreatedAt: chatCreatedAt,
-            chatUpdatedAt: chatUpdatedAt
+            turnStatus: turnStatus
         )
     }
 
-    private func commandStatus(
-        item: CodexChatItemSnapshot,
+    private func commandStatus<Item: CodexChatLogProjectionItem>(
+        item: Item,
         command: CodexCommand,
-        turnSnapshot: CodexChatTurnStateSnapshot
+        turnStatus: CodexTurnStatus?
     ) -> String {
-        let status = itemStatus(for: item, turnSnapshot: turnSnapshot)
+        let status = itemStatus(for: item, turnStatus: turnStatus)
         if terminalStatus(status) {
             return status.rawValue
         }
@@ -420,23 +475,23 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
         return command.status?.rawValue ?? status.rawValue
     }
 
-    private func fileChangeStatus(
-        item: CodexChatItemSnapshot,
+    private func fileChangeStatus<Item: CodexChatLogProjectionItem>(
+        item: Item,
         fileChange: CodexFileChange,
-        turnSnapshot: CodexChatTurnStateSnapshot
+        turnStatus: CodexTurnStatus?
     ) -> String {
-        let status = itemStatus(for: item, turnSnapshot: turnSnapshot)
+        let status = itemStatus(for: item, turnStatus: turnStatus)
         if terminalStatus(status) {
             return status.rawValue
         }
         return fileChange.status?.rawValue ?? status.rawValue
     }
 
-    private func itemStatus(
-        for item: CodexChatItemSnapshot,
-        turnSnapshot: CodexChatTurnStateSnapshot
+    private func itemStatus<Item: CodexChatLogProjectionItem>(
+        for item: Item,
+        turnStatus: CodexTurnStatus?
     ) -> CodexTurnStatus {
-        item.itemStatus ?? turnSnapshot.status ?? .running
+        item.itemStatus ?? turnStatus ?? .running
     }
 
     private func terminalStatus(_ status: CodexTurnStatus) -> Bool {
@@ -449,9 +504,81 @@ struct ReviewMonitorCodexChatLogProjection: Sendable {
     }
 }
 
-private extension CodexChatItemSnapshot {
+@MainActor
+private protocol CodexChatLogProjectionItem {
+    var id: String { get }
+    var projectionTurnID: CodexTurnID? { get }
+    var kind: CodexThreadItem.Kind { get }
+    var content: CodexThreadItem.Content { get }
+    var itemStatus: CodexTurnStatus? { get }
+}
+
+extension CodexChat.Item: CodexChatLogProjectionItem {
+    fileprivate var projectionTurnID: CodexTurnID? {
+        turnID
+    }
+
     var itemStatus: CodexTurnStatus? {
-        switch content {
+        content.reviewMonitorLogItemStatus
+    }
+}
+
+@MainActor
+private struct CodexChatModelLogItem: CodexChatLogProjectionItem {
+    var item: CodexChat.Item
+    var turnStatus: CodexTurnStatus?
+
+    var id: String {
+        item.id
+    }
+
+    var projectionTurnID: CodexTurnID? {
+        item.turnID
+    }
+
+    var kind: CodexThreadItem.Kind {
+        item.kind
+    }
+
+    var content: CodexThreadItem.Content {
+        item.content
+    }
+
+    var itemStatus: CodexTurnStatus? {
+        item.content.reviewMonitorLogItemStatus ?? turnStatus
+    }
+}
+
+@MainActor
+private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
+    var item: CodexThreadItem
+    var turnID: CodexTurnID
+    var turnStatus: CodexTurnStatus?
+
+    var id: String {
+        item.id
+    }
+
+    var projectionTurnID: CodexTurnID? {
+        turnID
+    }
+
+    var kind: CodexThreadItem.Kind {
+        item.kind
+    }
+
+    var content: CodexThreadItem.Content {
+        item.content
+    }
+
+    var itemStatus: CodexTurnStatus? {
+        item.content.reviewMonitorLogItemStatus ?? turnStatus
+    }
+}
+
+private extension CodexThreadItem.Content {
+    var reviewMonitorLogItemStatus: CodexTurnStatus? {
+        switch self {
         case .command(let command):
             return command.status
         case .fileChange(let fileChange):

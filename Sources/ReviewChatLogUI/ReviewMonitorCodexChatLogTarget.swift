@@ -1,5 +1,8 @@
 import AppKit
 import CodexKit
+import OSLog
+
+private let logger = Logger(subsystem: "CodexReviewKit", category: "chat-log-target")
 
 @MainActor
 package final class ReviewMonitorCodexChatLogTarget {
@@ -7,6 +10,13 @@ package final class ReviewMonitorCodexChatLogTarget {
 
     private enum LogRenderTarget: Equatable {
         case chat(CodexThreadID)
+
+        var debugDescription: String {
+            switch self {
+            case .chat(let id):
+                "chat(\(id.rawValue))"
+            }
+        }
     }
 
     package var view: NSView {
@@ -57,6 +67,9 @@ package final class ReviewMonitorCodexChatLogTarget {
         if isSwitchingRenderedChat {
             logScrollView.resetFindStateForContentReuse()
         }
+        logger.debug(
+            "Binding Codex chat log chatID=\(selectedChatID.rawValue, privacy: .public) switchingChat=\(isSwitchingRenderedChat, privacy: .public)"
+        )
         cancelSelectedChatObservation()
         cancelPendingLogSourceChange()
         selectedChatLogTask?.cancel()
@@ -106,6 +119,11 @@ package final class ReviewMonitorCodexChatLogTarget {
         restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
         allowIncrementalUpdate: Bool
     ) -> Bool {
+        if hasAppliedBoundLog && allowIncrementalUpdate == false {
+            logger.debug(
+                "Replacing displayed Codex chat log target=\(target.debugDescription, privacy: .public) blocks=\(sourceDocument.blocks.count, privacy: .public)"
+            )
+        }
         logRenderGeneration &+= 1
         let generation = logRenderGeneration
         let renderer = logRenderer
@@ -153,7 +171,16 @@ package final class ReviewMonitorCodexChatLogTarget {
                     return
                 }
                 self.selectedChatObservation = observation
-                for await change in observation.changes {
+                self.publishSelectedCodexChatLogChange(
+                    self.logProjection.applyBaseline(
+                        from: observation.chat,
+                        chatCreatedAt: chat.createdAt,
+                        chatUpdatedAt: chat.updatedAt
+                    ),
+                    target: target,
+                    initialRestorationTarget: initialRestorationTarget
+                )
+                for await update in observation.updates {
                     guard Task.isCancelled == false,
                         self.boundChat === chat,
                         self.isCurrentLogRenderTarget(target)
@@ -162,7 +189,8 @@ package final class ReviewMonitorCodexChatLogTarget {
                     }
                     self.publishSelectedCodexChatLogChange(
                         self.logProjection.apply(
-                            change,
+                            update,
+                            in: observation.chat,
                             chatCreatedAt: chat.createdAt,
                             chatUpdatedAt: chat.updatedAt
                         ),
@@ -243,6 +271,12 @@ package final class ReviewMonitorCodexChatLogTarget {
         allowIncrementalUpdate: Bool
     ) {
         guard let document = change.sourceDocument else {
+            if hasAppliedBoundLog {
+                let chatID = boundChatID?.rawValue ?? "nil"
+                logger.debug(
+                    "Clearing displayed Codex chat log chatID=\(chatID, privacy: .public)"
+                )
+            }
             resetLogRenderer()
             logScrollView.clear()
             return

@@ -80,10 +80,21 @@ extension ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
-        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        let splitViewController = viewController.splitViewControllerForTesting
+        let sidebar = splitViewController.sidebarViewControllerForTesting
+        let transport = splitViewController.transportViewControllerForTesting
         try await waitForCondition {
             sidebar.sidebarKindForTesting == .chatList
                 && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+        splitViewController.setSidebarReviewChatFilterForTesting(.running)
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID))
+                == "Branch: feature/workspace-alpha-sidebar"
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedChatID
+                && transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
         }
         #expect(
             store.chatCancellationCapability(
@@ -115,7 +126,7 @@ extension ReviewUITests {
         try await withTestTimeout(.seconds(2)) {
             while true {
                 let snapshot = await previewContent.snapshotForTesting(chatID: selectedChatID)
-                if snapshot?.turns.last?.status == .cancelled {
+                if snapshot?.turns?.last?.status == .cancelled {
                     break
                 }
                 try Task.checkCancellation()
@@ -124,15 +135,31 @@ extension ReviewUITests {
         }
         try await waitForCondition {
             sidebar.codexSidebarSectionsForTesting.chat(id: selectedChatID)?.status == .idle
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) == nil
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == nil
+                && transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
         }
 
+        splitViewController.setSidebarReviewChatFilterForTesting(.all)
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID))
+                == "Branch: feature/workspace-alpha-sidebar"
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedChatID
+        }
+
+        var presentedCancelItemAfterCancellation = false
         var cancelItemEnabledAfterCancellation = false
         sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
             guard let cancelItem = menu.items.first(where: { $0.title == "Cancel" }) else {
                 return
             }
+            presentedCancelItemAfterCancellation = true
             cancelItemEnabledAfterCancellation = cancelItem.isEnabled
         }
+        #expect(presentedCancelItemAfterCancellation)
         #expect(cancelItemEnabledAfterCancellation == false)
     }
 
@@ -2235,7 +2262,7 @@ private func performChatContextMenuItemForTesting(
 }
 
 @MainActor
-private func diagnosticMessage(_ item: CodexChatItemSnapshot) -> String {
+private func diagnosticMessage(_ item: CodexThreadItem) -> String {
     if case .diagnostic(let message) = item.content {
         return message
     }
@@ -2243,7 +2270,7 @@ private func diagnosticMessage(_ item: CodexChatItemSnapshot) -> String {
 }
 
 @MainActor
-private func reasoningText(_ item: CodexChatItemSnapshot) -> String {
+private func reasoningText(_ item: CodexThreadItem) -> String {
     if case .reasoning(let reasoning) = item.content {
         return reasoning.text
     }
@@ -2251,7 +2278,7 @@ private func reasoningText(_ item: CodexChatItemSnapshot) -> String {
 }
 
 @MainActor
-private func contextCompactionTitle(_ item: CodexChatItemSnapshot) -> String {
+private func contextCompactionTitle(_ item: CodexThreadItem) -> String {
     if case .contextCompaction(let title) = item.content {
         return title ?? ""
     }

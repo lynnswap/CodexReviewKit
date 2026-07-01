@@ -582,11 +582,10 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let metadata else {
             return hasOutput == false
         }
-        let status = (metadata.commandStatus ?? metadata.status)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let status = normalizedCommandStatus(metadata)
         switch status {
-        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "canceled", "cancelled":
+        case "completed", "succeeded", "success", "failed", "failure", "errored", "declined", "canceled",
+            "cancelled", "interrupted":
             return false
         case "inprogress", "in_progress", "started", "running":
             return true
@@ -597,6 +596,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
             return false
         }
         return true
+    }
+
+    private static func normalizedCommandStatus(_ metadata: ReviewMonitorLog.Metadata?) -> String? {
+        (metadata?.commandStatus ?? metadata?.status)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     private static func commandDurationText(
@@ -658,9 +663,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
 
         let rawStatus = metadata?.commandStatus ?? metadata?.status
-        let normalizedStatus = rawStatus?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
+        let normalizedStatus = normalizedCommandStatus(metadata)
         if normalizedStatus == "succeeded" || normalizedStatus == "success" || normalizedStatus == "completed" {
             return "Success"
         }
@@ -669,6 +672,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 return "exit \(exitCode)"
             }
             return "Failed"
+        }
+        if normalizedStatus == "interrupted" {
+            return "Interrupted"
+        }
+        if normalizedStatus == "cancelled" || normalizedStatus == "canceled" {
+            return "Cancelled"
         }
         return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }

@@ -260,13 +260,15 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         sidebarSelectionObservation = withPortableContinuousObservation { [weak self, uiState] event in
-            _ = uiState.selection?.id
+            let selection = uiState.selection
             guard event.kind != .initial,
                 let self,
                 self.hasCodexSidebarContent
             else {
                 return
             }
+            // Keep semantic selection in this observation's dependency set.
+            _ = selection
             self.reconcileOutlineSelection()
         }
     }
@@ -319,13 +321,13 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         codexSidebarModelContext = modelContext
         codexSidebarResultsController = resultsController
         codexSidebarTransactionTask = Task { @MainActor [weak self, resultsController] in
-            for await _ in resultsController.transactions {
+            for await transaction in resultsController.transactions {
                 guard let self,
                     self.codexSidebarResultsController === resultsController
                 else {
                     return
                 }
-                self.applyCodexSidebarTransaction(controller: resultsController)
+                self.applyCodexSidebarTransaction(transaction, controller: resultsController)
             }
         }
         codexSidebarFetchTask = Task { @MainActor [weak self, resultsController] in
@@ -344,9 +346,28 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     }
 
     private func applyCodexSidebarTransaction(
+        _ transaction: CodexFetchedResultsTransaction<CodexChat>,
         controller: CodexFetchedResultsController<CodexChat>
     ) {
+        clearRemovedChatSelectionIfNeeded(transaction)
         applyCodexSidebarSourceSections(controller.sections)
+    }
+
+    private func clearRemovedChatSelectionIfNeeded(
+        _ transaction: CodexFetchedResultsTransaction<CodexChat>
+    ) {
+        guard transaction.reason == .remove,
+            case .chat(let selectedChatID) = uiState.selection,
+            transaction.itemChanges.contains(where: { change in
+                if case .delete(let itemID, _) = change {
+                    return itemID == selectedChatID
+                }
+                return false
+            })
+        else {
+            return
+        }
+        uiState.selection = nil
     }
 
     private var codexSidebarSourceSections: [CodexFetchSection<CodexChat>] {
@@ -589,7 +610,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
     private func reconcileOutlineSelection() {
         guard let selection = uiState.selection else {
             if outlineView.selectedRow != -1 {
-                outlineView.deselectAll(nil)
+                deselectOutlineSelectionForReconciliation()
             }
             return
         }
@@ -599,44 +620,67 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard codexWorkspaceGroupSelection(id: selectedWorkspaceGroupID) != nil,
                 let row = row(forCodexSidebarSelectionID: .workspaceGroup(selectedWorkspaceGroupID))
             else {
-                guard codexSidebarContentIsAuthoritative else {
-                    return
+                if shouldClearMissingSemanticSelection(selection) {
+                    uiState.selection = nil
                 }
-                uiState.selection = nil
-                outlineView.deselectAll(nil)
+                deselectOutlineSelectionForReconciliation()
                 return
             }
 
             guard outlineView.selectedRow != row else {
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            selectOutlineRowForReconciliation(row)
 
         case .chat(let selectedChatID):
             guard currentChatSelection(id: selectedChatID) != nil else {
-                guard codexSidebarContentIsAuthoritative else {
-                    return
+                if shouldClearMissingSemanticSelection(selection) {
+                    uiState.selection = nil
                 }
-                uiState.selection = nil
-                outlineView.deselectAll(nil)
+                deselectOutlineSelectionForReconciliation()
                 return
             }
 
             guard let row = row(forCurrentChatSelectionID: selectedChatID)
             else {
+                deselectOutlineSelectionForReconciliation()
                 return
             }
 
             guard outlineView.selectedRow != row else {
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            selectOutlineRowForReconciliation(row)
 
         }
     }
 
-    private func updateSelectionFromOutlineView() {
+    private func selectOutlineRowForReconciliation(_ row: Int) {
+        guard outlineView.selectedRow != row else {
+            return
+        }
+        let wasReconcilingSelection = isReconcilingSelection
+        isReconcilingSelection = true
+        outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        isReconcilingSelection = wasReconcilingSelection
+    }
+
+    private func deselectOutlineSelectionForReconciliation() {
+        guard outlineView.selectedRow != -1 else {
+            return
+        }
+        let wasReconcilingSelection = isReconcilingSelection
+        isReconcilingSelection = true
+        outlineView.deselectAll(nil)
+        isReconcilingSelection = wasReconcilingSelection
+    }
+
+    private func updateSelectionFromOutlineView(acceptingProgrammaticSelection: Bool = false) {
         guard isReconcilingSelection == false else {
+            return
+        }
+        guard acceptingProgrammaticSelection || outlineView.consumeUserSelectionChangeIntent() else {
+            reconcileOutlineSelection()
             return
         }
         guard outlineView.selectedRow != -1 else {
@@ -738,26 +782,24 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         guard let selection else {
             return true
         }
-        guard codexSidebarContentIsAuthoritative else {
-            return true
+        return shouldClearMissingSemanticSelection(selection) == false
+    }
+
+    private func shouldClearMissingSemanticSelection(_ selection: ReviewMonitorSelection) -> Bool {
+        guard let codexSidebarModelContext else {
+            return false
         }
         switch selection {
         case .workspaceGroup(let id):
-            return codexWorkspaceGroupSelection(id: id) != nil
+            return codexSidebarModelContext.registeredModel(for: id) == nil
         case .chat(let id):
-            return currentChatSelection(id: id) != nil
-        }
-    }
-
-    private var codexSidebarContentIsAuthoritative: Bool {
-        guard let codexSidebarResultsController else {
-            return false
-        }
-        switch codexSidebarResultsController.phase {
-        case .loaded, .failed:
-            return true
-        case .idle, .loading:
-            return false
+            if currentChatSelection(id: id) != nil {
+                return false
+            }
+            guard let chat = codexSidebarModelContext.registeredModel(for: id) else {
+                return false
+            }
+            return chat.isArchived
         }
     }
 
@@ -1437,6 +1479,16 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             return id
         }
 
+        var nativeSelectedReviewChatIDForTesting: CodexThreadID? {
+            guard outlineView.selectedRow != -1,
+                let node = codexSidebarNode(from: outlineView.item(atRow: outlineView.selectedRow)),
+                case .chat(let id) = node.item
+            else {
+                return nil
+            }
+            return id
+        }
+
         var selectedWorkspaceGroupIDForTesting: CodexWorkspaceGroupID? {
             guard case .workspaceGroup(let id) = uiState.selection else {
                 return nil
@@ -1520,6 +1572,17 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             guard row != -1 else {
                 return
             }
+            outlineView.selectUserInitiatedRowForTesting(row)
+        }
+
+        func selectCodexSidebarRowProgrammaticallyForTesting(rowID: ReviewMonitorCodexSidebarRowID) {
+            guard let node = codexSidebarOutlineTree.node(rowID: rowID) else {
+                return
+            }
+            let row = outlineView.row(forItem: node)
+            guard row != -1 else {
+                return
+            }
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
 
@@ -1541,7 +1604,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 uiState.selection = .chat(chat.id)
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outlineView.selectUserInitiatedRowForTesting(row)
         }
 
         func selectReviewChatForTesting(id chatID: CodexThreadID) {
@@ -1553,7 +1616,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 uiState.selection = .chat(chatID)
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outlineView.selectUserInitiatedRowForTesting(row)
         }
 
         func presentContextMenuForTesting(
@@ -1582,7 +1645,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 uiState.selection = fallbackWorkspaceGroupSelection(cwd: cwd)
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            outlineView.selectUserInitiatedRowForTesting(row)
         }
 
         func clearSelectionForTesting() {
@@ -1702,8 +1765,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
                 uiState.selection = fallbackWorkspaceGroupSelection(cwd: cwd)
                 return
             }
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            updateSelectionFromOutlineView()
+            outlineView.selectUserInitiatedRowForTesting(row)
+            updateSelectionFromOutlineView(acceptingProgrammaticSelection: true)
         }
 
         func focusSidebarForTesting() {
@@ -1877,6 +1940,8 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
     var contextMenuProvider: ((NSPoint) -> NSMenu?)?
     var draggingExitedHandler: (() -> Void)?
     private var isPresentingContextMenu = false
+    private var userSelectionInteractionDepth = 0
+    private var hasPendingUserSelectionChangeIntent = false
     private weak var contextMenuFirstResponder: NSResponder?
     private var previousContextMenu: NSMenu?
 
@@ -1898,7 +1963,15 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         handlePrimaryInteraction(at: point) {
-            super.mouseDown(with: event)
+            performUserSelectionInteraction {
+                super.mouseDown(with: event)
+            }
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        performUserSelectionInteraction {
+            super.keyDown(with: event)
         }
     }
 
@@ -1946,6 +2019,37 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
         }
 
         action()
+    }
+
+    func consumeUserSelectionChangeIntent() -> Bool {
+        guard userSelectionInteractionDepth > 0 || hasPendingUserSelectionChangeIntent else {
+            return false
+        }
+        if userSelectionInteractionDepth == 0 {
+            hasPendingUserSelectionChangeIntent = false
+        }
+        return true
+    }
+
+    private func performUserSelectionInteraction(_ action: () -> Void) {
+        userSelectionInteractionDepth += 1
+        hasPendingUserSelectionChangeIntent = true
+        defer {
+            userSelectionInteractionDepth -= 1
+            schedulePendingUserSelectionIntentClear()
+        }
+        action()
+    }
+
+    private func schedulePendingUserSelectionIntentClear() {
+        Task { @MainActor [weak self] in
+            guard let self,
+                self.userSelectionInteractionDepth == 0
+            else {
+                return
+            }
+            self.hasPendingUserSelectionChangeIntent = false
+        }
     }
 
     private func isSidebarFirstResponder(_ responder: NSResponder) -> Bool {
@@ -2034,6 +2138,12 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
             acceptsFirstResponder
         }
 
+        func selectUserInitiatedRowForTesting(_ row: Int) {
+            performUserSelectionInteraction {
+                selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            }
+        }
+
     #endif
 }
 
@@ -2057,15 +2167,10 @@ private final class ReviewMonitorReviewChatTableRowView: NSTableRowView {
 private final class ReviewMonitorReviewChatCellView: NSTableCellView {
     private var hostingView: NSHostingView<ReviewMonitorChatRowView>?
     private weak var boundChat: CodexChat?
-    private var chatObservation: PortableObservationTracking.Token?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         configureHierarchy()
-    }
-
-    isolated deinit {
-        chatObservation?.cancel()
     }
 
     @available(*, unavailable)
@@ -2079,11 +2184,7 @@ private final class ReviewMonitorReviewChatCellView: NSTableCellView {
         }
         objectValue = chat
         boundChat = chat
-        chatObservation?.cancel()
         render(chat)
-        chatObservation = withPortableContinuousObservation { [weak self, chat] _ in
-            self?.render(chat)
-        }
     }
 
     private func configureHierarchy() {

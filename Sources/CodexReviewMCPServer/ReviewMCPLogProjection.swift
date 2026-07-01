@@ -50,15 +50,6 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.finalResult = nil
     }
 
-    @MainActor
-    init(result: CodexReviewAPI.Read.Result, turnSnapshot: CodexChatTurnSnapshot) {
-        self.init(
-            result: result,
-            turnID: turnSnapshot.turnID,
-            threadItems: turnSnapshot.threadItems
-        )
-    }
-
     init(
         result: CodexReviewAPI.Read.Result,
         turnID: CodexTurnID,

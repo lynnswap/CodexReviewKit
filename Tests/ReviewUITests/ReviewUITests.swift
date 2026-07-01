@@ -2771,11 +2771,11 @@ struct ReviewUITests {
             turnID: chat.turnID
         )
         _ = try await awaitChatRenderForTesting(chat, in: transport) { snapshot in
-            snapshot.log.contains("Running Command")
+            snapshot.log.contains("Command output")
         }
 
         #expect(transport.displayedLogForTesting.contains("- updated with longer replacement text"))
-        #expect(transport.displayedLogForTesting.contains("Running Command"))
+        #expect(transport.displayedLogForTesting.contains("Command output"))
         #expect(transport.displayedLogForTesting.contains("Command output - 1 line") == false)
         #expect(transport.displayedLogForTesting.contains("hidden output") == false)
         #expect(transport.logAppendCountForTesting == appendCount + 1)

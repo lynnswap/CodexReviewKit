@@ -1052,7 +1052,7 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let maxOffset = maximumVerticalScrollOffset()
         let minOffset = minimumVerticalScrollOffset()
         guard maxOffset > minOffset else {
-            return .top
+            return .bottom
         }
 
         let offset = contentView.bounds.origin.y

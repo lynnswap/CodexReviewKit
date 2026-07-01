@@ -541,7 +541,7 @@ enum ReviewMonitorLogStyler {
         switch normalized {
         case "completed", "complete", "succeeded", "success":
             return true
-        case "failed", "failure", "errored", "error", "cancelled", "canceled":
+        case "failed", "failure", "errored", "error", "cancelled", "canceled", "interrupted":
             return false
         default:
             return metadata?.completedAt != nil
@@ -562,7 +562,7 @@ enum ReviewMonitorLogStyler {
             return .running
         case "completed", "complete", "succeeded", "success", "passed", "applied":
             return .success
-        case "failed", "failure", "errored", "error", "cancelled", "canceled":
+        case "failed", "failure", "errored", "error", "cancelled", "canceled", "interrupted":
             return .failure
         case "warning", "warn", "updated":
             return .warning

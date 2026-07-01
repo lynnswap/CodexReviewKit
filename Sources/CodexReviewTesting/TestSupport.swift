@@ -2,6 +2,7 @@ import Foundation
 import CodexAppServerKit
 import CodexAppServerKitTesting
 import CodexReviewKit
+import Synchronization
 
 package typealias AsyncGate = CodexAppServerTestGate
 package typealias OneShotGate = AsyncGate
@@ -23,22 +24,24 @@ package actor ManualClock {
 }
 
 package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitoring, @unchecked Sendable {
-    private let lock = NSLock()
-    private var current: CodexReviewNetworkSnapshot?
-    private var continuations: [UUID: AsyncStream<CodexReviewNetworkSnapshot>.Continuation] = [:]
+    private struct State {
+        var current: CodexReviewNetworkSnapshot?
+        var continuations: [UUID: AsyncStream<CodexReviewNetworkSnapshot>.Continuation] = [:]
+    }
+
+    private let state: Mutex<State>
 
     package init(initialSnapshot: CodexReviewNetworkSnapshot = .satisfied()) {
-        self.current = initialSnapshot
+        self.state = Mutex(State(current: initialSnapshot))
     }
 
     package func snapshots() -> AsyncStream<CodexReviewNetworkSnapshot> {
         let continuationID = UUID()
         return AsyncStream(bufferingPolicy: .unbounded) { continuation in
-            let snapshot: CodexReviewNetworkSnapshot?
-            lock.lock()
-            continuations[continuationID] = continuation
-            snapshot = current
-            lock.unlock()
+            let snapshot = state.withLock { state in
+                state.continuations[continuationID] = continuation
+                return state.current
+            }
             if let snapshot {
                 continuation.yield(snapshot)
             }
@@ -49,20 +52,19 @@ package final class ManualCodexReviewNetworkMonitor: CodexReviewNetworkMonitorin
     }
 
     package func yield(_ snapshot: CodexReviewNetworkSnapshot) {
-        let continuations: [AsyncStream<CodexReviewNetworkSnapshot>.Continuation]
-        lock.lock()
-        current = snapshot
-        continuations = Array(self.continuations.values)
-        lock.unlock()
+        let continuations = state.withLock { state in
+            state.current = snapshot
+            return Array(state.continuations.values)
+        }
         for continuation in continuations {
             continuation.yield(snapshot)
         }
     }
 
     private func removeContinuation(id: UUID) {
-        lock.lock()
-        continuations.removeValue(forKey: id)
-        lock.unlock()
+        _ = state.withLock { state in
+            state.continuations.removeValue(forKey: id)
+        }
     }
 }
 

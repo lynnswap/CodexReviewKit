@@ -177,15 +177,27 @@ package extension CodexReviewMCPServer {
 
             let chat = modelContext.model(for: CodexThreadID(rawValue: threadID))
             do {
-                try await chat.refresh(includeTurns: true)
+                try await modelContext.refresh(chat, includeTurns: true)
             } catch {
                 return nil
             }
-            guard let snapshot = chat.turnSnapshot(for: CodexTurnID(rawValue: turnID)) else {
+            let codexTurnID = CodexTurnID(rawValue: turnID)
+            guard chat.turn(id: codexTurnID) != nil else {
                 return nil
             }
-            return ReviewMCPLogProjection(result: result, turnSnapshot: snapshot)
+            return ReviewMCPLogProjection(
+                result: result,
+                turnID: codexTurnID,
+                threadItems: chat.items(in: codexTurnID).map(\.threadItemForReviewMCP)
+            )
         }
+    }
+}
+
+@MainActor
+private extension CodexChat.Item {
+    var threadItemForReviewMCP: CodexThreadItem {
+        CodexThreadItem(id: id, kind: kind, content: content, rawPayload: rawPayload)
     }
 }
 

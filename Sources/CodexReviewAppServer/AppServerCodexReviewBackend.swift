@@ -17,7 +17,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private static let reviewPermissionProfileID = ":danger-full-access"
 
     private let appServer: CodexAppServer
-    private let modelContext: CodexModelContext?
+    private let dataKitModelContext: CodexModelContext?
     private var reviewEventSessionsByAttemptID: [String: AppServerReviewEventSession] = [:]
     private var activeReviewAttemptIDByThreadID: [String: String] = [:]
     private var activeThreadIDsByAttemptID: [String: Set<String>] = [:]
@@ -26,9 +26,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     private var inFlightRestartCountByInterruptedAttemptID: [String: Int] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
 
-    package init(appServer: CodexAppServer, modelContext: CodexModelContext? = nil) {
+    package init(appServer: CodexAppServer, dataKitModelContext: CodexModelContext? = nil) {
         self.appServer = appServer
-        self.modelContext = modelContext
+        self.dataKitModelContext = dataKitModelContext
     }
 
     package func readSettings() async throws -> CodexReviewBackendModel.Settings.Snapshot {
@@ -92,23 +92,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
     }
 
     package func startReview(_ request: CodexReviewBackendModel.Review.Start) async throws -> BackendReviewAttempt {
-        let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
-        let review: CodexReviewSession
-        if let modelContext {
-            review = try await modelContext.startReview(
-                in: workspace,
-                input: CodexReviewInput(
-                    target: request.request.target.appServerReviewTarget,
-                    options: reviewThreadOptions(request)
-                )
-            ).session
-        } else {
-            review = try await appServer.startReview(
-                in: workspace,
-                target: request.request.target.appServerReviewTarget,
-                options: reviewThreadOptions(request)
-            )
-        }
+        let review = try await startReviewSession(for: request)
         let attemptID = makeAppServerReviewAttemptID()
         let run = CodexReviewBackendModel.Review.Run(
             attemptID: attemptID,
@@ -122,6 +106,46 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend {
         await session.startConsuming(review)
 
         return await session.attempt()
+    }
+
+    private func startReviewSession(for request: CodexReviewBackendModel.Review.Start) async throws
+        -> CodexReviewSession
+    {
+        let workspace = URL(fileURLWithPath: request.request.cwd, isDirectory: true)
+        if let dataKitModelContext {
+            return try await startDataKitBackedReviewSession(
+                request,
+                in: workspace,
+                modelContext: dataKitModelContext
+            )
+        }
+        return try await startRawAppServerReviewSession(request, in: workspace)
+    }
+
+    private func startDataKitBackedReviewSession(
+        _ request: CodexReviewBackendModel.Review.Start,
+        in workspace: URL,
+        modelContext: CodexModelContext
+    ) async throws -> CodexReviewSession {
+        try await modelContext.startReview(
+            in: workspace,
+            input: CodexReviewInput(
+                target: request.request.target.appServerReviewTarget,
+                options: reviewThreadOptions(request)
+            )
+        )
+        .session
+    }
+
+    private func startRawAppServerReviewSession(
+        _ request: CodexReviewBackendModel.Review.Start,
+        in workspace: URL
+    ) async throws -> CodexReviewSession {
+        try await appServer.startReview(
+            in: workspace,
+            target: request.request.target.appServerReviewTarget,
+            options: reviewThreadOptions(request)
+        )
     }
 
     private func reviewThreadOptions(
