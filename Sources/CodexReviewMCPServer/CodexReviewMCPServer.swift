@@ -195,9 +195,9 @@ package extension CodexReviewMCPServer {
 }
 
 @MainActor
-private extension CodexChat.Item {
+private extension CodexItem {
     var threadItemForReviewMCP: CodexThreadItem {
-        CodexThreadItem(id: id, kind: kind, content: content, rawPayload: rawPayload)
+        CodexThreadItem(id: itemID, kind: kind, content: content, rawPayload: rawPayload)
     }
 }
 

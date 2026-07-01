@@ -1,5 +1,6 @@
 import CodexKit
 import CodexAppServerKitTesting
+import Foundation
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
 @testable import ReviewChatLogUI
@@ -510,6 +511,84 @@ struct ReviewMonitorCodexChatDetailTests {
         )
 
         #expect(document?.text == "Explain the current diff.")
+    }
+
+    @Test func codexChatLogProjectionUsesTerminalTurnStatusForRunningCommand() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-command"),
+            status: .completed,
+            items: [
+                .init(
+                    id: "command-running",
+                    kind: .commandExecution,
+                    content: .command(.init(
+                        command: "/bin/zsh -lc",
+                        output: "done",
+                        status: .running,
+                        startedAt: Date(timeIntervalSince1970: 4_000)
+                    ))
+                ),
+            ]
+        )
+
+        let renderedDocument = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: Date(timeIntervalSince1970: 4_005)
+        )
+        let sourceDocument = try #require(renderedDocument)
+        let commandBlock = try #require(sourceDocument.blocks.first { $0.kind == ReviewMonitorLog.Kind.command })
+        #expect(commandBlock.metadata?.status == CodexTurnStatus.completed.rawValue)
+        #expect(commandBlock.metadata?.commandStatus == CodexTurnStatus.completed.rawValue)
+
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            currentDate: Date(timeIntervalSince1970: 4_010)
+        )
+        let panel = try #require(displayDocument.commandOutputPanels.first)
+        #expect(panel.isActive == false)
+        #expect(panel.title.hasPrefix("Ran /bin/zsh -lc"))
+        #expect(panel.exitText == "Success")
+    }
+
+    @Test func codexChatLogProjectionUsesCommandExitCodeOverTerminalTurnSuccess() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-command"),
+            status: .completed,
+            items: [
+                .init(
+                    id: "command-failed",
+                    kind: .commandExecution,
+                    content: .command(.init(
+                        command: "/bin/zsh -lc",
+                        output: "error",
+                        exitCode: 1,
+                        status: .running,
+                        startedAt: Date(timeIntervalSince1970: 4_000)
+                    ))
+                ),
+            ]
+        )
+
+        let renderedDocument = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: Date(timeIntervalSince1970: 4_005)
+        )
+        let sourceDocument = try #require(renderedDocument)
+        let commandBlock = try #require(sourceDocument.blocks.first { $0.kind == ReviewMonitorLog.Kind.command })
+        #expect(commandBlock.metadata?.status == CodexTurnStatus.failed.rawValue)
+        #expect(commandBlock.metadata?.commandStatus == CodexTurnStatus.failed.rawValue)
+
+        let displayDocument = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: sourceDocument,
+            currentDate: Date(timeIntervalSince1970: 4_010)
+        )
+        let panel = try #require(displayDocument.commandOutputPanels.first)
+        #expect(panel.isActive == false)
+        #expect(panel.exitText == "exit 1")
     }
 
     @Test func codexChatStatusOnlyChangesKeepIncrementalLogUpdates() async throws {

@@ -372,8 +372,7 @@ struct ReviewMonitorCodexChatLogProjection {
     }
 
     private func sourceBlockID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
-        let rawTurnID = item.projectionTurnID?.rawValue ?? "unknown-turn"
-        return "\(rawTurnID):\(item.id)"
+        item.sourceID
     }
 
     private func logKind<Item: CodexChatLogProjectionItem>(
@@ -461,6 +460,15 @@ struct ReviewMonitorCodexChatLogProjection {
         turnStatus: CodexTurnStatus?
     ) -> String {
         let status = itemStatus(for: item, turnStatus: turnStatus)
+        if let commandStatus = command.status,
+            terminalStatus(commandStatus),
+            commandStatus != .completed
+        {
+            return commandStatus.rawValue
+        }
+        if let exitCode = command.exitCode {
+            return exitCode == 0 ? CodexTurnStatus.completed.rawValue : CodexTurnStatus.failed.rawValue
+        }
         if terminalStatus(status) {
             return status.rawValue
         }
@@ -468,9 +476,6 @@ struct ReviewMonitorCodexChatLogProjection {
             terminalStatus(commandStatus)
         {
             return commandStatus.rawValue
-        }
-        if let exitCode = command.exitCode {
-            return exitCode == 0 ? CodexTurnStatus.completed.rawValue : CodexTurnStatus.failed.rawValue
         }
         return command.status?.rawValue ?? status.rawValue
     }
@@ -491,7 +496,15 @@ struct ReviewMonitorCodexChatLogProjection {
         for item: Item,
         turnStatus: CodexTurnStatus?
     ) -> CodexTurnStatus {
-        item.itemStatus ?? turnStatus ?? .running
+        let itemStatus = item.itemStatus
+        let turnStatus = turnStatus ?? item.projectionTurnStatus
+        if let turnStatus,
+            terminalStatus(turnStatus),
+            itemStatus.map(terminalStatus) != true
+        {
+            return turnStatus
+        }
+        return itemStatus ?? turnStatus ?? .running
     }
 
     private func terminalStatus(_ status: CodexTurnStatus) -> Bool {
@@ -506,16 +519,26 @@ struct ReviewMonitorCodexChatLogProjection {
 
 @MainActor
 private protocol CodexChatLogProjectionItem {
-    var id: String { get }
+    var itemID: String { get }
+    var sourceID: String { get }
     var projectionTurnID: CodexTurnID? { get }
+    var projectionTurnStatus: CodexTurnStatus? { get }
     var kind: CodexThreadItem.Kind { get }
     var content: CodexThreadItem.Content { get }
     var itemStatus: CodexTurnStatus? { get }
 }
 
-extension CodexChat.Item: CodexChatLogProjectionItem {
+extension CodexItem: CodexChatLogProjectionItem {
+    fileprivate var sourceID: String {
+        id.rawValue
+    }
+
     fileprivate var projectionTurnID: CodexTurnID? {
         turnID
+    }
+
+    fileprivate var projectionTurnStatus: CodexTurnStatus? {
+        turn?.status
     }
 
     var itemStatus: CodexTurnStatus? {
@@ -525,15 +548,23 @@ extension CodexChat.Item: CodexChatLogProjectionItem {
 
 @MainActor
 private struct CodexChatModelLogItem: CodexChatLogProjectionItem {
-    var item: CodexChat.Item
+    var item: CodexItem
     var turnStatus: CodexTurnStatus?
 
-    var id: String {
-        item.id
+    var itemID: String {
+        item.itemID
+    }
+
+    var sourceID: String {
+        item.id.rawValue
     }
 
     var projectionTurnID: CodexTurnID? {
         item.turnID
+    }
+
+    var projectionTurnStatus: CodexTurnStatus? {
+        turnStatus
     }
 
     var kind: CodexThreadItem.Kind {
@@ -545,7 +576,7 @@ private struct CodexChatModelLogItem: CodexChatLogProjectionItem {
     }
 
     var itemStatus: CodexTurnStatus? {
-        item.content.reviewMonitorLogItemStatus ?? turnStatus
+        item.content.reviewMonitorLogItemStatus
     }
 }
 
@@ -555,12 +586,23 @@ private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
     var turnID: CodexTurnID
     var turnStatus: CodexTurnStatus?
 
-    var id: String {
+    var itemID: String {
         item.id
+    }
+
+    var sourceID: String {
+        CodexChatItemID(
+            rawItemID: semanticItemID,
+            turnID: turnID
+        ).rawValue
     }
 
     var projectionTurnID: CodexTurnID? {
         turnID
+    }
+
+    var projectionTurnStatus: CodexTurnStatus? {
+        turnStatus
     }
 
     var kind: CodexThreadItem.Kind {
@@ -572,7 +614,18 @@ private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
     }
 
     var itemStatus: CodexTurnStatus? {
-        item.content.reviewMonitorLogItemStatus ?? turnStatus
+        item.content.reviewMonitorLogItemStatus
+    }
+
+    private var semanticItemID: String {
+        switch item.kind {
+        case .enteredReviewMode:
+            "review-marker:enteredReviewMode"
+        case .exitedReviewMode:
+            "review-marker:exitedReviewMode"
+        default:
+            item.id
+        }
     }
 }
 
