@@ -970,3 +970,9 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return mappedRange
     }
 }
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}

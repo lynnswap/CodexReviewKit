@@ -29,7 +29,7 @@ enum ReviewMonitorLogSourceChange: Equatable {
 }
 
 @MainActor
-struct ReviewMonitorSelectedCodexChatLogProjection {
+struct ReviewMonitorCodexChatLogSourceProjection {
     private var turnProjection = CodexChatTurnProjection()
     private var logProjection = ReviewMonitorCodexChatLogProjection()
     private var hasLogDocument = false

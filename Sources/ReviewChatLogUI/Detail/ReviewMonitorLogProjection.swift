@@ -1,8 +1,8 @@
 import Foundation
 
-enum ReviewMonitorLog {}
+package enum ReviewMonitorLog {}
 
-extension ReviewMonitorLog {
+package extension ReviewMonitorLog {
     struct BlockID: Codable, Hashable, Sendable {
         var rawValue: String
 

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import CodexKit
 @_spi(Testing) @testable import CodexReviewKit
+@testable import ReviewChatLogUI
 @testable import ReviewUI
 @testable import ReviewUIPreviewSupport
 
@@ -587,7 +588,7 @@ private enum ReviewChatLogFixtureStore {
     }
 
     static func logText(for snapshot: CodexChatSnapshot, chatUpdatedAt: Date?) -> String {
-        var projection = ReviewMonitorSelectedCodexChatLogProjection()
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
         var document: ReviewMonitorLog.Document?
         for change in CodexChatChange.previewChangesForTesting(from: nil, to: snapshot) {
             document = projection.apply(

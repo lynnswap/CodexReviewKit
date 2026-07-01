@@ -7,6 +7,7 @@ import CodexReviewKit
 import SwiftUI
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
+@testable import ReviewChatLogUI
 @testable import ReviewUI
 @testable import ReviewUIPreviewSupport
 import CodexReviewTesting

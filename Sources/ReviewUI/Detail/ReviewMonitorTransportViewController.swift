@@ -1,29 +1,19 @@
 import AppKit
 import CodexKit
 import ObservationBridge
+import ReviewChatLogUI
 
 @MainActor
 final class ReviewMonitorTransportViewController: NSViewController {
-    private enum LogRenderTarget: Equatable {
-        case chat(CodexThreadID)
-    }
-
     private let codexModelSource: ReviewMonitorCodexModelSource?
     private let uiState: ReviewMonitorUIState
-    private let selectedCodexChat: ReviewMonitorSelectedCodexChat
-    private let logScrollView = ReviewMonitorLogScrollView()
-    private var logRenderer = ReviewMonitorLogRenderer()
+    private let chatLogTarget = ReviewMonitorCodexChatLogTarget()
     private let placeholderViewController = PlaceholderViewController()
     private var displayedContentConstraints: [NSLayoutConstraint] = []
     private var selectionObservation: PortableObservationTracking.Token?
-    private var selectedChatLogTask: Task<Void, Never>?
+    private var boundModelContext: CodexModelContext?
     private var boundChatID: CodexThreadID?
     private var displayedSelection: ReviewMonitorSelectionID?
-    private var logScrollTargetsByChatID: [CodexThreadID: ReviewMonitorLogScrollView.ScrollRestorationTarget] = [:]
-    private var logRenderTask: Task<Void, Never>?
-    private var logRenderGeneration: UInt64 = 0
-    private var appliedLogRenderGeneration: UInt64 = 0
-    private var hasAppliedBoundLog = false
 
     convenience init(
         uiState: ReviewMonitorUIState,
@@ -41,9 +31,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
     ) {
         self.codexModelSource = codexModelSource
         self.uiState = uiState
-        self.selectedCodexChat = ReviewMonitorSelectedCodexChat(
-            modelSource: codexModelSource
-        )
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -54,8 +41,6 @@ final class ReviewMonitorTransportViewController: NSViewController {
 
     isolated deinit {
         selectionObservation?.cancel()
-        selectedChatLogTask?.cancel()
-        logRenderTask?.cancel()
     }
 
     override func loadView() {
@@ -78,17 +63,18 @@ final class ReviewMonitorTransportViewController: NSViewController {
     private func configureHierarchy() {
         let safeArea = view.safeAreaLayoutGuide
         let placeholderView = placeholderViewController.view
+        let chatLogView = chatLogTarget.view
         addChild(placeholderViewController)
         placeholderView.translatesAutoresizingMaskIntoConstraints = false
 
-        view.addSubview(logScrollView)
+        view.addSubview(chatLogView)
         view.addSubview(placeholderView)
 
         displayedContentConstraints = [
-            logScrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            logScrollView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
-            logScrollView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
-            logScrollView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
+            chatLogView.topAnchor.constraint(equalTo: view.topAnchor),
+            chatLogView.leadingAnchor.constraint(equalTo: safeArea.leadingAnchor),
+            chatLogView.trailingAnchor.constraint(equalTo: safeArea.trailingAnchor),
+            chatLogView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
         ]
 
         NSLayoutConstraint.activate(
@@ -106,79 +92,78 @@ final class ReviewMonitorTransportViewController: NSViewController {
         selectionObservation?.cancel()
         selectionObservation = withPortableContinuousObservation { [weak self, uiState] event in
             let selection = uiState.selection
+            let modelContext = self?.codexModelSource?.modelContext
             guard let self else {
                 return
             }
-            guard event.kind == .initial || self.selectionRequiresPresentationUpdate(selection) else {
+            guard event.kind == .initial
+                || self.selectionRequiresPresentationUpdate(selection, modelContext: modelContext)
+            else {
                 return
             }
-            self.updatePresentation(selection: selection)
+            self.updatePresentation(selection: selection, modelContext: modelContext)
         }
     }
 
-    private func selectionRequiresPresentationUpdate(_ selection: ReviewMonitorSelection?) -> Bool {
+    private func selectionRequiresPresentationUpdate(
+        _ selection: ReviewMonitorSelection?,
+        modelContext: CodexModelContext?
+    ) -> Bool {
         switch selection {
         case .workspaceGroup:
             return displayedSelection != selection?.id
         case .chat(let selectedChatID):
             return boundChatID != selectedChatID
+                || boundModelContext !== modelContext
                 || displayedSelection != selection?.id
         case nil:
             return displayedSelection != nil
         }
     }
 
-    private func updatePresentation(selection: ReviewMonitorSelection?) {
+    private func updatePresentation(selection: ReviewMonitorSelection?, modelContext: CodexModelContext?) {
         switch selection {
         case .workspaceGroup:
             clearDisplayedLogSelection()
             displayPlaceholder(.noFindings)
-            logScrollView.isHidden = true
+            chatLogTarget.view.isHidden = true
             displayedSelection = selection?.id
 
         case .chat:
             if case .chat(let selectedChatID) = selection {
-                displayChat(selectedChatID)
+                displayChat(selectedChatID, modelContext: modelContext)
             }
             hidePlaceholder()
-            logScrollView.isHidden = false
+            chatLogTarget.view.isHidden = false
             displayedSelection = selection?.id
 
         case nil:
             clearDisplayedLogSelection()
             displayPlaceholder(.noSelection)
-            logScrollView.isHidden = true
+            chatLogTarget.view.isHidden = true
             displayedSelection = nil
         }
     }
 
-    private func displayChat(_ selectedChatID: CodexThreadID) {
-        let isSwitchingRenderedChat = boundChatID != nil && boundChatID != selectedChatID
-        cacheBoundLogScrollTarget()
-        if isSwitchingRenderedChat {
-            logScrollView.resetFindStateForContentReuse()
+    private func displayChat(_ selectedChatID: CodexThreadID, modelContext: CodexModelContext?) {
+        guard boundChatID != selectedChatID || boundModelContext !== modelContext else {
+            return
         }
-        selectedChatLogTask?.cancel()
-        selectedChatLogTask = nil
-        resetLogRenderer()
         boundChatID = selectedChatID
-        let restorationTarget = restorationTarget(chatID: selectedChatID)
-        selectedCodexChat.bind(toChatID: selectedChatID)
-        startSelectedCodexChatLogStream(
-            target: .chat(selectedChatID),
-            initialRestorationTarget: restorationTarget
-        )
+        boundModelContext = modelContext
+        guard let modelContext else {
+            chatLogTarget.clear()
+            return
+        }
+
+        let chat = modelContext.model(for: selectedChatID)
+        chatLogTarget.bind(chat: chat, modelContext: modelContext)
     }
 
     private func clearDisplayedLogSelection() {
-        cacheBoundLogScrollTarget()
-        selectedChatLogTask?.cancel()
-        selectedChatLogTask = nil
         boundChatID = nil
-        selectedCodexChat.unbind()
-        resetLogRenderer()
-        logScrollView.resetFindStateForContentReuse()
-        logScrollView.clear()
+        boundModelContext = nil
+        chatLogTarget.clear()
     }
 
     @discardableResult
@@ -197,127 +182,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
     }
 
     @discardableResult
-    private func renderBoundLog(
-        sourceDocument: ReviewMonitorLog.Document,
-        target: LogRenderTarget,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) -> Bool {
-        logRenderGeneration &+= 1
-        let generation = logRenderGeneration
-        let renderer = logRenderer
-        logRenderTask?.cancel()
-        logRenderTask = Task { @MainActor [weak self] in
-            let renderedDocument = await renderer.render(sourceDocument: sourceDocument)
-            guard Task.isCancelled == false,
-                let self,
-                self.logRenderGeneration == generation,
-                self.isCurrentLogRenderTarget(target)
-            else {
-                return
-            }
-            _ = self.logScrollView.render(
-                sourceDocument: renderedDocument.source,
-                displayDocument: renderedDocument.display,
-                restoring: restorationTarget,
-                allowIncrementalUpdate: allowIncrementalUpdate && self.hasAppliedBoundLog
-            )
-            self.appliedLogRenderGeneration = generation
-            self.hasAppliedBoundLog = true
-        }
-        return true
-    }
-
-    private func startSelectedCodexChatLogStream(
-        target: LogRenderTarget,
-        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
-    ) {
-        startLogSourceChangeStream(
-            selectedCodexChat.logSourceChangeStream(),
-            target: target,
-            initialRestorationTarget: initialRestorationTarget
-        )
-    }
-
-    private func startLogSourceChangeStream(
-        _ stream: AsyncStream<ReviewMonitorLogSourceChange>,
-        target: LogRenderTarget,
-        initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
-    ) {
-        selectedChatLogTask?.cancel()
-        selectedChatLogTask = Task { @MainActor [weak self] in
-            for await change in stream {
-                guard let self,
-                    self.isCurrentLogRenderTarget(target)
-                else {
-                    return
-                }
-                let hasAppliedInitialDocument = self.hasAppliedBoundLog
-                self.applySelectedCodexChatLogChange(
-                    change,
-                    target: target,
-                    restorationTarget: hasAppliedInitialDocument
-                        ? self.logScrollView.currentScrollRestorationTarget
-                        : initialRestorationTarget,
-                    allowIncrementalUpdate: hasAppliedInitialDocument && change.allowsIncrementalRender
-                )
-            }
-        }
-    }
-
-    private func applySelectedCodexChatLogChange(
-        _ change: ReviewMonitorLogSourceChange,
-        target: LogRenderTarget,
-        restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget,
-        allowIncrementalUpdate: Bool
-    ) {
-        guard let document = change.sourceDocument else {
-            resetLogRenderer()
-            logScrollView.clear()
-            return
-        }
-        renderBoundLog(
-            sourceDocument: document,
-            target: target,
-            restorationTarget: restorationTarget,
-            allowIncrementalUpdate: allowIncrementalUpdate
-        )
-    }
-
-    private func isCurrentLogRenderTarget(_ target: LogRenderTarget) -> Bool {
-        switch target {
-        case .chat(let id):
-            boundChatID == id
-        }
-    }
-
-    private func cacheBoundLogScrollTarget() {
-        let restorationTarget = logScrollView.currentScrollRestorationTarget
-        if let boundChatID {
-            logScrollTargetsByChatID[boundChatID] = restorationTarget
-        }
-    }
-
-    private func resetLogRenderer() {
-        logRenderTask?.cancel()
-        logRenderTask = nil
-        logRenderGeneration &+= 1
-        appliedLogRenderGeneration = logRenderGeneration
-        hasAppliedBoundLog = false
-        logRenderer = ReviewMonitorLogRenderer()
-    }
-
-    private func restorationTarget(
-        chatID: CodexThreadID
-    ) -> ReviewMonitorLogScrollView.ScrollRestorationTarget {
-        logScrollTargetsByChatID[chatID] ?? .bottom
-    }
-
-    @discardableResult
     func performDisplayedTextFinderAction(_ sender: Any?) -> Bool {
         switch displayedSelection {
         case .chat:
-            return logScrollView.performDisplayedTextFinderAction(sender)
+            return chatLogTarget.performDisplayedTextFinderAction(sender)
         case .workspaceGroup, nil:
             return false
         }
@@ -326,7 +194,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
     func validateDisplayedTextFinderAction(_ item: NSValidatedUserInterfaceItem) -> Bool {
         switch displayedSelection {
         case .chat:
-            return logScrollView.validateDisplayedTextFinderAction(item)
+            return chatLogTarget.validateDisplayedTextFinderAction(item)
         case .workspaceGroup, nil:
             return false
         }
@@ -357,23 +225,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         var selectedChatLogTaskForTesting: Task<Void, Never>? {
-            selectedChatLogTask
-        }
-
-        var selectedCodexChatIDForTesting: String? {
-            selectedCodexChat.chat?.id.rawValue
-        }
-
-        var selectedCodexChatPhaseForTesting: CodexDataPhase {
-            selectedCodexChat.phase
-        }
-
-        var selectedCodexChatItemTextsForTesting: [String] {
-            selectedCodexChat.chat?.items.compactMap(\.text) ?? []
+            chatLogTarget.selectedChatLogTaskForTesting
         }
 
         var displayedLogForTesting: String {
-            logScrollView.displayedTextForTesting
+            chatLogTarget.displayedTextForTesting
         }
 
         var isShowingEmptyStateForTesting: Bool {
@@ -389,278 +245,278 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         var logAppendCountForTesting: Int {
-            logScrollView.appendCount
+            chatLogTarget.appendCount
         }
 
         var logReplaceCountForTesting: Int {
-            logScrollView.replaceCount
+            chatLogTarget.replaceCount
         }
 
         var logReloadCountForTesting: Int {
-            logScrollView.reloadCount
+            chatLogTarget.reloadCount
         }
 
         var logAutoFollowCountForTesting: Int {
-            logScrollView.autoFollowCount
+            chatLogTarget.autoFollowCount
         }
 
         var logWordGlowCountForTesting: Int {
-            logScrollView.wordGlowCountForTesting
+            chatLogTarget.wordGlowCountForTesting
         }
 
         var logWordFadeRenderingAttributeRangeCountForTesting: Int {
-            logScrollView.wordFadeRenderingAttributeRangeCountForTesting
+            chatLogTarget.wordFadeRenderingAttributeRangeCountForTesting
         }
 
         var logWordFadeStorageUsesOpaqueTextColorForTesting: Bool {
-            logScrollView.wordFadeStorageUsesOpaqueTextColorForTesting
+            chatLogTarget.wordFadeStorageUsesOpaqueTextColorForTesting
         }
 
         var logWordFadeDisplayInvalidationCountForTesting: Int {
-            logScrollView.wordFadeDisplayInvalidationCountForTesting
+            chatLogTarget.wordFadeDisplayInvalidationCountForTesting
         }
 
         var logCommandOutputPanelCountForTesting: Int {
-            logScrollView.commandOutputPanelCountForTesting
+            chatLogTarget.commandOutputPanelCountForTesting
         }
 
         var logTerminalDecorationRectCountForTesting: Int {
-            logScrollView.terminalDecorationRectCountForTesting
+            chatLogTarget.terminalDecorationRectCountForTesting
         }
 
         var logExpandedCommandOutputPanelCountForTesting: Int {
-            logScrollView.expandedCommandOutputPanelCountForTesting
+            chatLogTarget.expandedCommandOutputPanelCountForTesting
         }
 
         var logCommandOutputPanelUsesTextKit2ForTesting: Bool {
-            logScrollView.commandOutputPanelUsesTextKit2ForTesting
+            chatLogTarget.commandOutputPanelUsesTextKit2ForTesting
         }
 
         var logCommandOutputPanelUsesInlineAttachmentForTesting: Bool {
-            logScrollView.commandOutputPanelUsesInlineAttachmentForTesting
+            chatLogTarget.commandOutputPanelUsesInlineAttachmentForTesting
         }
 
         var logCommandOutputPanelUsesButtonAttachmentForTesting: Bool {
-            logScrollView.commandOutputPanelUsesButtonAttachmentForTesting
+            chatLogTarget.commandOutputPanelUsesButtonAttachmentForTesting
         }
 
         var logCollapsedCommandOutputPanelAttachmentLineHeightForTesting: CGFloat? {
-            logScrollView.collapsedCommandOutputPanelAttachmentLineHeightForTesting
+            chatLogTarget.collapsedCommandOutputPanelAttachmentLineHeightForTesting
         }
 
         var logCollapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting: Bool {
-            logScrollView.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
+            chatLogTarget.collapsedCommandOutputPanelAttachmentPayloadIsEmptyForTesting
         }
 
         var logCommandOutputPanelUsesSystemMaterialBackgroundForTesting: Bool {
-            logScrollView.commandOutputPanelUsesSystemMaterialBackgroundForTesting
+            chatLogTarget.commandOutputPanelUsesSystemMaterialBackgroundForTesting
         }
 
         var logCommandOutputPanelVisibleLineCapacityForTesting: Int {
-            logScrollView.commandOutputPanelVisibleLineCapacityForTesting
+            chatLogTarget.commandOutputPanelVisibleLineCapacityForTesting
         }
 
         var logCommandOutputPanelResultTextForTesting: String? {
-            logScrollView.commandOutputPanelResultTextForTesting
+            chatLogTarget.commandOutputPanelResultTextForTesting
         }
 
         var logCommandOutputPanelTerminalTextForTesting: String? {
-            logScrollView.commandOutputPanelTerminalTextForTesting
+            chatLogTarget.commandOutputPanelTerminalTextForTesting
         }
 
         func logCommandOutputPanelTerminalTextForTesting(blockID: ReviewMonitorLog.BlockID) -> String? {
-            logScrollView.commandOutputPanelTerminalTextForTesting(blockID: blockID)
+            chatLogTarget.commandOutputPanelTerminalTextForTesting(blockID: blockID)
         }
 
         var logCommandOutputPanelCommandLineTextForTesting: String? {
-            logScrollView.commandOutputPanelCommandLineTextForTesting
+            chatLogTarget.commandOutputPanelCommandLineTextForTesting
         }
 
         var logCommandOutputPanelOutputScrollTextForTesting: String? {
-            logScrollView.commandOutputPanelOutputScrollTextForTesting
+            chatLogTarget.commandOutputPanelOutputScrollTextForTesting
         }
 
         var logCommandOutputPanelOutputScrollIsScrollableForTesting: Bool {
-            logScrollView.commandOutputPanelOutputScrollIsScrollableForTesting
+            chatLogTarget.commandOutputPanelOutputScrollIsScrollableForTesting
         }
 
         var logCommandOutputPanelOutputScrollUsesHorizontalScrollingForTesting: Bool {
-            logScrollView.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
+            chatLogTarget.commandOutputPanelOutputScrollUsesHorizontalScrollingForTesting
         }
 
         var logCommandOutputPanelOutputScrollVerticalOffsetForTesting: CGFloat? {
-            logScrollView.commandOutputPanelOutputScrollVerticalOffsetForTesting
+            chatLogTarget.commandOutputPanelOutputScrollVerticalOffsetForTesting
         }
 
         var logCommandOutputPanelOutputScrollMaximumVerticalOffsetForTesting: CGFloat? {
-            logScrollView.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
+            chatLogTarget.commandOutputPanelOutputScrollMaximumVerticalOffsetForTesting
         }
 
         func scrollCommandOutputPanelOutputForTesting(deltaY: CGFloat) -> Bool {
-            logScrollView.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
+            chatLogTarget.scrollCommandOutputPanelOutputForTesting(deltaY: deltaY)
         }
 
         var logCommandOutputPanelOutputHitTestTargetsTextViewForTesting: Bool {
-            logScrollView.commandOutputPanelOutputHitTestTargetsTextViewForTesting
+            chatLogTarget.commandOutputPanelOutputHitTestTargetsTextViewForTesting
         }
 
         func logFinderRectsForTesting(_ range: NSRange) -> [NSRect] {
-            logScrollView.finderRectsForTesting(range)
+            chatLogTarget.finderRectsForTesting(range)
         }
 
         var logFirstCommandOutputPanelRectForTesting: NSRect? {
-            logScrollView.firstCommandOutputPanelRectForTesting
+            chatLogTarget.firstCommandOutputPanelRectForTesting
         }
 
         var logCommandOutputPanelToggleSymbolNameForTesting: String? {
-            logScrollView.commandOutputPanelToggleSymbolNameForTesting
+            chatLogTarget.commandOutputPanelToggleSymbolNameForTesting
         }
 
         var logCommandOutputPanelLeadingAlignmentDeltaForTesting: CGFloat? {
-            logScrollView.commandOutputPanelLeadingAlignmentDeltaForTesting
+            chatLogTarget.commandOutputPanelLeadingAlignmentDeltaForTesting
         }
 
         var logCommandOutputPanelChevronSizeDeltaForTesting: CGFloat? {
-            logScrollView.commandOutputPanelChevronSizeDeltaForTesting
+            chatLogTarget.commandOutputPanelChevronSizeDeltaForTesting
         }
 
         var logCommandOutputPanelChevronVerticalAlignmentDeltaForTesting: CGFloat? {
-            logScrollView.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
+            chatLogTarget.commandOutputPanelChevronVerticalAlignmentDeltaForTesting
         }
 
         func logHitTestTargetsDocumentViewForFirstOccurrenceForTesting(_ text: String) -> Bool {
-            logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
+            chatLogTarget.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
         }
 
         func toggleFirstLogCommandOutputPanelForTesting() {
-            logScrollView.toggleFirstCommandOutputPanelForTesting()
+            chatLogTarget.toggleFirstCommandOutputPanelForTesting()
         }
 
         @discardableResult
         func clickFirstLogCommandOutputPanelHeaderForTesting() -> Bool {
-            logScrollView.clickFirstCommandOutputPanelHeaderForTesting()
+            chatLogTarget.clickFirstCommandOutputPanelHeaderForTesting()
         }
 
         @discardableResult
         func clickLogCommandOutputPanelHeaderForTesting(blockID: ReviewMonitorLog.BlockID) -> Bool {
-            logScrollView.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
+            chatLogTarget.clickCommandOutputPanelHeaderForTesting(blockID: blockID)
         }
 
         func completeLogWordGlowAnimationsForTesting() {
-            logScrollView.completeWordGlowAnimationsForTesting()
+            chatLogTarget.completeWordGlowAnimationsForTesting()
         }
 
         func advanceLogWordGlowAnimationsAfterInitialDelayForTesting(_ delay: TimeInterval) {
-            logScrollView.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
+            chatLogTarget.advanceWordGlowAnimationsAfterInitialDelayForTesting(delay)
         }
 
         func setLogReduceMotionForTesting(_ reduceMotion: Bool?) {
-            logScrollView.setReduceMotionForTesting(reduceMotion)
+            chatLogTarget.setReduceMotionForTesting(reduceMotion)
         }
 
         var logUsesCustomTextKit2SurfaceForTesting: Bool {
-            logScrollView.usesCustomTextKit2SurfaceForTesting
+            chatLogTarget.usesCustomTextKit2SurfaceForTesting
         }
 
         var logUsesTextViewForTesting: Bool {
-            logScrollView.usesTextViewForTesting
+            chatLogTarget.usesTextViewForTesting
         }
 
         var logUsesLogLayoutManagerForTesting: Bool {
-            logScrollView.usesLogLayoutManagerForTesting
+            chatLogTarget.usesLogLayoutManagerForTesting
         }
 
         var logIsEditableForTesting: Bool {
-            logScrollView.isEditableForTesting
+            chatLogTarget.isEditableForTesting
         }
 
         var logIsSelectableForTesting: Bool {
-            logScrollView.isSelectableForTesting
+            chatLogTarget.isSelectableForTesting
         }
 
         var logUsesFindBarForTesting: Bool {
-            logScrollView.usesFindBarForTesting
+            chatLogTarget.usesFindBarForTesting
         }
 
         var logIsIncrementalSearchingEnabledForTesting: Bool {
-            logScrollView.isIncrementalSearchingEnabledForTesting
+            chatLogTarget.isIncrementalSearchingEnabledForTesting
         }
 
         var logFindBarVisibleForTesting: Bool {
-            logScrollView.isFindBarVisibleForTesting
+            chatLogTarget.isFindBarVisibleForTesting
         }
 
         var logTextFinderIdentifierForTesting: ObjectIdentifier {
-            logScrollView.textFinderIdentifierForTesting
+            chatLogTarget.textFinderIdentifierForTesting
         }
 
         var logFindVisibleCharacterRangesForTesting: [NSRange] {
-            logScrollView.findVisibleCharacterRangesForTesting
+            chatLogTarget.findVisibleCharacterRangesForTesting
         }
 
         var logFindStringLengthForTesting: Int {
-            logScrollView.findStringLengthForTesting
+            chatLogTarget.findStringLengthForTesting
         }
 
         var logFindClientUsesSnapshotForTesting: Bool {
-            logScrollView.findClientUsesSnapshotForTesting
+            chatLogTarget.findClientUsesSnapshotForTesting
         }
 
         var logFindClientSnapshotMapsToDocumentForTesting: Bool {
-            logScrollView.findClientSnapshotMapsToDocumentForTesting
+            chatLogTarget.findClientSnapshotMapsToDocumentForTesting
         }
 
         var logFindClientFirstSelectedRangeForTesting: NSRange {
-            logScrollView.findClientFirstSelectedRangeForTesting
+            chatLogTarget.findClientFirstSelectedRangeForTesting
         }
 
         var logHasActiveFindQueryForTesting: Bool {
-            logScrollView.hasActiveFindQueryForTesting
+            chatLogTarget.hasActiveFindQueryForTesting
         }
 
         var logVisibleFindBarSearchStringForTesting: String? {
-            logScrollView.visibleFindBarSearchStringForTesting
+            chatLogTarget.visibleFindBarSearchStringForTesting
         }
 
         @discardableResult
         func setLogVisibleFindBarSearchStringForTesting(_ string: String) -> Bool {
-            logScrollView.setVisibleFindBarSearchStringForTesting(string)
+            chatLogTarget.setVisibleFindBarSearchStringForTesting(string)
         }
 
         var logFindIndicatorInvalidationCountForTesting: Int {
-            logScrollView.findIndicatorInvalidationCountForTesting
+            chatLogTarget.findIndicatorInvalidationCountForTesting
         }
 
         var logFindIncrementalMatchRangeCountForTesting: Int {
-            logScrollView.findIncrementalMatchRangeCountForTesting
+            chatLogTarget.findIncrementalMatchRangeCountForTesting
         }
 
         var logFindBarContainerContentViewIsTextContentViewForTesting: Bool {
-            logScrollView.findBarContainerContentViewIsTextContentViewForTesting
+            chatLogTarget.findBarContainerContentViewIsTextContentViewForTesting
         }
 
         var logFindIncrementalSearchUsesSystemHighlightingForTesting: Bool {
-            logScrollView.findIncrementalSearchUsesSystemHighlightingForTesting
+            chatLogTarget.findIncrementalSearchUsesSystemHighlightingForTesting
         }
 
         var logHitTestTargetsDocumentViewForTesting: Bool {
-            logScrollView.hitTestTargetsDocumentViewForTesting
+            chatLogTarget.hitTestTargetsDocumentViewForTesting
         }
 
         var logWritingToolsDisabledForTesting: Bool {
-            logScrollView.writingToolsDisabledForTesting
+            chatLogTarget.writingToolsDisabledForTesting
         }
 
         var logOverlayScrollerHideRequestCountForTesting: Int {
-            logScrollView.overlayScrollerHideRequestCountForTesting
+            chatLogTarget.overlayScrollerHideRequestCountForTesting
         }
 
         var logRenderIsIdleForTesting: Bool {
-            appliedLogRenderGeneration == logRenderGeneration
+            chatLogTarget.logRenderIsIdleForTesting
         }
 
         var logFrameForTesting: NSRect {
-            logScrollView.frame
+            chatLogTarget.frame
         }
 
         var viewFrameForTesting: NSRect {
@@ -676,7 +532,7 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         var displayedViewFrameForTesting: NSRect {
-            logScrollView.frame
+            chatLogTarget.frame
         }
 
         var activeDisplayedViewConstraintCountForTesting: Int {
@@ -715,159 +571,146 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         func scrollLogToTopForTesting() {
-            logScrollView.scrollToTopForTesting()
+            chatLogTarget.scrollToTopForTesting()
         }
 
         func scrollLogToOffsetForTesting(_ y: CGFloat) {
-            logScrollView.scrollToOffsetForTesting(y)
+            chatLogTarget.scrollToOffsetForTesting(y)
         }
 
         var logVerticalScrollOffsetForTesting: CGFloat {
-            logScrollView.verticalScrollOffsetForTesting
+            chatLogTarget.verticalScrollOffsetForTesting
         }
 
         var logViewportHeightForTesting: CGFloat {
-            logScrollView.viewportHeightForTesting
+            chatLogTarget.viewportHeightForTesting
         }
 
         var logMinimumVerticalScrollOffsetForTesting: CGFloat {
-            logScrollView.minimumVerticalScrollOffsetForTesting
+            chatLogTarget.minimumVerticalScrollOffsetForTesting
         }
 
         var logMaximumVerticalScrollOffsetForTesting: CGFloat {
-            logScrollView.maximumVerticalScrollOffsetForTesting
+            chatLogTarget.maximumVerticalScrollOffsetForTesting
         }
 
         var logTextContentFrameForTesting: NSRect {
-            logScrollView.textContentFrameForTesting
+            chatLogTarget.textContentFrameForTesting
         }
 
         var logDocumentViewFrameForTesting: NSRect {
-            logScrollView.documentViewFrameForTesting
+            chatLogTarget.documentViewFrameForTesting
         }
 
         var logContentInsetsForTesting: NSEdgeInsets {
-            logScrollView.contentInsetsForTesting
+            chatLogTarget.contentInsetsForTesting
         }
 
         var logAutomaticallyAdjustsContentInsetsForTesting: Bool {
-            logScrollView.automaticallyAdjustsContentInsetsForTesting
+            chatLogTarget.automaticallyAdjustsContentInsetsForTesting
         }
 
         var logTextContainerSizeForTesting: NSSize {
-            logScrollView.textContainerSizeForTesting
+            chatLogTarget.textContainerSizeForTesting
         }
 
         var logTextContainerInsetForTesting: NSSize {
-            logScrollView.textContainerInsetForTesting
+            chatLogTarget.textContainerInsetForTesting
         }
 
         var logVisibleFragmentViewCountForTesting: Int {
-            logScrollView.visibleFragmentViewCountForTesting
+            chatLogTarget.visibleFragmentViewCountForTesting
         }
 
         var logVisibleFragmentViewCountWithoutForcingLayoutForTesting: Int {
-            logScrollView.visibleFragmentViewCountWithoutForcingLayoutForTesting
+            chatLogTarget.visibleFragmentViewCountWithoutForcingLayoutForTesting
         }
 
         var logVisibleFragmentBoundsForTesting: NSRect {
-            logScrollView.visibleFragmentBoundsForTesting
+            chatLogTarget.visibleFragmentBoundsForTesting
         }
 
         var logVisibleFragmentBoundsWithoutForcingLayoutForTesting: NSRect {
-            logScrollView.visibleFragmentBoundsWithoutForcingLayoutForTesting
+            chatLogTarget.visibleFragmentBoundsWithoutForcingLayoutForTesting
         }
 
         var logStaleFragmentViewCountForTesting: Int {
-            logScrollView.staleFragmentViewCountForTesting
+            chatLogTarget.staleFragmentViewCountForTesting
         }
 
         var logProgrammaticScrollCountForTesting: Int {
-            logScrollView.programmaticScrollCountForTesting
+            chatLogTarget.programmaticScrollCountForTesting
         }
 
         var logAccessibilityValueForTesting: String? {
-            logScrollView.accessibilityValueForTesting
+            chatLogTarget.accessibilityValueForTesting
         }
 
         var logSelectedTextForTesting: String? {
-            logScrollView.selectedTextForTesting
+            chatLogTarget.selectedTextForTesting
         }
 
         var logSelectedRangeForTesting: NSRange {
-            logScrollView.selectedRangeForTesting
+            chatLogTarget.selectedRangeForTesting
         }
 
         var logFindStringForTesting: String {
-            logScrollView.findStringForTesting
+            chatLogTarget.findStringForTesting
         }
 
         func selectAllLogForTesting() {
-            logScrollView.selectAllForTesting()
+            chatLogTarget.selectAllForTesting()
         }
 
         func setSelectedLogRangeForTesting(_ range: NSRange) {
-            logScrollView.setSelectedLogRangeForTesting(range)
+            chatLogTarget.setSelectedLogRangeForTesting(range)
         }
 
         var logDocumentViewExportsUserInterfaceValidationForTesting: Bool {
-            logScrollView.documentViewExportsUserInterfaceValidationForTesting
+            chatLogTarget.documentViewExportsUserInterfaceValidationForTesting
         }
 
         func validateLogDocumentUserInterfaceItemForTesting(_ item: NSValidatedUserInterfaceItem) -> Bool {
-            logScrollView.validateDocumentUserInterfaceItemForTesting(item)
+            chatLogTarget.validateDocumentUserInterfaceItemForTesting(item)
         }
 
         func clearLogFinderSelectedRangesForTesting() {
-            logScrollView.clearFinderSelectedRangesForTesting()
+            chatLogTarget.clearFinderSelectedRangesForTesting()
         }
 
         func setLogFinderSelectedRangeForTesting(_ range: NSRange) {
-            logScrollView.setFinderSelectedRangeForTesting(range)
+            chatLogTarget.setFinderSelectedRangeForTesting(range)
         }
 
         func simulateLogFinderEmptySelectedRangesForTesting() {
-            logScrollView.simulateFinderEmptySelectedRangesForTesting()
+            chatLogTarget.simulateFinderEmptySelectedRangesForTesting()
         }
 
         func performLogKeyboardCommandForTesting(_ selector: Selector) {
-            logScrollView.performKeyboardCommandForTesting(selector)
+            chatLogTarget.performKeyboardCommandForTesting(selector)
         }
 
         @discardableResult
         func renderLogForTesting(text: String, allowIncrementalUpdate: Bool) -> Bool {
-            logScrollView.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
+            chatLogTarget.renderForTesting(text: text, allowIncrementalUpdate: allowIncrementalUpdate)
         }
 
         @discardableResult
         func renderLogDocumentForTesting(
             _ sourceDocument: ReviewMonitorLog.Document,
             target: DisplayedSelectionForTesting? = nil,
-            restoring restorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget? = nil,
             allowIncrementalUpdate: Bool
         ) -> Bool {
-            let resolvedTarget: LogRenderTarget
+            let chatID: CodexThreadID
             switch target ?? displayedSelectionForTesting {
             case .chat(let id):
-                resolvedTarget = .chat(CodexThreadID(rawValue: id))
+                chatID = CodexThreadID(rawValue: id)
             case .workspaceGroup, nil:
                 return false
             }
-            let resolvedRestorationTarget =
-                restorationTarget
-                ?? {
-                    guard hasAppliedBoundLog == false else {
-                        return logScrollView.currentScrollRestorationTarget
-                    }
-                    switch resolvedTarget {
-                    case .chat(let id):
-                        return logScrollTargetsByChatID[id] ?? .bottom
-                    }
-                }()
-            return renderBoundLog(
-                sourceDocument: sourceDocument,
-                target: resolvedTarget,
-                restorationTarget: resolvedRestorationTarget,
+            return chatLogTarget.renderLogDocumentForTesting(
+                sourceDocument,
+                chatID: chatID,
                 allowIncrementalUpdate: allowIncrementalUpdate
             )
         }
@@ -876,19 +719,11 @@ final class ReviewMonitorTransportViewController: NSViewController {
             switch target {
             case .chat(let id):
                 let chatID = CodexThreadID(rawValue: id)
-                if boundChatID != chatID {
-                    let isSwitchingRenderedChat = boundChatID != nil
-                    cacheBoundLogScrollTarget()
-                    if isSwitchingRenderedChat {
-                        logScrollView.resetFindStateForContentReuse()
-                    }
-                    selectedChatLogTask?.cancel()
-                    selectedChatLogTask = nil
-                    resetLogRenderer()
-                    boundChatID = chatID
-                }
+                chatLogTarget.bindLogRenderTargetForTesting(chatID)
+                boundChatID = chatID
+                boundModelContext = nil
                 hidePlaceholder()
-                logScrollView.isHidden = false
+                chatLogTarget.view.isHidden = false
                 displayedSelection = .chat(chatID)
             case .workspaceGroup:
                 break
@@ -896,37 +731,37 @@ final class ReviewMonitorTransportViewController: NSViewController {
         }
 
         func copyLogSelectionForTesting() {
-            logScrollView.copySelectionForTesting()
+            chatLogTarget.copySelectionForTesting()
         }
 
         func beginLogLiveResizeForTesting() {
-            logScrollView.beginLiveResizeForTesting()
+            chatLogTarget.beginLiveResizeForTesting()
         }
 
         func endLogLiveResizeForTesting() {
-            logScrollView.endLiveResizeForTesting()
+            chatLogTarget.endLiveResizeForTesting()
         }
 
         func scrollLogToBottomForTesting() {
-            logScrollView.scrollToBottomForTesting()
+            chatLogTarget.scrollToBottomForTesting()
         }
 
         var isLogPinnedToBottomForTesting: Bool {
-            logScrollView.isPinnedToBottomForTesting
+            chatLogTarget.isPinnedToBottomForTesting
         }
 
         func setLogScrollerStyleForTesting(_ style: NSScroller.Style) {
-            logScrollView.setScrollerStyleForTesting(style)
+            chatLogTarget.setScrollerStyleForTesting(style)
         }
 
         func setLogOverlayScrollersShownForTesting(_ isShown: Bool?) {
-            logScrollView.setOverlayScrollersShownForTesting(isShown)
+            chatLogTarget.setOverlayScrollersShownForTesting(isShown)
         }
 
         func setLogOverlayScrollerBridgeModeForTesting(
-            _ mode: ReviewMonitorLogScrollView.OverlayScrollerBridgeModeForTesting
+            _ mode: ReviewMonitorCodexChatLogTarget.OverlayScrollerBridgeModeForTesting
         ) {
-            logScrollView.setOverlayScrollerBridgeModeForTesting(mode)
+            chatLogTarget.setOverlayScrollerBridgeModeForTesting(mode)
         }
     }
 #endif

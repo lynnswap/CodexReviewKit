@@ -2,12 +2,13 @@ import CodexKit
 import CodexAppServerKitTesting
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
+@testable import ReviewChatLogUI
 @testable import ReviewUI
 
-@Suite("ReviewMonitor selected Codex chat", .serialized)
+@Suite("ReviewMonitor selected Codex chat detail", .serialized)
 @MainActor
-struct ReviewMonitorSelectedCodexChatTests {
-    @Test func selectedReviewChatObservesChatID() async throws {
+struct ReviewMonitorCodexChatDetailTests {
+    @Test func selectedReviewChatRendersInitialSnapshot() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -45,15 +46,16 @@ struct ReviewMonitorSelectedCodexChatTests {
 
         uiState.selection = .chat(CodexThreadID(rawValue: "review-thread"))
 
-        try await waitForCondition {
-            transport.selectedCodexChatIDForTesting == "review-thread"
-                && transport.selectedCodexChatPhaseForTesting == .loading
-                && transport.selectedCodexChatItemTextsForTesting == ["Review snapshot"]
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
+            snapshot.log == "Review snapshot"
         }
         #expect(await runtime.transport.recordedRequests(method: "thread/resume").count == 1)
     }
 
-    @Test func clearingSelectionDetachesSelectedCodexChat() async throws {
+    @Test func clearingSelectionClearsDisplayedChatLog() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -68,15 +70,17 @@ struct ReviewMonitorSelectedCodexChatTests {
         transport.loadViewIfNeeded()
 
         selectChat(id: "review-thread", in: uiState)
-        try await waitForCondition {
-            transport.selectedCodexChatIDForTesting == "review-thread"
-                && transport.selectedCodexChatPhaseForTesting == .loaded
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
+            snapshot.log == ""
         }
 
         uiState.selection = nil
         try await waitForCondition {
-            transport.selectedCodexChatIDForTesting == nil
-                && transport.selectedCodexChatPhaseForTesting == .idle
+            transport.renderedStateForTesting.selection == nil
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState
         }
     }
 
@@ -117,14 +121,18 @@ struct ReviewMonitorSelectedCodexChatTests {
         transport.loadViewIfNeeded()
         selectChat(id: "review-thread", in: uiState)
 
-        #expect(transport.selectedCodexChatIDForTesting == nil)
+        try await waitForCondition {
+            transport.renderedStateForTesting.selection == .chat("review-thread")
+        }
+        #expect(transport.displayedLogForTesting == "")
 
         modelSource.install(container: CodexModelContainer(appServer: runtime.server))
 
-        try await waitForCondition {
-            transport.selectedCodexChatIDForTesting == "review-thread"
-                && transport.selectedCodexChatPhaseForTesting == .loading
-                && transport.selectedCodexChatItemTextsForTesting == ["Late source"]
+        _ = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat("review-thread")
+        ) { snapshot in
+            snapshot.log == "Late source"
         }
     }
 
@@ -198,7 +206,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(updatedSnapshot.log.contains("Log fallback") == false)
     }
 
-    @Test func selectedCodexChatTextAppendUsesAppendPath() async throws {
+    @Test func codexChatTextAppendUsesAppendPath() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "review-thread"))
@@ -327,8 +335,8 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(document?.text == "Explain the current diff.")
     }
 
-    @Test func selectedCodexChatStatusOnlyChangesKeepIncrementalLogUpdates() {
-        var projection = ReviewMonitorSelectedCodexChatLogProjection()
+    @Test func codexChatStatusOnlyChangesKeepIncrementalLogUpdates() {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
         let turnID = CodexTurnID(rawValue: "turn-review")
         let snapshot = CodexChatSnapshot(
             chatID: CodexThreadID(rawValue: "review-thread"),
@@ -360,7 +368,7 @@ struct ReviewMonitorSelectedCodexChatTests {
         #expect(statusChange?.sourceDocument?.text == "Running review")
     }
 
-    @Test func selectedCodexChatRendersThreadAndLiveUpdates() async throws {
+    @Test func codexChatRendersThreadAndLiveUpdates() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         let modelContext = CodexModelContainer(appServer: runtime.server).mainContext
         try await runtime.transport.enqueueThreadResume(.init(id: "chat-thread"))
@@ -405,7 +413,6 @@ struct ReviewMonitorSelectedCodexChatTests {
             snapshot.log.contains("Generic chat snapshot")
         }
         #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
-        #expect(transport.selectedCodexChatIDForTesting == "chat-thread")
 
         try await runtime.transport.emitServerNotification(
             method: "item/updated",
