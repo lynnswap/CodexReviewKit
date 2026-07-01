@@ -160,7 +160,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed)
+            await backend.yield(.completed(finalReview: "No issues found."))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == false)
@@ -173,8 +173,13 @@ struct CodexReviewMCPHTTPServerTests {
                 resolved.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
                     == "Review completed.")
             #expect(
-                resolved.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
-            #expect(resolved.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
+                resolved.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == true)
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "review", "finalReview"]) as? String
+                    == "No issues found.")
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
+                    == "noFindings")
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -230,7 +235,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
-            await backend.yield(.completed)
+            await backend.yield(.completed(finalReview: "No issues found."))
             let awaited = try await postJSONRPC(
                 endpoint: endpoint,
                 sessionID: sessionID,
@@ -254,8 +259,13 @@ struct CodexReviewMCPHTTPServerTests {
                 awaited.value(for: ["result", "structuredContent", "lifecycle", "message"]) as? String
                     == "Review completed.")
             #expect(
-                awaited.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == false)
-            #expect(awaited.value(for: ["result", "structuredContent", "review", "finalReview"]) is NSNull)
+                awaited.value(for: ["result", "structuredContent", "review", "hasFinalReview"]) as? Bool == true)
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "review", "finalReview"]) as? String
+                    == "No issues found.")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
+                    == "noFindings")
             #expect(
                 awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
                     == nil)
@@ -294,7 +304,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.completed)
+            await backend.yield(.completed(finalReview: "No issues found."))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
@@ -853,7 +863,7 @@ struct CodexReviewMCPHTTPServerTests {
             await backend.waitForStartReview()
             await server.runSessionCleanupForTesting(now: .distantFuture)
             await gate.open()
-            await backend.yield(.completed)
+            await backend.yield(.completed(finalReview: "No issues found."))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")

@@ -89,7 +89,7 @@ private extension CodexReviewAPI.Read.Result {
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "review": core.structuredReviewContent(finalReview: log.finalResult),
+            "review": core.structuredReviewContent(),
         ]
         object["log"] =
             includeDetails
@@ -324,7 +324,7 @@ private extension CodexReviewAPI.Run.ListItem {
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "review": core.structuredReviewContent(finalReview: nil),
+            "review": core.structuredReviewContent(),
         ])
     }
 }
@@ -355,7 +355,7 @@ private extension CodexReviewAPI.Cancel.Outcome {
                 elapsedSeconds: nil,
                 cancellable: false
             ),
-            "review": core.structuredReviewContent(finalReview: nil),
+            "review": core.structuredReviewContent(),
         ])
     }
 }
@@ -407,8 +407,8 @@ private extension ReviewRunCore {
         )
     }
 
-    func structuredReviewContent(finalReview: String?) -> Value {
-        let finalReview = finalReview?.nilIfEmpty
+    func structuredReviewContent() -> Value {
+        let finalReview = self.finalReview?.nilIfEmpty
         return .object([
             "hasFinalReview": .bool(finalReview != nil),
             "finalReview": finalReview.map(Value.string) ?? .null,

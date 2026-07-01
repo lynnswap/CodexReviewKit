@@ -276,11 +276,27 @@ package extension CodexReviewBackendModel.Review {
 }
 
 package extension CodexReviewBackendModel.Review {
+    struct Completion: Equatable, Sendable {
+        package var finalReview: String?
+
+        package init(finalReview: String?) {
+            self.finalReview = finalReview?.nilIfEmpty
+        }
+    }
+}
+
+package extension CodexReviewBackendModel.Review {
     enum Event: Equatable, Sendable {
         case started(turnID: String, reviewThreadID: String?, model: String?)
-        case completed
+        case completed(CodexReviewBackendModel.Review.Completion)
         case failed(String)
         case cancelled(String)
+    }
+}
+
+package extension CodexReviewBackendModel.Review.Event {
+    static func completed(finalReview: String?) -> Self {
+        .completed(.init(finalReview: finalReview))
     }
 }
 

@@ -22,7 +22,7 @@ struct ReviewBackendEventSessionTests {
         await session.receive(
             [
                 .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"),
-                .completed,
+                .completed(finalReview: "No issues found."),
             ], controlThreadID: "review-thread")
 
         #expect(
@@ -34,7 +34,7 @@ struct ReviewBackendEventSessionTests {
                 ))
         #expect(
             try await nextEvent(from: attempt.events)
-                == .completed)
+                == .completed(finalReview: "No issues found."))
         #expect(await recorder.startedTurnIDs() == ["turn-1"])
         #expect(await recorder.finishedRun() == makeRun())
 

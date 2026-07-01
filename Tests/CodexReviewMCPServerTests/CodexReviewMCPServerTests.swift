@@ -35,7 +35,7 @@ struct CodexReviewMCPServerTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
             waitTimeout: nil
         ))
-        await backend.yield(.completed)
+        await backend.yield(.completed(finalReview: "No issues found."))
         let resolved = try await response
 
         guard case .reviewStart(let snapshot) = resolved else {

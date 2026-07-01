@@ -49,7 +49,7 @@ Returns:
   - `errorMessage`
 - `review`
   - `hasFinalReview`
-  - `finalReview` from the Codex chat turn when available
+  - `finalReview` from the terminal Codex review response
   - `reviewResult` parsed finding state (`hasFindings`, `noFindings`, or `unknown`) with title/body/location fields when a final review is available
 - `log`
   - `orderedEntryIds`
@@ -64,7 +64,7 @@ Returns:
 Notes:
 
 - `lifecycle.message` is review-run lifecycle text. It is not final review content.
-- `review.finalReview` comes from the Codex chat projection. If no chat projection is available, it is `null` even when the run has reached a terminal lifecycle state.
+- `review.finalReview` comes from the terminal review response. Chat log projection is only used for `log` details.
 - `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the run is still running, call `review_await` with the returned `runId`.
 - ReviewMonitor resolves the reported review model in this order:
   1. `~/.codex_review/config.toml` `review_model`

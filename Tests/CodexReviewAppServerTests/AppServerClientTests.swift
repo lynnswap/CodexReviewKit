@@ -93,13 +93,19 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(
                 threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "completed")
+                turn: .init(
+                    id: "turn-1",
+                    status: "completed",
+                    items: [
+                        .finalAnswer(id: "msg-1", text: "Looks good.")
+                    ]
+                )
             )
         )
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .completed)
+        #expect(try await iterator.next() == .completed(finalReview: "Looks good."))
     }
 
     @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
@@ -136,14 +142,26 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(
                 threadID: "review-thread-1",
-                turn: .init(id: "turn-1", status: "completed")
+                turn: .init(
+                    id: "turn-1",
+                    status: "completed",
+                    items: [
+                        .finalAnswer(id: "msg-1", text: "first")
+                    ]
+                )
             )
         )
         try await runtime.transport.emitServerNotification(
             method: "turn/completed",
             params: TestTurnNotification(
                 threadID: "review-thread-2",
-                turn: .init(id: "turn-2", status: "completed")
+                turn: .init(
+                    id: "turn-2",
+                    status: "completed",
+                    items: [
+                        .finalAnswer(id: "msg-1", text: "second")
+                    ]
+                )
             )
         )
 
@@ -151,13 +169,13 @@ struct AppServerClientTests {
         #expect(
             try await firstIterator.next()
                 == .started(turnID: "turn-1", reviewThreadID: "review-thread-1", model: "gpt-5"))
-        #expect(try await firstIterator.next() == .completed)
+        #expect(try await firstIterator.next() == .completed(finalReview: "first"))
 
         var secondIterator = eventSequence(secondAttempt).makeAsyncIterator()
         #expect(
             try await secondIterator.next()
                 == .started(turnID: "turn-2", reviewThreadID: "review-thread-2", model: "gpt-5"))
-        #expect(try await secondIterator.next() == .completed)
+        #expect(try await secondIterator.next() == .completed(finalReview: "second"))
     }
 
     @Test func backendKeepsCommandOutputDeltasInCodexChat() async throws {
@@ -198,11 +216,17 @@ struct AppServerClientTests {
             method: "turn/completed",
             params: TestTurnNotification(
                 threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "completed")
+                turn: .init(
+                    id: "turn-1",
+                    status: "completed",
+                    items: [
+                        .finalAnswer(id: "msg-1", text: "No issues found.")
+                    ]
+                )
             )
         )
 
-        #expect(try await nextEvent(from: attempt.events) == .completed)
+        #expect(try await nextEvent(from: attempt.events) == .completed(finalReview: "No issues found."))
     }
 
     @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {
@@ -542,6 +566,13 @@ private struct TestTurnNotification: Encodable, Sendable {
 private struct TestTurn: Encodable, Sendable {
     var id: String
     var status: String
+    var items: [TestItem]?
+
+    init(id: String, status: String, items: [TestItem]? = nil) {
+        self.id = id
+        self.status = status
+        self.items = items
+    }
 }
 
 private struct TestDeltaNotification: Encodable, Sendable {
@@ -574,6 +605,7 @@ private struct TestItem: Encodable, Sendable {
     var type: String
     var id: String
     var text: String?
+    var phase: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -585,6 +617,7 @@ private struct TestItem: Encodable, Sendable {
         type: String,
         id: String,
         text: String? = nil,
+        phase: String? = nil,
         review: String? = nil,
         command: String? = nil,
         cwd: String? = nil,
@@ -595,11 +628,22 @@ private struct TestItem: Encodable, Sendable {
         self.type = type
         self.id = id
         self.text = text
+        self.phase = phase
         self.review = review
         self.command = command
         self.cwd = cwd
         self.aggregatedOutput = aggregatedOutput
         self.exitCode = exitCode
         self.status = status
+    }
+
+    static func finalAnswer(id: String, text: String) -> TestItem {
+        .init(
+            type: "agentMessage",
+            id: id,
+            text: text,
+            phase: "final_answer",
+            status: "completed"
+        )
     }
 }

@@ -54,6 +54,7 @@ extension CodexReviewStore {
             cancellation.message.nilIfEmpty
             ?? runRecord.core.lifecycle.errorMessage
         runRecord.core.lifecycle.endedAt = endedAt
+        runRecord.core.finalReview = nil
         noteReviewRunMutation()
     }
 

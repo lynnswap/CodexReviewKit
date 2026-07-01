@@ -550,8 +550,13 @@ private enum AppServerTypedReviewEventAdapter {
                 message: response.status?.rawValue ?? "Failed."
             )
         }
+        guard let finalReview = response.finalAnswer?.nilIfEmpty
+            ?? response.transcript.finalAnswer?.nilIfEmpty
+        else {
+            return [.failed("Review completed without a final response.")]
+        }
         return [
-            .completed
+            .completed(finalReview: finalReview)
         ]
     }
 
@@ -580,11 +585,6 @@ private enum AppServerTypedReviewEventAdapter {
     ) -> [CodexReviewBackendModel.Review.Event] {
         guard item.kind.rawValue != "enteredReviewMode" else {
             return []
-        }
-        if phase == .completed, item.kind.rawValue == "exitedReviewMode" {
-            return [
-                .completed
-            ]
         }
         return []
     }

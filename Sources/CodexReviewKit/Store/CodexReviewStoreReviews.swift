@@ -536,6 +536,7 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.status = .running
         runRecord.core.lifecycle.startedAt = startedAt
         runRecord.core.lifecycleMessage = "Review started."
+        runRecord.core.finalReview = nil
         writeDiagnosticsIfNeeded()
     }
 
@@ -548,6 +549,7 @@ extension CodexReviewStore {
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.lifecycle.errorMessage = message
         runRecord.core.lifecycleMessage = message
+        runRecord.core.finalReview = nil
         writeDiagnosticsIfNeeded()
     }
 
@@ -674,7 +676,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return recoveryState.currentRun
             }
-            completeReview(runRecord)
+            markReviewFailed(runRecord, message: "Review completed without a final response.")
         }
         return recoveryState.currentRun
     }
@@ -695,7 +697,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return true
             }
-            completeReview(runRecord)
+            markReviewFailed(runRecord, message: "Review completed without a final response.")
         }
         return true
     }
@@ -813,8 +815,8 @@ extension CodexReviewStore {
             updatedRun.model = model ?? updatedRun.model
             runtimeState.setActiveRun(updatedRun, for: runRecord.id)
             runRecord.core.lifecycleMessage = "Review started."
-        case .completed:
-            completeReview(runRecord)
+        case .completed(let completion):
+            completeReview(runRecord, finalReview: completion.finalReview)
         case .failed(let message):
             markReviewFailed(runRecord, message: message)
         case .cancelled(let message):
@@ -842,14 +844,19 @@ extension CodexReviewStore {
         return true
     }
 
-    private func completeReview(_ runRecord: ReviewRunRecord) {
+    private func completeReview(_ runRecord: ReviewRunRecord, finalReview: String?) {
         guard runRecord.isTerminal == false else {
+            return
+        }
+        guard let finalReview = finalReview?.nilIfEmpty else {
+            markReviewFailed(runRecord, message: "Review completed without a final response.")
             return
         }
         let endedAt = clock.now()
         runRecord.core.lifecycle.status = .succeeded
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.lifecycleMessage = "Review completed."
+        runRecord.core.finalReview = finalReview
         writeDiagnosticsIfNeeded()
     }
 
