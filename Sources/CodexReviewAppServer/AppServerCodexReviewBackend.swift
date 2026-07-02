@@ -814,12 +814,3 @@ private extension CodexLoginHandle {
         }
     }
 }
-
-
-private func reasoningSummaryGroupID(itemID: String, summaryIndex: Int) -> String {
-    "\(itemID):summary:\(summaryIndex)"
-}
-
-private func rawReasoningGroupID(itemID: String, contentIndex: Int) -> String {
-    "\(itemID):\(contentIndex)"
-}
