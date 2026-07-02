@@ -2237,7 +2237,7 @@ struct ReviewUITests {
             turnID: chat.turnID
         )
 
-        #expect(contentPane.selectedChatLogTaskForTesting == nil)
+        #expect(contentPane.selectedChatLogTaskForTesting?.isCancelled != false)
         #expect(contentPane.renderSnapshotForTesting == emptySnapshot)
     }
 

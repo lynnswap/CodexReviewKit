@@ -72,8 +72,6 @@ package final class ReviewMonitorCodexChatLogTarget {
         )
         cancelSelectedChatObservation()
         cancelPendingLogSourceChange()
-        selectedChatLogTask?.cancel()
-        selectedChatLogTask = nil
         resetLogRenderer()
         logProjection.reset()
         boundChatID = selectedChatID
@@ -90,8 +88,9 @@ package final class ReviewMonitorCodexChatLogTarget {
     @discardableResult
     package func clear() -> Bool {
         cacheBoundLogScrollTarget()
+        // Keep the cancelled task referenced so the next bind can await its
+        // teardown before re-observing.
         selectedChatLogTask?.cancel()
-        selectedChatLogTask = nil
         cancelSelectedChatObservation()
         cancelPendingLogSourceChange()
         boundChatID = nil
@@ -155,9 +154,14 @@ package final class ReviewMonitorCodexChatLogTarget {
         target: LogRenderTarget,
         initialRestorationTarget: ReviewMonitorLogScrollView.ScrollRestorationTarget
     ) {
-        selectedChatLogTask?.cancel()
+        let previousTask = selectedChatLogTask
+        previousTask?.cancel()
         selectedChatLogTask = Task { @MainActor [weak self, weak chat, weak modelContext] in
-            guard let chat, let modelContext else {
+            // Wait for the previous observation task to unwind so its possibly
+            // in-flight observation registration is released before observing
+            // again; otherwise observe() can throw chatObservationAlreadyActive.
+            await previousTask?.value
+            guard Task.isCancelled == false, let chat, let modelContext else {
                 return
             }
             do {
@@ -200,6 +204,9 @@ package final class ReviewMonitorCodexChatLogTarget {
                 }
             } catch is CancellationError {
             } catch {
+                logger.error(
+                    "Codex chat log observation failed chatID=\(chat.id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
             }
         }
     }
