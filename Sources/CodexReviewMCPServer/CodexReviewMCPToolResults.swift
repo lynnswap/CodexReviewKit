@@ -151,21 +151,31 @@ private extension ReviewMCPLogProjection {
                 truncatedFields: &truncatedFields
             ),
         ]
+        // Long reviews can accumulate huge transcripts; detailed reads return
+        // a bounded tail page so MCP responses stay small, with the page
+        // metadata pointing at the omitted head.
+        let limit = Self.detailedItemsLimit
+        let total = items.count
+        let pageItems = items.suffix(limit)
+        let returned = pageItems.count
+        let offset = total - returned
         let page = LogEntryPage(
-            total: items.count,
-            offset: 0,
-            limit: items.count,
-            returned: items.count,
-            hasMoreBefore: false,
+            total: total,
+            offset: offset,
+            limit: limit,
+            returned: returned,
+            hasMoreBefore: offset > 0,
             hasMoreAfter: false,
-            previousOffset: nil,
+            previousOffset: offset > 0 ? max(0, offset - limit) : nil,
             nextOffset: nil
         )
-        object["items"] = .array(items.map { $0.structuredContent() })
+        object["items"] = .array(pageItems.map { $0.structuredContent() })
         object["itemsPage"] = page.structuredContent()
         object["truncatedFields"] = .array(truncatedFields.map(Value.string))
         return .object(object)
     }
+
+    private static var detailedItemsLimit: Int { 100 }
 }
 
 private extension ReviewMCPLogProjection.Item {

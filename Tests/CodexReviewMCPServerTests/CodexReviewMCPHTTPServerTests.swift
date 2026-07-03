@@ -547,7 +547,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(log["latestEntryId"] is NSNull)
             let itemsPage = try #require(log["itemsPage"] as? [String: Any])
             #expect(itemsPage["total"] as? Int == 0)
-            #expect(itemsPage["limit"] as? Int == 0)
+            #expect(itemsPage["limit"] as? Int == 100)
             #expect(itemsPage["returned"] as? Int == 0)
             let items = try #require(log["items"] as? [[String: Any]])
             #expect(items.isEmpty)
