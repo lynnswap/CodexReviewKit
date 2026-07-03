@@ -488,10 +488,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             await startedHTTPServer?.stop()
             await startedAppServer?.close()
             self.appServer = nil
-            self.appServerModelContainer = nil
+            clearAppServerModelContainer()
             self.appServerBackend = nil
             self.mcpHTTPServer = nil
-            appServerLifecycleHandler?(nil)
             authNotificationTask?.cancel()
             authNotificationTask = nil
             store.transitionToFailed(failureMessage)
@@ -563,9 +562,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         self.appServer = nil
-        self.appServerModelContainer = nil
+        clearAppServerModelContainer()
         self.mcpHTTPServer = nil
-        appServerLifecycleHandler?(nil)
         authNotificationTask?.cancel()
         authNotificationTask = nil
         await mcpHTTPServer?.stop()
@@ -1178,6 +1176,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
+    // Dropping the container must always reach the lifecycle handler, or the
+    // ReviewMonitor window keeps its model source pointed at a closed
+    // app-server container.
+    private func clearAppServerModelContainer() {
+        appServerModelContainer = nil
+        appServerLifecycleHandler?(nil)
+    }
+
     private func markRuntimeFailedAfterNotificationStreamError(
         _ error: any Error,
         store: CodexReviewStore
@@ -1199,7 +1205,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let failedAppServer = appServer
         let failedMCPHTTPServer = mcpHTTPServer
         appServer = nil
-        appServerModelContainer = nil
+        clearAppServerModelContainer()
         appServerBackend = nil
         mcpHTTPServer = nil
         authNotificationTask = nil

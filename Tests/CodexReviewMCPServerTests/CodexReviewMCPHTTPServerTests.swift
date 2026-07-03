@@ -870,7 +870,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(resolved.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(resolved.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
             let startText = (resolved.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
-            #expect(startText == "Review completed.")
+            #expect(startText == "No issues found.")
             #expect(startText?.contains("rawLogText") == false)
             let tools = try await postJSONRPC(
                 endpoint: endpoint,

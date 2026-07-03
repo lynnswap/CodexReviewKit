@@ -34,7 +34,7 @@ func toolResult(response: CodexReviewMCP.Tool.Response) throws -> CallTool.Resul
 
 private extension CodexReviewAPI.Read.Result {
     func textContent(log: ReviewMCPLogProjection) -> String {
-        log.finalResult?.nilIfEmpty ?? core.displayLifecycleMessage
+        log.finalResult?.nilIfEmpty ?? core.finalReview ?? core.displayLifecycleMessage
     }
 
     func textContentForStartOrAwait(log: ReviewMCPLogProjection) -> String {

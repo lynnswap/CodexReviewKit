@@ -44,6 +44,10 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
                 "runID": .object(["type": .string("string")]),
                 "runId": .object(["type": .string("string")]),
             ]),
+            "anyOf": .array([
+                .object(["required": .array([.string("runId")])]),
+                .object(["required": .array([.string("runID")])]),
+            ]),
         ])
     case .reviewList:
         .object([
