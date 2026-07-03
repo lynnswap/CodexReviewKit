@@ -154,8 +154,15 @@ struct ReviewMonitorCodexSidebarPresentationOrder: Equatable {
         }
     }
 
-    mutating func reorderWorkspaceGroup(id: CodexWorkspaceGroupID, before targetID: CodexWorkspaceGroupID?) -> Bool {
-        Self.reorder(id: id, before: targetID, in: &workspaceGroupIDs)
+    mutating func reorderWorkspaceGroup(
+        id: CodexWorkspaceGroupID,
+        currentOrder: [CodexWorkspaceGroupID],
+        before targetID: CodexWorkspaceGroupID?
+    ) -> Bool {
+        var ids = mergedOrder(preferredIDs: workspaceGroupIDs, currentOrder: currentOrder)
+        let didChange = Self.reorder(id: id, before: targetID, in: &ids)
+        workspaceGroupIDs = ids
+        return didChange
     }
 
     mutating func reorderChat(

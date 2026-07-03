@@ -57,6 +57,7 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
             case none
             case reorderCodexWorkspaceGroup(
                 id: CodexWorkspaceGroupID,
+                currentOrder: [CodexWorkspaceGroupID],
                 beforeID: CodexWorkspaceGroupID?
             )
             case reorderCodexChat(
@@ -971,7 +972,11 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         let beforeID = remainingRoots.dropFirst(displayDestinationIndex).compactMap(\.workspaceGroupID).first
 
         return SidebarResolvedDrop(
-            operation: .reorderCodexWorkspaceGroup(id: id, beforeID: beforeID),
+            operation: .reorderCodexWorkspaceGroup(
+                id: id,
+                currentOrder: codexSidebarOutlineTree.roots.compactMap(\.workspaceGroupID),
+                beforeID: beforeID
+            ),
             dropItem: nil,
             dropChildIndex: clampedDestinationIndex
         )
@@ -1221,8 +1226,14 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         switch resolvedDrop.operation {
         case .none:
             return false
-        case .reorderCodexWorkspaceGroup(let id, let beforeID):
-            guard codexSidebarPresentationOrder.reorderWorkspaceGroup(id: id, before: beforeID) else {
+        case .reorderCodexWorkspaceGroup(let id, let currentOrder, let beforeID):
+            guard
+                codexSidebarPresentationOrder.reorderWorkspaceGroup(
+                    id: id,
+                    currentOrder: currentOrder,
+                    before: beforeID
+                )
+            else {
                 return false
             }
             applyFilteredCodexSidebarSections()
