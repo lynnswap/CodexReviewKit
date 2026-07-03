@@ -89,7 +89,9 @@ private extension CodexReviewAPI.Read.Result {
                 elapsedSeconds: elapsedSeconds,
                 cancellable: cancellable
             ),
-            "review": core.structuredReviewContent(),
+            "review": core.structuredReviewContent(
+                resolvedFinalReview: log.finalResult?.nilIfEmpty ?? core.finalReview
+            ),
         ]
         object["log"] =
             includeDetails
@@ -424,8 +426,11 @@ private extension ReviewRunCore {
         )
     }
 
-    func structuredReviewContent() -> Value {
-        let finalReview = self.finalReview?.nilIfEmpty
+    // The run record is not the transcript's source of truth; read paths that
+    // hold a log projection pass the resolved final review so structured
+    // fields match the text content.
+    func structuredReviewContent(resolvedFinalReview: String? = nil) -> Value {
+        let finalReview = (resolvedFinalReview ?? self.finalReview)?.nilIfEmpty
         return .object([
             "hasFinalReview": .bool(finalReview != nil),
             "finalReview": finalReview.map(Value.string) ?? .null,
