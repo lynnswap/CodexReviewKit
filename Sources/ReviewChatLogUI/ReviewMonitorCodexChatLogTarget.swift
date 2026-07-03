@@ -207,6 +207,17 @@ package final class ReviewMonitorCodexChatLogTarget {
                 logger.error(
                     "Codex chat log observation failed chatID=\(chat.id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)"
                 )
+                // The previous chat's transcript is intentionally kept on
+                // screen until the next baseline renders, but a failed
+                // observation means no baseline will ever arrive; clear the
+                // pane instead of showing another chat's log indefinitely.
+                guard let self,
+                    self.boundChat === chat,
+                    self.isCurrentLogRenderTarget(target)
+                else {
+                    return
+                }
+                _ = self.logScrollView.clear()
             }
         }
     }
