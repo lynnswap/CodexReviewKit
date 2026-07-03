@@ -321,6 +321,10 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             in: .userDomainMask
         ).first
     ) -> URL {
+        if let codexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           codexHome.isEmpty == false {
+            return URL(fileURLWithPath: codexHome, isDirectory: true)
+        }
         if let home = environment["HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
            home.isEmpty == false {
             return URL(fileURLWithPath: home, isDirectory: true)
@@ -1750,7 +1754,10 @@ private enum CodexReviewAccountRegistry {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.accountKey = try container.decodeIfPresent(String.self, forKey: .accountKey)
             self.email = try container.decode(String.self, forKey: .email)
-            self.kind = try container.decode(Kind.self, forKey: .kind)
+            // Registries written before the kind field existed must keep
+            // decoding; dropping them would empty the persisted account list.
+            self.kind = try container.decodeIfPresent(Kind.self, forKey: .kind)
+                ?? Kind.legacyDefault(accountKey: accountKey, email: email)
             self.planType = try container.decodeIfPresent(String.self, forKey: .planType)
             self.lastActivatedAt = try container.decodeIfPresent(Date.self, forKey: .lastActivatedAt)
             self.lastRateLimitFetchAt = try container.decodeIfPresent(Date.self, forKey: .lastRateLimitFetchAt)
@@ -1766,6 +1773,20 @@ private enum CodexReviewAccountRegistry {
         case chatGPT = "chatgpt"
         case apiKey
         case amazonBedrock
+
+        static func legacyDefault(accountKey: String?, email: String) -> Self {
+            let normalizedAccountKey = accountKey
+                .map(CodexReviewAccount.normalizedEmail)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            switch normalizedAccountKey ?? CodexReviewAccount.normalizedEmail(email) {
+            case "api-key":
+                return .apiKey
+            case "amazon-bedrock":
+                return .amazonBedrock
+            default:
+                return .chatGPT
+            }
+        }
 
         init(_ accountKind: CodexReviewBackendModel.Account.Kind) {
             switch accountKind {
