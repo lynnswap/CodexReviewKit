@@ -452,9 +452,12 @@ func makePreviewMessageItemForTesting(
 @MainActor
 func chatCommandOutputBlockIDForTesting(
     turnID: CodexTurnID,
-    itemID: String
+    itemID: String,
+    kind: CodexThreadItem.Kind = .commandExecution
 ) -> ReviewMonitorLog.BlockID {
-    ReviewMonitorLog.BlockID("commandOutput:\(turnID.rawValue):\(itemID)")
+    // Command output panel block ids reuse CodexItem.id.rawValue, whose
+    // format is "<turnID>:<kind>:<itemID>".
+    ReviewMonitorLog.BlockID("commandOutput:\(turnID.rawValue):\(kind.rawValue):\(itemID)")
 }
 
 @MainActor

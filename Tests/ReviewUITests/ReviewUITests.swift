@@ -1137,7 +1137,7 @@ struct ReviewUITests {
         #expect(snapshot.log.contains("Sources/App.swift | 12") == false)
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
 
-        let panelBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "file-change-direct")
+        let panelBlockID = chatCommandOutputBlockIDForTesting(turnID: chat.turnID, itemID: "file-change-direct", kind: .fileChange)
         #expect(transport.clickLogCommandOutputPanelHeaderForTesting(blockID: panelBlockID))
         await awaitNativeLayoutTurn()
         #expect(transport.logCommandOutputPanelResultTextForTesting == "Success")
