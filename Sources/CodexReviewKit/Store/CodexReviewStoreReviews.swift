@@ -34,7 +34,16 @@ extension CodexReviewStore {
         waitTimeout: Duration
     ) async throws -> CodexReviewAPI.Read.Result {
         let runID = try beginReview(sessionID: sessionID, request: request)
-        return try await awaitReview(sessionID: sessionID, runID: runID, timeout: waitTimeout)
+        // A timeout returns while the worker keeps running (clients re-await
+        // by runId), but caller cancellation must cancel the worker like the
+        // unbounded overload, or disconnected clients orphan the review.
+        return try await withTaskCancellationHandler {
+            try await awaitReview(sessionID: sessionID, runID: runID, timeout: waitTimeout)
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.runtimeState.cancelActiveWorker(for: runID)
+            }
+        }
     }
 
     package func awaitReview(
