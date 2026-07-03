@@ -89,6 +89,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws
         -> CodexReviewBackendModel.Login.Challenge
     {
+        // CodexAppServerKit's loginChatGPT cannot yet forward the native
+        // web-authentication callback scheme to account/login/start, so the
+        // server never shapes the auth URL for a native session; the host
+        // deliberately falls back to the external browser until that API
+        // exists. Do not mark the challenge native here without it.
         let handle = try await appServer.loginChatGPT()
         return try handle.backendChallenge(
             nativeWebAuthenticationCallbackScheme: nil
