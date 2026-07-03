@@ -10,7 +10,9 @@ package struct CodexChatCancellationCapability: Equatable, Sendable {
     package static let disabled = CodexChatCancellationCapability(isEnabled: false, action: nil)
     package static let reviewRun = CodexChatCancellationCapability(isEnabled: true, action: .reviewRun)
     package static let directChat = CodexChatCancellationCapability(isEnabled: true, action: .directChat)
-    package static let pendingReviewCancellation = CodexChatCancellationCapability(isEnabled: true, action: nil)
+    // A cancellation is already in flight; there is nothing further the user
+    // can trigger, so the command stays visible but disabled.
+    package static let pendingReviewCancellation = CodexChatCancellationCapability(isEnabled: false, action: nil)
 
     package init(isEnabled: Bool, action: Action?) {
         self.isEnabled = isEnabled

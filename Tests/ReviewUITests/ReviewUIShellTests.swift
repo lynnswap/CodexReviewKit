@@ -567,7 +567,9 @@ extension ReviewUITests {
             menu.performActionForItem(at: cancelIndex)
         }
 
-        #expect(cancelItemWasEnabled)
+        // A pending cancellation leaves nothing further to trigger, so the
+        // command is visible but disabled.
+        #expect(cancelItemWasEnabled == false)
         try await Task.sleep(for: .milliseconds(100))
         let resumeRequestCount = await runtime.transport.recordedRequests(method: "thread/resume").count
         let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
