@@ -133,11 +133,36 @@ private extension ReviewMCPLogProjection {
     }
 
     func structuredContentWithItems() -> Value {
+        // Long reviews can accumulate huge transcripts; detailed reads return
+        // a bounded tail page so MCP responses stay small, with the page
+        // metadata pointing at the omitted head. The entry id arrays are
+        // bounded to the same window so no field scales with the full
+        // transcript.
+        let limit = Self.detailedItemsLimit
+        let total = items.count
+        let pageItems = Array(items.suffix(limit))
+        let returned = pageItems.count
+        let offset = total - returned
+        let pageItemIDs = Set(pageItems.map(\.id))
+        let page = LogEntryPage(
+            total: total,
+            offset: offset,
+            limit: limit,
+            returned: returned,
+            hasMoreBefore: offset > 0,
+            hasMoreAfter: false,
+            previousOffset: offset > 0 ? max(0, offset - limit) : nil,
+            nextOffset: nil
+        )
         var truncatedFields: [String] = []
         var object: [String: Value] = [
             "revision": .string(revision),
-            "orderedEntryIds": .array(orderedEntryIDs.map(Value.string)),
-            "activeEntryIds": .array(activeEntryIDs.map(Value.string)),
+            "orderedEntryIds": .array(
+                orderedEntryIDs.filter(pageItemIDs.contains).map(Value.string)
+            ),
+            "activeEntryIds": .array(
+                activeEntryIDs.filter(pageItemIDs.contains).map(Value.string)
+            ),
             "activeEntryCount": .int(activeEntryCount),
             "latestEntryId": latestEntryID.map(Value.string) ?? .null,
             "finalLifecycleMessage": boundedLogString(
@@ -151,24 +176,6 @@ private extension ReviewMCPLogProjection {
                 truncatedFields: &truncatedFields
             ),
         ]
-        // Long reviews can accumulate huge transcripts; detailed reads return
-        // a bounded tail page so MCP responses stay small, with the page
-        // metadata pointing at the omitted head.
-        let limit = Self.detailedItemsLimit
-        let total = items.count
-        let pageItems = items.suffix(limit)
-        let returned = pageItems.count
-        let offset = total - returned
-        let page = LogEntryPage(
-            total: total,
-            offset: offset,
-            limit: limit,
-            returned: returned,
-            hasMoreBefore: offset > 0,
-            hasMoreAfter: false,
-            previousOffset: offset > 0 ? max(0, offset - limit) : nil,
-            nextOffset: nil
-        )
         object["items"] = .array(pageItems.map { $0.structuredContent() })
         object["itemsPage"] = page.structuredContent()
         object["truncatedFields"] = .array(truncatedFields.map(Value.string))
