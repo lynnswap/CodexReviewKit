@@ -114,7 +114,10 @@ extension Array where Element == CodexFetchSection<CodexChat> {
         var latestChat: CodexChat?
         var latestDate = Date.distantPast
         for chat in chats {
-            guard chat.status.map({ $0.isActive == false }) ?? false else {
+            // Listed chats frequently omit status; anything not actively
+            // running counts as finished, matching the running classification
+            // used everywhere else in this sidebar.
+            guard chat.status?.isActive != true else {
                 continue
             }
             let finishedAt = chat.activityDate ?? .distantPast
