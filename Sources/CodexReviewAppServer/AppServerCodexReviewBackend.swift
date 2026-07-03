@@ -27,6 +27,16 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     private var inFlightRestartCountByInterruptedAttemptID: [String: Int] = [:]
     private var completedReviewEventSessionMetricsByThreadID: [String: ReviewBackendEventSessionMetrics] = [:]
 
+    private struct DeferredReviewThreadCleanup {
+        var run: CodexReviewBackendModel.Review.Run
+        var additionalCleanupThreadIDs: [String]
+    }
+
+    // Terminal reviews keep their chats readable (sidebar, MCP log reads)
+    // until runtime teardown: cleanupReview defers the destructive thread
+    // deletion here and cleanupActiveReviewsForShutdown flushes it.
+    private var deferredThreadCleanupsByAttemptID: [String: DeferredReviewThreadCleanup] = [:]
+
     package init(appServer: CodexAppServer, modelContainer: CodexModelContainer? = nil) {
         let modelContainer = modelContainer ?? CodexModelContainer(appServer: appServer)
         self.appServer = appServer
@@ -135,8 +145,14 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     private func reviewThreadOptions(
         _ request: CodexReviewBackendModel.Review.Start
     ) -> CodexThread.Options {
-        return .init(
-            model: request.model,
+        reviewThreadOptions(model: request.model)
+    }
+
+    // Every thread handle a review runs on uses the same review profile;
+    // restart/resume paths must not fall back to default Codex settings.
+    private func reviewThreadOptions(model: String?) -> CodexThread.Options {
+        .init(
+            model: model,
             approvalMode: .denyAll,
             permissions: .profile(id: Self.reviewPermissionProfileID),
             ephemeral: false,
@@ -205,7 +221,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         let review = try await appServer.restartPreparedReview(
             appServerToken,
             target: request.request.target.appServerReviewTarget,
-            threadOptions: .init(model: interruptedRun.model ?? request.model)
+            threadOptions: reviewThreadOptions(model: interruptedRun.model ?? request.model)
         )
         let attemptID = makeAppServerReviewAttemptID()
         let recoveredRun = CodexReviewBackendModel.Review.Run(
@@ -237,10 +253,24 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
                 completedReviewEventSessionMetricsByThreadID[threadID] = completedMetrics
             }
         }
-        await cleanupAppServerReview(run, additionalCleanupThreadIDs: additionalCleanupThreadIDs)
+        deferredThreadCleanupsByAttemptID[run.attemptID] = .init(
+            run: run,
+            additionalCleanupThreadIDs: additionalCleanupThreadIDs
+        )
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
             activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
+        }
+    }
+
+    private func flushDeferredThreadCleanups() async {
+        let deferredCleanups = deferredThreadCleanupsByAttemptID.values
+        deferredThreadCleanupsByAttemptID = [:]
+        for cleanup in deferredCleanups {
+            await cleanupAppServerReview(
+                cleanup.run,
+                additionalCleanupThreadIDs: cleanup.additionalCleanupThreadIDs
+            )
         }
     }
 
@@ -267,6 +297,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
             }
             await cleanupReview(run)
         }
+        await flushDeferredThreadCleanups()
     }
 
     package func reviewEventSessionMetricsForTesting(
@@ -416,7 +447,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         }
         let review = try await appServer.resumeReview(
             identity,
-            threadOptions: .init(model: run.model)
+            threadOptions: reviewThreadOptions(model: run.model)
         )
         return try await review.cancel()
     }

@@ -229,7 +229,7 @@ struct AppServerClientTests {
         #expect(try await nextEvent(from: attempt.events) == .completed(finalReview: "No issues found."))
     }
 
-    @Test func cleanupDeletesReviewThreadsThroughCodexThreadHandles() async throws {
+    @Test func cleanupDefersReviewThreadDeletionUntilShutdown() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
@@ -239,6 +239,13 @@ struct AppServerClientTests {
 
         let attempt = try await backend.startReview(makeReviewStart())
         await backend.cleanupReview(attempt.run)
+
+        // Completed review chats stay readable until runtime teardown.
+        #expect(await runtime.transport.recordedRequests(method: "thread/delete").isEmpty)
+
+        await backend.cleanupActiveReviewsForShutdown(
+            .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingRuns: [])
+        )
 
         let deleteRequests = await runtime.transport.recordedRequests(method: "thread/delete")
         #expect(deleteRequests.count == 2)
@@ -406,6 +413,12 @@ struct AppServerClientTests {
             try jsonObject(from: $0.params)["model"] as? String
         }
         #expect(resumeModels == ["gpt-5", "gpt-5", "gpt-5"])
+        // Restarted reviews keep the review thread profile instead of default
+        // Codex settings.
+        let resumeApprovalPolicies = try requests.filter { $0.method == "thread/resume" }.map {
+            try jsonObject(from: $0.params)["approvalPolicy"] as? String
+        }
+        #expect(resumeApprovalPolicies.last == "never")
         let interruptTurnIDs = try requests.filter { $0.method == "turn/interrupt" }.map {
             try jsonObject(from: $0.params)["turnId"] as? String
         }
