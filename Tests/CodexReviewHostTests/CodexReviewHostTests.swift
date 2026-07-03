@@ -565,6 +565,9 @@ struct CodexReviewHostTests {
             params: EmptyResponse()
         )
         await waitUntil { store.auth.selectedAccount?.accountKey == "new@example.com" }
+        // The post-login rate-limit refresh lands asynchronously after the
+        // account update; wait for the full request sequence before asserting.
+        await transport.waitForRequestCount(7)
         let loginRequest = try #require(await transport.recordedRequests().first {
             $0.method == "account/login/start"
         })
