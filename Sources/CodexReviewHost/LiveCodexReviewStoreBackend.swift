@@ -949,7 +949,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth: CodexReviewAuthModel
     ) async {
         do {
-            _ = try await session.waitForCallbackURL()
+            let callbackURL = try await session.waitForCallbackURL()
+            guard loginChallenge?.id == challenge.id else {
+                return
+            }
+            guard let loginBackend else {
+                throw CodexReviewAPI.Error.io("Authentication runtime is not available.")
+            }
+            try await loginBackend.completeLogin(challenge, callbackURL: callbackURL)
             guard loginChallenge?.id == challenge.id else {
                 return
             }

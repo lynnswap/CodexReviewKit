@@ -86,17 +86,28 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_: CodexReviewBackendModel.Login.Request) async throws
+    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws
         -> CodexReviewBackendModel.Login.Challenge
     {
-        // CodexAppServerKit's loginChatGPT cannot yet forward the native
-        // web-authentication callback scheme to account/login/start, so the
-        // server never shapes the auth URL for a native session; the host
-        // deliberately falls back to the external browser until that API
-        // exists. Do not mark the challenge native here without it.
+        if let callbackScheme = request.nativeWebAuthenticationCallbackScheme {
+            let login = try await appServer.loginChatGPT(
+                nativeWebAuthentication: .init(callbackURLScheme: callbackScheme)
+            )
+            return login.backendChallenge()
+        }
         let handle = try await appServer.loginChatGPT()
         return try handle.backendChallenge(
             nativeWebAuthenticationCallbackScheme: nil
+        )
+    }
+
+    package func completeLogin(
+        _ challenge: CodexReviewBackendModel.Login.Challenge,
+        callbackURL: URL
+    ) async throws {
+        try await appServer.completeLogin(
+            id: .init(rawValue: challenge.id),
+            callbackURL: callbackURL
         )
     }
 
@@ -824,6 +835,16 @@ private extension CodexModel {
             defaultReasoningEffort: defaultReasoningEffort,
             supportedServiceTiers: serviceTiers,
             isDefault: isDefault
+        )
+    }
+}
+
+private extension CodexChatGPTLogin {
+    func backendChallenge() -> CodexReviewBackendModel.Login.Challenge {
+        .init(
+            id: id.rawValue,
+            verificationURL: authenticationURL,
+            nativeWebAuthenticationCallbackScheme: nativeWebAuthentication?.callbackURLScheme
         )
     }
 }
