@@ -2894,6 +2894,73 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
+    @Test func coalescedMarkdownAppendInvalidatesWholeDisplaySuffix() async throws {
+        let chat = makeReviewChatFixtureForTesting(
+            id: "chat-markdown-multi-block-append",
+            cwd: "/tmp/workspace-alpha",
+            title: "Uncommitted changes",
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            chatEntries: [
+                .init(
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Need to inspect files."
+                )
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, fixtures: [chat])
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
+        _ = try await awaitChatRenderForTesting(
+            chat,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_2",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_3",
+                text: "# Follow-up heading\n\nMore details."
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+
+        let snapshot = try await awaitChatRenderForTesting(chat, in: transport) {
+            $0.log.contains("Reviewing JSONRPC requests\n\nI'm checking the response shape.")
+                && $0.log.contains("Follow-up heading\n\nMore details.")
+        }
+        #expect(snapshot.log.contains("Reviewing JSONRPC requests\n\nI'm checking the response shape."))
+        #expect(snapshot.log.contains("Follow-up heading\n\nMore details."))
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+        let headingFontSize = try #require(
+            transport.logFontPointSizeForFirstOccurrenceForTesting("Follow-up heading")
+        )
+        let bodyFontSize = try #require(
+            transport.logFontPointSizeForFirstOccurrenceForTesting("More details.")
+        )
+        #expect(headingFontSize > bodyFontSize)
+    }
+
     @Test func selectedReviewChatMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let chat = makeReviewChatFixtureForTesting(
             id: "chat-markdown-append-fallback",

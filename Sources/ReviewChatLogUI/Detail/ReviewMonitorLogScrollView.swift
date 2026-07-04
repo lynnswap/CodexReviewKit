@@ -1561,6 +1561,10 @@ extension ReviewMonitorLogScrollView {
         logDocumentView.hitTestTargetsDocumentViewForFirstOccurrenceForTesting(text)
     }
 
+    func fontPointSizeForFirstLogOccurrenceForTesting(_ text: String) -> CGFloat? {
+        logDocumentView.fontPointSizeForFirstOccurrenceForTesting(text)
+    }
+
     func toggleFirstCommandOutputPanelForTesting() {
         logDocumentView.toggleFirstCommandOutputPanelForTesting()
     }

@@ -711,7 +711,7 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
         }
 
         if block.kind.requiresMarkdownPresentationInvalidationOnAppend {
-            return block.range
+            return NSUnionRange(block.range, append.range)
         }
         return append.range
     }
@@ -2724,6 +2724,18 @@ final class ReviewMonitorLogDocumentView: NSView, NSUserInterfaceValidations,
                 return false
             }
             return hitTest(NSPoint(x: rect.midX, y: rect.midY)) === self
+        }
+
+        func fontPointSizeForFirstOccurrenceForTesting(_ text: String) -> CGFloat? {
+            layoutTextViewport(force: true)
+            let range = (textStorage.string as NSString).range(of: text)
+            guard range.location != NSNotFound,
+                range.location < textStorage.length,
+                let font = textStorage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+            else {
+                return nil
+            }
+            return font.pointSize
         }
 
         func toggleFirstCommandOutputPanelForTesting() {
