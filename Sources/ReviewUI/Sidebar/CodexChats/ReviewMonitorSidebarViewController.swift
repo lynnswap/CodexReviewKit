@@ -969,17 +969,52 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         }
 
         let remainingRoots = codexSidebarOutlineTree.roots.filter { $0 !== sourceNode }
-        let beforeID = remainingRoots.dropFirst(displayDestinationIndex).compactMap(\.workspaceGroupID).first
+        let visibleBeforeID = remainingRoots.dropFirst(displayDestinationIndex).compactMap(\.workspaceGroupID).first
+        // Reorder against the unfiltered group order so groups hidden by an
+        // active chat filter keep their relative positions, mirroring the
+        // chat reorder path.
+        let currentOrder = codexUnfilteredWorkspaceGroupIDs()
+        let beforeID = visibleBeforeID ?? codexWorkspaceGroupBeforeID(
+            movingID: id,
+            visibleOrder: remainingRoots.compactMap(\.workspaceGroupID),
+            currentOrder: currentOrder
+        )
 
         return SidebarResolvedDrop(
             operation: .reorderCodexWorkspaceGroup(
                 id: id,
-                currentOrder: codexSidebarOutlineTree.roots.compactMap(\.workspaceGroupID),
+                currentOrder: currentOrder,
                 beforeID: beforeID
             ),
             dropItem: nil,
             dropChildIndex: clampedDestinationIndex
         )
+    }
+
+    private func codexUnfilteredWorkspaceGroupIDs() -> [CodexWorkspaceGroupID] {
+        var seen: Set<CodexWorkspaceGroupID> = []
+        return codexSidebarSourceSections
+            .compactMap(\.sidebarWorkspaceGroupID)
+            .filter { seen.insert($0).inserted }
+    }
+
+    private func codexWorkspaceGroupBeforeID(
+        movingID: CodexWorkspaceGroupID,
+        visibleOrder: [CodexWorkspaceGroupID],
+        currentOrder: [CodexWorkspaceGroupID]
+    ) -> CodexWorkspaceGroupID? {
+        guard let lastVisibleID = visibleOrder.last,
+            let lastVisibleIndex = currentOrder.firstIndex(of: lastVisibleID)
+        else {
+            return nil
+        }
+        let nextIndex = lastVisibleIndex + 1
+        guard nextIndex < currentOrder.count,
+            currentOrder[nextIndex] != movingID
+        else {
+            return nil
+        }
+        return currentOrder[nextIndex]
     }
 
     private func codexWorkspaceGroupRootSegment(containing rootIndex: Int) -> Range<Int> {
