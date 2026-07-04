@@ -85,14 +85,8 @@ separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
 Claude Code also has an MCP tool idle timeout for remote MCP tools. To allow
 long-running reviews that may stay quiet for more than the default idle window,
-set `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` in milliseconds before starting Claude
-Code, for example 40 minutes:
-
-```bash
-CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=2400000 claude
-```
-
-Or put the same environment variable in Claude Code's settings:
+set `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` in milliseconds in Claude Code's
+settings, for example 40 minutes:
 
 ```json
 {
