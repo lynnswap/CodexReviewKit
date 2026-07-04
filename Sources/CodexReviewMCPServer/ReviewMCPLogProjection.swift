@@ -70,7 +70,9 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         }
         let itemRevision = threadItems
             .map { item in
-                "\(item.id):\(item.kind.rawValue):\(item.text?.count ?? 0)"
+                // Digest the content, not just its length, so same-length
+                // edits still advance the revision clients compare.
+                "\(item.id):\(item.kind.rawValue):\(item.text?.stableLogDigest ?? "0")"
             }
             .joined(separator: "|")
         self.revision = [
@@ -94,8 +96,26 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
 }
 
 private extension [ReviewMCPLogProjection.Item] {
+    // Only agent messages qualify as the final result; a trailing user
+    // prompt in the transcript must never replace the review findings.
     var lastAssistantMessageText: String? {
-        reversed().compactMap { $0.content.messageText }.first
+        reversed()
+            .filter { $0.kind == CodexThreadItem.Kind.agentMessage.rawValue }
+            .compactMap { $0.content.messageText }
+            .first
+    }
+}
+
+private extension String {
+    // Process-stable FNV-1a digest; revisions are only compared against
+    // other revisions produced by the same server instance.
+    var stableLogDigest: String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 16)
     }
 }
 
