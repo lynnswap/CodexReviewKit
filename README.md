@@ -83,6 +83,23 @@ tool_timeout_sec = 1200.0
 This config belongs to the Codex client that calls the MCP server. It is
 separate from CodexReviewMonitor's dedicated runtime home at `~/.codex_review`.
 
+Claude Code also has an MCP tool idle timeout for remote MCP tools. To allow
+long-running reviews that may stay quiet for more than the default idle window,
+set `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` in milliseconds in Claude Code's
+settings, for example 40 minutes:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": "2400000"
+  }
+}
+```
+
+This Claude Code setting is process-wide. It is not scoped to the
+`codex_review` MCP server, so the same idle timeout applies to all MCP tools
+used by that Claude Code session.
+
 ## More Detail
 
 - [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
