@@ -40,7 +40,7 @@
       </MacroExpansion>
       <EnvironmentVariables>
          <EnvironmentVariable
-            key = "REVIEW_MONITOR_MOCK_JOBS"
+            key = "REVIEW_MONITOR_REVIEW_MODE"
             value = "1"
             isEnabled = "YES">
          </EnvironmentVariable>
@@ -81,11 +81,6 @@
          </BuildableReference>
       </BuildableProductRunnable>
       <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "REVIEW_MONITOR_MOCK_JOBS"
-            value = "1"
-            isEnabled = "NO">
-         </EnvironmentVariable>
          <EnvironmentVariable
             key = "REVIEW_MONITOR_REVIEW_MODE"
             value = "true"

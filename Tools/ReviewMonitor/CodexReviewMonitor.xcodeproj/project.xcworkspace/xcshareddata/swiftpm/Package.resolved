@@ -2,6 +2,14 @@
   "originHash" : "11d1673255c652381957935c0aa0fcc8f6cba52200a3e3e3c7296d58e6207f76",
   "pins" : [
     {
+      "identity" : "codexkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lynnswap/CodexKit.git",
+      "state" : {
+        "revision" : "6de9e019d35095390252102bd30b069e1090c874"
+      }
+    },
+    {
       "identity" : "eventsource",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/mattt/eventsource.git",
@@ -17,6 +25,15 @@
       "state" : {
         "revision" : "4f046ab5862e5d98687b03f9e522e6de48b7efca",
         "version" : "0.12.0"
+      }
+    },
+    {
+      "identity" : "swift-async-algorithms",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-async-algorithms",
+      "state" : {
+        "revision" : "9d349bcc328ac3c31ce40e746b5882742a0d1272",
+        "version" : "1.1.3"
       }
     },
     {

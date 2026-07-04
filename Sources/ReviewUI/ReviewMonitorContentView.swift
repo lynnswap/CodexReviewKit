@@ -1,7 +1,8 @@
 import AppKit
 import Combine
+import CodexKit
 import ObservationBridge
-import CodexReview
+import CodexReviewKit
 
 typealias ReviewMonitorContentTransitionAnimator = @MainActor (
     NSView,
@@ -10,11 +11,13 @@ typealias ReviewMonitorContentTransitionAnimator = @MainActor (
 ) -> Void
 
 @MainActor
-final class ReviewMonitorRootViewController: NSViewController {
+package final class ReviewMonitorRootViewController: NSViewController {
     private let uiState: ReviewMonitorUIState
     private let store: CodexReviewStore
+    private let codexModelSource: ReviewMonitorCodexModelSource?
     private let contentTransitionAnimator: ReviewMonitorContentTransitionAnimator
     private let showSettings: (@MainActor () -> Void)?
+    private let dependencyRetainer: AnyObject?
     private var observation: PortableObservationTracking.Token?
     private var windowCancellable: AnyCancellable?
     private var presentedContentKind: ReviewMonitorContentKind?
@@ -22,21 +25,60 @@ final class ReviewMonitorRootViewController: NSViewController {
     private lazy var splitViewController = ReviewMonitorSplitViewController(
         store: store,
         uiState: uiState,
+        codexModelSource: codexModelSource,
         showSettings: showSettings
     )
 
     private lazy var signInViewController = ReviewMonitorSignInViewController(store: store)
 
-    init(
+    convenience init(
         store: CodexReviewStore,
         uiState: ReviewMonitorUIState,
+        modelContext: CodexModelContext,
         contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
         showSettings: (@MainActor () -> Void)? = nil
     ) {
+        self.init(
+            store: store,
+            uiState: uiState,
+            codexModelSource: ReviewMonitorCodexModelSource(modelContext: modelContext),
+            contentTransitionAnimator: contentTransitionAnimator,
+            showSettings: showSettings,
+            dependencyRetainer: nil
+        )
+    }
+
+    package convenience init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil
+    ) {
+        self.init(
+            store: store,
+            uiState: uiState,
+            codexModelSource: codexModelSource,
+            contentTransitionAnimator: Self.defaultContentTransitionAnimator,
+            showSettings: showSettings,
+            dependencyRetainer: dependencyRetainer
+        )
+    }
+
+    init(
+        store: CodexReviewStore,
+        uiState: ReviewMonitorUIState,
+        codexModelSource: ReviewMonitorCodexModelSource? = nil,
+        contentTransitionAnimator: @escaping ReviewMonitorContentTransitionAnimator = ReviewMonitorRootViewController.defaultContentTransitionAnimator,
+        showSettings: (@MainActor () -> Void)? = nil,
+        dependencyRetainer: AnyObject? = nil
+    ) {
         self.store = store
         self.uiState = uiState
+        self.codexModelSource = codexModelSource
         self.contentTransitionAnimator = contentTransitionAnimator
         self.showSettings = showSettings
+        self.dependencyRetainer = dependencyRetainer
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -49,7 +91,7 @@ final class ReviewMonitorRootViewController: NSViewController {
         observation?.cancel()
     }
 
-    override func loadView() {
+    package override func loadView() {
         let backgroundView = NSVisualEffectView()
         backgroundView.material = .underWindowBackground
         backgroundView.blendingMode = .behindWindow
@@ -57,7 +99,7 @@ final class ReviewMonitorRootViewController: NSViewController {
         view = backgroundView
     }
 
-    override func viewDidLoad() {
+    package override func viewDidLoad() {
         super.viewDidLoad()
         bindWindowState()
         bindWindowAttachment()
@@ -222,6 +264,15 @@ final class ReviewMonitorRootViewController: NSViewController {
     }
 }
 
+@MainActor
+extension ReviewMonitorRootViewController {
+    package func prepareForImmediateRenderingForPreviewSupport() {
+        loadViewIfNeeded()
+        splitViewController.prepareForImmediateRenderingForPreviewSupport()
+        view.layoutSubtreeIfNeeded()
+    }
+}
+
 #if DEBUG
 @MainActor
 extension ReviewMonitorRootViewController {
@@ -252,42 +303,5 @@ extension ReviewMonitorRootViewController {
     var embeddedContentSubviewCountForTesting: Int {
         view.subviews.count
     }
-}
-
-@MainActor
-func makeReviewMonitorPreviewContentViewController() -> NSViewController {
-    makeReviewMonitorPreviewContentViewControllerForPreview()
-}
-
-@MainActor
-func makeReviewMonitorPreviewContentViewControllerForPreview(
-    authPhase: CodexReviewAuthModel.Phase = .signedOut,
-    account: CodexAccount? = nil,
-    serverState: CodexReviewServerState = .running,
-    previewStore: CodexReviewStore? = nil
-) -> ReviewMonitorRootViewController {
-    let store: CodexReviewStore
-    switch serverState {
-    case .running:
-        store = previewStore ?? ReviewMonitorPreviewContent.makeStore()
-    case .failed, .starting, .stopped:
-        store = CodexReviewStore.makePreviewStore()
-        store.serverState = serverState
-        store.serverURL = nil
-    }
-    let previewAccounts = ReviewMonitorPreviewContent.makePreviewAccounts()
-    let resolvedAccount = account ?? previewAccounts.first
-    store.auth.updatePhase(authPhase)
-    store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
-    store.auth.selectPersistedAccount(resolvedAccount?.id)
-    let uiState = ReviewMonitorUIState(auth: store.auth)
-    if case .running = serverState,
-       let previewJob = store.orderedJobs
-           .first(where: { $0.core.lifecycle.status == .running })
-           ?? store.orderedJobs.first
-    {
-        uiState.selection = .job(previewJob)
-    }
-    return ReviewMonitorRootViewController(store: store, uiState: uiState)
 }
 #endif

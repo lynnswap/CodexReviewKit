@@ -15,9 +15,9 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "CodexReviewTests"
-               BuildableName = "CodexReviewTests"
-               BlueprintName = "CodexReviewTests"
+               BlueprintIdentifier = "CodexReviewKitTests"
+               BuildableName = "CodexReviewKitTests"
+               BlueprintName = "CodexReviewKitTests"
                ReferencedContainer = "container:">
             </BuildableReference>
          </BuildActionEntry>
@@ -74,20 +74,6 @@
                BlueprintIdentifier = "ReviewUITests"
                BuildableName = "ReviewUITests"
                BlueprintName = "ReviewUITests"
-               ReferencedContainer = "container:">
-            </BuildableReference>
-         </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "ArchitectureFenceTests"
-               BuildableName = "ArchitectureFenceTests"
-               BlueprintName = "ArchitectureFenceTests"
                ReferencedContainer = "container:">
             </BuildableReference>
          </BuildActionEntry>
@@ -103,9 +89,9 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "CodexReviewTests"
-               BuildableName = "CodexReviewTests"
-               BlueprintName = "CodexReviewTests"
+               BlueprintIdentifier = "CodexReviewKitTests"
+               BuildableName = "CodexReviewKitTests"
+               BlueprintName = "CodexReviewKitTests"
                ReferencedContainer = "container:">
             </BuildableReference>
          </TestableReference>
@@ -146,16 +132,6 @@
                BlueprintIdentifier = "ReviewUITests"
                BuildableName = "ReviewUITests"
                BlueprintName = "ReviewUITests"
-               ReferencedContainer = "container:">
-            </BuildableReference>
-         </TestableReference>
-         <TestableReference
-            skipped = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "ArchitectureFenceTests"
-               BuildableName = "ArchitectureFenceTests"
-               BlueprintName = "ArchitectureFenceTests"
                ReferencedContainer = "container:">
             </BuildableReference>
          </TestableReference>

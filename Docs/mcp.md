@@ -7,10 +7,10 @@ endpoint.
 
 - App-managed Streamable HTTP MCP endpoint at `http://localhost:9417/mcp`
 - Multi-session
-- Session-scoped review jobs
+- Session-scoped review runs
 - One long-lived `codex app-server` backend process
 - One shared internal transport to the backend process
-- Review jobs run concurrently across sessions and within the same session
+- Review runs run concurrently across sessions and within the same session
 
 ## Tools
 
@@ -32,7 +32,7 @@ Key inputs:
 
 Returns:
 
-- `jobId`
+- `runId`
 - `run`
   - `reviewThreadId`
   - `threadId`
@@ -47,23 +47,31 @@ Returns:
   - `cancellable`
   - `cancellation` when cancellation metadata is available
   - `errorMessage`
-- `output`
-  - `summary`
-  - `review`
+- `review`
   - `hasFinalReview`
-  - `lastAgentMessage`
-  - `reviewResult` parsed finding state (`hasFindings`, `noFindings`, or `unknown`) with title/body/location fields when available
+  - `finalReview` from the terminal Codex review response
+  - `reviewResult` parsed finding state (`hasFindings`, `noFindings`, or `unknown`) with title/body/location fields when a final review is available
+- `log`
+  - `orderedEntryIds`
+  - `activeEntryIds`
+  - `activeEntryCount`
+  - `latestEntryId`
+  - `finalLifecycleMessage`
+  - `finalResult`
+  - `itemsPage`
+  - `items` for detailed reads
 
 Notes:
 
-- `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the job is still running, call `review_await` with the returned `jobId`.
+- `lifecycle.message` is review-run lifecycle text. It is not final review content.
+- `review.finalReview` comes from the terminal review response. Chat log projection is only used for `log` details.
+- `review_start` is the primary client flow. Codex clients wait for terminal completion. Claude Code clients wait up to 540 seconds; if the run is still running, call `review_await` with the returned `runId`.
 - ReviewMonitor resolves the reported review model in this order:
   1. `~/.codex_review/config.toml` `review_model`
   2. the effective dedicated Codex config in `~/.codex_review/config.toml` `review_model`
   3. backend-reported `thread/start.model`
   4. the effective dedicated Codex config in `~/.codex_review/config.toml` `model` only as a pre-thread-start fallback when the backend does not report a model
-- Use `review_read` to fetch paged, ordered `logs`. `rawLogText` is the
-  diagnostic/raw projection and is not a full log transcript.
+- Use `review_read` to fetch detailed Codex chat log projection for a run.
 
 If you are unsure how to build the `target` object, read:
 
@@ -76,55 +84,38 @@ If you are unsure how to build the `target` object, read:
 
 ### `review_await`
 
-Waits for a running review job owned by the current MCP session. The wait is
+Waits for a running review run owned by the current MCP session. The wait is
 bounded to 540 seconds so clients with fixed activity watchdogs can continue
 waiting with another tool call.
 
 Inputs:
 
-- `jobId` or `jobID`
+- `runId` or `runID`
 
-Returns the same lightweight shape as `review_start`: `jobId`, `run`,
-`lifecycle`, and `output`. It does not include `logs` or `rawLogText`; use
-`review_read` when log pages are needed.
+Returns the same lightweight shape as `review_start`: `runId`, `run`,
+`lifecycle`, `review`, and a compact `log`. Use `review_read` when log item
+details are needed.
 
-If the job is still running after the bounded wait, call `review_await` again
-with the same `jobId`.
+If the run is still running after the bounded wait, call `review_await` again
+with the same `runId`.
 
 ### `review_read`
 
-Reads the current or final state of a review job owned by the current MCP session.
-This is optional for normal clients because `review_start` already returns the final summary.
-
-Optional inputs:
-
-- `logOffset` 0-based log page offset. If omitted, `review_read` returns the
-  latest page.
-- `logLimit` page size, default `100`, max `500`
-- `logFilter` `default` excludes command output; `all` includes it
+Reads the current or final state of a review run owned by the current MCP session.
+This is optional for normal clients because `review_start` already returns the terminal lifecycle state and final review when a Codex chat projection is available.
 
 Returns:
 
-- `jobId`
+- `runId`
 - `run`
 - `lifecycle`
-- `output`
-- `logs` paged read projection. Grouped replacement/delta entries are folded
-  into their current value before paging.
-- `logsPage`
-  - `total`
-  - `offset`
-  - `limit`
-  - `returned`
-  - `hasMoreBefore`
-  - `hasMoreAfter`
-  - `previousOffset`
-  - `nextOffset`
-- `rawLogText` diagnostic/raw projection, not a full transcript
+- `review`
+- `log` with ordered item IDs, active item IDs, terminal lifecycle/final review
+  values, paging metadata, and item details.
 
 ### `review_list`
 
-Lists review jobs owned by the current MCP session.
+Lists review runs owned by the current MCP session.
 
 Optional inputs:
 
@@ -135,21 +126,21 @@ Optional inputs:
 Returns:
 
 - `items`
-  - `jobId`
+  - `runId`
   - `cwd`
   - `targetSummary`
   - `run`
   - `lifecycle`
-  - `output`
+  - `review`
 
 ### `review_cancel`
 
-Cancels a review job owned by the current MCP session.
+Cancels a review run owned by the current MCP session.
 
 Inputs:
 
 - exact:
-  - `jobId`
+  - `runId`
 - selector:
   - `cwd`
   - `statuses`
@@ -157,7 +148,7 @@ Inputs:
 Notes:
 
 - `cwd` is a search key, not a unique identifier.
-- Without `jobId`, `review_cancel` searches only the current MCP session.
+- Without `runId`, `review_cancel` searches only the current MCP session.
 - Responses include `lifecycle.cancellation.source` and `lifecycle.cancellation.message` when cancellation metadata is available. UI-triggered cancellations use `source: "userInterface"`.
 
 ## Discovery Resources

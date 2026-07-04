@@ -6,9 +6,11 @@
 //
 
 import AppKit
-import CodexReview
+import CodexDataKit
+import CodexReviewKit
 import CodexReviewHost
-@_spi(PreviewSupport) import ReviewUI
+import ReviewUI
+import ReviewUIPreviewSupport
 
 enum ReviewMonitorLaunchMode: Sendable {
     case application
@@ -46,7 +48,6 @@ struct ReviewMonitorLaunchContext: Sendable {
 
 enum ReviewMonitorLaunchEnvironment {
     static let reviewModeKey = CodexReviewStoreTestEnvironment.reviewModeKey
-    static let mockJobsKey = CodexReviewStoreTestEnvironment.mockJobsKey
     static let xctestConfigurationKey = "XCTestConfigurationFilePath"
     static let xctestBundlePathKey = "XCTestBundlePath"
     static let xcInjectBundleIntoKey = "XCInjectBundleInto"
@@ -57,7 +58,6 @@ enum ReviewMonitorLaunchEnvironment {
     static let testCodexCommandKey = CodexReviewStoreTestEnvironment.codexCommandKey
     static let testDiagnosticsPathKey = CodexReviewStoreTestEnvironment.diagnosticsPathKey
     static let reviewModeArgument = CodexReviewStoreTestEnvironment.reviewModeArgument
-    static let mockJobsArgument = CodexReviewStoreTestEnvironment.mockJobsArgument
     static let testPortArgument = CodexReviewStoreTestEnvironment.portArgument
     static let testCodexCommandArgument = CodexReviewStoreTestEnvironment.codexCommandArgument
     static let testDiagnosticsPathArgument = CodexReviewStoreTestEnvironment.diagnosticsPathArgument
@@ -102,8 +102,6 @@ enum ReviewMonitorLaunchEnvironment {
         }
         return isEnabledFlag(environment[reviewModeKey])
             || arguments.contains(reviewModeArgument)
-            || isEnabledFlag(environment[mockJobsKey])
-            || arguments.contains(mockJobsArgument)
     }
 
     static func isRunningUnderXCTest(
@@ -210,6 +208,23 @@ private final class ReviewMonitorPresentationAnchorSource {
     weak var window: NSWindow?
 }
 
+@MainActor
+struct ReviewMonitorAppDependencies {
+    let store: CodexReviewStore
+    let previewContent: ReviewMonitorPreviewContentSource?
+
+    init(
+        store: CodexReviewStore,
+        previewContent: ReviewMonitorPreviewContentSource? = nil
+    ) {
+        if let previewContent {
+            precondition(previewContent.store === store)
+        }
+        self.store = store
+        self.previewContent = previewContent
+    }
+}
+
 private enum ReviewMonitorNativeAuthentication {
     static let callbackScheme = "lynnpd.CodexReviewMonitor.auth"
 }
@@ -219,22 +234,29 @@ struct ReviewMonitorAppComposition {
     typealias PresentationAnchorProvider = @MainActor () -> NSWindow?
     typealias LiveStoreFactory = (
         CodexReviewRuntime.Preferences,
-        CodexReviewNativeAuthentication.Configuration?
+        CodexReviewNativeAuthentication.Configuration?,
+        CodexReviewAppServerLifecycleHandler?
     ) -> CodexReviewStore
 
-    var makeStore: (ReviewMonitorLaunchContext, @escaping PresentationAnchorProvider) -> CodexReviewStore
+    var makeDependencies: (
+        ReviewMonitorLaunchContext,
+        @escaping PresentationAnchorProvider
+    ) -> ReviewMonitorAppDependencies
     var makeLifecycleController: (
         any ReviewMonitorLifecycleStore,
         ReviewMonitorLaunchContext
     ) -> ReviewMonitorLifecycleController
-    var makeWindowController: (CodexReviewStore, @escaping @MainActor () -> Void) -> NSWindowController
+    var makeWindowController: (
+        ReviewMonitorAppDependencies,
+        @escaping @MainActor () -> Void
+    ) -> NSWindowController
     var makeSettingsWindowController: () -> NSWindowController
 
     init(
-        makeStore: @escaping (
+        makeDependencies: @escaping (
             ReviewMonitorLaunchContext,
             @escaping PresentationAnchorProvider
-        ) -> CodexReviewStore,
+        ) -> ReviewMonitorAppDependencies,
         makeLifecycleController: @escaping (
             any ReviewMonitorLifecycleStore,
             ReviewMonitorLaunchContext
@@ -245,7 +267,7 @@ struct ReviewMonitorAppComposition {
             )
         },
         makeWindowController: @escaping (
-            CodexReviewStore,
+            ReviewMonitorAppDependencies,
             @escaping @MainActor () -> Void
         ) -> NSWindowController,
         makeSettingsWindowController: @escaping () -> NSWindowController = {
@@ -254,7 +276,7 @@ struct ReviewMonitorAppComposition {
             )
         }
     ) {
-        self.makeStore = makeStore
+        self.makeDependencies = makeDependencies
         self.makeLifecycleController = makeLifecycleController
         self.makeWindowController = makeWindowController
         self.makeSettingsWindowController = makeSettingsWindowController
@@ -262,30 +284,50 @@ struct ReviewMonitorAppComposition {
 
     static func live(
         runtimePreferencesStore: any CodexReviewRuntime.PreferencesStore = CodexReviewRuntime.UserDefaultsPreferencesStore(),
-        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration in
+        makeLiveStore: @escaping LiveStoreFactory = { runtimePreferences, nativeAuthenticationConfiguration, appServerLifecycleHandler in
             CodexReviewStore.makeLiveStore(
                 runtimePreferences: runtimePreferences,
-                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration
+                nativeAuthenticationConfiguration: nativeAuthenticationConfiguration,
+                appServerLifecycleHandler: appServerLifecycleHandler
             )
         }
     ) -> ReviewMonitorAppComposition {
-        ReviewMonitorAppComposition(
-            makeStore: { context, presentationAnchorProvider in
+        let codexModelSource = ReviewMonitorCodexModelSource()
+        return ReviewMonitorAppComposition(
+            makeDependencies: { context, presentationAnchorProvider in
                 if context.requestsPreviewContent {
-                    return ReviewMonitorPreviewContent.makeStore()
+                    let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+                    return ReviewMonitorAppDependencies(
+                        store: previewContent.store,
+                        previewContent: previewContent
+                    )
                 }
-                return makeLiveStore(
+                let store = makeLiveStore(
                     runtimePreferencesStore.load(),
-                    .init(
+                    CodexReviewNativeAuthentication.Configuration(
                         callbackScheme: ReviewMonitorNativeAuthentication.callbackScheme,
                         browserSessionPolicy: .ephemeral,
                         presentationAnchorProvider: presentationAnchorProvider
                     )
-                )
+                ) { modelContainer in
+                    if let modelContainer {
+                        codexModelSource.install(container: modelContainer)
+                    } else {
+                        codexModelSource.clear()
+                    }
+                }
+                return ReviewMonitorAppDependencies(store: store)
             },
-            makeWindowController: { store, showSettings in
-                ReviewMonitorWindowController(
-                    store: store,
+            makeWindowController: { dependencies, showSettings in
+                if let previewContent = dependencies.previewContent {
+                    return ReviewMonitorWindowController(
+                        previewContent: previewContent,
+                        showSettings: showSettings
+                    )
+                }
+                return ReviewMonitorWindowController(
+                    appStore: dependencies.store,
+                    codexModelSource: codexModelSource,
                     showSettings: showSettings
                 )
             },
@@ -309,14 +351,15 @@ final class ReviewMonitorAppDelegate: NSObject, NSApplicationDelegate {
     private var launchMode: ReviewMonitorLaunchMode {
         launchContext.launchMode
     }
-    lazy var store: CodexReviewStore = {
-        composition.makeStore(launchContext) { [weak presentationAnchorSource] in
+    lazy var appDependencies: ReviewMonitorAppDependencies = {
+        composition.makeDependencies(launchContext) { [weak presentationAnchorSource] in
             presentationAnchorSource?.window
         }
     }()
+    lazy var store: CodexReviewStore = appDependencies.store
     lazy var lifecycle = composition.makeLifecycleController(store, launchContext)
     lazy var windowController: NSWindowController = {
-        let windowController = composition.makeWindowController(store) { [weak self] in
+        let windowController = composition.makeWindowController(appDependencies) { [weak self] in
             self?.showSettingsWindow(nil)
         }
         presentationAnchorSource.window = windowController.window

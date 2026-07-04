@@ -1,10 +1,13 @@
 import AppKit
+import CodexAppServerKitTesting
+import CodexKit
 import Foundation
 import ObservationBridge
 import SwiftUI
 import Testing
-@_spi(Testing) @testable import CodexReview
-@_spi(PreviewSupport) @testable import ReviewUI
+@_spi(Testing) @testable import CodexReviewKit
+@testable import ReviewUI
+import ReviewUIPreviewSupport
 import CodexReviewTesting
 
 @MainActor
@@ -20,9 +23,622 @@ extension ReviewUITests {
         #expect(rootViewController.isSplitViewEmbeddedForTesting)
     }
 
+    @Test func previewPreparationLoadsSelectedChatStreamBeforeWindowAttachment() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+
+        #expect(viewController.isViewLoaded == false)
+
+        viewController.prepareForSwiftUIPreviewRendering()
+
+        #expect(viewController.isViewLoaded)
+        #expect(viewController.isSplitViewEmbeddedForTesting)
+        #expect(viewController.splitViewControllerForTesting.isTransportViewLoadedForTesting)
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue))
+        #expect(snapshot.log.isEmpty == false)
+    }
+
+    @Test func previewContentViewControllerRendersSidebarFromFakeAppServer() async throws {
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview()
+
+        viewController.prepareForSwiftUIPreviewRendering()
+
+        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("workspace-alpha")
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+
+        #expect(sidebar.isShowingEmptyStateForTesting == false)
+        #expect(sidebar.sidebarKindForTesting == .chatList)
+    }
+
+    @Test func previewChatContextMenuCancelInterruptsActiveFakeAppServerChat() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let splitViewController = viewController.splitViewControllerForTesting
+        let sidebar = splitViewController.sidebarViewControllerForTesting
+        let transport = splitViewController.transportViewControllerForTesting
+        try await waitForCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+        splitViewController.setSidebarReviewChatFilterForTesting(.running)
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID))
+                == "Branch: feature/workspace-alpha-sidebar"
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedChatID
+                && transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+        }
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: selectedChatID.rawValue,
+                isChatActive: true
+            ) == .directChat
+        )
+
+        var presentedCancelItem = false
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            presentedCancelItem = true
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        #expect(presentedCancelItem)
+        #expect(cancelItemWasEnabled)
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.interruptRequestCountForTesting() == 0 {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        #expect(await previewContent.interruptRequestCountForTesting() == 1)
+        try await withTestTimeout(.seconds(2)) {
+            while true {
+                let snapshot = await previewContent.snapshotForTesting(chatID: selectedChatID)
+                if snapshot?.turns?.last?.status == .cancelled {
+                    break
+                }
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarSectionsForTesting.chat(id: selectedChatID)?.status == .idle
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) == nil
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == nil
+                && transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue)
+                && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+        }
+
+        splitViewController.setSidebarReviewChatFilterForTesting(.all)
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID))
+                == "Branch: feature/workspace-alpha-sidebar"
+                && sidebar.selectedReviewChatIDForTesting == selectedChatID
+                && sidebar.nativeSelectedReviewChatIDForTesting == selectedChatID
+        }
+
+        var presentedCancelItemAfterCancellation = false
+        var cancelItemEnabledAfterCancellation = false
+        sidebar.presentContextMenuForTesting(chatID: selectedChatID) { menu in
+            guard let cancelItem = menu.items.first(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            presentedCancelItemAfterCancellation = true
+            cancelItemEnabledAfterCancellation = cancelItem.isEnabled
+        }
+        #expect(presentedCancelItemAfterCancellation)
+        #expect(cancelItemEnabledAfterCancellation == false)
+    }
+
+    @Test func inactiveChatContextMenuArchiveSkipsConfirmationAndRemovesSidebarChat() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "inactive-chat-to-archive")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Inactive archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .idle
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Inactive archive chat"
+        }
+
+        var confirmationRequestCount = 0
+        sidebar.setChatArchiveConfirmationForTesting { _, _ in
+            confirmationRequestCount += 1
+            return false
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        await runtime.transport.waitForRequest(method: "thread/archive")
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
+        }
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(confirmationRequestCount == 0)
+    }
+
+    @Test func activeChatContextMenuArchiveDoesNotArchiveWhenConfirmationIsRejected() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-archive-rejected")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Rejected active archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    )
+                ]
+            ))
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat"
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return false
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        try await waitForCondition {
+            confirmedChatIDs == [chatID]
+        }
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").isEmpty)
+        #expect(sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Rejected active archive chat")
+    }
+
+    @Test func activeChatContextMenuArchiveArchivesAfterConfirmationApproval() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-archive-approved")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Approved active archive chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: [])
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "thread/archive")
+
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running)
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Approved active archive chat"
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return true
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: chatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        await runtime.transport.waitForRequest(method: "thread/archive")
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == nil
+        }
+        #expect(await runtime.transport.recordedRequests(method: "thread/archive").count == 1)
+        #expect(confirmedChatIDs == [chatID])
+    }
+
+    @Test func previewChatContextMenuArchiveUsesFakeAppServerThreadArchivePath() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) != nil
+        }
+
+        var confirmedChatIDs: [CodexThreadID] = []
+        sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
+            confirmedChatIDs.append(chatID)
+            return true
+        }
+
+        let archiveMenuState = performChatContextMenuItemForTesting(
+            title: "Archive",
+            chatID: selectedChatID,
+            sidebar: sidebar
+        )
+
+        #expect(archiveMenuState.presented)
+        #expect(archiveMenuState.enabled)
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.archiveRequestCountForTesting() == 0 {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) == nil
+        }
+        #expect(await previewContent.archiveRequestCountForTesting() == 1)
+        #expect(confirmedChatIDs == [selectedChatID])
+    }
+
+    @Test func activeChatContextMenuCancelFallsBackWhenMatchingReviewRunIsTerminal() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-with-terminal-run")
+        let turnID = CodexTurnID(rawValue: "active-turn")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Active chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: []),
+                        turns: [
+                            .init(id: turnID, status: .running)
+                        ]
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: chatID,
+                status: .active(activeFlags: []),
+                turns: [
+                    .init(id: turnID, status: .running)
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+        let terminalRun = ReviewRunRecord.makeForTesting(
+            id: "terminal-run",
+            cwd: repo.path,
+            targetSummary: "Terminal review run",
+            threadID: chatID.rawValue,
+            turnID: "terminal-turn",
+            status: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 4_000),
+            endedAt: Date(timeIntervalSince1970: 4_100),
+            summary: "Completed review."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [terminalRun]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Active chat"
+        }
+
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: chatID.rawValue,
+                isChatActive: true
+            ) == .directChat
+        )
+
+        var presentedCancelItem = false
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            presentedCancelItem = true
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        #expect(presentedCancelItem)
+        #expect(cancelItemWasEnabled)
+        await runtime.transport.waitForRequest(method: "turn/interrupt")
+        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        #expect(interruptRequestCount == 1)
+    }
+
+    @Test func activeChatContextMenuCancelDoesNotBypassPendingReviewCancellation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        let context = CodexModelContainer(appServer: runtime.server).mainContext
+        let repo = try makeShellTestGitRepository()
+        let chatID = CodexThreadID(rawValue: "active-chat-with-pending-run-cancel")
+        let turnID = CodexTurnID(rawValue: "pending-turn")
+
+        try await runtime.transport.enqueueThreadList(
+            .init(
+                threads: [
+                    .init(
+                        id: chatID,
+                        workspace: repo,
+                        name: "Pending cancellation chat",
+                        updatedAt: Date(timeIntervalSince1970: 5_000),
+                        status: .active(activeFlags: []),
+                        turns: [
+                            .init(id: turnID, status: .running)
+                        ]
+                    )
+                ]
+            ))
+        try await runtime.transport.enqueueThreadResume(
+            .init(
+                id: chatID,
+                status: .active(activeFlags: []),
+                turns: [
+                    .init(id: turnID, status: .running)
+                ]
+            ))
+        try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
+
+        let terminalRun = ReviewRunRecord.makeForTesting(
+            id: "a-terminal-run",
+            cwd: repo.path,
+            targetSummary: "Terminal review run",
+            threadID: chatID.rawValue,
+            turnID: "terminal-review-turn",
+            status: .succeeded,
+            startedAt: Date(timeIntervalSince1970: 4_100),
+            endedAt: Date(timeIntervalSince1970: 4_200),
+            summary: "Completed review."
+        )
+        let pendingRun = ReviewRunRecord.makeForTesting(
+            id: "z-pending-cancellation-run",
+            cwd: repo.path,
+            targetSummary: "Pending cancellation review run",
+            threadID: chatID.rawValue,
+            turnID: "pending-review-turn",
+            status: .running,
+            cancellationRequested: true,
+            startedAt: Date(timeIntervalSince1970: 4_000),
+            summary: "Cancellation requested."
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadReviewCancellationStateForTesting(
+            serverState: .running,
+            reviewRuns: [terminalRun, pendingRun]
+        )
+        let viewController = ReviewMonitorSplitViewController(
+            store: store,
+            uiState: ReviewMonitorUIState(auth: store.auth),
+            modelContext: context
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let sidebar = viewController.sidebarViewControllerForTesting
+        try await waitForCondition {
+            sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(chatID)) == "Pending cancellation chat"
+        }
+
+        #expect(
+            store.chatCancellationCapability(
+                forChatID: chatID.rawValue,
+                isChatActive: true
+            ) == .pendingReviewCancellation
+        )
+
+        var cancelItemWasEnabled = false
+        sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+            guard let cancelIndex = menu.items.firstIndex(where: { $0.title == "Cancel" }) else {
+                return
+            }
+            cancelItemWasEnabled = menu.items[cancelIndex].isEnabled
+            menu.performActionForItem(at: cancelIndex)
+        }
+
+        // A pending cancellation leaves nothing further to trigger, so the
+        // command is visible but disabled.
+        #expect(cancelItemWasEnabled == false)
+        try await Task.sleep(for: .milliseconds(100))
+        let resumeRequestCount = await runtime.transport.recordedRequests(method: "thread/resume").count
+        let interruptRequestCount = await runtime.transport.recordedRequests(method: "turn/interrupt").count
+        #expect(resumeRequestCount == 0)
+        #expect(interruptRequestCount == 0)
+    }
+
+    @Test func previewContentViewControllerRendersSelectedChatLogDuringViewLifecycle() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let selectedSnapshot = try #require(await previewContent.snapshotForTesting(chatID: selectedChatID))
+        let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue))
+        #expect(snapshot.log.isEmpty == false)
+    }
+
+    @Test func previewContentViewControllerStreamsSelectedChatLogDuringViewLifecycle() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+
+        viewController.loadViewIfNeeded()
+        viewController.view.layoutSubtreeIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let initialSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        let nextTick = try #require(await viewController.appendPreviewChatLogStreamTickForTesting())
+        #expect(nextTick == 1)
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.count > initialSnapshot.log.count
+                && snapshot.log.contains("Turn started")
+                && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(updatedSnapshot.log.contains("Turn started"))
+    }
+
     @Test func bindingStoreAppliesInitialState() {
         let store = CodexReviewStore.makePreviewStore()
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarTopAccessoryCountForTesting == 0)
@@ -32,14 +648,14 @@ extension ReviewUITests {
         #expect(viewController.contentPaneViewControllerForTesting.isShowingEmptyStateForTesting)
     }
 
-    @Test func splitViewShowsEmptyStateWithoutJobs() {
+    @Test func splitViewShowsEmptyStateWithoutChats() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.splitViewItems.count == 2)
@@ -53,10 +669,10 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerFailedOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.splitViewItems.count == 2)
@@ -68,10 +684,10 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerStartingOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .starting,
-            workspaces: []
+            serverState: .starting
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
@@ -80,26 +696,26 @@ extension ReviewUITests {
     @Test func splitViewShowsUnavailableSidebarWhenServerStoppedOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
-            serverState: .stopped,
-            workspaces: []
+            serverState: .stopped
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
         #expect(viewController.sidebarPresentationForTesting == .unavailable)
     }
 
-    @Test func splitViewShowsJobSidebarWhenServerRunningOnLoad() {
+    @Test func splitViewShowsReviewChatSidebarWhenServerRunningOnLoad() {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarTopAccessoryCountForTesting == 0)
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
     }
@@ -108,14 +724,13 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarBottomAccessoryIsHiddenForTesting == false)
 
         uiState.sidebarSelection = .account
@@ -124,7 +739,7 @@ extension ReviewUITests {
 
         uiState.sidebarSelection = .workspace
         try await waitForSidebarBottomAccessoryHidden(viewController, false)
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
     }
 
     @Test func statusAccessoryViewControllerVisibilityTracksOnlySidebarSelection() async throws {
@@ -139,8 +754,7 @@ extension ReviewUITests {
         #expect(viewController.isHidden == false)
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         #expect(viewController.isHidden == false)
 
@@ -201,9 +815,7 @@ extension ReviewUITests {
     }
 
     @Test func sidebarScrollViewExtendsBehindBottomAccessory() {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
+        let store = ReviewMonitorPreviewContent.makeStore()
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 760, height: 420)
@@ -228,17 +840,16 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         viewController.loadViewIfNeeded()
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            workspaces: []
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -249,12 +860,11 @@ extension ReviewUITests {
 
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: viewController.sidebarViewControllerForTesting.sidebarKindObservationForTesting
         )
         #expect(viewController.sidebarAccessoryCountForTesting == 1)
@@ -269,18 +879,21 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false
         }
 
         #expect(window.toolbar != nil)
         #expect(harness.rootViewController.contentKindForTesting == .contentView)
-        #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarPickerToolbarItemIdentifierForTesting))
-        #expect(viewController.toolbarIdentifiersForTesting.contains(viewController.sidebarJobFilterToolbarItemIdentifierForTesting))
+        #expect(
+            viewController.toolbarIdentifiersForTesting.contains(
+                viewController.sidebarPickerToolbarItemIdentifierForTesting))
+        #expect(
+            viewController.toolbarIdentifiersForTesting.contains(
+                viewController.sidebarReviewChatFilterToolbarItemIdentifierForTesting))
         #expect(viewController.toolbarIdentifiersForTesting.contains(.toggleSidebar) == false)
         #expect(viewController.toolbarIdentifiersForTesting.contains(.sidebarTrackingSeparator))
         #expect(
-            viewController.sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting ==
-                ["Workspace", "Account"]
+            viewController.sidebarPickerToolbarSegmentAccessibilityDescriptionsForTesting == ["Workspace", "Account"]
         )
         #expect(window.styleMask.contains(.fullSizeContentView))
         #expect(window.titleVisibility == .hidden)
@@ -293,7 +906,7 @@ extension ReviewUITests {
         #expect(viewController.contentAutomaticallyAdjustsSafeAreaInsetsForTesting)
     }
 
-    @Test func sidebarJobFilterToolbarItemProvidesMenuAndSelectedState() async throws {
+    @Test func sidebarReviewChatFilterToolbarItemProvidesMenuAndSelectedState() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -302,81 +915,83 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
-        #expect(viewController.sidebarJobFilterToolbarMenuItemTitlesForTesting == [
-            "All Items",
-            "-",
-            "Running",
-            "Latest Finished",
-        ])
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false)
+        #expect(viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false)
+        #expect(
+            viewController.sidebarReviewChatFilterToolbarMenuItemTitlesForTesting == [
+                "All Items",
+                "-",
+                "Running",
+                "Latest Finished",
+            ])
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting == false)
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.setSidebarJobFilterForTesting(.running)
+        viewController.setSidebarReviewChatFilterForTesting(.running)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting
+            viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting
         }
-        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .running)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Running"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.selectSidebarJobFilterForTesting(.latestFinished)
-        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
+        viewController.selectSidebarReviewChatFilterForTesting(.latestFinished)
+        let combinedFilter: SidebarReviewChatFilter = [.running, .latestFinished]
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
         }
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(
+            viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Running", "Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.selectSidebarJobFilterForTesting(.running)
+        viewController.selectSidebarReviewChatFilterForTesting(.running)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .latestFinished
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .latestFinished
         }
-        #expect(viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
+        #expect(viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["Latest Finished"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
 
-        viewController.setSidebarJobFilterForTesting(.all)
+        viewController.setSidebarReviewChatFilterForTesting(.all)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarShowsActiveBackgroundForTesting == false
+            viewController.sidebarReviewChatFilterToolbarShowsActiveBackgroundForTesting == false
         }
-        #expect(viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all)
-        #expect(viewController.sidebarJobFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all)
+        #expect(viewController.sidebarReviewChatFilterToolbarSelectedMenuItemTitlesForTesting == ["All Items"])
         #expect(viewController.selectedToolbarItemIdentifierForTesting == nil)
     }
 
-    @Test func sidebarJobFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
-        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+    @Test func sidebarReviewChatFilterPersistsMenuSelectionAcrossWindowControllers() async throws {
+        let defaultsContext = try makeSidebarReviewChatFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
-        let combinedFilter: SidebarJobFilter = [.running, .latestFinished]
+        let combinedFilter: SidebarReviewChatFilter = [.running, .latestFinished]
 
         do {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
             sidebarItem.isCollapsed = false
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
-            viewController.selectSidebarJobFilterForTesting(.running)
+            viewController.selectSidebarReviewChatFilterForTesting(.running)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .running
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .running
             }
-            viewController.selectSidebarJobFilterForTesting(.latestFinished)
+            viewController.selectSidebarReviewChatFilterForTesting(.latestFinished)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
+                defaults.string(forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
                     == combinedFilter.persistedValue
             )
             harness.window.close()
@@ -386,22 +1001,22 @@ extension ReviewUITests {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
             sidebarItem.isCollapsed = false
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == combinedFilter
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == combinedFilter
             }
-            viewController.selectSidebarJobFilterForTesting(.all)
+            viewController.selectSidebarReviewChatFilterForTesting(.all)
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
             #expect(
-                defaults.string(forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
-                    == SidebarJobFilter.all.persistedValue
+                defaults.string(forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
+                    == SidebarReviewChatFilter.all.persistedValue
             )
             harness.window.close()
         }
@@ -410,7 +1025,7 @@ extension ReviewUITests {
             let store = CodexReviewStore.makePreviewStore()
             let harness = makeWindowHarness(
                 store: store,
-                sidebarJobFilterDefaults: defaults
+                sidebarReviewChatFilterDefaults: defaults
             )
             let viewController = harness.viewController
             let sidebarItem = try #require(viewController.splitViewItems.first)
@@ -418,23 +1033,23 @@ extension ReviewUITests {
             defer { harness.window.close() }
 
             try await waitForCondition {
-                viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+                viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
             }
         }
     }
 
-    @Test func sidebarJobFilterDefaultsToAllForInvalidPersistedValue() async throws {
-        let defaultsContext = try makeSidebarJobFilterDefaultsForTesting()
+    @Test func sidebarReviewChatFilterDefaultsToAllForInvalidPersistedValue() async throws {
+        let defaultsContext = try makeSidebarReviewChatFilterDefaultsForTesting()
         let defaults = defaultsContext.defaults
         defer {
             defaults.removePersistentDomain(forName: defaultsContext.suiteName)
         }
-        defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.JobFilterPersistence.defaultsKey)
+        defaults.set("invalid-filter", forKey: ReviewMonitorSidebar.ReviewChatFilterPersistence.defaultsKey)
 
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(
             store: store,
-            sidebarJobFilterDefaults: defaults
+            sidebarReviewChatFilterDefaults: defaults
         )
         let viewController = harness.viewController
         let sidebarItem = try #require(viewController.splitViewItems.first)
@@ -442,11 +1057,11 @@ extension ReviewUITests {
         defer { harness.window.close() }
 
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarSelectedFilterForTesting == .all
+            viewController.sidebarReviewChatFilterToolbarSelectedFilterForTesting == .all
         }
     }
 
-    @Test func sidebarJobFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
+    @Test func sidebarReviewChatFilterToolbarItemOnlyShowsForWorkspaceSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -455,16 +1070,16 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false)
+        #expect(viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false)
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting
         }
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.workspace)
         try await waitForCondition {
-            viewController.sidebarJobFilterToolbarItemIsHiddenForTesting == false
+            viewController.sidebarReviewChatFilterToolbarItemIsHiddenForTesting == false
         }
     }
 
@@ -472,8 +1087,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let harness = makeWindowHarness(store: store)
         let viewController = harness.viewController
@@ -482,7 +1096,7 @@ extension ReviewUITests {
         let sidebarItem = try #require(viewController.splitViewItems.first)
         sidebarItem.isCollapsed = false
 
-        #expect(viewController.sidebarPresentationForTesting == .jobList)
+        #expect(viewController.sidebarPresentationForTesting == .chatList)
         #expect(viewController.sidebarPickerToolbarSelectedSelectionForTesting == .workspace)
 
         viewController.selectSidebarPickerToolbarSegmentForTesting(.account)
@@ -570,7 +1184,7 @@ extension ReviewUITests {
     @Test func sidebarPickerToolbarItemTracksExternalSelectionChanges() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
 
@@ -590,11 +1204,10 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            workspaces: []
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         viewController.attach(to: window)
@@ -610,13 +1223,12 @@ extension ReviewUITests {
         uiState.sidebarSelection = .workspace
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: sidebar.sidebarKindObservationForTesting
         )
 
         store.loadForTesting(
-            serverState: .failed("Embedded server is unavailable in preview mode."),
-            content: makeSidebarContent(from: [])
+            serverState: .failed("Embedded server is unavailable in preview mode.")
         )
         try await waitForSidebarPresentation(
             viewController,
@@ -626,12 +1238,11 @@ extension ReviewUITests {
 
         store.loadForTesting(
             serverState: .running,
-            serverURL: URL(string: "http://localhost:9417/mcp"),
-            content: makeSidebarContent(from: [])
+            serverURL: URL(string: "http://localhost:9417/mcp")
         )
         try await waitForSidebarPresentation(
             viewController,
-            .jobList,
+            .chatList,
             observation: sidebar.sidebarKindObservationForTesting
         )
     }
@@ -639,7 +1250,7 @@ extension ReviewUITests {
     @Test func splitViewShowsAddAccountToolbarItemOnlyForAccountSidebar() async throws {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -665,7 +1276,7 @@ extension ReviewUITests {
         let store = CodexReviewStore.makePreviewStore()
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
         window.setContentSize(NSSize(width: 900, height: 600))
@@ -685,7 +1296,7 @@ extension ReviewUITests {
         #expect(viewController.addAccountToolbarItemIsHiddenForTesting == false)
     }
 
-    @Test func previewContentViewControllerConfiguresAttachedWindowLikeSplitPresentation() {
+    @Test func previewContentViewControllerConfiguresAttachedWindowLikeSplitPresentation() async throws {
         let viewController = makeReviewMonitorPreviewContentViewControllerForPreview()
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
@@ -695,13 +1306,73 @@ extension ReviewUITests {
 
         #expect(window.toolbar != nil)
         #expect(window.styleMask.contains(.fullSizeContentView))
-        #expect(window.titleVisibility == .visible)
-        #expect(window.title.isEmpty == false)
         #expect(window.isOpaque)
         #expect(window.backgroundColor == .windowBackgroundColor)
         #expect(window.titlebarAppearsTransparent == false)
         #expect(window.titlebarSeparatorStyle == .automatic)
         #expect(window.isMovableByWindowBackground == false)
+    }
+
+    @Test func previewContentViewControllerRendersSelectedChatLog() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let selectedSnapshot = try #require(await previewContent.snapshotForTesting(chatID: selectedChatID))
+        let expectedLogText = try #require(selectedSnapshot.items.compactMap { $0.text }.first)
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        window.layoutIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let snapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.contains(expectedLogText) && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(transport.renderedStateForTesting.selection == .chat(selectedChatID.rawValue))
+        #expect(snapshot.log.isEmpty == false)
+    }
+
+    @Test func previewContentViewControllerStreamsSelectedChatLogTicks() async throws {
+        let previewContent = ReviewMonitorPreviewContent.makeContentSource()
+        let store = previewContent.store
+        let selectedChatID = try #require(previewSelectedChatID(in: store))
+        let viewController = makeReviewMonitorPreviewContentViewControllerForPreview(
+            previewContent: previewContent
+        )
+        let window = NSWindow(contentViewController: viewController)
+        defer { window.close() }
+        window.setContentSize(NSSize(width: 900, height: 600))
+        viewController.loadViewIfNeeded()
+        window.layoutIfNeeded()
+
+        let transport = viewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let initialSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        let nextTick = try #require(await viewController.appendPreviewChatLogStreamTickForTesting())
+        #expect(nextTick == 1)
+        let updatedSnapshot = try await awaitTransportRender(
+            transport,
+            expectedSelection: .chat(selectedChatID.rawValue)
+        ) { snapshot in
+            snapshot.log.count > initialSnapshot.log.count
+                && snapshot.log.contains("Turn started")
+                && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(updatedSnapshot.log.contains("Turn started"))
     }
 
     @Test func windowControllerUsesSeededAuthenticatedStateOnFirstPresentation() {
@@ -712,7 +1383,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -737,7 +1408,7 @@ extension ReviewUITests {
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
             frameAutosaveName: autosaveName,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -755,18 +1426,17 @@ extension ReviewUITests {
 
     @Test func windowControllerKeepsSplitViewForUnsavedCurrentSession() {
         let store = CodexReviewStore.makePreviewStore()
-        let currentAccount = CodexAccount(email: "current@example.com", planType: "pro")
+        let currentAccount = CodexReviewAccount(email: "current@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
             account: currentAccount,
-            persistedAccounts: [],
-            workspaces: []
+            persistedAccounts: []
         )
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -784,17 +1454,16 @@ extension ReviewUITests {
 
     @Test func accountSidebarDisplaysUnsavedCurrentSession() {
         let store = CodexReviewStore.makePreviewStore()
-        let currentAccount = CodexAccount(email: "current@example.com", planType: "pro")
+        let currentAccount = CodexReviewAccount(email: "current@example.com", planType: "pro")
         store.loadForTesting(
             serverState: .running,
             authPhase: .signedOut,
             account: currentAccount,
-            persistedAccounts: [],
-            workspaces: []
+            persistedAccounts: []
         )
         let uiState = ReviewMonitorUIState(auth: store.auth)
         uiState.sidebarSelection = .account
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: uiState)
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(store: store, uiState: uiState)
 
         viewController.loadViewIfNeeded()
 
@@ -829,13 +1498,12 @@ extension ReviewUITests {
             serverState: .running,
             authPhase: .signedOut,
             account: nil,
-            persistedAccounts: [CodexAccount(email: "saved@example.com", planType: "pro")],
-            workspaces: []
+            persistedAccounts: [CodexReviewAccount(email: "saved@example.com", planType: "pro")]
         )
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         guard let window = windowController.window else {
             Issue.record("ReviewMonitorWindowController did not create a window.")
@@ -861,7 +1529,7 @@ extension ReviewUITests {
         let windowController = ReviewMonitorWindowController(
             store: store,
             contentTransitionAnimator: ReviewMonitorRootViewController.defaultContentTransitionAnimator,
-            sidebarJobFilterDefaults: nil
+            sidebarReviewChatFilterDefaults: nil
         )
         defer { windowController.window?.close() }
         await Task.yield()
@@ -1035,12 +1703,14 @@ extension ReviewUITests {
         )
         defer { harness.window.close() }
 
-        applyTestAuthState(auth: store.auth, state: 
-            .failed(
-                "Authentication failed.",
-                isAuthenticated: true,
-                accountID: "review@example.com"
-            )
+        applyTestAuthState(
+            auth: store.auth,
+            state:
+                .failed(
+                    "Authentication failed.",
+                    isAuthenticated: true,
+                    accountID: "review@example.com"
+                )
         )
         await Task.yield()
 
@@ -1065,14 +1735,13 @@ extension ReviewUITests {
     }
 
     @Test func detailLogViewExtendsBehindTitlebarWithoutOverlappingSidebar() async throws {
-        let job = makeJob(
-            id: "job-safe-area",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: "Safe area log\n"
+        let logText = "Safe area log\n"
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-safe-area",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 900, height: 600)
@@ -1081,9 +1750,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         let logFrame = transport.logFrameForTesting
         let viewBounds = transport.viewBoundsForTesting
@@ -1098,21 +1765,21 @@ extension ReviewUITests {
         #expect(transport.logAutomaticallyAdjustsContentInsetsForTesting)
         #expect(contentInsets.top > 0)
         #expect(abs(transport.logVerticalScrollOffsetForTesting + contentInsets.top) < 0.5)
-        #expect(abs(
-            transport.logMaximumVerticalScrollOffsetForTesting
-                - transport.logMinimumVerticalScrollOffsetForTesting
-        ) < 0.5)
+        #expect(
+            abs(
+                transport.logMaximumVerticalScrollOffsetForTesting
+                    - transport.logMinimumVerticalScrollOffsetForTesting
+            ) < 0.5)
     }
 
     @Test func shortDetailLogKeepsTextContentWithinDocumentBounds() async throws {
-        let job = makeJob(
-            id: "job-short-log-layout",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: "Short log\n"
+        let logText = "Short log\n"
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-short-log-layout",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 900, height: 600)
@@ -1121,9 +1788,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         let textContentFrame = transport.logTextContentFrameForTesting
         let documentViewFrame = transport.logDocumentViewFrameForTesting
@@ -1135,14 +1800,14 @@ extension ReviewUITests {
     }
 
     @Test func detailLogExpandsAfterSidebarReopensFromCompactWidth() async throws {
-        let job = makeJob(
-            id: "job-sidebar-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40).joined()
+        let logText = Array(repeating: "Long line that should reflow across the widened detail pane.\n", count: 40)
+            .joined()
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-sidebar-width-regression",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 520, height: 420)
@@ -1153,8 +1818,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         window.setContentSize(NSSize(width: 360, height: 420))
         sidebarItem.isCollapsed = true
@@ -1181,14 +1845,14 @@ extension ReviewUITests {
     }
 
     @Test func detailLogShrinksAfterSidebarReopensIntoNarrowWidth() async throws {
-        let job = makeJob(
-            id: "job-sidebar-width-shrink-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40).joined()
+        let logText = Array(repeating: "Long line that should reflow when the detail pane narrows.\n", count: 40)
+            .joined()
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-sidebar-width-shrink-regression",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1199,10 +1863,7 @@ extension ReviewUITests {
         try await waitForWindowContentKind(harness.rootViewController, .contentView)
         let transport = viewController.transportViewControllerForTesting
         let sidebarItem = try #require(viewController.splitViewItems.first)
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let expandedDocumentWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1223,14 +1884,13 @@ extension ReviewUITests {
     }
 
     @Test func detailLogTracksSimpleWindowResizeInBothDirections() async throws {
-        let job = makeJob(
-            id: "job-window-resize-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
+        let logText = Array(repeating: "Long line that should reflow as the window resizes.\n", count: 40).joined()
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-window-resize-width-regression",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1239,10 +1899,7 @@ extension ReviewUITests {
         let window = harness.window
         defer { window.close() }
         let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         expectLogTextContainerWidthTracksContentView(transport)
 
@@ -1273,15 +1930,13 @@ extension ReviewUITests {
     }
 
     @Test func detailLogRewrapsVisibleTextDuringLiveWindowResize() async throws {
-        let job = makeJob(
-            id: "job-window-live-resize-log",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review.",
-            logText: String(repeating: "wrap-sensitive text ", count: 600)
+        let logText = String(repeating: "wrap-sensitive text ", count: 600)
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-window-live-resize-log",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 960, height: 600)
@@ -1296,10 +1951,7 @@ extension ReviewUITests {
             }
             window.close()
         }
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
         let wideWidth = transport.logDocumentViewFrameForTesting.width
         let wideDocumentHeight = transport.logDocumentViewFrameForTesting.height
         let wideFragmentHeight = transport.logVisibleFragmentBoundsForTesting.height
@@ -1333,15 +1985,12 @@ extension ReviewUITests {
                 "stream.tick \(String(format: "%03d", index)) delta/render +5 -3 after resizing the split view, avoiding sidebar auto-collapse, and keeping visible TextKit 2 fragments fresh"
             }
             .joined(separator: "\n\n")
-        let job = makeJob(
-            id: "job-window-live-resize-stream-log",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            summary: "Running review.",
-            logText: streamLog
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-window-live-resize-stream-log",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 1_060, height: 600)
@@ -1356,10 +2005,8 @@ extension ReviewUITests {
             }
             window.close()
         }
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
-        window.layoutIfNeeded()
-        transport.view.layoutSubtreeIfNeeded()
+        try await renderDetailLogForShellLayoutTesting(
+            streamLog, in: transport, viewController: viewController, chat: chat)
         #expect(transport.isLogPinnedToBottomForTesting)
 
         transport.beginLogLiveResizeForTesting()
@@ -1379,14 +2026,15 @@ extension ReviewUITests {
     }
 
     @Test func detailLogTextContainerExpandsAfterToolbarSidebarToggleAtCompactWidth() async throws {
-        let job = makeJob(
-            id: "job-toolbar-sidebar-toggle-textkit-width-regression",
-            status: .running,
-            targetSummary: "Uncommitted changes",
-            logText: Array(repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40).joined()
+        let logText = Array(
+            repeating: "Long line that should reflow after the toolbar sidebar toggle path.\n", count: 40
+        ).joined()
+        let chat = makeShellReviewChatForTesting(
+            id: "chat-toolbar-sidebar-toggle-textkit-width-regression",
+            title: "Uncommitted changes"
         )
         let store = CodexReviewStore.makePreviewStore()
-        store.loadForTesting(serverState: .running, content: makeSidebarContent(from: [job]))
+        store.loadForTesting(serverState: .running, fixtures: [chat])
         let harness = makeWindowHarness(
             store: store,
             contentSize: NSSize(width: 520, height: 420)
@@ -1401,8 +2049,7 @@ extension ReviewUITests {
         window.layoutIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
         transport.view.layoutSubtreeIfNeeded()
-        viewController.sidebarViewControllerForTesting.selectJobForTesting(job)
-        _ = try await awaitTransportRender(transport)
+        try await renderDetailLogForShellLayoutTesting(logText, in: transport, viewController: viewController, chat: chat)
 
         viewController.toggleSidebar(nil)
         await awaitNativeLayoutTurn()
@@ -1451,7 +2098,8 @@ extension ReviewUITests {
     @Test func splitViewAttachIsIdempotentForSameWindow() {
         let backend = CountingStartBackend()
         let store = makeStore(backend: backend)
-        let viewController = ReviewMonitorSplitViewController(store: store, uiState: ReviewMonitorUIState(auth: store.auth))
+        let viewController = makeReviewMonitorSplitViewControllerForTesting(
+            store: store, uiState: ReviewMonitorUIState(auth: store.auth))
         let window = NSWindow(contentViewController: viewController)
         defer { window.close() }
 
@@ -1465,157 +2113,217 @@ extension ReviewUITests {
         #expect(backend.startCallCount() == 0)
     }
 
-    @Test func previewRunningJobsAppendPseudoStreamWhenTicked() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialLog = reviewMonitorLogText(for: runningJob)
-        let initialEntryCount = runningJob.logEntries.count
+    @Test func previewRunningChatsAppendPseudoStreamWhenTicked() async throws {
+        let source = ReviewMonitorPreviewContent.makeContentSource()
+        let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        let initialItemCount = initialSnapshot.items.count
 
-        ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store)
+        await source.appendPreviewChatLogStreamTick()
 
-        let appendedText = String(reviewMonitorLogText(for: runningJob).dropFirst(initialLog.count))
-        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
-        #expect(reviewMonitorLogText(for: runningJob) != initialLog)
+        let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
+        let appendedText = appendedItems.compactMap { $0.text }.joined(separator: "\n")
+        #expect(updatedSnapshot.items != initialSnapshot.items)
         #expect(appendedText.contains("Turn started"))
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)
-        #expect(appendedEntries.count == 1)
-        #expect(appendedEntries.first?.kind == .event)
-        #expect(appendedEntries.first?.text.contains("preview-turn") == true)
+        #expect(appendedItems.count == 1)
+        #expect(appendedItems.first?.kind.rawValue == "event")
+        #expect(appendedItems.first.map(diagnosticMessage)?.contains("preview-turn") == true)
     }
 
-    @Test func previewStreamUsesMixedReviewLogKinds() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialEntryCount = runningJob.logEntries.count
+    @Test func previewChatStreamUsesMixedLogKinds() async throws {
+        let source = ReviewMonitorPreviewContent.makeContentSource()
+        let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
         for _ in 0..<720 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
 
-        let appendedEntries = Array(runningJob.logEntries.dropFirst(initialEntryCount))
-        let appendedKinds = appendedEntries.map(\.kind)
-        #expect(appendedKinds.contains(.event))
-        #expect(appendedKinds.contains(.command))
-        #expect(appendedKinds.contains(.toolCall))
-        #expect(appendedKinds.contains(.plan))
-        #expect(appendedKinds.contains(.contextCompaction))
-        #expect(appendedKinds.contains(.reasoningSummary))
-        #expect(appendedKinds.contains(.agentMessage))
+        let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
+        let appendedKinds = appendedItems.map { $0.kind.rawValue }
+        #expect(appendedKinds.contains("event"))
+        #expect(appendedKinds.contains("commandExecution"))
+        #expect(appendedKinds.contains("mcpToolCall"))
+        #expect(appendedKinds.contains("plan"))
+        #expect(appendedKinds.contains("contextCompaction"))
+        #expect(appendedKinds.contains("reasoning"))
+        #expect(appendedKinds.contains("agentMessage"))
         #expect(Set(appendedKinds).count >= 6)
+        #expect(Set(appendedItems.map { $0.id }).count == appendedItems.count)
 
-        let repeatedNonReplacingGroups = Dictionary(
-            grouping: appendedEntries.filter { $0.replacesGroup == false },
-            by: { entry in "\(entry.groupID ?? "")|\(entry.kind.rawValue)" }
-        ).values.filter { entries in
-            entries.first?.groupID != nil && entries.count > 1
-        }
-        for entries in repeatedNonReplacingGroups {
-            let kind = try #require(entries.first?.kind)
-            #expect([.reasoning, .reasoningSummary, .rawReasoning].contains(kind))
-        }
-
-        let compactionEntries = runningJob.logEntries
-            .dropFirst(initialEntryCount)
-            .filter { $0.kind == .contextCompaction }
-        #expect(compactionEntries.count >= 2)
-        #expect(compactionEntries.last?.text == "Context automatically compacted")
-        #expect(compactionEntries.last?.metadata?.status == "completed")
-        let renderedLog = reviewMonitorLogText(for: runningJob)
+        let compactionItems = updatedSnapshot.items
+            .dropFirst(initialItemCount)
+            .filter { $0.kind.rawValue == "contextCompaction" }
+        let compactionItem = try #require(compactionItems.last)
+        #expect(contextCompactionTitle(compactionItem) == "Context automatically compacted")
+        let renderedLog = updatedSnapshot.items.compactMap { $0.text }.joined(separator: "\n")
         #expect(renderedLog.contains("Context automatically compacted"))
         #expect(renderedLog.contains("Automatically compacting context") == false)
     }
 
-    @Test func previewStreamWaitsAfterEachCompletedItemAndDrainsChunks() throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
-        let runningJob = try #require(
-            store.orderedJobs.first(where: { $0.core.lifecycle.status == .running })
-        )
-        let initialEntryCount = runningJob.logEntries.count
+    @Test func previewChatStreamWaitsAfterEachCompletedItemAndDrainsChunks() async throws {
+        let source = ReviewMonitorPreviewContent.makeContentSource()
+        let runningChatID = CodexThreadID(rawValue: "preview-thread-0-0")
+        let initialSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        let initialItemCount = initialSnapshot.items.count
         var tick = 0
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == initialEntryCount + 1)
-        #expect(runningJob.logEntries.last?.kind == .event)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
+        var snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        #expect(snapshot.items.count == initialItemCount + 1)
+        #expect(snapshot.items.last?.kind.rawValue == "event")
 
         for _ in 0..<38 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
-        #expect(runningJob.logEntries.count == initialEntryCount + 1)
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        #expect(snapshot.items.count == initialItemCount + 1)
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == initialEntryCount + 2)
-        #expect(runningJob.logEntries.last?.kind == .plan)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        #expect(snapshot.items.count == initialItemCount + 2)
+        #expect(snapshot.items.last?.kind.rawValue == "plan")
 
-        var observedEntryCount = runningJob.logEntries.count
-        for _ in 0..<180 where runningJob.logEntries.last?.kind != .reasoningSummary {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            observedEntryCount = runningJob.logEntries.count
+        for _ in 0..<180 where snapshot.items.last?.kind.rawValue != "reasoning" {
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
+            snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         }
-        let firstReasoning = try #require(runningJob.logEntries.last)
-        #expect(firstReasoning.kind == .reasoningSummary)
-        let reasoningGroupID = firstReasoning.groupID
-        var reasoningChunkCount = 1
+        let firstReasoning = try #require(snapshot.items.last)
+        #expect(firstReasoning.kind.rawValue == "reasoning")
+        let reasoningID = firstReasoning.id
+        let initialReasoningText = reasoningText(firstReasoning)
+        var latestReasoningText = initialReasoningText
 
         for _ in 0..<80 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-            let entries = Array(runningJob.logEntries.dropFirst(observedEntryCount))
-            if entries.isEmpty {
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
+            snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+            let item = try #require(snapshot.items.first { $0.id == reasoningID })
+            let text = reasoningText(item)
+            if text == latestReasoningText {
                 break
             }
-            #expect(entries.count == 1)
-            let entry = try #require(entries.first)
-            #expect(entry.kind == .reasoningSummary)
-            #expect(entry.groupID == reasoningGroupID)
-            reasoningChunkCount += 1
-            observedEntryCount = runningJob.logEntries.count
+            latestReasoningText = text
         }
 
-        #expect(reasoningChunkCount > 1)
-        let countAfterReasoning = runningJob.logEntries.count
+        #expect(latestReasoningText.count > initialReasoningText.count)
+        let countAfterReasoning = snapshot.items.count
         for _ in 0..<37 {
-            tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
+            tick = await source.appendPreviewChatLogStreamTick(after: tick)
         }
-        #expect(runningJob.logEntries.count == countAfterReasoning)
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        #expect(snapshot.items.count == countAfterReasoning)
 
-        tick = ReviewMonitorPreviewContent.appendPreviewStreamTick(to: store, after: tick)
-        #expect(runningJob.logEntries.count == countAfterReasoning + 1)
-        #expect(runningJob.logEntries.last?.kind == .command)
+        tick = await source.appendPreviewChatLogStreamTick(after: tick)
+        snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
+        #expect(snapshot.items.count == countAfterReasoning + 1)
+        #expect(snapshot.items.last?.kind.rawValue == "commandExecution")
     }
 
-    @Test func previewFirstWorkspaceShowsStructuredFindingsWhenSelected() async throws {
-        let store = ReviewMonitorPreviewContent.makeStore(
-            streamInterval: nil
-        )
-        let firstWorkspace = try #require(store.workspaces.sorted { $0.cwd < $1.cwd }.first)
-        let harness = makeWindowHarness(store: store)
-        let viewController = harness.viewController
-        let window = harness.window
-        defer { window.close() }
-        let transport = viewController.transportViewControllerForTesting
-        viewController.sidebarViewControllerForTesting.selectWorkspaceForTesting(firstWorkspace)
-
-        _ = try await awaitTransportRender(transport)
-        let accessibilityValue = try #require(transport.workspaceFindingsAccessibilityValueForTesting)
-        #expect(transport.workspaceFindingSnapshotForTesting.isShowingFindingsList)
-        #expect(transport.workspaceFindingSnapshotForTesting.isShowingNoFindingsState == false)
-        #expect(accessibilityValue.isEmpty == false)
-    }
 }
 
-private func makeSidebarJobFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {
-    let suiteName = "ReviewMonitorSidebarJobFilterDefaultsTests-\(UUID().uuidString)"
+@MainActor
+private func previewSelectedChatID(in store: CodexReviewStore) -> CodexThreadID? {
+    _ = store
+    return CodexThreadID(rawValue: "preview-thread-0-0")
+}
+
+private func makeShellTestGitRepository() throws -> URL {
+    let repo = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: repo.appendingPathComponent(".git", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    return repo
+}
+
+@MainActor
+private func performChatContextMenuItemForTesting(
+    title: String,
+    chatID: CodexThreadID,
+    sidebar: ReviewMonitorSidebarViewController
+) -> (presented: Bool, enabled: Bool) {
+    var presented = false
+    var enabled = false
+    sidebar.presentContextMenuForTesting(chatID: chatID) { menu in
+        guard let itemIndex = menu.items.firstIndex(where: { $0.title == title }) else {
+            return
+        }
+        presented = true
+        enabled = menu.items[itemIndex].isEnabled
+        menu.performActionForItem(at: itemIndex)
+    }
+    return (presented: presented, enabled: enabled)
+}
+
+@MainActor
+private func diagnosticMessage(_ item: CodexThreadItem) -> String {
+    if case .diagnostic(let message) = item.content {
+        return message
+    }
+    return ""
+}
+
+@MainActor
+private func reasoningText(_ item: CodexThreadItem) -> String {
+    if case .reasoning(let reasoning) = item.content {
+        return reasoning.text
+    }
+    return ""
+}
+
+@MainActor
+private func contextCompactionTitle(_ item: CodexThreadItem) -> String {
+    if case .contextCompaction(let title) = item.content {
+        return title ?? ""
+    }
+    return ""
+}
+
+@MainActor
+private func makeShellReviewChatForTesting(
+    id: String,
+    title: String
+) -> ReviewChatFixtureForTesting {
+    makeReviewChatFixtureForTesting(
+        id: id,
+        title: title,
+        status: .running,
+        startedAt: Date(timeIntervalSince1970: 200)
+    )
+}
+
+@MainActor
+private func renderDetailLogForShellLayoutTesting(
+    _ text: String,
+    in transport: ReviewMonitorTransportViewController,
+    viewController: ReviewMonitorSplitViewController,
+    chat: ReviewChatFixtureForTesting
+) async throws {
+    viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
+    let expectedSelection: ReviewMonitorTransportViewController.DisplayedSelectionForTesting = .chat(chat.chatID.rawValue)
+    try await waitForCondition {
+        transport.renderedStateForTesting.selection == expectedSelection
+            && transport.renderedStateForTesting.snapshot.isShowingEmptyState == false
+    }
+    #expect(transport.renderLogForTesting(text: text, allowIncrementalUpdate: false))
+    transport.scrollLogToBottomForTesting()
+    if let window = viewController.view.window {
+        window.layoutIfNeeded()
+    }
+    viewController.view.layoutSubtreeIfNeeded()
+    transport.view.layoutSubtreeIfNeeded()
+}
+
+private func makeSidebarReviewChatFilterDefaultsForTesting() throws -> (defaults: UserDefaults, suiteName: String) {
+    let suiteName = "ReviewMonitorSidebarReviewChatFilterDefaultsTests-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defaults.removePersistentDomain(forName: suiteName)
     return (defaults, suiteName)

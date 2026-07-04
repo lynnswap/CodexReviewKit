@@ -1,7 +1,9 @@
 import AppKit
 import Foundation
-import CodexReview
+import CodexReviewKit
 import CodexReviewHost
+@testable import ReviewUI
+import ReviewUIPreviewSupport
 import Testing
 @testable import CodexReviewMonitor
 
@@ -15,7 +17,7 @@ struct CodexReviewMonitorCITests {
             arguments: []
         )
 
-        #expect(environment[ReviewMonitorLaunchEnvironment.mockJobsKey] == "1")
+        #expect(environment[ReviewMonitorLaunchEnvironment.reviewModeKey] == "1")
         #expect(context.requestsPreviewContent)
         #expect(context.shouldStartEmbeddedServer == false)
     }
@@ -86,12 +88,13 @@ struct CodexReviewMonitorCITests {
         let recorder = WindowControllerFactoryRecorder()
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeStore: { context, _ in
+            makeDependencies: { context, _ in
                 capturedContext = context
-                return expectedStore
+                return ReviewMonitorAppDependencies(store: expectedStore)
             },
-            makeWindowController: { store, showSettings in
-                #expect(store === expectedStore)
+            makeWindowController: { dependencies, showSettings in
+                #expect(dependencies.store === expectedStore)
+                #expect(dependencies.previewContent == nil)
                 capturedShowSettings = showSettings
                 return recorder.makeWindowController()
             },
@@ -103,7 +106,7 @@ struct CodexReviewMonitorCITests {
             launchContextProvider: {
                 ReviewMonitorLaunchContext(
                     environment: [
-                        ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+                        ReviewMonitorLaunchEnvironment.reviewModeKey: "1",
                     ],
                     arguments: [],
                     launchMode: .application
@@ -143,8 +146,8 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -190,8 +193,8 @@ struct CodexReviewMonitorCITests {
     @Test func appDelegateShowsInjectedSettingsWindowController() {
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -222,7 +225,7 @@ struct CodexReviewMonitorCITests {
         var didCallLiveStoreFactory = false
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { _, _ in
+            makeLiveStore: { _, _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview store creation should not build a live store.")
                 return CodexReviewStore.makePreviewStore()
@@ -230,22 +233,83 @@ struct CodexReviewMonitorCITests {
         )
         let context = ReviewMonitorLaunchContext(
             environment: [
-                ReviewMonitorLaunchEnvironment.mockJobsKey: "1",
+                ReviewMonitorLaunchEnvironment.reviewModeKey: "1",
             ],
             arguments: [],
             launchMode: .application
         )
         var didRequestPresentationAnchor = false
 
-        _ = composition.makeStore(context) {
+        let dependencies = composition.makeDependencies(context) {
             didRequestPresentationAnchor = true
             Issue.record("Preview store creation should not request a presentation anchor.")
             return nil
         }
 
+        #expect(dependencies.previewContent != nil)
+        #expect(dependencies.previewContent?.store === dependencies.store)
         #expect(didRequestPresentationAnchor == false)
         #expect(didCallLiveStoreFactory == false)
         #expect(context.shouldStartEmbeddedServer == false)
+    }
+
+    @Test func liveCompositionPreviewWindowRendersPreviewChatLog() async throws {
+        let runtimePreferencesStore = FailingRuntimePreferencesStore()
+        var didCallLiveStoreFactory = false
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _, _ in
+                didCallLiveStoreFactory = true
+                Issue.record("Preview window creation should not build a live store.")
+                return CodexReviewStore.makePreviewStore()
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [
+                ReviewMonitorLaunchEnvironment.reviewModeKey: "1",
+            ],
+            arguments: [],
+            launchMode: .application
+        )
+        let dependencies = composition.makeDependencies(context) {
+            Issue.record("Preview store creation should not request a presentation anchor.")
+            return nil
+        }
+
+        let windowController = composition.makeWindowController(dependencies) {}
+        let rootViewController = try #require(
+            windowController.window?.contentViewController as? ReviewMonitorRootViewController
+        )
+        rootViewController.prepareForSwiftUIPreviewRendering()
+
+        let sidebar = rootViewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        try await waitForPreviewCondition {
+            sidebar.sidebarKindForTesting == .chatList
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("workspace-alpha")
+                && sidebar.displayedCodexSidebarTitlesForTesting.contains("Branch: feature/workspace-alpha-sidebar")
+        }
+        #expect(sidebar.isShowingEmptyStateForTesting == false)
+
+        let transport = rootViewController.splitViewControllerForTesting.transportViewControllerForTesting
+        let initialSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
+            snapshot.log.isEmpty == false && snapshot.isShowingEmptyState == false
+        }
+
+        #expect(didCallLiveStoreFactory == false)
+        if case .chat? = transport.renderedStateForTesting.selection {
+        } else {
+            Issue.record("Expected preview window to select a chat.")
+        }
+        #expect(initialSnapshot.log.isEmpty == false)
+
+        let nextTick = try #require(await rootViewController.appendPreviewChatLogStreamTickForTesting())
+        #expect(nextTick == 1)
+        let updatedSnapshot = try await awaitPreviewTransportRender(transport) { snapshot in
+            snapshot.log.count > initialSnapshot.log.count
+                && snapshot.log.contains("Turn started")
+                && snapshot.isShowingEmptyState == false
+        }
+        #expect(updatedSnapshot.log.contains("Turn started"))
     }
 
     @Test func liveCompositionPassesLoadedRuntimePreferencesToApplicationStoreFactory() {
@@ -266,7 +330,7 @@ struct CodexReviewMonitorCITests {
         var capturedAuthenticationConfiguration: CodexReviewNativeAuthentication.Configuration?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
-            makeLiveStore: { runtimePreferences, authenticationConfiguration in
+            makeLiveStore: { runtimePreferences, authenticationConfiguration, _ in
                 capturedRuntimePreferences = runtimePreferences
                 capturedAuthenticationConfiguration = authenticationConfiguration
                 return expectedStore
@@ -279,12 +343,14 @@ struct CodexReviewMonitorCITests {
         )
         var didRequestPresentationAnchor = false
 
-        let store = composition.makeStore(context) {
+        let dependencies = composition.makeDependencies(context) {
             didRequestPresentationAnchor = true
             return nil
         }
+        let store = dependencies.store
 
         #expect(store === expectedStore)
+        #expect(dependencies.previewContent == nil)
         #expect(capturedRuntimePreferences == expectedRuntimePreferences)
         #expect(didRequestPresentationAnchor == false)
         #expect(capturedAuthenticationConfiguration?.callbackScheme == "lynnpd.CodexReviewMonitor.auth")
@@ -294,6 +360,31 @@ struct CodexReviewMonitorCITests {
         }
         #expect(capturedAuthenticationConfiguration?.presentationAnchorProvider() == nil)
         #expect(didRequestPresentationAnchor)
+    }
+
+    @Test func liveCompositionPassesAppServerLifecycleHandlerToLiveStoreFactory() {
+        let runtimePreferencesStore = RuntimePreferencesStoreStub()
+        let expectedStore = CodexReviewStore.makePreviewStore()
+        var capturedLifecycleHandler: CodexReviewAppServerLifecycleHandler?
+        let composition = ReviewMonitorAppComposition.live(
+            runtimePreferencesStore: runtimePreferencesStore,
+            makeLiveStore: { _, _, appServerLifecycleHandler in
+                capturedLifecycleHandler = appServerLifecycleHandler
+                return expectedStore
+            }
+        )
+        let context = ReviewMonitorLaunchContext(
+            environment: [:],
+            arguments: [],
+            launchMode: .application
+        )
+
+        let dependencies = composition.makeDependencies(context) { nil }
+        let store = dependencies.store
+
+        #expect(store === expectedStore)
+        #expect(dependencies.previewContent == nil)
+        #expect(capturedLifecycleHandler != nil)
     }
 
     @Test func liveCompositionBuildsLifecycleFromLaunchContext() async {
@@ -527,8 +618,8 @@ struct CodexReviewMonitorCITests {
         }
 
         let composition = ReviewMonitorAppComposition(
-            makeStore: { _, _ in
-                CodexReviewStore.makePreviewStore()
+            makeDependencies: { _, _ in
+                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -726,6 +817,40 @@ private actor TestValueQueue<Value: Sendable> {
             waiters.append(continuation)
         }
     }
+}
+
+@MainActor
+private func awaitPreviewTransportRender(
+    _ transport: ReviewMonitorTransportViewController,
+    matching predicate: (ReviewMonitorTransportViewController.RenderSnapshotForTesting) -> Bool
+) async throws -> ReviewMonitorTransportViewController.RenderSnapshotForTesting {
+    for _ in 0..<100 {
+        let state = transport.renderedStateForTesting
+        if transport.logRenderIsIdleForTesting,
+           predicate(state.snapshot)
+        {
+            return state.snapshot
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    let state = transport.renderedStateForTesting
+    Issue.record(
+        "Timed out waiting for preview transport render: selection=\(String(describing: state.selection)), log=\(state.snapshot.log)"
+    )
+    return state.snapshot
+}
+
+@MainActor
+private func waitForPreviewCondition(
+    _ condition: @escaping @MainActor () -> Bool
+) async throws {
+    for _ in 0..<100 {
+        if condition() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    Issue.record("Timed out waiting for preview condition.")
 }
 
 @MainActor

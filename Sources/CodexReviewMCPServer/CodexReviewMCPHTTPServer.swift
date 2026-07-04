@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import MCP
 import OSLog
+import Synchronization
 @preconcurrency import NIOCore
 @preconcurrency import NIOHTTP1
 @preconcurrency import NIOPosix
@@ -516,22 +517,22 @@ package actor CodexReviewMCPHTTPServer {
 }
 
 private final class ActiveRequestCompletion: @unchecked Sendable {
-    private let lock = NSLock()
+    private let didFinish = Mutex(false)
     private let onFinish: @Sendable () -> Void
-    private var didFinish = false
 
     init(onFinish: @escaping @Sendable () -> Void) {
         self.onFinish = onFinish
     }
 
     func finish() {
-        lock.lock()
-        if didFinish {
-            lock.unlock()
-            return
+        let shouldFinish = didFinish.withLock { didFinish in
+            if didFinish {
+                return false
+            }
+            didFinish = true
+            return true
         }
-        didFinish = true
-        lock.unlock()
+        guard shouldFinish else { return }
         onFinish()
     }
 }

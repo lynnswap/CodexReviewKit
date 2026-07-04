@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import CodexReview
+import CodexReviewKit
 import ObservationBridge
 
 @MainActor
@@ -80,7 +80,7 @@ final class ReviewMonitorServerStatusAccessoryViewController: NSSplitViewItemAcc
 }
 
 struct AccountRateLimitsSectionView: View {
-    let account: CodexAccount?
+    let account: CodexReviewAccount?
 
     var body: some View {
         ForEach(rateLimits) { window in
@@ -94,7 +94,7 @@ struct AccountRateLimitsSectionView: View {
 
     @ViewBuilder
     private func rateLimitsRow(
-        _ window: CodexAccount.RateLimitWindow
+        _ window: CodexReviewAccount.RateLimitWindow
     ) -> some View {
         if let details = Self.rateLimitDetailsText(for: window) {
             Button {
@@ -104,12 +104,12 @@ struct AccountRateLimitsSectionView: View {
         }
     }
 
-    private var rateLimits: [CodexAccount.RateLimitWindow] {
+    private var rateLimits: [CodexReviewAccount.RateLimitWindow] {
         account?.rateLimits ?? []
     }
 
     static func rateLimitDetailsText(
-        for window: CodexAccount.RateLimitWindow
+        for window: CodexReviewAccount.RateLimitWindow
     ) -> AttributedString? {
         guard let resetsAt = window.resetsAt else {
             return nil
@@ -268,42 +268,3 @@ struct StatusView: View {
         }
     }
 }
-
-#if DEBUG
-
-#Preview("Signed In") {
-    let store = makeStatusPreviewStore()
-    StatusView(store: store)
-        .padding()
-}
-
-#Preview("Server Failed") {
-    let store = makeStatusPreviewStore(
-        serverState: .failed("The embedded server stopped responding.")
-    )
-    StatusView(store: store)
-        .padding()
-}
-
-@MainActor
-func makeStatusPreviewStore(
-    authPhase: CodexReviewAuthModel.Phase = .signedOut,
-    account: CodexAccount? = nil,
-    serverState: CodexReviewServerState = .running
-) -> CodexReviewStore {
-    let store = ReviewMonitorPreviewContent.makeStore()
-    let runningServerURL = store.serverURL
-    let previewAccounts = ReviewMonitorPreviewContent.makePreviewAccounts()
-    let resolvedAccount = account ?? previewAccounts.first
-    store.auth.updatePhase(authPhase)
-    store.auth.applyPersistedAccountStates(previewAccounts.map(savedAccountPayload(from:)))
-    store.auth.selectPersistedAccount(resolvedAccount?.id)
-    store.serverState = serverState
-    store.serverURL = serverState == .running ? runningServerURL : nil
-    return store
-}
-@MainActor
-func makeStatusPreviewAccount() -> CodexAccount {
-    ReviewMonitorPreviewContent.makePreviewAccount()
-}
-#endif

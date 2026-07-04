@@ -1,9 +1,9 @@
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 struct ReviewMonitorAccountRowView: View {
     let store: CodexReviewStore
-    var account: CodexAccount?
+    var account: CodexReviewAccount?
     
     var body: some View {
         if let account {

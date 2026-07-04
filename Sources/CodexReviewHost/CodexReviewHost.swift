@@ -1,6 +1,5 @@
 import Foundation
-import CodexReview
-import CodexReviewAppServer
+import CodexReviewKit
 import CodexReviewMCPServer
 
 @MainActor
@@ -26,21 +25,6 @@ package final class CodexReviewHost {
         )
         self.store = store
         self.mcpServer = CodexReviewMCPServer(store: store)
-    }
-
-    package convenience init(
-        appServerTransport: any JSONRPC.Transport,
-        endpoint: URL? = nil
-    ) {
-        let client = AppServerClient(transport: appServerTransport)
-        let backend = AppServerCodexReviewBackend(client: client)
-        self.init(
-            backend: backend,
-            endpoint: endpoint,
-            shutdown: {
-                await client.close()
-            }
-        )
     }
 
     package func start(endpoint: URL? = nil) async {
@@ -244,18 +228,15 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         try await backend.interruptReview(run, reason: reason)
     }
 
-    func beginReviewRecovery(
-        _ run: CodexReviewBackendModel.Review.Run,
-        reason: CodexReviewBackendModel.CancellationReason
-    ) async throws -> CodexReviewBackendModel.Review.RecoveryToken {
-        try await backend.beginReviewRecovery(run, reason: reason)
+    func prepareReviewRestart(_ run: CodexReviewBackendModel.Review.Run) async throws -> CodexReviewBackendModel.Review.RestartToken {
+        try await backend.prepareReviewRestart(run)
     }
 
-    func resumeReviewRecovery(
-        _ token: CodexReviewBackendModel.Review.RecoveryToken,
+    func restartPreparedReview(
+        _ token: CodexReviewBackendModel.Review.RestartToken,
         request: CodexReviewBackendModel.Review.Start
     ) async throws -> BackendReviewAttempt {
-        try await backend.resumeReviewRecovery(token, request: request)
+        try await backend.restartPreparedReview(token, request: request)
     }
 
     func cleanupReview(_ run: CodexReviewBackendModel.Review.Run) async {
@@ -278,13 +259,13 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
         to auth: CodexReviewAuthModel
     ) {
-        let accounts = snapshot.accounts.compactMap { account -> CodexAccount? in
+        let accounts = snapshot.accounts.compactMap { account -> CodexReviewAccount? in
             let label = account.label.trimmingCharacters(in: .whitespacesAndNewlines)
-            let accountKey = CodexAccount.normalizedEmail(account.id.rawValue)
+            let accountKey = CodexReviewAccount.normalizedEmail(account.id.rawValue)
             guard label.isEmpty == false, accountKey.isEmpty == false else {
                 return nil
             }
-            return CodexAccount(
+            return CodexReviewAccount(
                 accountKey: accountKey,
                 email: label,
                 planType: account.planType,
@@ -293,7 +274,7 @@ private final class DirectCodexReviewStoreBackend: CodexReviewStoreBackend {
             )
         }
         let activeAccountKey = snapshot.activeAccountID
-            .map { CodexAccount.normalizedEmail($0.rawValue) }
+            .map { CodexReviewAccount.normalizedEmail($0.rawValue) }
         auth.applyPersistedAccountStates(
             accounts.map(savedAccountPayload(from:)),
             activeAccountKey: activeAccountKey

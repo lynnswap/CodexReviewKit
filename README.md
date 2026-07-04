@@ -34,10 +34,39 @@ visible.
 
 ## What Runs Locally
 
-- `CodexReviewMonitor.app` shows review jobs, output, and findings.
+- `CodexReviewMonitor.app` shows review runs, CodexChat logs, and findings.
 - `http://localhost:9417/mcp` is the app-managed MCP endpoint.
 - `codex app-server` runs behind CodexReviewMonitor as the live review backend.
 - `~/.codex_review` is the dedicated Codex home used by CodexReviewMonitor.
+
+## CodexAppServerKit
+
+`CodexAppServerKit` is the Swift library product for working with a local
+`codex app-server` process. It owns the stdio JSON-RPC transport, app-server
+handshake, typed request DTOs, and a domain-oriented public API for sessions,
+thread IDs, turn IDs, prompts, responses, response streams, transcripts, models,
+accounts, and login flows.
+
+The public API is centered on a `CodexAppServer` value that is initialized and
+kept for the lifetime of the app-server connection:
+
+```swift
+import CodexAppServerKit
+
+let appServer = try await CodexAppServer()
+let thread = try await appServer.startThread(in: workspaceURL)
+let result = try await thread.respond(to: "Review this workspace.")
+await appServer.close()
+```
+
+`CodexReviewAppServer` builds on that lower-level app-server boundary and keeps
+only ReviewMonitor-specific `review/start` orchestration and review event
+conversion.
+
+See [CodexAppServerKit README][codex-app-server-kit-readme] for the
+standalone SDK surface, including thread-level streams for messages,
+transcripts, log entries, and in-flight response controls such as steer, queue,
+and interrupt.
 
 ## Timeout Setup
 
@@ -88,3 +117,5 @@ The release verification workflow also requires the repository variable
 Developer ID Application certificate used by `--signing-identity`. The workflow
 will not publish the draft release unless the uploaded DMG and contained app are
 signed and notarized for that Team ID.
+
+[codex-app-server-kit-readme]: https://github.com/lynnswap/CodexKit/blob/main/Sources/CodexAppServerKit/README.md

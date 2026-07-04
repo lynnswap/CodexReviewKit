@@ -1,6 +1,6 @@
 import Testing
-@testable import CodexReview
-import CodexReviewMCPServer
+@testable import CodexReviewKit
+@testable import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP server adapter")
@@ -26,7 +26,7 @@ struct CodexReviewMCPServerTests {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
-            idGenerator: .init(next: { "job-1" })
+            idGenerator: .init(next: { "run-1" })
         )
         let server = CodexReviewMCPServer(store: store)
 
@@ -35,16 +35,19 @@ struct CodexReviewMCPServerTests {
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges),
             waitTimeout: nil
         ))
-        await backend.yield(.completed(summary: "Done", result: "review"))
+        await backend.yield(.completed(finalReview: "No issues found."))
         let resolved = try await response
 
-        guard case .reviewRead(let read, let timeline, _) = resolved else {
-            Issue.record("Expected reviewRead response")
+        guard case .reviewStart(let snapshot) = resolved else {
+            Issue.record("Expected reviewStart response")
             return
         }
-        #expect(read.jobID == "job-1")
+        let read = snapshot.result
+        let log = snapshot.log
+        #expect(read.runID == "run-1")
         #expect(read.core.lifecycle.status == .succeeded)
-        #expect(timeline.terminalSummary == "Done")
-        #expect(timeline.terminalResult == "review")
+        #expect(log.finalLifecycleMessage == nil)
+        #expect(log.finalResult == nil)
+        #expect(log.items.isEmpty)
     }
 }

@@ -1,8 +1,8 @@
 import AppKit
 import Foundation
 import Testing
-@_spi(Testing) @testable import CodexReview
-@_spi(PreviewSupport) @testable import ReviewUI
+@_spi(Testing) @testable import CodexReviewKit
+@testable import ReviewUI
 import CodexReviewTesting
 
 @Suite(.serialized)
@@ -20,7 +20,6 @@ struct ReviewUISettingsTests {
         store.loadForTesting(
             serverState: .running,
             authState: .signedIn(accountID: "review@example.com"),
-            workspaces: [],
             settingsSnapshot: settingsSnapshot
         )
 
@@ -37,7 +36,6 @@ struct ReviewUISettingsTests {
         store.loadForTesting(
             serverState: .stopped,
             authState: .signedIn(accountID: "review@example.com"),
-            workspaces: [],
             settingsSnapshot: settingsSnapshot
         )
 

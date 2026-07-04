@@ -1,114 +1,129 @@
 import Foundation
-import CodexReview
-import CodexReviewMCPAdapter
+import CodexKit
+import CodexReviewKit
 
 package enum CodexReviewMCP {
     package enum Tool {}
 }
 
-package extension CodexReviewMCP.Tool {
-enum Name: String, Codable, Equatable, Sendable, CaseIterable {
-    case reviewStart = "review_start"
-    case reviewAwait = "review_await"
-    case reviewRead = "review_read"
-    case reviewList = "review_list"
-    case reviewCancel = "review_cancel"
-}
-}
-
+package typealias ReviewMCPLogProjectionProvider = @MainActor @Sendable (
+    CodexReviewAPI.Read.Result
+) async -> ReviewMCPLogProjection?
 
 package extension CodexReviewMCP.Tool {
-struct Descriptor: Codable, Equatable, Sendable {
-    package var name: CodexReviewMCP.Tool.Name
-    package var description: String
-
-    package init(name: CodexReviewMCP.Tool.Name, description: String) {
-        self.name = name
-        self.description = description
+    enum Name: String, Codable, Equatable, Sendable, CaseIterable {
+        case reviewStart = "review_start"
+        case reviewAwait = "review_await"
+        case reviewRead = "review_read"
+        case reviewList = "review_list"
+        case reviewCancel = "review_cancel"
     }
 }
-}
-
 
 package extension CodexReviewMCP.Tool {
-enum Request: Equatable, Sendable {
-    case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
-    case reviewAwait(sessionID: String?, jobID: String, waitTimeout: Duration)
-    case reviewRead(sessionID: String?, jobID: String, logFilter: CodexReviewAPI.Log.Filter, logPage: CodexReviewAPI.Log.PageRequest)
-    case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewJobState]?, limit: Int?)
-    case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Job.Selector, reason: ReviewCancellation)
-}
-}
+    struct Descriptor: Codable, Equatable, Sendable {
+        package var name: CodexReviewMCP.Tool.Name
+        package var description: String
 
+        package init(name: CodexReviewMCP.Tool.Name, description: String) {
+            self.name = name
+            self.description = description
+        }
+    }
+}
 
 package extension CodexReviewMCP.Tool {
-enum Response: Equatable, Sendable {
-    case reviewRead(
-        CodexReviewAPI.Read.Result,
-        timeline: ReviewMCPProjection,
-        timelinePage: CodexReviewAPI.Log.PageRequest?
-    )
-    case reviewList(CodexReviewAPI.List.Result)
-    case reviewCancel(CodexReviewAPI.Cancel.Outcome)
-}
+    enum Request: Equatable, Sendable {
+        case reviewStart(sessionID: String, request: CodexReviewAPI.Start.Request, waitTimeout: Duration?)
+        case reviewAwait(sessionID: String?, runID: String, waitTimeout: Duration)
+        case reviewRead(sessionID: String?, runID: String)
+        case reviewList(sessionID: String?, cwd: String?, statuses: [ReviewRunState]?, limit: Int?)
+        case reviewCancel(sessionID: String?, selector: CodexReviewAPI.Run.Selector, reason: ReviewCancellation)
+    }
 }
 
+package extension CodexReviewMCP.Tool {
+    internal struct ReviewSnapshot: Equatable, Sendable {
+        var result: CodexReviewAPI.Read.Result
+        var log: ReviewMCPLogProjection
+
+        init(result: CodexReviewAPI.Read.Result, log: ReviewMCPLogProjection) {
+            self.result = result
+            self.log = log
+        }
+    }
+}
+
+package extension CodexReviewMCP.Tool {
+    internal enum Response: Equatable, Sendable {
+        case reviewStart(ReviewSnapshot)
+        case reviewAwait(ReviewSnapshot)
+        case reviewRead(ReviewSnapshot)
+        case reviewList(CodexReviewAPI.List.Result)
+        case reviewCancel(CodexReviewAPI.Cancel.Outcome)
+    }
+}
 
 @MainActor
 package final class CodexReviewMCPServer {
     private let store: CodexReviewStore
+    private let logProjectionProvider: ReviewMCPLogProjectionProvider?
 
-    package init(store: CodexReviewStore) {
+    package init(
+        store: CodexReviewStore,
+        logProjectionProvider: ReviewMCPLogProjectionProvider? = nil
+    ) {
         self.store = store
+        self.logProjectionProvider = logProjectionProvider
     }
 
     package var tools: [CodexReviewMCP.Tool.Descriptor] {
         [
             .init(name: .reviewStart, description: "Start a Codex review."),
-            .init(name: .reviewAwait, description: "Wait for a running Codex review job."),
-            .init(name: .reviewRead, description: "Read a Codex review job."),
-            .init(name: .reviewList, description: "List Codex review jobs."),
-            .init(name: .reviewCancel, description: "Cancel a Codex review job."),
+            .init(name: .reviewAwait, description: "Wait for a running Codex review run."),
+            .init(name: .reviewRead, description: "Read a Codex review run."),
+            .init(name: .reviewList, description: "List Codex review runs."),
+            .init(name: .reviewCancel, description: "Cancel a Codex review run."),
         ]
     }
 
-    package func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
+    func handle(_ request: CodexReviewMCP.Tool.Request) async throws -> CodexReviewMCP.Tool.Response {
         switch request {
         case .reviewStart(let sessionID, let reviewRequest, let waitTimeout):
+            let result: CodexReviewAPI.Read.Result
             if let waitTimeout {
-                return try reviewReadResponse(
-                    try await store.startReview(
-                        sessionID: sessionID,
-                        request: reviewRequest,
-                        waitTimeout: waitTimeout
-                    ),
-                    sessionID: sessionID
+                result = try await store.startReview(
+                    sessionID: sessionID,
+                    request: reviewRequest,
+                    waitTimeout: waitTimeout
                 )
+            } else {
+                result = try await store.startReview(sessionID: sessionID, request: reviewRequest)
             }
-            return try reviewReadResponse(
-                try await store.startReview(sessionID: sessionID, request: reviewRequest),
+            let snapshot = try await reviewSnapshot(
+                result,
                 sessionID: sessionID
             )
-        case .reviewAwait(let sessionID, let jobID, let waitTimeout):
-            return try reviewReadResponse(
+            return .reviewStart(snapshot)
+        case .reviewAwait(let sessionID, let runID, let waitTimeout):
+            let snapshot = try await reviewSnapshot(
                 try await store.awaitReview(
                     sessionID: sessionID,
-                    jobID: jobID,
+                    runID: runID,
                     timeout: waitTimeout
                 ),
                 sessionID: sessionID
             )
-        case .reviewRead(let sessionID, let jobID, let logFilter, let logPage):
-            return try reviewReadResponse(
+            return .reviewAwait(snapshot)
+        case .reviewRead(let sessionID, let runID):
+            let snapshot = try await reviewSnapshot(
                 try store.readReview(
                     sessionID: sessionID,
-                    jobID: jobID,
-                    logFilter: logFilter,
-                    logPage: logPage
+                    runID: runID
                 ),
-                sessionID: sessionID,
-                timelinePage: logPage
+                sessionID: sessionID
             )
+            return .reviewRead(snapshot)
         case .reviewList(let sessionID, let cwd, let statuses, let limit):
             return .reviewList(store.listReviews(
                 sessionID: sessionID,
@@ -117,31 +132,26 @@ package final class CodexReviewMCPServer {
                 limit: limit
             ))
         case .reviewCancel(let sessionID, let selector, let reason):
-            let job = try store.resolveJob(
+            let runRecord = try store.resolveRun(
                 sessionID: sessionID,
                 selector: selector.defaultingToActiveStatusesForCancellation()
             )
             return .reviewCancel(try await store.cancelReview(
-                jobID: job.id,
+                runID: runRecord.id,
                 cancellation: reason
             ))
         }
     }
 
-    private func reviewReadResponse(
+    private func reviewSnapshot(
         _ result: CodexReviewAPI.Read.Result,
-        sessionID: String?,
-        timelinePage: CodexReviewAPI.Log.PageRequest? = nil
-    ) throws -> CodexReviewMCP.Tool.Response {
-        let job = try store.resolveJob(
-            sessionID: sessionID,
-            selector: .init(jobID: result.jobID)
-        )
-        return .reviewRead(
-            result,
-            timeline: ReviewMCPProjection(timeline: job.timeline),
-            timelinePage: timelinePage
-        )
+        sessionID: String?
+    ) async throws -> CodexReviewMCP.Tool.ReviewSnapshot {
+        if let sessionID {
+            _ = try store.resolveRun(sessionID: sessionID, selector: .init(runID: result.runID))
+        }
+        let log = await logProjectionProvider?(result) ?? ReviewMCPLogProjection.unavailable(result: result)
+        return .init(result: result, log: log)
     }
 
     package func closeSession(_ sessionID: String) async {
@@ -149,15 +159,53 @@ package final class CodexReviewMCPServer {
     }
 
     package func hasActiveReviews(in sessionID: String) -> Bool {
-        store.activeJobIDs(for: sessionID).isEmpty == false
+        store.activeReviewRunIDs(for: sessionID).isEmpty == false
     }
 }
 
-private extension CodexReviewAPI.Job.Selector {
-    func defaultingToActiveStatusesForCancellation() -> CodexReviewAPI.Job.Selector {
-        guard jobID == nil, statuses == nil else {
+package extension CodexReviewMCPServer {
+    static func chatLogProjectionProvider(
+        modelContext: CodexModelContext
+    ) -> ReviewMCPLogProjectionProvider {
+        { result in
+            guard let turnID = result.core.run.turnID?.nilIfEmpty else {
+                return nil
+            }
+            guard let threadID = (result.core.run.reviewThreadID ?? result.core.run.threadID)?.nilIfEmpty else {
+                return nil
+            }
+
+            let chat = modelContext.model(for: CodexThreadID(rawValue: threadID))
+            do {
+                try await modelContext.refresh(chat, includeTurns: true)
+            } catch {
+                return nil
+            }
+            let codexTurnID = CodexTurnID(rawValue: turnID)
+            guard chat.turn(id: codexTurnID) != nil else {
+                return nil
+            }
+            return ReviewMCPLogProjection(
+                result: result,
+                turnID: codexTurnID,
+                threadItems: chat.items(in: codexTurnID).map(\.threadItemForReviewMCP)
+            )
+        }
+    }
+}
+
+@MainActor
+private extension CodexItem {
+    var threadItemForReviewMCP: CodexThreadItem {
+        CodexThreadItem(id: itemID, kind: kind, content: content, rawPayload: rawPayload)
+    }
+}
+
+private extension CodexReviewAPI.Run.Selector {
+    func defaultingToActiveStatusesForCancellation() -> CodexReviewAPI.Run.Selector {
+        guard runID == nil, statuses == nil else {
             return self
         }
-        return .init(jobID: jobID, cwd: cwd, statuses: [.queued, .running])
+        return .init(runID: runID, cwd: cwd, statuses: [.queued, .running])
     }
 }

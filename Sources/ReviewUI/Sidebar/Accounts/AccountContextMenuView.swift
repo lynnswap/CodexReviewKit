@@ -1,9 +1,9 @@
-import CodexReview
+import CodexReviewKit
 import SwiftUI
 
 struct AccountContextMenuView: View {
     let store: CodexReviewStore
-    let account: CodexAccount
+    let account: CodexReviewAccount
 
     private var auth: CodexReviewAuthModel {
         store.auth
@@ -11,7 +11,7 @@ struct AccountContextMenuView: View {
 
     private func requestDestructiveAccountAction() {
         if auth.selectedAccount == account {
-            store.requestSignOutActiveAccount(requiresConfirmation: store.hasRunningJobs)
+            store.requestSignOutActiveAccount(requiresConfirmation: store.hasRunningReviewRuns)
         } else {
             store.requestRemoveAccount(account, requiresConfirmation: false)
         }
@@ -47,8 +47,8 @@ struct AccountContextMenuView: View {
 
 #if DEBUG
 #Preview {
-    let currentAccount = CodexAccount(email: "current@example.com")
-    let otherAccount = CodexAccount(email: "other@example.com")
+    let currentAccount = CodexReviewAccount(email: "current@example.com")
+    let otherAccount = CodexReviewAccount(email: "other@example.com")
         let store: CodexReviewStore = {
             let store = CodexReviewStore.makePreviewStore()
             store.auth.applyPersistedAccountStates([
