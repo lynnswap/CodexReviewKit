@@ -33,9 +33,9 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        // CodexKit has no tagged releases yet; pin the final review response
-        // contract fix (lynnswap/CodexKit#17).
-        .package(url: "https://github.com/lynnswap/CodexKit.git", revision: "23276c81cf160b773b3f9fb5ae710d257838cad0"),
+        // CodexKit has no tagged releases yet; pin the reviewed native-login
+        // and final review response contract revision.
+        .package(url: "https://github.com/lynnswap/CodexKit.git", revision: "d2a694d7f633c1f01d4d260585863c0a3eae21af"),
     ],
     targets: [
         .target(

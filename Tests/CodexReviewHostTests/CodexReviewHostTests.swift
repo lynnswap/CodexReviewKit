@@ -507,7 +507,7 @@ struct CodexReviewHostTests {
         ])
     }
 
-    @Test func liveStoreCompletesBrowserLoginFromAccountNotifications() async throws {
+    @Test func liveStoreCompletesNativeLoginFromAuthenticationSessionAndAccountNotifications() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -521,6 +521,105 @@ struct CodexReviewHostTests {
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
                 nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+            ),
+            for: "account/login/start"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        let sessions = FakeWebAuthenticationSessions()
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            nativeAuthenticationConfiguration: .init(
+                callbackScheme: "lynnpd.CodexReviewMonitor.auth",
+                browserSessionPolicy: .ephemeral,
+                presentationAnchorProvider: { NSWindow() }
+            ),
+            webAuthenticationSessionFactory: sessions.makeSession,
+            externalURLOpener: externalURLOpener.open,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
+        await store.addAccount()
+        await transport.waitForRequestCount(5)
+        #expect(store.auth.isAuthenticating)
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
+        let loginRequest = try #require(await transport.recordedRequests().first {
+            $0.method == "account/login/start"
+        })
+        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
+        #expect(loginParams.nativeWebAuthentication == .init(
+            callbackURLScheme: "lynnpd.CodexReviewMonitor.auth"
+        ))
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        await transport.waitForRequestCount(6)
+        let completeRequest = try #require(await transport.recordedRequests().first {
+            $0.method == "account/login/complete"
+        })
+        let completeParams = try JSONDecoder().decode(
+            AppServerAPI.Account.Login.Complete.Params.self,
+            from: completeRequest.params
+        )
+        #expect(completeParams.loginID == "login-1")
+        #expect(completeParams.callbackURL == "lynnpd.CodexReviewMonitor.auth://callback?code=abc")
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-1", success: true)
+        )
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await waitUntil { store.auth.selectedAccount?.accountKey == "new@example.com" }
+        // The post-login rate-limit refresh lands asynchronously after the
+        // account update; wait for the full request sequence before asserting.
+        await transport.waitForRequestCount(8)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/login/complete",
+            "account/read",
+            "account/rateLimits/read",
+        ])
+        await store.stop()
+    }
+
+    @Test func liveStoreUsesNativeAuthenticationWhenServerDoesNotReturnNativeMetadata() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.Login.Response.chatgpt(
+                loginID: "login-1",
+                authURL: "https://example.com/auth",
+                nativeWebAuthentication: nil
             ),
             for: "account/login/start"
         )
@@ -553,9 +652,20 @@ struct CodexReviewHostTests {
         await transport.waitForNotificationStreamCount(1)
         await store.addAccount()
         await transport.waitForRequestCount(5)
+
         #expect(store.auth.isAuthenticating)
-        #expect(sessions.createdSessionCount == 0)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
+        let loginRequest = try #require(await transport.recordedRequests().first {
+            $0.method == "account/login/start"
+        })
+        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
+        #expect(loginParams.nativeWebAuthentication == .init(
+            callbackURLScheme: "lynnpd.CodexReviewMonitor.auth"
+        ))
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
         try await transport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-1", success: true)
@@ -565,14 +675,7 @@ struct CodexReviewHostTests {
             params: EmptyResponse()
         )
         await waitUntil { store.auth.selectedAccount?.accountKey == "new@example.com" }
-        // The post-login rate-limit refresh lands asynchronously after the
-        // account update; wait for the full request sequence before asserting.
         await transport.waitForRequestCount(7)
-        let loginRequest = try #require(await transport.recordedRequests().first {
-            $0.method == "account/login/start"
-        })
-        let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
-        #expect(loginParams.nativeWebAuthentication == nil)
         let methods = await transport.recordedRequests().map(\.method)
         #expect(methods == [
             "initialize",
@@ -586,7 +689,7 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func liveStoreUsesExternalBrowserWhenNativeSessionFactoryIsConfigured() async throws {
+    @Test func liveStoreCancelsLoginWhenNativeSessionFactoryFails() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -626,17 +729,18 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await store.addAccount()
-        await transport.waitForRequestCount(5)
+        await transport.waitForRequestCount(6)
 
-        #expect(didCreateNativeSession == false)
-        #expect(store.auth.isAuthenticating)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
-        #expect(Array(await transport.recordedRequests().map(\.method).prefix(5)) == [
+        #expect(didCreateNativeSession)
+        #expect(failedMessage(from: store.auth.phase) == "Authentication presentation failed.")
+        #expect(externalURLOpener.openedURLs == [])
+        #expect(await transport.recordedRequests().map(\.method) == [
             "initialize",
             "account/read",
             "config/read",
             "model/list",
             "account/login/start",
+            "account/login/cancel",
         ])
         await store.stop()
     }
@@ -671,9 +775,13 @@ struct CodexReviewHostTests {
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-2",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: nil
+                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
             ),
             for: "account/login/start"
+        )
+        try await authTransport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
         )
         try await authTransport.enqueue(
             AppServerAPI.Account.Read.Response(
@@ -742,13 +850,28 @@ struct CodexReviewHostTests {
         await store.addAccount()
         await authTransport.waitForNotificationStreamCount(1)
         await authTransport.waitForRequestCount(2)
-        #expect(sessions.createdSessionCount == 0)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
         let loginRequest = try #require(await authTransport.recordedRequests().first {
             $0.method == "account/login/start"
         })
         let loginParams = try JSONDecoder().decode(AppServerAPI.Account.Login.Params.self, from: loginRequest.params)
-        #expect(loginParams.nativeWebAuthentication == nil)
+        #expect(loginParams.nativeWebAuthentication == .init(
+            callbackURLScheme: "lynnpd.CodexReviewMonitor.auth"
+        ))
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        await authTransport.waitForRequestCount(3)
+        let completeRequest = try #require(await authTransport.recordedRequests().first {
+            $0.method == "account/login/complete"
+        })
+        let completeParams = try JSONDecoder().decode(
+            AppServerAPI.Account.Login.Complete.Params.self,
+            from: completeRequest.params
+        )
+        #expect(completeParams.loginID == "login-2")
+        #expect(completeParams.callbackURL == "lynnpd.CodexReviewMonitor.auth://callback?code=abc")
         try await authTransport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-2", success: true)
@@ -771,6 +894,7 @@ struct CodexReviewHostTests {
         #expect(await authTransport.recordedRequests().map(\.method) == [
             "initialize",
             "account/login/start",
+            "account/login/complete",
             "account/read",
             "account/rateLimits/read",
         ])
@@ -888,6 +1012,10 @@ struct CodexReviewHostTests {
             for: "account/login/start"
         )
         try await transport.enqueue(
+            AppServerAPI.Account.Login.Complete.Response(),
+            for: "account/login/complete"
+        )
+        try await transport.enqueue(
             AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
             for: "account/read"
         )
@@ -921,8 +1049,12 @@ struct CodexReviewHostTests {
 
         await store.addAccount()
         await transport.waitForRequestCount(5)
-        #expect(sessions.createdSessionCount == 0)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        await transport.waitForRequestCount(6)
         try await transport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-new", success: true)
@@ -948,12 +1080,13 @@ struct CodexReviewHostTests {
             "config/read",
             "model/list",
             "account/login/start",
+            "account/login/complete",
             "account/read",
             "account/rateLimits/read",
         ])
     }
 
-    @Test func liveStoreAddAccountUsesExternalBrowserWhenNativeSessionFactoryFails() async throws {
+    @Test func liveStoreAddAccountCancelsLoginWhenNativeSessionFactoryFails() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         try writeRegistry(
@@ -1019,18 +1152,19 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         let previousFailureCount = store.auth.authenticationFailureCount
         await store.addAccount()
-        await loginTransport.waitForRequestCount(2)
+        await loginTransport.waitForRequestCount(3)
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
-        #expect(store.auth.authenticationFailureCount == previousFailureCount)
-        #expect(store.auth.isAuthenticating)
+        #expect(store.auth.authenticationFailureCount == previousFailureCount + 1)
+        #expect(failedMessage(from: store.auth.phase) == "Authentication presentation failed.")
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(externalURLOpener.openedURLs == [])
         await store.stop()
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
-        #expect(Array(await loginTransport.recordedRequests().map(\.method).prefix(2)) == [
+        #expect(await loginTransport.recordedRequests().map(\.method) == [
             "initialize",
             "account/login/start",
+            "account/login/cancel",
         ])
     }
 
@@ -1514,11 +1648,12 @@ struct CodexReviewHostTests {
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-1",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+                nativeWebAuthentication: nil
             ),
             for: "account/login/start"
         )
         let externalURLOpener = FakeExternalURLOpener()
+        let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1527,7 +1662,7 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            webAuthenticationSessionFactory: sessions.makeSession,
             externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
@@ -1542,9 +1677,11 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         await mainTransport.waitForNotificationStreamCount(1)
         await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(externalURLOpener.openedURLs == [])
 
         await mainTransport.finishNotificationStreams(throwing: TestTransportClosedError())
         await waitUntil {
@@ -1728,11 +1865,12 @@ struct CodexReviewHostTests {
             AppServerAPI.Account.Login.Response.chatgpt(
                 loginID: "login-2",
                 authURL: "https://example.com/auth",
-                nativeWebAuthentication: .init(callbackURLScheme: "lynnpd.CodexReviewMonitor.auth")
+                nativeWebAuthentication: nil
             ),
             for: "account/login/start"
         )
         let externalURLOpener = FakeExternalURLOpener()
+        let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1741,7 +1879,7 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            webAuthenticationSessionFactory: sessions.makeSession,
             externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
@@ -1756,7 +1894,9 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         await store.addAccount()
         await loginTransport.waitForNotificationStreamCount(1)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        #expect(externalURLOpener.openedURLs == [])
         try await loginTransport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(
