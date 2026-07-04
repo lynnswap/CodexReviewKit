@@ -344,21 +344,34 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         guard append.text.isEmpty == false else {
             return false
         }
-        let appendEnd = displayedUTF16Length + append.textUTF16Length
-        return append.textUTF16Length > 0 &&
-            append.range.location >= displayedUTF16Length &&
-            NSMaxRange(append.range) <= appendEnd &&
-            document.textUTF16Length == displayedUTF16Length + append.textUTF16Length
+        let expectedRange = NSRange(location: displayedUTF16Length, length: append.textUTF16Length)
+        guard append.textUTF16Length == (append.text as NSString).length,
+            append.range == expectedRange,
+            document.textUTF16Length == displayedUTF16Length + append.textUTF16Length,
+            displayedText + append.text == document.text
+        else {
+            assertionFailure("Log append change is not synchronized with the display document.")
+            return false
+        }
+        return true
     }
 
     private func canApplyReplacement(
         _ replacement: ReviewMonitorLog.Replacement,
         to document: ReviewMonitorLog.Document
     ) -> Bool {
-        replacement.textUTF16Length >= 0 &&
-            replacement.range.location >= 0 &&
-            NSMaxRange(replacement.range) <= displayedUTF16Length &&
-        document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length
+        guard replacement.textUTF16Length == (replacement.text as NSString).length,
+            replacement.range.location >= 0,
+            replacement.range.length >= 0,
+            NSMaxRange(replacement.range) <= displayedUTF16Length,
+            document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length,
+            let replacementResult = replacingDisplayedText(in: replacement.range, with: replacement.text),
+            replacementResult == document.text
+        else {
+            assertionFailure("Log replacement change is not synchronized with the display document.")
+            return false
+        }
+        return true
     }
 
     private func canApplyFallbackAppend(_ suffix: String, to document: ReviewMonitorLog.Document) -> Bool {
@@ -881,6 +894,18 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let mutable = NSMutableString(string: displayedText)
         mutable.replaceCharacters(in: range, with: text)
         displayedText = mutable as String
+    }
+
+    private func replacingDisplayedText(in range: NSRange, with text: String) -> String? {
+        guard range.location >= 0,
+            range.length >= 0,
+            NSMaxRange(range) <= displayedUTF16Length
+        else {
+            return nil
+        }
+        let mutable = NSMutableString(string: displayedText)
+        mutable.replaceCharacters(in: range, with: text)
+        return mutable as String
     }
 
     private func invalidateDocumentLayout() {
