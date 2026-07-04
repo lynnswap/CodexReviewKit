@@ -606,7 +606,7 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func liveStoreUsesExternalBrowserWhenServerDoesNotReturnNativeAuthentication() async throws {
+    @Test func liveStoreUsesNativeAuthenticationWhenServerDoesNotReturnNativeMetadata() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -623,6 +623,17 @@ struct CodexReviewHostTests {
             ),
             for: "account/login/start"
         )
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "new@example.com", planType: "plus")),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 20, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
         let sessions = FakeWebAuthenticationSessions()
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -638,11 +649,13 @@ struct CodexReviewHostTests {
         )
 
         await store.start(forceRestartIfNeeded: true)
+        await transport.waitForNotificationStreamCount(1)
         await store.addAccount()
         await transport.waitForRequestCount(5)
 
-        #expect(sessions.createdSessionCount == 0)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(store.auth.isAuthenticating)
+        #expect(sessions.createdSessionCount == 1)
+        #expect(externalURLOpener.openedURLs == [])
         let loginRequest = try #require(await transport.recordedRequests().first {
             $0.method == "account/login/start"
         })
@@ -650,6 +663,29 @@ struct CodexReviewHostTests {
         #expect(loginParams.nativeWebAuthentication == .init(
             callbackURLScheme: "lynnpd.CodexReviewMonitor.auth"
         ))
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        session.complete(with: URL(string: "lynnpd.CodexReviewMonitor.auth://callback?code=abc")!)
+        try await transport.emitServerNotification(
+            method: "account/login/completed",
+            params: TestLoginCompletedNotification(loginID: "login-1", success: true)
+        )
+        try await transport.emitServerNotification(
+            method: "account/updated",
+            params: EmptyResponse()
+        )
+        await waitUntil { store.auth.selectedAccount?.accountKey == "new@example.com" }
+        await transport.waitForRequestCount(7)
+        let methods = await transport.recordedRequests().map(\.method)
+        #expect(methods == [
+            "initialize",
+            "account/read",
+            "config/read",
+            "model/list",
+            "account/login/start",
+            "account/read",
+            "account/rateLimits/read",
+        ])
         await store.stop()
     }
 
@@ -1617,6 +1653,7 @@ struct CodexReviewHostTests {
             for: "account/login/start"
         )
         let externalURLOpener = FakeExternalURLOpener()
+        let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1625,7 +1662,7 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            webAuthenticationSessionFactory: sessions.makeSession,
             externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
@@ -1640,9 +1677,11 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         await mainTransport.waitForNotificationStreamCount(1)
         await store.addAccount()
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path))
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        #expect(externalURLOpener.openedURLs == [])
 
         await mainTransport.finishNotificationStreams(throwing: TestTransportClosedError())
         await waitUntil {
@@ -1831,6 +1870,7 @@ struct CodexReviewHostTests {
             for: "account/login/start"
         )
         let externalURLOpener = FakeExternalURLOpener()
+        let sessions = FakeWebAuthenticationSessions()
         var isolatedCodexHomeURL: URL?
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
@@ -1839,7 +1879,7 @@ struct CodexReviewHostTests {
                 browserSessionPolicy: .ephemeral,
                 presentationAnchorProvider: { NSWindow() }
             ),
-            webAuthenticationSessionFactory: FakeWebAuthenticationSessions().makeSession,
+            webAuthenticationSessionFactory: sessions.makeSession,
             externalURLOpener: externalURLOpener.open,
             transportFactory: { codexHomeURL in
                 if codexHomeURL == mainCodexHomeURL {
@@ -1854,7 +1894,9 @@ struct CodexReviewHostTests {
         await store.start(forceRestartIfNeeded: true)
         await store.addAccount()
         await loginTransport.waitForNotificationStreamCount(1)
-        #expect(externalURLOpener.openedURLs == [URL(string: "https://example.com/auth")!])
+        let session = await sessions.waitForSession()
+        await session.waitUntilWaitingForCallback()
+        #expect(externalURLOpener.openedURLs == [])
         try await loginTransport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(

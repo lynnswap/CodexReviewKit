@@ -865,7 +865,6 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             logger.info("Received ChatGPT login challenge")
             let nativeCallbackScheme = challenge.nativeWebAuthenticationCallbackScheme
             let usesNativeAuthentication = nativeAuthenticationConfiguration != nil
-                && nativeCallbackScheme != nil
                 && challenge.verificationURL != nil
             auth.updatePhase(.signingIn(.init(
                 title: "Sign in to Codex",
@@ -873,10 +872,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 browserURL: challenge.verificationURL?.absoluteString,
                 userCode: challenge.userCode
             )))
-            guard usesNativeAuthentication,
-                  let nativeAuthenticationConfiguration,
-                  challenge.verificationURL != nil
-            else {
+            guard let nativeAuthenticationConfiguration, challenge.verificationURL != nil else {
                 if let verificationURL = challenge.verificationURL {
                     externalURLOpener(verificationURL)
                 }
@@ -912,6 +908,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 await self.monitorAuthenticationSession(
                     challenge: challenge,
                     session: session,
+                    completesLoginThroughCallback: nativeCallbackScheme != nil,
                     auth: auth
                 )
             }
@@ -946,11 +943,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func monitorAuthenticationSession(
         challenge: CodexReviewBackendModel.Login.Challenge,
         session: any CodexReviewNativeAuthentication.WebSession,
+        completesLoginThroughCallback: Bool,
         auth: CodexReviewAuthModel
     ) async {
         do {
             let callbackURL = try await session.waitForCallbackURL()
             guard loginChallenge?.id == challenge.id else {
+                return
+            }
+            guard completesLoginThroughCallback else {
+                logger.info("Authentication session completed; waiting for app-server login completion notification")
                 return
             }
             guard let loginBackend else {
