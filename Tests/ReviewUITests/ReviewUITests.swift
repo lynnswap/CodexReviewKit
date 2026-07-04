@@ -2699,6 +2699,268 @@ struct ReviewUITests {
         #expect(transport.logReloadCountForTesting == reloadCount)
     }
 
+    @Test func commandOutputDisplayAppendBeforeMarkdownHeadingIsSelfConsistent() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            )
+        ])
+        let previousDisplay = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: previousSource,
+            currentDate: startedAt
+        )
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+            .init(
+                id: .init("reasoning_2"),
+                kind: .rawReasoning,
+                groupID: "reasoning_2",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: currentSource,
+            previousDisplay: previousDisplay,
+            currentDate: Date(timeIntervalSince1970: 211)
+        )
+
+        guard case .append(let append) = display.lastChange else {
+            Issue.record("Expected command display update to remain an append.")
+            return
+        }
+        #expect(applyingDisplayChange(display.lastChange, to: previousDisplay.text) == display.text)
+        #expect(append.text == (display.text as NSString).substring(from: previousDisplay.textUTF16Length))
+        #expect(append.text.contains("\u{fffc}\n\nReviewing JSONRPC requests"))
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Running git diff\n\nReviewing JSONRPC requests"))
+        #expect(visibleText.contains("git diffReviewing JSONRPC requests") == false)
+    }
+
+    @Test func commandOutputDisplayReplacementAfterDurationUpdateIsSelfConsistent() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+        ])
+        let previousDisplay = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: previousSource,
+            currentDate: startedAt
+        )
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    completedAt: Date(timeIntervalSince1970: 211),
+                    durationMs: 11_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: currentSource,
+            previousDisplay: previousDisplay,
+            currentDate: Date(timeIntervalSince1970: 211)
+        )
+
+        guard case .replace = display.lastChange else {
+            Issue.record("Expected command duration update to replace the display command panel.")
+            return
+        }
+        #expect(applyingDisplayChange(display.lastChange, to: previousDisplay.text) == display.text)
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Ran git diff for 11s\n\nReviewing JSONRPC requests"))
+        #expect(visibleText.contains("11sReviewing JSONRPC requests") == false)
+    }
+
+    @Test func coalescedRunningCommandBeforeMarkdownHeadingKeepsParagraphBoundary() async throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        let chat = makeReviewChatFixtureForTesting(
+            id: "chat-running-command-markdown-heading",
+            cwd: "/tmp/workspace-alpha",
+            title: "Uncommitted changes",
+            status: .running,
+            startedAt: startedAt,
+            chatEntries: [
+                .init(
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Need to inspect files."
+                )
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, fixtures: [chat])
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
+        _ = try await awaitChatRenderForTesting(
+            chat,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(command: "git diff", commandStatus: "running")
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_2",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+
+        let snapshot = try await awaitChatRenderForTesting(chat, in: transport) {
+            $0.log.contains("Ran git diff\n\nReviewing JSONRPC requests")
+        }
+        #expect(snapshot.log.contains("Ran git diff\n\nReviewing JSONRPC requests"))
+        #expect(snapshot.log.contains("git diffReviewing JSONRPC requests") == false)
+        #expect(transport.displayedLogForTesting.contains("Ran git diff\n\nReviewing JSONRPC requests"))
+        #expect(transport.displayedLogForTesting.contains("git diffReviewing JSONRPC requests") == false)
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+    }
+
+    @Test func coalescedMarkdownAppendInvalidatesWholeDisplaySuffix() async throws {
+        let chat = makeReviewChatFixtureForTesting(
+            id: "chat-markdown-multi-block-append",
+            cwd: "/tmp/workspace-alpha",
+            title: "Uncommitted changes",
+            status: .running,
+            startedAt: Date(timeIntervalSince1970: 200),
+            chatEntries: [
+                .init(
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Need to inspect files."
+                )
+            ]
+        )
+        let store = CodexReviewStore.makePreviewStore()
+        store.loadForTesting(serverState: .running, fixtures: [chat])
+        let harness = makeWindowHarness(store: store, contentSize: NSSize(width: 860, height: 520))
+        let viewController = harness.viewController
+        let window = harness.window
+        defer { window.close() }
+        let transport = viewController.transportViewControllerForTesting
+        viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
+        _ = try await awaitChatRenderForTesting(
+            chat,
+            in: transport,
+            allowIncrementalUpdate: false
+        )
+        let appendCount = transport.logAppendCountForTesting
+        let reloadCount = transport.logReloadCountForTesting
+
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_2",
+                text: "**Reviewing JSONRPC requests**\n\nI'm checking the response shape."
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+        await appendChatLogEntryForTesting(
+            .init(
+                kind: .rawReasoning,
+                groupID: "reasoning_3",
+                text: "# Follow-up heading\n\nMore details."
+            ),
+            to: chat.chatID,
+            turnID: chat.turnID
+        )
+
+        let snapshot = try await awaitChatRenderForTesting(chat, in: transport) {
+            $0.log.contains("Reviewing JSONRPC requests\n\nI'm checking the response shape.")
+                && $0.log.contains("Follow-up heading\n\nMore details.")
+        }
+        #expect(snapshot.log.contains("Reviewing JSONRPC requests\n\nI'm checking the response shape."))
+        #expect(snapshot.log.contains("Follow-up heading\n\nMore details."))
+        #expect(transport.logAppendCountForTesting == appendCount + 1)
+        #expect(transport.logReloadCountForTesting == reloadCount)
+        let headingFontSize = try #require(
+            transport.logFontPointSizeForFirstOccurrenceForTesting("Follow-up heading")
+        )
+        let bodyFontSize = try #require(
+            transport.logFontPointSizeForFirstOccurrenceForTesting("More details.")
+        )
+        #expect(headingFontSize > bodyFontSize)
+    }
+
     @Test func selectedReviewChatMarkdownAppendReplacesTailBlockWithoutReload() async throws {
         let chat = makeReviewChatFixtureForTesting(
             id: "chat-markdown-append-fallback",
@@ -4428,6 +4690,31 @@ struct ReviewUITests {
             }
         }
         return try await body()
+    }
+
+    private func applyingDisplayChange(_ change: ReviewMonitorLog.Change, to text: String) -> String? {
+        switch change {
+        case .append(let append):
+            guard append.range.location == (text as NSString).length,
+                append.range.length == append.textUTF16Length
+            else {
+                return nil
+            }
+            return text + append.text
+        case .replace(let replacement):
+            let length = (text as NSString).length
+            guard replacement.range.location >= 0,
+                replacement.range.length >= 0,
+                NSMaxRange(replacement.range) <= length
+            else {
+                return nil
+            }
+            let mutable = NSMutableString(string: text)
+            mutable.replaceCharacters(in: replacement.range, with: replacement.text)
+            return mutable as String
+        case .reload:
+            return nil
+        }
     }
 
     @Test func logFindKeepsFirstAppendIntoEmptyVisibleLogLive() async throws {

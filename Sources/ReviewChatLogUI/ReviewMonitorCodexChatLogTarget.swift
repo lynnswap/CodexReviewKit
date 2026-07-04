@@ -514,6 +514,10 @@ package final class ReviewMonitorCodexChatLogTarget {
             logScrollView.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
         }
 
+        func fontPointSizeForFirstLogOccurrenceForTesting(_ text: String) -> CGFloat? {
+            logScrollView.fontPointSizeForFirstLogOccurrenceForTesting(text)
+        }
+
         func toggleFirstCommandOutputPanelForTesting() {
             logScrollView.toggleFirstCommandOutputPanelForTesting()
         }

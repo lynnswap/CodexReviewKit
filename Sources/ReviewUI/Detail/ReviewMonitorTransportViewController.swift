@@ -388,6 +388,10 @@ final class ReviewMonitorTransportViewController: NSViewController {
             chatLogTarget.hitTestTargetsDocumentViewForFirstLogOccurrenceForTesting(text)
         }
 
+        func logFontPointSizeForFirstOccurrenceForTesting(_ text: String) -> CGFloat? {
+            chatLogTarget.fontPointSizeForFirstLogOccurrenceForTesting(text)
+        }
+
         func toggleFirstLogCommandOutputPanelForTesting() {
             chatLogTarget.toggleFirstCommandOutputPanelForTesting()
         }
