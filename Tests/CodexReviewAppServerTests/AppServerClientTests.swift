@@ -108,6 +108,62 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(finalReview: "Looks good."))
     }
 
+    @Test func backendCompletesReviewFromFinalAnswerDeltaWhenTerminalPayloadIsSparse() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "item/agentMessage/delta",
+            params: TestDeltaNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                itemID: "msg-1",
+                delta: "Looks good.",
+                phase: "final_answer"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
+
+        #expect(
+            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(try await iterator.next() == .completed(finalReview: "Looks good."))
+    }
+
+    @Test func backendFailsCompletedReviewWithoutFinalAnswer() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "completed")
+            )
+        )
+
+        #expect(
+            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(try await iterator.next() == .failed("Review completed without a final response."))
+    }
+
     @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
@@ -593,12 +649,14 @@ private struct TestDeltaNotification: Encodable, Sendable {
     var turnID: String
     var itemID: String
     var delta: String
+    var phase: String?
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case itemID = "itemId"
         case delta
+        case phase
     }
 }
 
