@@ -209,14 +209,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            let log = try #require(
-                resolved.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
-            let itemsPage = try #require(log["itemsPage"] as? [String: Any])
-            #expect(itemsPage["total"] as? Int == 2)
-            #expect(itemsPage["limit"] as? Int == 100)
-            #expect(itemsPage["returned"] as? Int == 2)
-            let items = try #require(log["items"] as? [[String: Any]])
-            #expect(items.compactMap { $0["kind"] as? String } == ["commandExecution", "agentMessage"])
+            #expect(resolved.value(for: ["result", "structuredContent", "log"]) == nil)
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -319,14 +312,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            #expect(
-                awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
-                    == "Review completed.")
-            #expect(
-                awaited.value(for: ["result", "structuredContent", "log", "itemsPage", "returned"]) as? Int == 1)
-            let awaitedItems = try #require(
-                awaited.value(for: ["result", "structuredContent", "log", "items"]) as? [[String: Any]])
-            #expect(awaitedItems.first?["kind"] as? String == "commandExecution")
+            #expect(awaited.value(for: ["result", "structuredContent", "log"]) == nil)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
