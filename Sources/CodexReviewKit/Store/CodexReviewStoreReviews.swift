@@ -685,7 +685,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return recoveryState.currentRun
             }
-            markReviewFailed(runRecord, message: "Review completed without a final response.")
+            markReviewFailed(runRecord, message: "Review completed without review output.")
         }
         return recoveryState.currentRun
     }
@@ -706,7 +706,7 @@ extension CodexReviewStore {
             if completePendingCancellationIfNeeded(for: runRecord) {
                 return true
             }
-            markReviewFailed(runRecord, message: "Review completed without a final response.")
+            markReviewFailed(runRecord, message: "Review completed without review output.")
         }
         return true
     }
@@ -858,7 +858,7 @@ extension CodexReviewStore {
             return
         }
         guard let finalReview = finalReview?.nilIfEmpty else {
-            markReviewFailed(runRecord, message: "Review completed without a final response.")
+            markReviewFailed(runRecord, message: "Review completed without review output.")
             return
         }
         let endedAt = clock.now()

@@ -1,11 +1,12 @@
 import Darwin
 import Foundation
+import CodexKit
 import MCP
 @preconcurrency import NIOCore
 import Testing
 @_spi(Testing) @testable import CodexReviewKit
 import CodexReviewKit
-import CodexReviewMCPServer
+@testable import CodexReviewMCPServer
 import CodexReviewTesting
 
 @Suite("MCP Streamable HTTP server")
@@ -50,11 +51,15 @@ struct CodexReviewMCPHTTPServerTests {
             let awaitSchema = try #require(reviewAwait["inputSchema"] as? [String: Any])
             let awaitProperties = try #require(awaitSchema["properties"] as? [String: Any])
             #expect(awaitProperties["runId"] != nil)
+            #expect(awaitProperties["jobId"] != nil)
+            #expect(awaitProperties["jobID"] != nil)
             #expect(awaitProperties["logOffset"] == nil)
             let awaitAnyOf = try #require(awaitSchema["anyOf"] as? [[String: Any]])
             let requiredAliases = awaitAnyOf.compactMap { $0["required"] as? [String] }
             #expect(requiredAliases.contains(["runId"]))
             #expect(requiredAliases.contains(["runID"]))
+            #expect(requiredAliases.contains(["jobId"]))
+            #expect(requiredAliases.contains(["jobID"]))
         }
     }
 
@@ -136,7 +141,31 @@ struct CodexReviewMCPHTTPServerTests {
             idGenerator: .init(next: { "run-1" })
         )
 
-        try await withHTTPServer(store: store) { server in
+        try await withHTTPServer(
+            store: store,
+            logProjectionProvider: { result in
+                ReviewMCPLogProjection(
+                    result: result,
+                    turnID: "turn-1",
+                    threadItems: [
+                        .init(
+                            id: "command-1",
+                            kind: .commandExecution,
+                            content: .command(.init(command: "swift test", output: "passed"))
+                        ),
+                        .init(
+                            id: "assistant-1",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "assistant-1",
+                                role: .assistant,
+                                text: "No issues found."
+                            ))
+                        ),
+                    ]
+                )
+            }
+        ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint)
             let requestBody = try makeJSONBody([
@@ -180,6 +209,14 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
+            let log = try #require(
+                resolved.value(for: ["result", "structuredContent", "log"]) as? [String: Any])
+            let itemsPage = try #require(log["itemsPage"] as? [String: Any])
+            #expect(itemsPage["total"] as? Int == 2)
+            #expect(itemsPage["limit"] as? Int == 100)
+            #expect(itemsPage["returned"] as? Int == 2)
+            let items = try #require(log["items"] as? [[String: Any]])
+            #expect(items.compactMap { $0["kind"] as? String } == ["commandExecution", "agentMessage"])
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -205,7 +242,23 @@ struct CodexReviewMCPHTTPServerTests {
             boundedReviewWaitDuration: .milliseconds(50)
         )
 
-        try await withHTTPServer(store: store, configuration: configuration) { server in
+        try await withHTTPServer(
+            store: store,
+            configuration: configuration,
+            logProjectionProvider: { result in
+                ReviewMCPLogProjection(
+                    result: result,
+                    turnID: "turn-1",
+                    threadItems: [
+                        .init(
+                            id: "command-1",
+                            kind: .commandExecution,
+                            content: .command(.init(command: "git diff", output: "diff"))
+                        ),
+                    ]
+                )
+            }
+        ) { server in
             let endpoint = await server.url
             let sessionID = try await initializeSession(endpoint: endpoint, clientName: "Claude Code")
             let requestBody = try makeJSONBody([
@@ -268,8 +321,12 @@ struct CodexReviewMCPHTTPServerTests {
                     == "noFindings")
             #expect(
                 awaited.value(for: ["result", "structuredContent", "log", "finalLifecycleMessage"]) as? String
-                    == nil)
-            #expect(awaited.value(for: ["result", "structuredContent", "log", "finalResult"]) is NSNull)
+                    == "Review completed.")
+            #expect(
+                awaited.value(for: ["result", "structuredContent", "log", "itemsPage", "returned"]) as? Int == 1)
+            let awaitedItems = try #require(
+                awaited.value(for: ["result", "structuredContent", "log", "items"]) as? [[String: Any]])
+            #expect(awaitedItems.first?["kind"] as? String == "commandExecution")
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -455,7 +512,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "method": "tools/call",
                     "params": [
                         "name": "review_read",
-                        "arguments": ["runId": "run-in-session"],
+                        "arguments": ["jobId": "run-in-session"],
                     ],
                 ]
             )
@@ -468,7 +525,7 @@ struct CodexReviewMCPHTTPServerTests {
                     "method": "tools/call",
                     "params": [
                         "name": "review_read",
-                        "arguments": ["runID": "run-other-session"],
+                        "arguments": ["jobID": "run-other-session"],
                     ],
                 ]
             )
@@ -483,6 +540,39 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 (denied.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"] as? String
                     == "Run run-other-session was not found.")
+        }
+    }
+
+    @Test func streamableHTTPRejectsConflictingRunIdentifierAliases() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let sessionID = try await initializeSession(endpoint: await server.url)
+            let response = try await postJSONRPC(
+                endpoint: await server.url,
+                sessionID: sessionID,
+                body: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "review_read",
+                        "arguments": [
+                            "runId": "run-1",
+                            "jobId": "run-2",
+                        ],
+                    ],
+                ]
+            )
+
+            #expect(response.value(for: ["result", "isError"]) as? Bool == true)
+            let errorText =
+                (response.value(for: ["result", "content"]) as? [[String: Any]])?.first?["text"]
+                    as? String
+            #expect(errorText == "Conflicting run identifier arguments: runId and jobId.")
         }
     }
 
@@ -1098,9 +1188,13 @@ struct CodexReviewMCPHTTPServerTests {
     private func withHTTPServer<T>(
         store: CodexReviewStore,
         configuration: CodexReviewMCPHTTPServer.Configuration = .init(port: 0),
+        logProjectionProvider: ReviewMCPLogProjectionProvider? = nil,
         operation: (CodexReviewMCPHTTPServer) async throws -> T
     ) async throws -> T {
-        let adapter = CodexReviewMCPServer(store: store)
+        let adapter = CodexReviewMCPServer(
+            store: store,
+            logProjectionProvider: logProjectionProvider
+        )
         let server = CodexReviewMCPHTTPServer(
             adapter: adapter,
             configuration: configuration

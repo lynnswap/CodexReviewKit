@@ -90,7 +90,7 @@ package struct ReviewMCPLogProjection: Sendable, Equatable {
         self.finalLifecycleMessage = status.isTerminal ? lifecycleMessage : nil
         self.finalResult =
             status == .succeeded
-            ? projectedItems.lastAssistantMessageText
+            ? result.core.finalReview ?? projectedItems.lastAssistantMessageText
             : nil
     }
 }

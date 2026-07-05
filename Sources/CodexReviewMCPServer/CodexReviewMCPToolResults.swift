@@ -63,7 +63,7 @@ private extension CodexReviewAPI.Read.Result {
 
     func structuredContentForStartOrAwait(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
-            includeDetails: false,
+            includeDetails: core.lifecycle.status.isTerminal,
             includeNextAction: core.lifecycle.status.isTerminal == false,
             log: log
         )

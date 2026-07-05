@@ -597,10 +597,8 @@ private enum AppServerTypedReviewEventAdapter {
                 message: response.status?.rawValue ?? "Failed."
             )
         }
-        guard let finalReview = response.finalAnswer?.nilIfEmpty
-            ?? response.transcript.finalAnswer?.nilIfEmpty
-        else {
-            return [.failed("Review completed without a final response.")]
+        guard let finalReview = response.transcript.reviewOutputText?.nilIfEmpty else {
+            return [.failed("Review completed without review output.")]
         }
         return [
             .completed(finalReview: finalReview)
