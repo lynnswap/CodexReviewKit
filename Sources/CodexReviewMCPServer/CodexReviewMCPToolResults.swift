@@ -472,7 +472,6 @@ private extension ParsedReviewResult.Finding {
             "body": .string(body),
             "priority": priority.map(Value.int) ?? .null,
             "location": location.map { $0.structuredContent() } ?? .null,
-            "rawText": .string(rawText),
         ])
     }
 }

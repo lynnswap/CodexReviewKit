@@ -223,6 +223,55 @@ struct CodexReviewMCPHTTPServerTests {
         }
     }
 
+    @Test func streamableHTTPOmitsRawFindingTextFromReviewStartResult() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-1" })
+        )
+
+        try await withHTTPServer(store: store) { server in
+            let endpoint = await server.url
+            let sessionID = try await initializeSession(endpoint: endpoint)
+            let requestBody = try makeJSONBody([
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": [
+                    "name": "review_start",
+                    "arguments": [
+                        "cwd": "/tmp/project",
+                        "target": ["type": "uncommittedChanges"],
+                    ],
+                ],
+            ])
+            async let responseData = postJSONRPCData(
+                endpoint: endpoint,
+                sessionID: sessionID,
+                bodyData: requestBody
+            )
+            await backend.yield(.completed(finalReview: """
+            Review comment:
+
+            - [P1] Pin CodexKit fallback — Package.swift:14-14
+              Fresh clones can resolve a moving dependency and drift from the reviewed API.
+            """))
+            let resolved = try decodeSSEJSON(from: try await responseData)
+
+            #expect(
+                resolved.value(for: ["result", "structuredContent", "review", "finalReview"]) as? String
+                    != nil)
+            let findings = try #require(
+                resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "findings"])
+                    as? [[String: Any]])
+            let finding = try #require(findings.first)
+            #expect(finding["title"] as? String == "[P1] Pin CodexKit fallback")
+            #expect(finding["body"] as? String == "Fresh clones can resolve a moving dependency and drift from the reviewed API.")
+            #expect(finding["location"] != nil)
+            #expect(finding["rawText"] == nil)
+        }
+    }
+
     @Test func streamableHTTPBoundsClaudeReviewStartAndContinuesWithReviewAwait() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
