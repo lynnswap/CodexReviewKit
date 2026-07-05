@@ -487,6 +487,43 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.text == "Review the current code changes.")
     }
 
+    @Test func codexChatLogProjectionDeduplicatesReviewOutputAgentMessage() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let finalReview = """
+        Review comment:
+
+        - [P2] Handle complete agent messages without appending them as deltas.
+        """
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            status: .completed,
+            items: [
+                .init(
+                    id: "review-output",
+                    kind: .exitedReviewMode,
+                    content: .log(finalReview)
+                ),
+                .init(
+                    id: "review-output-agent",
+                    kind: .agentMessage,
+                    content: .message(.init(
+                        id: "review-output-agent",
+                        role: .assistant,
+                        text: finalReview
+                    ))
+                ),
+            ]
+        )
+        let document = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+
+        #expect(document?.text == finalReview)
+        #expect(document?.blocks.count == 1)
+    }
+
     @Test func codexChatLogProjectionRendersUserMessageWithoutReviewModeLog() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(

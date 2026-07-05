@@ -91,13 +91,21 @@ struct ReviewMonitorCodexChatLogProjection {
         let suppressUserMessages = items.contains { item in
             item.kind == .enteredReviewMode || item.kind == .exitedReviewMode
         }
-        let blocks = items.flatMap {
-            projectedBlocks(
-                from: $0,
+        let reviewOutputTexts = Set(items.compactMap(Self.reviewOutputText))
+        var emittedReviewOutputTexts = Set<String>()
+        let blocks = items.flatMap { item in
+            if let reviewOutputText = Self.reviewOutputText(for: item) {
+                guard emittedReviewOutputTexts.insert(reviewOutputText).inserted else {
+                    return [] as [ReviewMonitorLogProjectedBlock]
+                }
+            }
+            return projectedBlocks(
+                from: item,
                 turnStatus: turnStatus,
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt,
-                suppressUserMessages: suppressUserMessages
+                suppressUserMessages: suppressUserMessages,
+                reviewOutputTexts: reviewOutputTexts
             )
         }
         guard blocks.isEmpty == false else {
@@ -112,11 +120,17 @@ struct ReviewMonitorCodexChatLogProjection {
         turnStatus: CodexTurnStatus?,
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
-        suppressUserMessages: Bool
+        suppressUserMessages: Bool,
+        reviewOutputTexts: Set<String>
     ) -> [ReviewMonitorLogProjectedBlock] {
         switch item.content {
         case .message(let message):
             guard suppressUserMessages == false || message.role != .user else {
+                return []
+            }
+            if message.role == .assistant,
+                reviewOutputTexts.contains(Self.normalizedReviewOutputText(message.text))
+            {
                 return []
             }
             return [
@@ -232,6 +246,26 @@ struct ReviewMonitorCodexChatLogProjection {
                 )
             ]
         }
+    }
+
+    private static func reviewOutputText<Item: CodexChatLogProjectionItem>(for item: Item) -> String? {
+        guard item.kind == .exitedReviewMode else {
+            return nil
+        }
+        switch item.content {
+        case .message(let message):
+            return normalizedReviewOutputText(message.text).nilIfEmpty
+        case .diagnostic(let text), .log(let text):
+            return normalizedReviewOutputText(text).nilIfEmpty
+        case .unknown(let raw):
+            return raw.text.map(normalizedReviewOutputText)?.nilIfEmpty
+        case .plan, .reasoning, .command, .fileChange, .toolCall, .contextCompaction:
+            return nil
+        }
+    }
+
+    private static func normalizedReviewOutputText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func unknownText(title: String, detail: String?) -> String {
