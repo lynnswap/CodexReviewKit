@@ -63,7 +63,7 @@ private extension CodexReviewAPI.Read.Result {
 
     func structuredContentForStartOrAwait(log: ReviewMCPLogProjection) -> Value {
         structuredContent(
-            includeLog: false,
+            includeLog: true,
             includeDetails: false,
             includeNextAction: core.lifecycle.status.isTerminal == false,
             log: log
@@ -115,6 +115,14 @@ private extension CodexReviewAPI.Read.Result {
 private extension ReviewMCPLogProjection {
     func structuredContent() -> Value {
         var truncatedFields: [String] = []
+        let orderedEntryIDs = Array(self.orderedEntryIDs.suffix(Self.compactEntryIDLimit))
+        let activeEntryIDs = Array(self.activeEntryIDs.suffix(Self.compactEntryIDLimit))
+        if orderedEntryIDs.count < self.orderedEntryIDs.count {
+            truncatedFields.append("orderedEntryIds")
+        }
+        if activeEntryIDs.count < self.activeEntryIDs.count {
+            truncatedFields.append("activeEntryIds")
+        }
         var object: [String: Value] = [
             "revision": .string(revision),
             "orderedEntryIds": .array(orderedEntryIDs.map(Value.string)),
@@ -189,6 +197,7 @@ private extension ReviewMCPLogProjection {
         return .object(object)
     }
 
+    private static var compactEntryIDLimit: Int { 100 }
     private static var detailedItemsLimit: Int { 100 }
 }
 

@@ -598,12 +598,18 @@ private enum AppServerTypedReviewEventAdapter {
                 message: response.status?.rawValue ?? "Failed."
             )
         }
-        guard let finalReview = response.transcript.reviewOutputText?.nilIfEmpty else {
+        guard let finalReview = reviewCompletionText(for: response) else {
             return [.failed("Review completed without review output.")]
         }
         return [
             .completed(finalReview: finalReview)
         ]
+    }
+
+    private static func reviewCompletionText(for response: CodexResponse) -> String? {
+        response.transcript.reviewOutputText?.nilIfEmpty
+            ?? response.finalAnswer?.nilIfEmpty
+            ?? response.transcript.finalAnswer?.nilIfEmpty
     }
 
     private static func unknownStatusEvents(

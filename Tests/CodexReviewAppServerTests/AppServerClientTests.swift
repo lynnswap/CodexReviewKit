@@ -135,6 +135,35 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
     }
 
+    @Test func backendCompletesReviewFromCompatibleFinalAnswerWhenReviewOutputIsAbsent() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(
+                    id: "turn-1",
+                    status: "completed",
+                    items: [
+                        .finalAnswer(id: "assistant-final", text: "No issues found.")
+                    ]
+                )
+            )
+        )
+
+        #expect(
+            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
+    }
+
     @Test func backendDoesNotPromoteThreadScopedFinalAnswerDeltaWithoutTurnID() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")

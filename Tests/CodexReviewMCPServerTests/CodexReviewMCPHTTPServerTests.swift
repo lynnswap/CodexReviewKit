@@ -209,7 +209,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 resolved.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            #expect(resolved.value(for: ["result", "structuredContent", "log"]) == nil)
+            assertCompactLog(resolved, total: 2)
             let commands = await backend.recordedCommands()
             #expect(
                 commands.contains(
@@ -327,7 +327,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(running.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "running")
             #expect(running.value(for: ["result", "structuredContent", "logs"]) == nil)
             #expect(running.value(for: ["result", "structuredContent", "rawLogText"]) == nil)
-            #expect(running.value(for: ["result", "structuredContent", "log"]) == nil)
+            assertCompactLog(running, total: 1)
             #expect(
                 running.value(for: ["result", "structuredContent", "nextAction", "tool"]) as? String == "review_await")
 
@@ -362,7 +362,7 @@ struct CodexReviewMCPHTTPServerTests {
             #expect(
                 awaited.value(for: ["result", "structuredContent", "review", "reviewResult", "state"]) as? String
                     == "noFindings")
-            #expect(awaited.value(for: ["result", "structuredContent", "log"]) == nil)
+            assertCompactLog(awaited, total: 1)
             #expect(awaited.value(for: ["result", "structuredContent", "logs"]) == nil)
         }
     }
@@ -1456,6 +1456,20 @@ private nonisolated func testError(_ message: String) -> NSError {
         code: 1,
         userInfo: [NSLocalizedDescriptionKey: message]
     )
+}
+
+private func assertCompactLog(_ response: [String: Any], total: Int) {
+    let log = response.value(for: ["result", "structuredContent", "log"]) as? [String: Any]
+    #expect(log != nil)
+    #expect(log?["revision"] is String)
+    #expect((log?["orderedEntryIds"] as? [String])?.count == min(total, 100))
+    #expect((log?["activeEntryIds"] as? [String]) != nil)
+    #expect(log?["activeEntryCount"] is Int)
+    let itemsPage = log?["itemsPage"] as? [String: Any]
+    #expect(itemsPage?["total"] as? Int == total)
+    #expect(itemsPage?["limit"] as? Int == 0)
+    #expect(itemsPage?["returned"] as? Int == 0)
+    #expect((log?["items"] as? [[String: Any]])?.isEmpty == true)
 }
 
 private extension [String: Any] {
