@@ -91,11 +91,11 @@ struct ReviewMonitorCodexChatLogProjection {
         let suppressUserMessages = items.contains { item in
             item.kind == .enteredReviewMode || item.kind == .exitedReviewMode
         }
-        let reviewOutputTexts = Set(items.compactMap(Self.reviewOutputText))
-        var emittedReviewOutputTexts = Set<String>()
+        let reviewOutputKeys = Set(items.compactMap(Self.reviewOutputKey))
+        var emittedReviewOutputKeys = Set<ReviewOutputKey>()
         let blocks = items.flatMap { item in
-            if let reviewOutputText = Self.reviewOutputText(for: item) {
-                guard emittedReviewOutputTexts.insert(reviewOutputText).inserted else {
+            if let reviewOutputKey = Self.reviewOutputKey(for: item) {
+                guard emittedReviewOutputKeys.insert(reviewOutputKey).inserted else {
                     return [] as [ReviewMonitorLogProjectedBlock]
                 }
             }
@@ -105,7 +105,7 @@ struct ReviewMonitorCodexChatLogProjection {
                 chatCreatedAt: chatCreatedAt,
                 chatUpdatedAt: chatUpdatedAt,
                 suppressUserMessages: suppressUserMessages,
-                reviewOutputTexts: reviewOutputTexts
+                reviewOutputKeys: reviewOutputKeys
             )
         }
         guard blocks.isEmpty == false else {
@@ -121,7 +121,7 @@ struct ReviewMonitorCodexChatLogProjection {
         chatCreatedAt: Date?,
         chatUpdatedAt: Date?,
         suppressUserMessages: Bool,
-        reviewOutputTexts: Set<String>
+        reviewOutputKeys: Set<ReviewOutputKey>
     ) -> [ReviewMonitorLogProjectedBlock] {
         switch item.content {
         case .message(let message):
@@ -129,7 +129,8 @@ struct ReviewMonitorCodexChatLogProjection {
                 return []
             }
             if message.role == .assistant,
-                reviewOutputTexts.contains(Self.normalizedReviewOutputText(message.text))
+                let reviewOutputKey = Self.reviewOutputKey(for: item, text: message.text),
+                reviewOutputKeys.contains(reviewOutputKey)
             {
                 return []
             }
@@ -248,20 +249,34 @@ struct ReviewMonitorCodexChatLogProjection {
         }
     }
 
-    private static func reviewOutputText<Item: CodexChatLogProjectionItem>(for item: Item) -> String? {
+    private static func reviewOutputKey<Item: CodexChatLogProjectionItem>(for item: Item) -> ReviewOutputKey? {
         guard item.kind == .exitedReviewMode else {
             return nil
         }
         switch item.content {
         case .message(let message):
-            return normalizedReviewOutputText(message.text).nilIfEmpty
+            return reviewOutputKey(for: item, text: message.text)
         case .diagnostic(let text), .log(let text):
-            return normalizedReviewOutputText(text).nilIfEmpty
+            return reviewOutputKey(for: item, text: text)
         case .unknown(let raw):
-            return raw.text.map(normalizedReviewOutputText)?.nilIfEmpty
+            return raw.text.flatMap { reviewOutputKey(for: item, text: $0) }
         case .plan, .reasoning, .command, .fileChange, .toolCall, .contextCompaction:
             return nil
         }
+    }
+
+    private static func reviewOutputKey<Item: CodexChatLogProjectionItem>(
+        for item: Item,
+        text: String
+    ) -> ReviewOutputKey? {
+        guard let normalizedText = normalizedReviewOutputText(text).nilIfEmpty else {
+            return nil
+        }
+        return ReviewOutputKey(scopeID: reviewOutputScopeID(for: item), text: normalizedText)
+    }
+
+    private static func reviewOutputScopeID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
+        item.projectionTurnID?.rawValue ?? item.sourceID
     }
 
     private static func normalizedReviewOutputText(_ text: String) -> String {
@@ -549,6 +564,11 @@ struct ReviewMonitorCodexChatLogProjection {
             return true
         }
     }
+}
+
+private struct ReviewOutputKey: Hashable {
+    var scopeID: String
+    var text: String
 }
 
 @MainActor

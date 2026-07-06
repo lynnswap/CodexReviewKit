@@ -524,6 +524,70 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document?.blocks.count == 1)
     }
 
+    @Test func codexChatLogProjectionKeepsMatchingReviewOutputsFromDifferentTurns() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let finalReview = "No issues found."
+        let snapshot = makeCodexThreadSnapshotForTesting(
+            chatID: CodexThreadID(rawValue: "review-thread"),
+            turns: [
+                .init(
+                    id: CodexTurnID(rawValue: "turn-first"),
+                    status: .completed,
+                    items: [
+                        .init(
+                            id: "review-output-first",
+                            kind: .exitedReviewMode,
+                            content: .log(finalReview)
+                        ),
+                        .init(
+                            id: "review-output-agent-first",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "review-output-agent-first",
+                                role: .assistant,
+                                text: finalReview
+                            ))
+                        ),
+                    ]
+                ),
+                .init(
+                    id: CodexTurnID(rawValue: "turn-second"),
+                    status: .completed,
+                    items: [
+                        .init(
+                            id: "review-output-second",
+                            kind: .exitedReviewMode,
+                            content: .log(finalReview)
+                        ),
+                        .init(
+                            id: "review-output-agent-second",
+                            kind: .agentMessage,
+                            content: .message(.init(
+                                id: "review-output-agent-second",
+                                role: .assistant,
+                                text: finalReview
+                            ))
+                        ),
+                    ]
+                ),
+            ]
+        )
+
+        let projectedDocument = projection.render(
+            from: snapshot,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+        let document = try #require(projectedDocument)
+
+        #expect(document.blocks.count == 2)
+        let documentText = document.text as NSString
+        let renderedText = document.blocks.map { block in
+            documentText.substring(with: block.range)
+        }
+        #expect(renderedText == [finalReview, finalReview])
+    }
+
     @Test func codexChatLogProjectionRendersUserMessageWithoutReviewModeLog() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(

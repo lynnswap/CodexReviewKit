@@ -52,6 +52,7 @@ struct AppServerClientTests {
         let reviewStart = try #require(requests.first { $0.method == "review/start" })
         let reviewParams = try jsonObject(from: reviewStart.params)
         #expect(reviewParams["threadId"] as? String == "thread-1")
+        #expect(reviewParams["delivery"] as? String == "inline")
         let target = try #require(reviewParams["target"] as? [String: Any])
         #expect(target["type"] as? String == "uncommittedChanges")
     }

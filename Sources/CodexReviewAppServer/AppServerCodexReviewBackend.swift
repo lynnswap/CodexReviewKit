@@ -152,7 +152,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
             in: workspace,
             input: CodexReviewInput(
                 target: request.request.target.appServerReviewTarget,
-                options: reviewThreadOptions(request)
+                options: reviewThreadOptions(request),
+                delivery: .inline
             )
         )
         .session
