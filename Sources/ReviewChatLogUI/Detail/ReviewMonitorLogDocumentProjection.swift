@@ -133,7 +133,7 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
         return true
     }
 
-    private static func replacementChange(
+    static func replacementChange(
         previous: ReviewMonitorLog.Document,
         current: ReviewMonitorLog.Document
     ) -> ReviewMonitorLog.Replacement? {

@@ -3025,6 +3025,62 @@ struct ReviewUITests {
         #expect(panel.lineCount == 2)
     }
 
+    @Test func scrollViewAppliesCrossRevisionReplacementAfterSkippedRenders() throws {
+        let scrollView = ReviewMonitorLogScrollView()
+        var projection = ReviewMonitorLogDocumentProjection()
+        let startedAt = Date(timeIntervalSince1970: 200)
+        func commandBlocks(
+            status: String,
+            cwd: String? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil
+        ) -> [ReviewMonitorLogProjectedBlock] {
+            [
+                .init(
+                    id: .init("reasoning_1"),
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Analyzing the diff."
+                ),
+                .init(
+                    id: .init("command_1"),
+                    kind: .command,
+                    groupID: "cmd_1",
+                    text: "$ git diff",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: status,
+                        itemID: "cmd_1",
+                        command: "git diff",
+                        cwd: cwd,
+                        startedAt: startedAt,
+                        completedAt: completedAt,
+                        durationMs: durationMs,
+                        commandStatus: status
+                    )
+                ),
+            ]
+        }
+
+        let initial = projection.render(projectedBlocks: commandBlocks(status: "running"))
+        #expect(scrollView.render(document: initial, restoring: .bottom, allowIncrementalUpdate: false))
+        #expect(scrollView.reloadCount == 1)
+
+        // A superseded revision that is never applied to the scroll view.
+        let skipped = projection.render(projectedBlocks: commandBlocks(status: "running", cwd: "/tmp/project"))
+        let final = projection.render(projectedBlocks: commandBlocks(
+            status: "completed",
+            cwd: "/tmp/project",
+            completedAt: Date(timeIntervalSince1970: 211),
+            durationMs: 11_000
+        ))
+        #expect(final.revision == skipped.revision &+ 1)
+
+        #expect(scrollView.render(document: final, restoring: .bottom, allowIncrementalUpdate: true))
+        #expect(scrollView.replaceCount == 1)
+        #expect(scrollView.reloadCount == 1)
+    }
+
     @Test func adjacentCommandPanelsStayOnSeparateParagraphs() throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         var projection = ReviewMonitorLogDocumentProjection()
