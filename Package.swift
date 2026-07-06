@@ -8,10 +8,11 @@ let packageDirectory = URL(fileURLWithPath: #filePath)
 let localCodexKitPath = packageDirectory
     .appendingPathComponent("dependencies/CodexKit", isDirectory: true)
     .path
+let codexKitFallbackRevision = "58c2dab605c3dad806e0ac90c6d3d1f67c5fd36d"
 let codexKitDependency: Package.Dependency =
     FileManager.default.fileExists(atPath: "\(localCodexKitPath)/Package.swift")
         ? .package(path: localCodexKitPath)
-        : .package(url: "https://github.com/lynnswap/CodexKit.git", branch: "main")
+        : .package(url: "https://github.com/lynnswap/CodexKit.git", revision: codexKitFallbackRevision)
 
 let package = Package(
     name: "CodexReviewKit",

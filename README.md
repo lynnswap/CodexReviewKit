@@ -104,7 +104,9 @@ used by that Claude Code session.
 
 `Package.swift` uses a local `dependencies/CodexKit` checkout when that
 directory contains a `Package.swift`. If the local checkout is absent, SwiftPM
-resolves `CodexKit` from the remote `main` branch.
+resolves `CodexKit` from the pinned fallback revision in `Package.swift`.
+Update that revision to a reviewed CodexKit `main` commit whenever
+CodexReviewKit adopts new CodexKit APIs.
 
 ```bash
 mkdir -p dependencies
