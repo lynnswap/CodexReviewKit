@@ -3,6 +3,15 @@ import Foundation
 package enum ReviewMonitorLog {}
 
 enum ReviewMonitorUTF16TextReplacement {
+    static func segmentsEqual(
+        _ lhs: String,
+        range lhsRange: NSRange,
+        _ rhs: String,
+        range rhsRange: NSRange
+    ) -> Bool {
+        utf16SegmentsEqual(lhs as NSString, lhsRange, rhs as NSString, rhsRange)
+    }
+
     static func replacing(
         _ text: String,
         range: NSRange,

@@ -195,14 +195,21 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
                     previous: previousBlock,
                     current: currentBlock,
                     displayDelta: displayDelta,
-                    sourceDelta: sourceDelta
+                    sourceDelta: sourceDelta,
+                    previousDocument: previous,
+                    currentDocument: current
                 ) else {
                     return nil
                 }
                 continue
             }
 
-            if previousBlock == currentBlock {
+            if blockContentUnchanged(
+                previous: previousBlock,
+                current: currentBlock,
+                previousDocument: previous,
+                currentDocument: current
+            ) {
                 continue
             }
             guard canReplaceSingleBlock(previous: previousBlock, current: currentBlock) else {
@@ -234,9 +241,11 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
         previous: ReviewMonitorLog.Block,
         current: ReviewMonitorLog.Block,
         displayDelta: Int,
-        sourceDelta: Int
+        sourceDelta: Int,
+        previousDocument: ReviewMonitorLog.Document,
+        currentDocument: ReviewMonitorLog.Document
     ) -> Bool {
-        previous.id == current.id
+        guard previous.id == current.id
             && previous.kind == current.kind
             && previous.groupID == current.groupID
             && previous.metadata == current.metadata
@@ -244,6 +253,47 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             && current.range.length == previous.range.length
             && current.sourceRange.location == previous.sourceRange.location + sourceDelta
             && current.sourceRange.length == previous.sourceRange.length
+        else {
+            return false
+        }
+        return blockContentUnchanged(
+            previous: previous,
+            current: current,
+            previousDocument: previousDocument,
+            currentDocument: currentDocument
+        )
+    }
+
+    private static func blockContentUnchanged(
+        previous: ReviewMonitorLog.Block,
+        current: ReviewMonitorLog.Block,
+        previousDocument: ReviewMonitorLog.Document,
+        currentDocument: ReviewMonitorLog.Document
+    ) -> Bool {
+        guard previous.id == current.id,
+            previous.kind == current.kind,
+            previous.groupID == current.groupID,
+            previous.metadata == current.metadata,
+            rangeIsValid(previous.range, upperBound: previousDocument.textUTF16Length),
+            rangeIsValid(current.range, upperBound: currentDocument.textUTF16Length),
+            rangeIsValid(previous.sourceRange, upperBound: previousDocument.sourceTextUTF16Length),
+            rangeIsValid(current.sourceRange, upperBound: currentDocument.sourceTextUTF16Length),
+            ReviewMonitorUTF16TextReplacement.segmentsEqual(
+                previousDocument.text,
+                range: previous.range,
+                currentDocument.text,
+                range: current.range
+            ),
+            ReviewMonitorUTF16TextReplacement.segmentsEqual(
+                previousDocument.sourceText,
+                range: previous.sourceRange,
+                currentDocument.sourceText,
+                range: current.sourceRange
+            )
+        else {
+            return false
+        }
+        return true
     }
 
     private static func rangeIsValid(_ range: NSRange) -> Bool {

@@ -2890,6 +2890,46 @@ struct ReviewUITests {
         #expect(applyingDisplayChange(currentSource.lastChange, to: previousSource.text) == currentSource.text)
     }
 
+    @Test func sourceDocumentReplacementHandlesSameLengthBlockTextRewrite() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("event_1"),
+                kind: .event,
+                groupID: "event_1",
+                text: "abcd"
+            ),
+            .init(
+                id: .init("event_2"),
+                kind: .event,
+                groupID: "event_2",
+                text: "tail"
+            ),
+        ])
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("event_1"),
+                kind: .event,
+                groupID: "event_1",
+                text: "wxyz"
+            ),
+            .init(
+                id: .init("event_2"),
+                kind: .event,
+                groupID: "event_2",
+                text: "tail"
+            ),
+        ])
+
+        guard case .replace(let replacement) = currentSource.lastChange else {
+            Issue.record("Expected same-length block rewrite to remain a replacement.")
+            return
+        }
+        #expect(replacement.blockID == ReviewMonitorLog.BlockID("event_1"))
+        #expect(applyingDisplayChange(currentSource.lastChange, to: previousSource.text) == currentSource.text)
+    }
+
     @Test func commandOutputOnlyDisplayBeforeMarkdownHeadingKeepsParagraphBoundary() throws {
         var projection = ReviewMonitorLogDocumentProjection()
         let source = projection.render(projectedBlocks: [
