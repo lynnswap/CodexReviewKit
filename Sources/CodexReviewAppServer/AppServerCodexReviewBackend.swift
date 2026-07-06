@@ -238,6 +238,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         let review = try await appServer.restartPreparedReview(
             appServerToken,
             target: request.request.target.appServerReviewTarget,
+            delivery: .inline,
             threadOptions: reviewThreadOptions(model: interruptedRun.model ?? request.model)
         )
         let attemptID = makeAppServerReviewAttemptID()
