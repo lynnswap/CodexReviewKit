@@ -844,6 +844,39 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(document.text == "\(reasoningText)\n\n$ /bin/zsh -lc")
     }
 
+    @Test func codexChatLogProjectionDeduplicatesReasoningMirrorWithWrappedItemPayload() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let reasoningText = "Inspecting differences"
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            status: .running,
+            items: [
+                .init(
+                    id: "event-reasoning",
+                    kind: .reasoning,
+                    content: .reasoning(.init(summary: reasoningText)),
+                    rawPayload: rawPayload(type: "agent_reasoning")
+                ),
+                .init(
+                    id: "response-reasoning",
+                    kind: .reasoning,
+                    content: .reasoning(.init(summary: reasoningText)),
+                    rawPayload: Data("{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\"}}".utf8)
+                ),
+            ]
+        )
+
+        let projectedDocument = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+        let document = try #require(projectedDocument)
+
+        #expect(document.blocks.count == 1)
+        #expect(document.text == reasoningText)
+    }
+
     @Test func codexChatLogProjectionKeepsRepeatedReasoningAfterMirrorPairConsumed() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let reasoningText = "Inspecting differences"

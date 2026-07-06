@@ -665,8 +665,11 @@ private struct RawPayloadKind: Decodable {
     var item: NestedItem?
     var payload: NestedItem?
 
+    // A nested item/payload kind identifies the item itself; a top-level
+    // type on the same wrapper is the event envelope kind, so the nested
+    // kind wins when both are present.
     var kindValue: String? {
-        type ?? kind ?? item?.kindValue ?? payload?.kindValue
+        item?.kindValue ?? payload?.kindValue ?? type ?? kind
     }
 }
 
