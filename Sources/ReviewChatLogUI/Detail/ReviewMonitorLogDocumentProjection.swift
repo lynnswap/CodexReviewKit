@@ -325,19 +325,19 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
                 return
             }
 
-            // Block text must not carry the inter-block separator: command
-            // panels replace their block text with a placeholder, so a
-            // separator living inside a neighboring block's trailing newlines
-            // would silently disappear from the display document.
-            let sourceText = Self.normalizedBlockText(block.text)
+            // Rendered block text must not carry the inter-block separator:
+            // command panels replace their block text with a placeholder, so
+            // a separator living inside a neighboring block's trailing
+            // newlines would silently disappear from the display document.
+            // Source text stays raw so panels and copy keep output fidelity.
             let renderedText = Self.normalizedBlockText(
                 ReviewMonitorLogStyler.renderedText(
                     for: block.kind,
-                    source: sourceText,
+                    source: block.text,
                     blockID: block.id
                 ))
             let appended = appendedText(renderedText, after: document.text)
-            let appendedSource = appendedText(sourceText, after: document.sourceText)
+            let appendedSource = appendedSourceText(block.text)
             hasVisibleSections = true
 
             let previousLength = document.textUTF16Length
@@ -345,7 +345,7 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             let suffixLength = ReviewMonitorLogDocumentProjection.utf16Length(appended)
             let sourceSuffixLength = ReviewMonitorLogDocumentProjection.utf16Length(appendedSource)
             let blockLength = ReviewMonitorLogDocumentProjection.utf16Length(renderedText)
-            let sourceBlockLength = ReviewMonitorLogDocumentProjection.utf16Length(sourceText)
+            let sourceBlockLength = ReviewMonitorLogDocumentProjection.utf16Length(block.text)
             let blockRange = NSRange(
                 location: previousLength + max(0, suffixLength - blockLength),
                 length: blockLength
@@ -380,6 +380,16 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             }
             if existingText.hasSuffix("\n\n") {
                 return blockText
+            }
+            return "\n\n" + blockText
+        }
+
+        private func appendedSourceText(_ blockText: String) -> String {
+            guard hasVisibleSections else {
+                return blockText
+            }
+            if blockText.isEmpty {
+                return "\n\n"
             }
             return "\n\n" + blockText
         }

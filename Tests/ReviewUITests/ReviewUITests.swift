@@ -2989,6 +2989,42 @@ struct ReviewUITests {
         #expect(visibleText.contains("43s\n\n\nSummarizing files with git") == false)
     }
 
+    @Test func expandedCommandPanelPreservesRawOutputNewlines() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let metadata = ReviewMonitorLog.Metadata(
+            sourceType: "commandExecution",
+            status: "completed",
+            itemID: "cmd_1",
+            command: "git diff",
+            durationMs: 10_000,
+            commandStatus: "completed"
+        )
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: metadata
+            ),
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "\nerror\n",
+                metadata: metadata
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: source,
+            expandedBlockIDs: [ReviewMonitorLog.BlockID("commandOutput:cmd_1")]
+        )
+
+        let panel = try #require(display.commandOutputPanels.first)
+        #expect(panel.outputText == "\nerror\n")
+        #expect(panel.lineCount == 2)
+    }
+
     @Test func adjacentCommandPanelsStayOnSeparateParagraphs() throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         var projection = ReviewMonitorLogDocumentProjection()

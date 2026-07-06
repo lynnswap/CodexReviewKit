@@ -563,6 +563,11 @@ enum ReviewMonitorLogStyler {
         source: String,
         blockID: ReviewMonitorLog.BlockID
     ) -> Presentation {
+        // Rendered block text must not carry outer newlines: the document
+        // builder owns inter-block paragraph boundaries, and presentation is
+        // re-derived from the raw source range later, so both paths need
+        // identical rendered geometry.
+        let source = source.trimmingCharacters(in: .newlines)
         switch kind {
         case .agentMessage, .reasoning, .reasoningSummary, .rawReasoning:
             return renderMarkdown(source, blockID: blockID)
