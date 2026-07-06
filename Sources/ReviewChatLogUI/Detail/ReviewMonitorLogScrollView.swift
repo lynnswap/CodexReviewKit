@@ -1,5 +1,8 @@
 import AppKit
 import ObjectiveC.runtime
+import OSLog
+
+private let logger = Logger(subsystem: "CodexReviewKit", category: "log-scroll-view")
 
 @MainActor
 final class ReviewMonitorLogScrollView: NSScrollView {
@@ -263,6 +266,19 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             currentDisplayDocument = display
             return didRender
         }
+        if allowIncrementalUpdate,
+           let replacement = crossRevisionReplacement(for: display),
+           canApplyReplacement(replacement, to: display) {
+            let didRender = applyReplacement(replacement, document: display)
+            displayedRevision = display.revision
+            currentDisplayDocument = display
+            return didRender
+        }
+        if allowIncrementalUpdate {
+            logger.debug(
+                "Reloading displayed log without an incremental change displayedRevision=\(self.displayedRevision.map(String.init(describing:)) ?? "nil", privacy: .public) revision=\(display.revision, privacy: .public) blocks=\(display.blocks.count, privacy: .public)"
+            )
+        }
         let didRender = applyReload(
             display.text,
             document: display,
@@ -272,6 +288,25 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         displayedRevision = display.revision
         currentDisplayDocument = display
         return didRender
+    }
+
+    // Applied renders can skip revisions when a newer source document
+    // supersedes an in-flight render, so the single-step lastChange no longer
+    // describes what is on screen. Recompute the block replacement against
+    // the display document that was actually applied last.
+    private func crossRevisionReplacement(
+        for display: ReviewMonitorLog.Document
+    ) -> ReviewMonitorLog.Replacement? {
+        guard let previousDisplay = currentDisplayDocument,
+            previousDisplay.textUTF16Length == displayedUTF16Length,
+            previousDisplay.text == displayedText
+        else {
+            return nil
+        }
+        return ReviewMonitorLogDocumentProjection.replacementChange(
+            previous: previousDisplay,
+            current: display
+        )
     }
 
     private func toggleCommandOutputPanel(_ blockID: ReviewMonitorLog.BlockID) {
@@ -365,8 +400,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             replacement.range.length >= 0,
             NSMaxRange(replacement.range) <= displayedUTF16Length,
             document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length,
-            let replacementResult = replacingDisplayedText(in: replacement.range, with: replacement.text),
-            replacementResult == document.text
+            ReviewMonitorUTF16TextReplacement.replacing(
+                displayedText,
+                range: replacement.range,
+                with: replacement.text,
+                equals: document.text
+            )
         else {
             assertionFailure("Log replacement change is not synchronized with the display document.")
             return false
@@ -894,18 +933,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let mutable = NSMutableString(string: displayedText)
         mutable.replaceCharacters(in: range, with: text)
         displayedText = mutable as String
-    }
-
-    private func replacingDisplayedText(in range: NSRange, with text: String) -> String? {
-        guard range.location >= 0,
-            range.length >= 0,
-            NSMaxRange(range) <= displayedUTF16Length
-        else {
-            return nil
-        }
-        let mutable = NSMutableString(string: displayedText)
-        mutable.replaceCharacters(in: range, with: text)
-        return mutable as String
     }
 
     private func invalidateDocumentLayout() {

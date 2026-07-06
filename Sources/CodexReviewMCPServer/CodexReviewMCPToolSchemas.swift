@@ -26,28 +26,18 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
     case .reviewAwait:
         .object([
             "type": .string("object"),
-            "properties": .object([
+            "properties": .object(reviewRunIDProperties(extra: [
                 "sessionID": .object(["type": .string("string")]),
-                "runID": .object(["type": .string("string")]),
-                "runId": .object(["type": .string("string")]),
-            ]),
-            "anyOf": .array([
-                .object(["required": .array([.string("runId")])]),
-                .object(["required": .array([.string("runID")])]),
-            ]),
+            ])),
+            "anyOf": ReviewRunIDArgument.requiredAnyOf(),
         ])
     case .reviewRead:
         .object([
             "type": .string("object"),
-            "properties": .object([
+            "properties": .object(reviewRunIDProperties(extra: [
                 "sessionID": .object(["type": .string("string")]),
-                "runID": .object(["type": .string("string")]),
-                "runId": .object(["type": .string("string")]),
-            ]),
-            "anyOf": .array([
-                .object(["required": .array([.string("runId")])]),
-                .object(["required": .array([.string("runID")])]),
-            ]),
+            ])),
+            "anyOf": ReviewRunIDArgument.requiredAnyOf(),
         ])
     case .reviewList:
         .object([
@@ -62,14 +52,20 @@ func schema(for tool: CodexReviewMCP.Tool.Name) -> Value {
     case .reviewCancel:
         .object([
             "type": .string("object"),
-            "properties": .object([
+            "properties": .object(reviewRunIDProperties(extra: [
                 "sessionID": .object(["type": .string("string")]),
-                "runID": .object(["type": .string("string")]),
-                "runId": .object(["type": .string("string")]),
                 "cwd": .object(["type": .string("string")]),
                 "statuses": .object(["type": .string("array")]),
                 "reason": .object(["type": .string("string")]),
-            ]),
+            ])),
         ])
     }
+}
+
+private func reviewRunIDProperties(extra: [String: Value]) -> [String: Value] {
+    var properties = ReviewRunIDArgument.properties()
+    for (name, schema) in extra {
+        properties[name] = schema
+    }
+    return properties
 }

@@ -1,6 +1,18 @@
 // swift-tools-version: 6.3
 
+import Foundation
 import PackageDescription
+
+let packageDirectory = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+let localCodexKitPath = packageDirectory
+    .appendingPathComponent("dependencies/CodexKit", isDirectory: true)
+    .path
+let codexKitFallbackRevision = "58c2dab605c3dad806e0ac90c6d3d1f67c5fd36d"
+let codexKitDependency: Package.Dependency =
+    FileManager.default.fileExists(atPath: "\(localCodexKitPath)/Package.swift")
+        ? .package(path: localCodexKitPath)
+        : .package(url: "https://github.com/lynnswap/CodexKit.git", revision: codexKitFallbackRevision)
 
 let package = Package(
     name: "CodexReviewKit",
@@ -33,9 +45,7 @@ let package = Package(
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", exact: "0.12.1"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.97.1"),
         .package(url: "https://github.com/lynnswap/ObservationBridge.git", .upToNextMinor(from: "0.12.0")),
-        // CodexKit has no tagged releases yet; pin the reviewed native-login
-        // and final review response contract revision.
-        .package(url: "https://github.com/lynnswap/CodexKit.git", revision: "d2a694d7f633c1f01d4d260585863c0a3eae21af"),
+        codexKitDependency,
     ],
     targets: [
         .target(

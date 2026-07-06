@@ -37,7 +37,7 @@ func toolRequest(
             limit: arguments["limit"]?.intValue
         )
     case .reviewCancel:
-        let runID = optionalRunID(in: arguments)
+        let runID = try ReviewRunIDArgument.optionalValue(in: arguments)
         let sessionID = sessionID(
             in: arguments,
             defaultSessionID: defaultSessionID,
@@ -63,15 +63,8 @@ func sessionID(
     defaultSessionID ?? arguments["sessionID"]?.stringValue ?? fallback
 }
 
-func optionalRunID(in arguments: [String: Value]) -> String? {
-    arguments["runID"]?.stringValue?.nilIfEmpty ?? arguments["runId"]?.stringValue?.nilIfEmpty
-}
-
 func requiredRunID(in arguments: [String: Value]) throws -> String {
-    guard let runID = optionalRunID(in: arguments) else {
-        throw MCPProtocolServerError.missingArgument("runID/runId")
-    }
-    return runID
+    try ReviewRunIDArgument.requiredValue(in: arguments)
 }
 
 func reviewTarget(from object: [String: Value]) throws -> CodexReviewAPI.Target {

@@ -152,7 +152,8 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
             in: workspace,
             input: CodexReviewInput(
                 target: request.request.target.appServerReviewTarget,
-                options: reviewThreadOptions(request)
+                options: reviewThreadOptions(request),
+                delivery: .inline
             )
         )
         .session
@@ -237,6 +238,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         let review = try await appServer.restartPreparedReview(
             appServerToken,
             target: request.request.target.appServerReviewTarget,
+            delivery: .inline,
             threadOptions: reviewThreadOptions(model: interruptedRun.model ?? request.model)
         )
         let attemptID = makeAppServerReviewAttemptID()
@@ -597,14 +599,18 @@ private enum AppServerTypedReviewEventAdapter {
                 message: response.status?.rawValue ?? "Failed."
             )
         }
-        guard let finalReview = response.finalAnswer?.nilIfEmpty
-            ?? response.transcript.finalAnswer?.nilIfEmpty
-        else {
-            return [.failed("Review completed without a final response.")]
+        guard let finalReview = reviewCompletionText(for: response) else {
+            return [.failed("Review completed without review output.")]
         }
         return [
             .completed(finalReview: finalReview)
         ]
+    }
+
+    private static func reviewCompletionText(for response: CodexResponse) -> String? {
+        response.transcript.reviewOutputText?.nilIfEmpty
+            ?? response.finalAnswer?.nilIfEmpty
+            ?? response.transcript.finalAnswer?.nilIfEmpty
     }
 
     private static func unknownStatusEvents(

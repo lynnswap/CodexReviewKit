@@ -2831,6 +2831,348 @@ struct ReviewUITests {
         #expect(visibleText.contains("11sReviewing JSONRPC requests") == false)
     }
 
+    @Test func sourceDocumentReplacementTargetsMetadataChangedBlock() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+        ])
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    completedAt: Date(timeIntervalSince1970: 211),
+                    durationMs: 11_000,
+                    commandStatus: "completed"
+                )
+            ),
+        ])
+
+        guard case .replace(let replacement) = currentSource.lastChange else {
+            Issue.record("Expected command metadata change to remain a block replacement.")
+            return
+        }
+        #expect(replacement.blockID == ReviewMonitorLog.BlockID("command_1"))
+        #expect(applyingDisplayChange(currentSource.lastChange, to: previousSource.text) == currentSource.text)
+    }
+
+    @Test func sourceDocumentReplacementHandlesSameLengthBlockTextRewrite() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("event_1"),
+                kind: .event,
+                groupID: "event_1",
+                text: "abcd"
+            ),
+            .init(
+                id: .init("event_2"),
+                kind: .event,
+                groupID: "event_2",
+                text: "tail"
+            ),
+        ])
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("event_1"),
+                kind: .event,
+                groupID: "event_1",
+                text: "wxyz"
+            ),
+            .init(
+                id: .init("event_2"),
+                kind: .event,
+                groupID: "event_2",
+                text: "tail"
+            ),
+        ])
+
+        guard case .replace(let replacement) = currentSource.lastChange else {
+            Issue.record("Expected same-length block rewrite to remain a replacement.")
+            return
+        }
+        #expect(replacement.blockID == ReviewMonitorLog.BlockID("event_1"))
+        #expect(applyingDisplayChange(currentSource.lastChange, to: previousSource.text) == currentSource.text)
+    }
+
+    @Test func commandOutputOnlyDisplayBeforeMarkdownHeadingKeepsParagraphBoundary() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "stdout",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    durationMs: 43_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "**Summarizing files with git**\n\nI need to summarize the files."
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(from: source)
+
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Ran command for 43s\n\nSummarizing files with git"))
+        #expect(visibleText.contains("43sSummarizing files with git") == false)
+    }
+
+    @Test func commandOutputWithTrailingNewlinesBeforeMarkdownHeadingKeepsParagraphBoundary() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "stdout\n\n",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    durationMs: 43_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "**Summarizing files with git**\n\nI need to summarize the files."
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(from: source)
+
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Ran command for 43s\n\nSummarizing files with git"))
+        #expect(visibleText.contains("43sSummarizing files with git") == false)
+        #expect(visibleText.contains("43s\n\n\nSummarizing files with git") == false)
+    }
+
+    @Test func expandedCommandPanelPreservesRawOutputNewlines() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let metadata = ReviewMonitorLog.Metadata(
+            sourceType: "commandExecution",
+            status: "completed",
+            itemID: "cmd_1",
+            command: "git diff",
+            durationMs: 10_000,
+            commandStatus: "completed"
+        )
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: metadata
+            ),
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "\nerror\n",
+                metadata: metadata
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: source,
+            expandedBlockIDs: [ReviewMonitorLog.BlockID("commandOutput:cmd_1")]
+        )
+
+        let panel = try #require(display.commandOutputPanels.first)
+        #expect(panel.outputText == "\nerror\n")
+        #expect(panel.lineCount == 2)
+    }
+
+    @Test func scrollViewAppliesCrossRevisionReplacementAfterSkippedRenders() throws {
+        let scrollView = ReviewMonitorLogScrollView()
+        var projection = ReviewMonitorLogDocumentProjection()
+        let startedAt = Date(timeIntervalSince1970: 200)
+        func commandBlocks(
+            status: String,
+            cwd: String? = nil,
+            completedAt: Date? = nil,
+            durationMs: Int? = nil
+        ) -> [ReviewMonitorLogProjectedBlock] {
+            [
+                .init(
+                    id: .init("reasoning_1"),
+                    kind: .rawReasoning,
+                    groupID: "reasoning_1",
+                    text: "Analyzing the diff."
+                ),
+                .init(
+                    id: .init("command_1"),
+                    kind: .command,
+                    groupID: "cmd_1",
+                    text: "$ git diff",
+                    metadata: .init(
+                        sourceType: "commandExecution",
+                        status: status,
+                        itemID: "cmd_1",
+                        command: "git diff",
+                        cwd: cwd,
+                        startedAt: startedAt,
+                        completedAt: completedAt,
+                        durationMs: durationMs,
+                        commandStatus: status
+                    )
+                ),
+            ]
+        }
+
+        let initial = projection.render(projectedBlocks: commandBlocks(status: "running"))
+        #expect(scrollView.render(document: initial, restoring: .bottom, allowIncrementalUpdate: false))
+        #expect(scrollView.reloadCount == 1)
+
+        // A superseded revision that is never applied to the scroll view.
+        let skipped = projection.render(projectedBlocks: commandBlocks(status: "running", cwd: "/tmp/project"))
+        let final = projection.render(projectedBlocks: commandBlocks(
+            status: "completed",
+            cwd: "/tmp/project",
+            completedAt: Date(timeIntervalSince1970: 211),
+            durationMs: 11_000
+        ))
+        #expect(final.revision == skipped.revision &+ 1)
+
+        #expect(scrollView.render(document: final, restoring: .bottom, allowIncrementalUpdate: true))
+        #expect(scrollView.replaceCount == 1)
+        #expect(scrollView.reloadCount == 1)
+    }
+
+    @Test func adjacentCommandPanelsStayOnSeparateParagraphs() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    durationMs: 10_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "diff\n",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    durationMs: 10_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("command_2"),
+                kind: .command,
+                groupID: "cmd_2",
+                text: "$ swift test",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_2",
+                    command: "swift test",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: source,
+            currentDate: Date(timeIntervalSince1970: 203)
+        )
+
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Ran git diff for 10s\n\nRunning swift test"))
+        #expect(visibleText.contains("10sRunning swift test") == false)
+    }
+
+    @Test func reasoningWithTrailingNewlinesBeforeCommandKeepsParagraphBoundary() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files.\n\n"
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(
+            from: source,
+            currentDate: Date(timeIntervalSince1970: 203)
+        )
+
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Need to inspect files.\n\nRunning git diff"))
+        #expect(visibleText.contains("files.Running git diff") == false)
+    }
+
     @Test func coalescedRunningCommandBeforeMarkdownHeadingKeepsParagraphBoundary() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         let chat = makeReviewChatFixtureForTesting(

@@ -133,50 +133,175 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
         return true
     }
 
-    private static func replacementChange(
+    static func replacementChange(
         previous: ReviewMonitorLog.Document,
         current: ReviewMonitorLog.Document
     ) -> ReviewMonitorLog.Replacement? {
-        for previousBlock in previous.blocks {
-            guard let currentBlock = current.blocks.first(where: { $0.id == previousBlock.id }),
-                currentBlock.range.location == previousBlock.range.location,
-                NSMaxRange(currentBlock.range) <= current.textUTF16Length
-            else {
-                continue
-            }
-
-            let replacementText = (current.text as NSString).substring(with: currentBlock.range)
-            let candidate = replacingText(
-                in: previous.text,
-                range: previousBlock.range,
-                with: replacementText
-            )
-            guard candidate == current.text else {
-                continue
-            }
-            return .init(
-                kind: currentBlock.kind,
-                blockID: currentBlock.id,
-                range: previousBlock.range,
-                text: replacementText,
-                textUTF16Length: currentBlock.range.length
-            )
+        guard let candidate = replacementCandidate(previous: previous, current: current) else {
+            return nil
         }
-        return nil
+
+        guard rangeIsValid(candidate.previous.range, upperBound: previous.textUTF16Length),
+            rangeIsValid(candidate.current.range, upperBound: current.textUTF16Length),
+            rangeIsValid(candidate.previous.sourceRange, upperBound: previous.sourceTextUTF16Length),
+            rangeIsValid(candidate.current.sourceRange, upperBound: current.sourceTextUTF16Length)
+        else {
+            return nil
+        }
+
+        let replacementText = (current.text as NSString).substring(with: candidate.current.range)
+        let replacementSource = (current.sourceText as NSString).substring(with: candidate.current.sourceRange)
+        guard ReviewMonitorUTF16TextReplacement.replacing(
+            previous.text,
+            range: candidate.previous.range,
+            with: replacementText,
+            equals: current.text
+        ),
+            ReviewMonitorUTF16TextReplacement.replacing(
+                previous.sourceText,
+                range: candidate.previous.sourceRange,
+                with: replacementSource,
+                equals: current.sourceText
+            )
+        else {
+            return nil
+        }
+
+        return .init(
+            kind: candidate.current.kind,
+            blockID: candidate.current.id,
+            range: candidate.previous.range,
+            text: replacementText,
+            textUTF16Length: candidate.current.range.length
+        )
     }
 
-    private static func replacingText(
-        in text: String,
-        range: NSRange,
-        with replacement: String
-    ) -> String {
-        let string = text as NSString
-        let prefix = string.substring(with: NSRange(location: 0, length: range.location))
-        let suffixLocation = NSMaxRange(range)
-        let suffix = string.substring(
-            with: NSRange(location: suffixLocation, length: string.length - suffixLocation)
+    private static func replacementCandidate(
+        previous: ReviewMonitorLog.Document,
+        current: ReviewMonitorLog.Document
+    ) -> (previous: ReviewMonitorLog.Block, current: ReviewMonitorLog.Block)? {
+        guard previous.blocks.count == current.blocks.count else {
+            return nil
+        }
+
+        var candidate: (previous: ReviewMonitorLog.Block, current: ReviewMonitorLog.Block)?
+        var displayDelta = 0
+        var sourceDelta = 0
+        for index in previous.blocks.indices {
+            let previousBlock = previous.blocks[index]
+            let currentBlock = current.blocks[index]
+            if candidate != nil {
+                guard unchangedBlockAfterReplacement(
+                    previous: previousBlock,
+                    current: currentBlock,
+                    displayDelta: displayDelta,
+                    sourceDelta: sourceDelta,
+                    previousDocument: previous,
+                    currentDocument: current
+                ) else {
+                    return nil
+                }
+                continue
+            }
+
+            if blockContentUnchanged(
+                previous: previousBlock,
+                current: currentBlock,
+                previousDocument: previous,
+                currentDocument: current
+            ) {
+                continue
+            }
+            guard canReplaceSingleBlock(previous: previousBlock, current: currentBlock) else {
+                return nil
+            }
+            candidate = (previous: previousBlock, current: currentBlock)
+            displayDelta = currentBlock.range.length - previousBlock.range.length
+            sourceDelta = currentBlock.sourceRange.length - previousBlock.sourceRange.length
+        }
+        return candidate
+    }
+
+    private static func canReplaceSingleBlock(
+        previous: ReviewMonitorLog.Block,
+        current: ReviewMonitorLog.Block
+    ) -> Bool {
+        previous.id == current.id
+            && previous.kind == current.kind
+            && previous.groupID == current.groupID
+            && current.range.location == previous.range.location
+            && current.sourceRange.location == previous.sourceRange.location
+            && rangeIsValid(previous.range)
+            && rangeIsValid(current.range)
+            && rangeIsValid(previous.sourceRange)
+            && rangeIsValid(current.sourceRange)
+    }
+
+    private static func unchangedBlockAfterReplacement(
+        previous: ReviewMonitorLog.Block,
+        current: ReviewMonitorLog.Block,
+        displayDelta: Int,
+        sourceDelta: Int,
+        previousDocument: ReviewMonitorLog.Document,
+        currentDocument: ReviewMonitorLog.Document
+    ) -> Bool {
+        guard previous.id == current.id
+            && previous.kind == current.kind
+            && previous.groupID == current.groupID
+            && previous.metadata == current.metadata
+            && current.range.location == previous.range.location + displayDelta
+            && current.range.length == previous.range.length
+            && current.sourceRange.location == previous.sourceRange.location + sourceDelta
+            && current.sourceRange.length == previous.sourceRange.length
+        else {
+            return false
+        }
+        return blockContentUnchanged(
+            previous: previous,
+            current: current,
+            previousDocument: previousDocument,
+            currentDocument: currentDocument
         )
-        return prefix + replacement + suffix
+    }
+
+    private static func blockContentUnchanged(
+        previous: ReviewMonitorLog.Block,
+        current: ReviewMonitorLog.Block,
+        previousDocument: ReviewMonitorLog.Document,
+        currentDocument: ReviewMonitorLog.Document
+    ) -> Bool {
+        guard previous.id == current.id,
+            previous.kind == current.kind,
+            previous.groupID == current.groupID,
+            previous.metadata == current.metadata,
+            rangeIsValid(previous.range, upperBound: previousDocument.textUTF16Length),
+            rangeIsValid(current.range, upperBound: currentDocument.textUTF16Length),
+            rangeIsValid(previous.sourceRange, upperBound: previousDocument.sourceTextUTF16Length),
+            rangeIsValid(current.sourceRange, upperBound: currentDocument.sourceTextUTF16Length),
+            ReviewMonitorUTF16TextReplacement.segmentsEqual(
+                previousDocument.text,
+                range: previous.range,
+                currentDocument.text,
+                range: current.range
+            ),
+            ReviewMonitorUTF16TextReplacement.segmentsEqual(
+                previousDocument.sourceText,
+                range: previous.sourceRange,
+                currentDocument.sourceText,
+                range: current.sourceRange
+            )
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func rangeIsValid(_ range: NSRange) -> Bool {
+        range.location >= 0 && range.length >= 0
+    }
+
+    private static func rangeIsValid(_ range: NSRange, upperBound: Int) -> Bool {
+        range.location >= 0 && range.length >= 0 && NSMaxRange(range) <= upperBound
     }
 
     private static func contentChanged(
@@ -200,13 +325,19 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
                 return
             }
 
-            let renderedText = ReviewMonitorLogStyler.renderedText(
-                for: block.kind,
-                source: block.text,
-                blockID: block.id
-            )
+            // Rendered block text must not carry the inter-block separator:
+            // command panels replace their block text with a placeholder, so
+            // a separator living inside a neighboring block's trailing
+            // newlines would silently disappear from the display document.
+            // Source text stays raw so panels and copy keep output fidelity.
+            let renderedText = Self.normalizedBlockText(
+                ReviewMonitorLogStyler.renderedText(
+                    for: block.kind,
+                    source: block.text,
+                    blockID: block.id
+                ))
             let appended = appendedText(renderedText, after: document.text)
-            let appendedSource = appendedText(block.text, after: document.sourceText)
+            let appendedSource = appendedSourceText(block.text)
             hasVisibleSections = true
 
             let previousLength = document.textUTF16Length
@@ -250,10 +381,21 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             if existingText.hasSuffix("\n\n") {
                 return blockText
             }
-            if existingText.hasSuffix("\n") || blockText.hasPrefix("\n") {
-                return "\n" + blockText
+            return "\n\n" + blockText
+        }
+
+        private func appendedSourceText(_ blockText: String) -> String {
+            guard hasVisibleSections else {
+                return blockText
+            }
+            if blockText.isEmpty {
+                return "\n\n"
             }
             return "\n\n" + blockText
+        }
+
+        private static func normalizedBlockText(_ text: String) -> String {
+            text.trimmingCharacters(in: .newlines)
         }
 
         private static func isVisible(kind: ReviewMonitorLog.Kind, text: String) -> Bool {

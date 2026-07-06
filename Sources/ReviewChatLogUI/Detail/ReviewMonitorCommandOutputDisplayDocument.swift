@@ -45,6 +45,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         }
 
         let sourceString = source.text as NSString
+        let rawSourceString = source.sourceText as NSString
         var text = ""
         var textUTF16Length = 0
         var blocks: [ReviewMonitorLog.Block] = []
@@ -110,7 +111,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                 )
                 let outputText = commandOutputText(
                     for: panelSource,
-                    sourceString: sourceString,
+                    rawSourceString: rawSourceString,
                     isExpanded: isExpanded
                 )
                 let placeholder = commandOutputPlaceholder(
@@ -147,7 +148,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
                         outputSourceRange: panelSource.output?.sourceRange,
                         lineCount: commandOutputLineCount(
                             for: panelSource,
-                            sourceString: sourceString,
+                            rawSourceString: rawSourceString,
                             isExpanded: isExpanded
                         ),
                         isExpanded: isExpanded,
@@ -440,9 +441,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         )
     }
 
+    // Panel output reads the raw source text: rendered block text is
+    // normalized for stable paragraph boundaries, but expanded panels must
+    // show the command output exactly as captured.
     private static func commandOutputLineCount(
         for panelSource: CommandPanelSource,
-        sourceString: NSString,
+        rawSourceString: NSString,
         isExpanded: Bool
     ) -> Int {
         guard isExpanded else {
@@ -451,12 +455,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let output = panelSource.output else {
             return 0
         }
-        return ReviewMonitorLog.LineCounter.lineCount(in: sourceString, range: output.range)
+        return ReviewMonitorLog.LineCounter.lineCount(in: rawSourceString, range: output.sourceRange)
     }
 
     private static func commandOutputText(
         for panelSource: CommandPanelSource,
-        sourceString: NSString,
+        rawSourceString: NSString,
         isExpanded: Bool
     ) -> String {
         guard isExpanded else {
@@ -465,7 +469,7 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         guard let output = panelSource.output else {
             return ""
         }
-        return sourceString.substring(with: output.range)
+        return rawSourceString.substring(with: output.sourceRange)
     }
 
     private static func commandOutputTitle(
@@ -1007,7 +1011,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         case .replace(let replacement):
             guard replacement.textUTF16Length == (replacement.text as NSString).length,
                 rangeIsValid(replacement.range, in: previousDisplay.text),
-                replacingText(in: previousDisplay.text, range: replacement.range, with: replacement.text) == displayText
+                ReviewMonitorUTF16TextReplacement.replacing(
+                    previousDisplay.text,
+                    range: replacement.range,
+                    with: replacement.text,
+                    equals: displayText
+                )
             else {
                 return nil
             }
@@ -1073,21 +1082,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return range.location >= 0 && range.length >= 0 && NSMaxRange(range) <= length
     }
 
-    private static func replacingText(in text: String, range: NSRange, with replacement: String) -> String {
-        let string = text as NSString
-        guard range.location >= 0,
-            range.length >= 0,
-            NSMaxRange(range) <= string.length
-        else {
-            return text
-        }
-        let prefix = string.substring(with: NSRange(location: 0, length: range.location))
-        let suffixLocation = NSMaxRange(range)
-        let suffix = string.substring(
-            with: NSRange(location: suffixLocation, length: string.length - suffixLocation)
-        )
-        return prefix + replacement + suffix
-    }
 }
 
 private extension String {

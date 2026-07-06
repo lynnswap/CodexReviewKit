@@ -100,6 +100,28 @@ This Claude Code setting is process-wide. It is not scoped to the
 `codex_review` MCP server, so the same idle timeout applies to all MCP tools
 used by that Claude Code session.
 
+## Local CodexKit Development
+
+`Package.swift` uses a local `dependencies/CodexKit` checkout when that
+directory contains a `Package.swift`. If the local checkout is absent, SwiftPM
+resolves `CodexKit` from the pinned fallback revision in `Package.swift`.
+Update that revision to a reviewed CodexKit `main` commit whenever
+CodexReviewKit adopts new CodexKit APIs.
+
+```bash
+mkdir -p dependencies
+git clone git@github.com:lynnswap/CodexKit.git dependencies/CodexKit
+swift test --build-system swiftbuild --no-parallel
+```
+
+After creating or removing `dependencies/CodexKit`, run SwiftPM with manifest
+caching disabled once if resolution still points at the previous dependency
+kind:
+
+```bash
+swift package --manifest-cache none resolve
+```
+
 ## More Detail
 
 - [Architecture](Docs/architecture.md): package boundaries, runtime flow, and
