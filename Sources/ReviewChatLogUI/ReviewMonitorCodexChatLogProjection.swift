@@ -93,7 +93,7 @@ struct ReviewMonitorCodexChatLogProjection {
         }
         let reviewOutputKeys = Set(items.compactMap(Self.reviewOutputKey))
         var emittedReviewOutputKeys = Set<ReviewOutputKey>()
-        var previousReasoningOutputKey: ReasoningOutputKey?
+        var pendingReasoningMirrors = PendingReasoningMirrors()
         let blocks = items.flatMap { item in
             if let reviewOutputKey = Self.reviewOutputKey(for: item) {
                 guard emittedReviewOutputKeys.insert(reviewOutputKey).inserted else {
@@ -101,12 +101,9 @@ struct ReviewMonitorCodexChatLogProjection {
                 }
             }
             if let reasoningOutputKey = Self.reasoningOutputKey(for: item) {
-                guard Self.shouldRenderReasoningOutput(reasoningOutputKey, after: previousReasoningOutputKey) else {
+                guard pendingReasoningMirrors.shouldRender(reasoningOutputKey) else {
                     return [] as [ReviewMonitorLogProjectedBlock]
                 }
-                previousReasoningOutputKey = reasoningOutputKey
-            } else {
-                previousReasoningOutputKey = nil
             }
             return projectedBlocks(
                 from: item,
@@ -306,20 +303,6 @@ struct ReviewMonitorCodexChatLogProjection {
 
     private static func reasoningOutputScopeID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
         item.projectionTurnID?.rawValue ?? "item:\(item.sourceID)"
-    }
-
-    private static func shouldRenderReasoningOutput(
-        _ key: ReasoningOutputKey,
-        after previousKey: ReasoningOutputKey?
-    ) -> Bool {
-        guard let previousKey else {
-            return true
-        }
-        guard previousKey.scopeID == key.scopeID, previousKey.text == key.text else {
-            return true
-        }
-        let payloadKinds = Set([previousKey.payloadKind, key.payloadKind].compactMap { $0 })
-        return payloadKinds != ["agent_reasoning", "reasoning"]
     }
 
     private static func normalizedReviewOutputText(_ text: String) -> String {
@@ -631,6 +614,40 @@ private struct ReasoningOutputKey: Hashable {
     var scopeID: String
     var text: String
     var payloadKind: String?
+}
+
+// Codex delivers one logical reasoning entry through two payload kinds
+// (`agent_reasoning` event and `reasoning` item), and the mirror may arrive
+// after unrelated items such as commands. Each rendered entry therefore
+// consumes at most one later mirror with the counterpart payload kind, which
+// suppresses late mirrors without dropping legitimately repeated reasoning.
+private struct PendingReasoningMirrors {
+    private struct EntryKey: Hashable {
+        var scopeID: String
+        var text: String
+    }
+
+    private static let mirrorPayloadKinds: Set<String> = ["agent_reasoning", "reasoning"]
+
+    private var pendingPayloadKindsByKey: [EntryKey: [String]] = [:]
+
+    mutating func shouldRender(_ key: ReasoningOutputKey) -> Bool {
+        guard let payloadKind = key.payloadKind,
+            Self.mirrorPayloadKinds.contains(payloadKind)
+        else {
+            return true
+        }
+        let entryKey = EntryKey(scopeID: key.scopeID, text: key.text)
+        var pending = pendingPayloadKindsByKey[entryKey] ?? []
+        if let mirrorIndex = pending.firstIndex(where: { $0 != payloadKind }) {
+            pending.remove(at: mirrorIndex)
+            pendingPayloadKindsByKey[entryKey] = pending.isEmpty ? nil : pending
+            return false
+        }
+        pending.append(payloadKind)
+        pendingPayloadKindsByKey[entryKey] = pending
+        return true
+    }
 }
 
 private struct RawPayloadKind: Decodable {

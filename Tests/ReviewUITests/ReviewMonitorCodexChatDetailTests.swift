@@ -806,6 +806,77 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(mirroredDocument.revision == initialDocument.revision)
     }
 
+    @Test func codexChatLogProjectionDeduplicatesReasoningMirrorSeparatedByCommand() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let reasoningText = "Inspecting differences"
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            status: .running,
+            items: [
+                .init(
+                    id: "event-reasoning",
+                    kind: .reasoning,
+                    content: .reasoning(.init(summary: reasoningText)),
+                    rawPayload: rawPayload(type: "agent_reasoning")
+                ),
+                .init(
+                    id: "command-a",
+                    kind: .commandExecution,
+                    content: .command(.init(command: "/bin/zsh -lc"))
+                ),
+                .init(
+                    id: "response-reasoning",
+                    kind: .reasoning,
+                    content: .reasoning(.init(summary: reasoningText)),
+                    rawPayload: rawPayload(type: "reasoning")
+                ),
+            ]
+        )
+
+        let projectedDocument = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+        let document = try #require(projectedDocument)
+
+        #expect(document.blocks.count == 2)
+        #expect(document.text == "\(reasoningText)\n\n$ /bin/zsh -lc")
+    }
+
+    @Test func codexChatLogProjectionKeepsRepeatedReasoningAfterMirrorPairConsumed() async throws {
+        var projection = ReviewMonitorCodexChatLogProjection()
+        let reasoningText = "Inspecting differences"
+        func reasoningItem(id: String, payloadType: String) -> CodexThreadItem {
+            .init(
+                id: id,
+                kind: .reasoning,
+                content: .reasoning(.init(summary: reasoningText)),
+                rawPayload: rawPayload(type: payloadType)
+            )
+        }
+        let turn = CodexTurnSnapshot(
+            id: CodexTurnID(rawValue: "turn-review"),
+            status: .running,
+            items: [
+                reasoningItem(id: "event-reasoning-1", payloadType: "agent_reasoning"),
+                reasoningItem(id: "response-reasoning-1", payloadType: "reasoning"),
+                reasoningItem(id: "event-reasoning-2", payloadType: "agent_reasoning"),
+                reasoningItem(id: "response-reasoning-2", payloadType: "reasoning"),
+            ]
+        )
+
+        let projectedDocument = projection.render(
+            from: turn,
+            chatCreatedAt: nil,
+            chatUpdatedAt: nil
+        )
+        let document = try #require(projectedDocument)
+
+        #expect(document.blocks.count == 2)
+        #expect(document.text == "\(reasoningText)\n\n\(reasoningText)")
+    }
+
     @Test func codexChatLogProjectionRendersUserMessageWithoutReviewModeLog() async throws {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(
