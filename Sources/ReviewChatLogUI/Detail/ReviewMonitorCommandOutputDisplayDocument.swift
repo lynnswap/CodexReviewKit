@@ -1007,7 +1007,12 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         case .replace(let replacement):
             guard replacement.textUTF16Length == (replacement.text as NSString).length,
                 rangeIsValid(replacement.range, in: previousDisplay.text),
-                replacingText(in: previousDisplay.text, range: replacement.range, with: replacement.text) == displayText
+                ReviewMonitorUTF16TextReplacement.replacing(
+                    previousDisplay.text,
+                    range: replacement.range,
+                    with: replacement.text,
+                    equals: displayText
+                )
             else {
                 return nil
             }
@@ -1073,21 +1078,6 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         return range.location >= 0 && range.length >= 0 && NSMaxRange(range) <= length
     }
 
-    private static func replacingText(in text: String, range: NSRange, with replacement: String) -> String {
-        let string = text as NSString
-        guard range.location >= 0,
-            range.length >= 0,
-            NSMaxRange(range) <= string.length
-        else {
-            return text
-        }
-        let prefix = string.substring(with: NSRange(location: 0, length: range.location))
-        let suffixLocation = NSMaxRange(range)
-        let suffix = string.substring(
-            with: NSRange(location: suffixLocation, length: string.length - suffixLocation)
-        )
-        return prefix + replacement + suffix
-    }
 }
 
 private extension String {

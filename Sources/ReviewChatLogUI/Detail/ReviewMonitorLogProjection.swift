@@ -2,6 +2,93 @@ import Foundation
 
 package enum ReviewMonitorLog {}
 
+enum ReviewMonitorUTF16TextReplacement {
+    static func replacing(
+        _ text: String,
+        range: NSRange,
+        with replacement: String,
+        equals target: String
+    ) -> Bool {
+        let source = text as NSString
+        let target = target as NSString
+        let replacement = replacement as NSString
+        let replacementLength = replacement.length
+        guard range.location >= 0,
+            range.length >= 0,
+            NSMaxRange(range) <= source.length,
+            source.length - range.length + replacementLength == target.length
+        else {
+            return false
+        }
+
+        let prefixRange = NSRange(location: 0, length: range.location)
+        guard utf16SegmentsEqual(source, prefixRange, target, prefixRange) else {
+            return false
+        }
+
+        let replacementTargetRange = NSRange(location: range.location, length: replacementLength)
+        guard utf16SegmentsEqual(
+            replacement,
+            NSRange(location: 0, length: replacementLength),
+            target,
+            replacementTargetRange
+        ) else {
+            return false
+        }
+
+        let sourceSuffixLocation = NSMaxRange(range)
+        let suffixLength = source.length - sourceSuffixLocation
+        return utf16SegmentsEqual(
+            source,
+            NSRange(location: sourceSuffixLocation, length: suffixLength),
+            target,
+            NSRange(location: NSMaxRange(replacementTargetRange), length: suffixLength)
+        )
+    }
+
+    private static func utf16SegmentsEqual(
+        _ lhs: NSString,
+        _ lhsRange: NSRange,
+        _ rhs: NSString,
+        _ rhsRange: NSRange
+    ) -> Bool {
+        guard lhsRange.length == rhsRange.length,
+            rangeIsValid(lhsRange, in: lhs),
+            rangeIsValid(rhsRange, in: rhs)
+        else {
+            return false
+        }
+        guard lhsRange.length > 0 else {
+            return true
+        }
+
+        let chunkSize = 4_096
+        var lhsBuffer = [unichar](repeating: 0, count: chunkSize)
+        var rhsBuffer = [unichar](repeating: 0, count: chunkSize)
+        var offset = 0
+        while offset < lhsRange.length {
+            let length = min(chunkSize, lhsRange.length - offset)
+            lhs.getCharacters(
+                &lhsBuffer,
+                range: NSRange(location: lhsRange.location + offset, length: length)
+            )
+            rhs.getCharacters(
+                &rhsBuffer,
+                range: NSRange(location: rhsRange.location + offset, length: length)
+            )
+            for index in 0..<length where lhsBuffer[index] != rhsBuffer[index] {
+                return false
+            }
+            offset += length
+        }
+        return true
+    }
+
+    private static func rangeIsValid(_ range: NSRange, in text: NSString) -> Bool {
+        range.location >= 0 && range.length >= 0 && NSMaxRange(range) <= text.length
+    }
+}
+
 package extension ReviewMonitorLog {
     struct BlockID: Codable, Hashable, Sendable {
         var rawValue: String

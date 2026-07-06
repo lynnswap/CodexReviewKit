@@ -2831,6 +2831,94 @@ struct ReviewUITests {
         #expect(visibleText.contains("11sReviewing JSONRPC requests") == false)
     }
 
+    @Test func sourceDocumentReplacementTargetsMetadataChangedBlock() throws {
+        let startedAt = Date(timeIntervalSince1970: 200)
+        var projection = ReviewMonitorLogDocumentProjection()
+        let previousSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "running",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    commandStatus: "running"
+                )
+            ),
+        ])
+
+        let currentSource = projection.render(projectedBlocks: [
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "Need to inspect files."
+            ),
+            .init(
+                id: .init("command_1"),
+                kind: .command,
+                groupID: "cmd_1",
+                text: "$ git diff",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    itemID: "cmd_1",
+                    command: "git diff",
+                    startedAt: startedAt,
+                    completedAt: Date(timeIntervalSince1970: 211),
+                    durationMs: 11_000,
+                    commandStatus: "completed"
+                )
+            ),
+        ])
+
+        guard case .replace(let replacement) = currentSource.lastChange else {
+            Issue.record("Expected command metadata change to remain a block replacement.")
+            return
+        }
+        #expect(replacement.blockID == ReviewMonitorLog.BlockID("command_1"))
+        #expect(applyingDisplayChange(currentSource.lastChange, to: previousSource.text) == currentSource.text)
+    }
+
+    @Test func commandOutputOnlyDisplayBeforeMarkdownHeadingKeepsParagraphBoundary() throws {
+        var projection = ReviewMonitorLogDocumentProjection()
+        let source = projection.render(projectedBlocks: [
+            .init(
+                id: .init("command_output_1"),
+                kind: .commandOutput,
+                groupID: "cmd_1",
+                text: "stdout",
+                metadata: .init(
+                    sourceType: "commandExecution",
+                    status: "completed",
+                    durationMs: 43_000,
+                    commandStatus: "completed"
+                )
+            ),
+            .init(
+                id: .init("reasoning_1"),
+                kind: .rawReasoning,
+                groupID: "reasoning_1",
+                text: "**Summarizing files with git**\n\nI need to summarize the files."
+            ),
+        ])
+        let display = ReviewMonitorCommandOutputDisplayDocument.make(from: source)
+
+        let visibleText = ReviewMonitorCommandOutputDisplayDocument.userVisibleText(from: display.text)
+        #expect(visibleText.contains("Ran command for 43s\n\nSummarizing files with git"))
+        #expect(visibleText.contains("43sSummarizing files with git") == false)
+    }
+
     @Test func coalescedRunningCommandBeforeMarkdownHeadingKeepsParagraphBoundary() async throws {
         let startedAt = Date(timeIntervalSince1970: 200)
         let chat = makeReviewChatFixtureForTesting(

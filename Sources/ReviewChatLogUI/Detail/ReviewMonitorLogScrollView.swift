@@ -365,8 +365,12 @@ final class ReviewMonitorLogScrollView: NSScrollView {
             replacement.range.length >= 0,
             NSMaxRange(replacement.range) <= displayedUTF16Length,
             document.textUTF16Length == displayedUTF16Length - replacement.range.length + replacement.textUTF16Length,
-            let replacementResult = replacingDisplayedText(in: replacement.range, with: replacement.text),
-            replacementResult == document.text
+            ReviewMonitorUTF16TextReplacement.replacing(
+                displayedText,
+                range: replacement.range,
+                with: replacement.text,
+                equals: document.text
+            )
         else {
             assertionFailure("Log replacement change is not synchronized with the display document.")
             return false
@@ -894,18 +898,6 @@ final class ReviewMonitorLogScrollView: NSScrollView {
         let mutable = NSMutableString(string: displayedText)
         mutable.replaceCharacters(in: range, with: text)
         displayedText = mutable as String
-    }
-
-    private func replacingDisplayedText(in range: NSRange, with text: String) -> String? {
-        guard range.location >= 0,
-            range.length >= 0,
-            NSMaxRange(range) <= displayedUTF16Length
-        else {
-            return nil
-        }
-        let mutable = NSMutableString(string: displayedText)
-        mutable.replaceCharacters(in: range, with: text)
-        return mutable as String
     }
 
     private func invalidateDocumentLayout() {

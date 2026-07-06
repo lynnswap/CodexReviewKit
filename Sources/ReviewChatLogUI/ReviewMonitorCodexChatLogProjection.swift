@@ -93,11 +93,20 @@ struct ReviewMonitorCodexChatLogProjection {
         }
         let reviewOutputKeys = Set(items.compactMap(Self.reviewOutputKey))
         var emittedReviewOutputKeys = Set<ReviewOutputKey>()
+        var previousReasoningOutputKey: ReasoningOutputKey?
         let blocks = items.flatMap { item in
             if let reviewOutputKey = Self.reviewOutputKey(for: item) {
                 guard emittedReviewOutputKeys.insert(reviewOutputKey).inserted else {
                     return [] as [ReviewMonitorLogProjectedBlock]
                 }
+            }
+            if let reasoningOutputKey = Self.reasoningOutputKey(for: item) {
+                guard Self.shouldRenderReasoningOutput(reasoningOutputKey, after: previousReasoningOutputKey) else {
+                    return [] as [ReviewMonitorLogProjectedBlock]
+                }
+                previousReasoningOutputKey = reasoningOutputKey
+            } else {
+                previousReasoningOutputKey = nil
             }
             return projectedBlocks(
                 from: item,
@@ -279,8 +288,55 @@ struct ReviewMonitorCodexChatLogProjection {
         item.projectionTurnID?.rawValue ?? item.sourceID
     }
 
+    private static func reasoningOutputKey<Item: CodexChatLogProjectionItem>(for item: Item) -> ReasoningOutputKey? {
+        guard item.kind == .reasoning else {
+            return nil
+        }
+        guard case .reasoning(let reasoning) = item.content,
+            let normalizedText = normalizedReasoningOutputText(reasoning.text).nilIfEmpty
+        else {
+            return nil
+        }
+        return ReasoningOutputKey(
+            scopeID: reasoningOutputScopeID(for: item),
+            text: normalizedText,
+            payloadKind: rawPayloadKind(from: item.rawPayload)
+        )
+    }
+
+    private static func reasoningOutputScopeID<Item: CodexChatLogProjectionItem>(for item: Item) -> String {
+        item.projectionTurnID?.rawValue ?? "item:\(item.sourceID)"
+    }
+
+    private static func shouldRenderReasoningOutput(
+        _ key: ReasoningOutputKey,
+        after previousKey: ReasoningOutputKey?
+    ) -> Bool {
+        guard let previousKey else {
+            return true
+        }
+        guard previousKey.scopeID == key.scopeID, previousKey.text == key.text else {
+            return true
+        }
+        let payloadKinds = Set([previousKey.payloadKind, key.payloadKind].compactMap { $0 })
+        return payloadKinds != ["agent_reasoning", "reasoning"]
+    }
+
     private static func normalizedReviewOutputText(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizedReasoningOutputText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func rawPayloadKind(from data: Data?) -> String? {
+        guard let data,
+            let payload = try? JSONDecoder().decode(RawPayloadKind.self, from: data)
+        else {
+            return nil
+        }
+        return payload.kindValue
     }
 
     private func unknownText(title: String, detail: String?) -> String {
@@ -571,6 +627,32 @@ private struct ReviewOutputKey: Hashable {
     var text: String
 }
 
+private struct ReasoningOutputKey: Hashable {
+    var scopeID: String
+    var text: String
+    var payloadKind: String?
+}
+
+private struct RawPayloadKind: Decodable {
+    struct NestedItem: Decodable {
+        var type: String?
+        var kind: String?
+
+        var kindValue: String? {
+            type ?? kind
+        }
+    }
+
+    var type: String?
+    var kind: String?
+    var item: NestedItem?
+    var payload: NestedItem?
+
+    var kindValue: String? {
+        type ?? kind ?? item?.kindValue ?? payload?.kindValue
+    }
+}
+
 @MainActor
 private protocol CodexChatLogProjectionItem {
     var itemID: String { get }
@@ -580,6 +662,7 @@ private protocol CodexChatLogProjectionItem {
     var kind: CodexThreadItem.Kind { get }
     var content: CodexThreadItem.Content { get }
     var itemStatus: CodexTurnStatus? { get }
+    var rawPayload: Data? { get }
 }
 
 extension CodexItem: CodexChatLogProjectionItem {
@@ -632,6 +715,10 @@ private struct CodexChatModelLogItem: CodexChatLogProjectionItem {
     var itemStatus: CodexTurnStatus? {
         item.content.reviewMonitorLogItemStatus
     }
+
+    var rawPayload: Data? {
+        item.rawPayload
+    }
 }
 
 @MainActor
@@ -669,6 +756,10 @@ private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
 
     var itemStatus: CodexTurnStatus? {
         item.content.reviewMonitorLogItemStatus
+    }
+
+    var rawPayload: Data? {
+        item.rawPayload
     }
 
     private var semanticItemID: String {
