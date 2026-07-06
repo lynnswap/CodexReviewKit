@@ -325,13 +325,19 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
                 return
             }
 
-            let renderedText = ReviewMonitorLogStyler.renderedText(
-                for: block.kind,
-                source: block.text,
-                blockID: block.id
-            )
+            // Block text must not carry the inter-block separator: command
+            // panels replace their block text with a placeholder, so a
+            // separator living inside a neighboring block's trailing newlines
+            // would silently disappear from the display document.
+            let sourceText = Self.normalizedBlockText(block.text)
+            let renderedText = Self.normalizedBlockText(
+                ReviewMonitorLogStyler.renderedText(
+                    for: block.kind,
+                    source: sourceText,
+                    blockID: block.id
+                ))
             let appended = appendedText(renderedText, after: document.text)
-            let appendedSource = appendedText(block.text, after: document.sourceText)
+            let appendedSource = appendedText(sourceText, after: document.sourceText)
             hasVisibleSections = true
 
             let previousLength = document.textUTF16Length
@@ -339,7 +345,7 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             let suffixLength = ReviewMonitorLogDocumentProjection.utf16Length(appended)
             let sourceSuffixLength = ReviewMonitorLogDocumentProjection.utf16Length(appendedSource)
             let blockLength = ReviewMonitorLogDocumentProjection.utf16Length(renderedText)
-            let sourceBlockLength = ReviewMonitorLogDocumentProjection.utf16Length(block.text)
+            let sourceBlockLength = ReviewMonitorLogDocumentProjection.utf16Length(sourceText)
             let blockRange = NSRange(
                 location: previousLength + max(0, suffixLength - blockLength),
                 length: blockLength
@@ -375,10 +381,11 @@ struct ReviewMonitorLogDocumentProjection: Sendable {
             if existingText.hasSuffix("\n\n") {
                 return blockText
             }
-            if existingText.hasSuffix("\n") || blockText.hasPrefix("\n") {
-                return "\n" + blockText
-            }
             return "\n\n" + blockText
+        }
+
+        private static func normalizedBlockText(_ text: String) -> String {
+            text.trimmingCharacters(in: .newlines)
         }
 
         private static func isVisible(kind: ReviewMonitorLog.Kind, text: String) -> Bool {
