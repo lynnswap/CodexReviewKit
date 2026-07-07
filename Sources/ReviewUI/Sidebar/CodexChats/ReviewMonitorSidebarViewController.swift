@@ -2172,6 +2172,7 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
                 return
             }
             beginContextMenuPresentation(with: contextMenu)
+            contextMenu.update()
             presenter(contextMenu)
             if isPresentingContextMenu {
                 endContextMenuPresentation()
