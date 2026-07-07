@@ -164,6 +164,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
 
         let request = try #require(await runtime.transport.recordedRequests(method: "thread/list").first)
         let params = try request.decodeParams(ThreadListParams.self)
+        #expect(params.archived == false)
         #expect(params.sourceKinds == nil)
     }
 
@@ -1110,6 +1111,7 @@ struct ReviewMonitorCodexSidebarResultsTests {
 }
 
 private struct ThreadListParams: Decodable {
+    var archived: Bool?
     var sourceKinds: [String]?
 }
 
