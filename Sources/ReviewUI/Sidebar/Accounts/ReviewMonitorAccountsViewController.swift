@@ -956,6 +956,7 @@ private final class ReviewMonitorAccountsOutlineView: NSOutlineView {
             return
         }
         beginContextMenuPresentation(with: contextMenu)
+        contextMenu.update()
         presenter(contextMenu)
         if isPresentingContextMenu {
             endContextMenuPresentation()

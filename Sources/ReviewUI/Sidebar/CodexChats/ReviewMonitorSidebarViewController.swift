@@ -1,5 +1,6 @@
 import AppKit
 import CodexKit
+import Foundation
 import ObservationBridge
 import CodexReviewKit
 import SwiftUI
@@ -276,7 +277,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
 
     static var defaultCodexSidebarDescriptor: CodexFetchDescriptor<CodexChat> {
         CodexFetchDescriptor<CodexChat>(
-            sortBy: [CodexSortDescriptor(\.recencyAt, order: .reverse)]
+            predicate: #Predicate<CodexChat> { $0.isArchived == false },
+            sortBy: [SortDescriptor(\.recencyAt, order: .reverse)]
         )
     }
 
@@ -2170,6 +2172,7 @@ private final class ReviewMonitorSidebarOutlineView: NSOutlineView {
                 return
             }
             beginContextMenuPresentation(with: contextMenu)
+            contextMenu.update()
             presenter(contextMenu)
             if isPresentingContextMenu {
                 endContextMenuPresentation()

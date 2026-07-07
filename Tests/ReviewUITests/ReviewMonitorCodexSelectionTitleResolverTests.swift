@@ -22,12 +22,14 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                         id: appThreadID,
                         workspace: app,
                         name: "App review",
+                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 3_000)
                     ),
                     .init(
                         id: "thread-tools",
                         workspace: tools,
                         name: "Tools review",
+                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 2_000)
                     ),
                 ]
@@ -66,6 +68,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                         id: "thread-repo",
                         workspace: repo,
                         name: "Repo review",
+                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 1_000)
                     )
                 ]
@@ -98,6 +101,7 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
                         id: floatingThreadID,
                         name: "Floating review",
                         preview: "Uncategorized preview",
+                        sourceKind: .subAgentReview,
                         updatedAt: Date(timeIntervalSince1970: 1_000)
                     )
                 ]
@@ -137,12 +141,18 @@ struct ReviewMonitorCodexSelectionTitleResolverTests {
 private func loadReviewChats(in context: CodexModelContext) async throws {
     let results = context.fetchedResults(
         for: CodexFetchDescriptor<CodexChat>(
-            predicate: .init(sourceKinds: [.subAgentReview]),
-            sortBy: [CodexSortDescriptor(\.updatedAt, order: .reverse)]
+            predicate: sourceKindChatPredicate([.subAgentReview]),
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         ),
         sectionedBy: .workspaceGroup
     )
     try await results.performFetch()
+}
+
+private func sourceKindChatPredicate(_ sourceKinds: [CodexThreadSourceKind]) -> Predicate<CodexChat> {
+    #Predicate<CodexChat> { chat in
+        chat.sourceKind != nil && sourceKinds.contains(chat.sourceKind!)
+    }
 }
 
 private func workspaceID(for url: URL) -> CodexWorkspaceID {
