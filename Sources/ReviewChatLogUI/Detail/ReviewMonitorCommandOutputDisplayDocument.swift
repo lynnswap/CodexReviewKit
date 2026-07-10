@@ -683,6 +683,11 @@ enum ReviewMonitorCommandOutputDisplayDocument {
         if normalizedStatus == "cancelled" || normalizedStatus == "canceled" {
             return "Cancelled"
         }
+        if normalizedStatus == "inprogress" || normalizedStatus == "in_progress"
+            || normalizedStatus == "started" || normalizedStatus == "running"
+        {
+            return "running"
+        }
         return rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 

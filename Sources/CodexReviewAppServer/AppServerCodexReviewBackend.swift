@@ -36,6 +36,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     // until runtime teardown: cleanupReview defers the destructive thread
     // deletion here and cleanupActiveReviewsForShutdown flushes it.
     private var deferredThreadCleanupsByAttemptID: [String: DeferredReviewThreadCleanup] = [:]
+    private var completedThreadCleanupAttemptIDs: Set<String> = []
 
     package init(appServer: CodexAppServer, modelContainer: CodexModelContainer? = nil) {
         let modelContainer = modelContainer ?? CodexModelContainer(appServer: appServer)
@@ -260,10 +261,12 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
                 completedReviewEventSessionMetricsByThreadID[threadID] = completedMetrics
             }
         }
-        deferredThreadCleanupsByAttemptID[run.attemptID] = .init(
-            run: run,
-            additionalCleanupThreadIDs: additionalCleanupThreadIDs
-        )
+        if completedThreadCleanupAttemptIDs.contains(run.attemptID) == false {
+            deferredThreadCleanupsByAttemptID[run.attemptID] = .init(
+                run: run,
+                additionalCleanupThreadIDs: additionalCleanupThreadIDs
+            )
+        }
         for threadID in cleanupThreadIDs {
             reviewEventSessionCanonicalThreadIDByThreadID.removeValue(forKey: threadID)
             activeReviewAttemptIDByThreadID.removeValue(forKey: threadID)
@@ -273,6 +276,9 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
     private func flushDeferredThreadCleanups() async {
         let deferredCleanups = deferredThreadCleanupsByAttemptID.values
         deferredThreadCleanupsByAttemptID = [:]
+        completedThreadCleanupAttemptIDs.formUnion(
+            deferredCleanups.map { $0.run.attemptID }
+        )
         for cleanup in deferredCleanups {
             await cleanupAppServerReview(
                 cleanup.run,

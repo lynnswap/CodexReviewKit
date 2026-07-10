@@ -870,10 +870,11 @@ struct CodexReviewStoreCommandTests {
             await recoverGate.open()
             let cleanup = await cleanupTask.value
             let read = try await result
-            let request = try #require(await recorder.onlyRequest())
+            let requests = await recorder.recordedRequests()
 
             #expect(cleanup.didComplete)
-            #expect(request.recoveryWaitingRuns == [initialRun])
+            #expect(requests.count == 2)
+            #expect(requests.allSatisfy { $0.recoveryWaitingRuns == [initialRun] })
             #expect(read.core.lifecycle.status == .cancelled)
             #expect(read.core.lifecycle.cancellation?.message == "Review runtime stopped.")
             #expect(read.core.run.turnID == "turn-1")
@@ -1085,12 +1086,13 @@ struct CodexReviewStoreCommandTests {
                 await recorder.record(request)
                 return true
             }
-            let request = try #require(await recorder.onlyRequest())
+            let requests = await recorder.recordedRequests()
             let read = try store.readReview(runID: "run-1")
 
             #expect(result.didComplete)
-            #expect(request.reason.message == "Review runtime stopped.")
-            #expect(request.recoveryWaitingRuns == [run])
+            #expect(requests.count == 2)
+            #expect(requests.allSatisfy { $0.reason.message == "Review runtime stopped." })
+            #expect(requests.allSatisfy { $0.recoveryWaitingRuns == [run] })
             #expect(read.core.lifecycle.status == .cancelled)
             let runtimeState = store.runtimeReviewRunState(runID: "run-1")
             #expect(runtimeState.hasActiveWorker == false)
@@ -1869,8 +1871,8 @@ private actor RuntimeStopCleanupRequestRecorder {
         requests.append(request)
     }
 
-    func onlyRequest() -> CodexReviewRuntimeStopReviewCleanupRequest? {
-        requests.count == 1 ? requests[0] : nil
+    func recordedRequests() -> [CodexReviewRuntimeStopReviewCleanupRequest] {
+        requests
     }
 }
 

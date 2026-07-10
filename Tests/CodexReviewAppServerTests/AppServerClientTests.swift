@@ -474,6 +474,13 @@ struct AppServerClientTests {
             .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingRuns: [])
         )
 
+        // The review worker can reach its own finalizer after shutdown cleanup.
+        // Repeated finalization must not reacquire destructive cleanup authority.
+        await backend.cleanupReview(attempt.run)
+        await backend.cleanupActiveReviewsForShutdown(
+            .init(reason: .init(message: "Review runtime stopped."), recoveryWaitingRuns: [])
+        )
+
         let deleteRequests = await runtime.transport.recordedRequests(method: "thread/delete")
         #expect(deleteRequests.count == 2)
         let deletedIDs = try deleteRequests.map { try jsonObject(from: $0.params)["threadId"] as? String }

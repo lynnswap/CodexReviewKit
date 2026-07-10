@@ -1836,7 +1836,10 @@ struct CodexReviewHostTests {
         await store.addAccount()
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
-        #expect(failedMessage(from: store.auth.phase) == "login unavailable")
+        #expect(
+            failedMessage(from: store.auth.phase)
+                == "JSON-RPC request 2 (account/login/start) was rejected by the server: login unavailable"
+        )
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
     }
 
@@ -2126,6 +2129,7 @@ private enum AppServerAPI {
 
                 private struct Turn: Codable, Equatable, Sendable {
                     var id: String
+                    var status: String
                 }
 
                 init(turnID: String, reviewThreadID: String? = nil) {
@@ -2141,7 +2145,10 @@ private enum AppServerAPI {
 
                 func encode(to encoder: Encoder) throws {
                     var container = encoder.container(keyedBy: CodingKeys.self)
-                    try container.encode(Turn(id: turnID), forKey: .turn)
+                    try container.encode(
+                        Turn(id: turnID, status: CodexTurnStatus.inProgress.rawValue),
+                        forKey: .turn
+                    )
                     try container.encodeIfPresent(reviewThreadID, forKey: .reviewThreadID)
                 }
             }

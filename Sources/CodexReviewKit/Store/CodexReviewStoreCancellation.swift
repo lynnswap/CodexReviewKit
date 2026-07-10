@@ -155,8 +155,21 @@ extension CodexReviewStore {
                 CodexReviewRuntimeStopReviewCleanupRequest
             ) async -> Bool
     ) async -> CodexReviewRuntimeStopReviewCleanupResult {
+        let startingRunIDs: [String] = orderedReviewRuns.compactMap { runRecord in
+            guard runRecord.isTerminal == false,
+                runtimeState.isStarting(runRecord.id)
+            else {
+                return nil
+            }
+            return runRecord.id
+        }
+        markActiveReviewCancellationsPendingForRuntimeStop(reason: reason)
         let request = runtimeStopReviewCleanupRequest(reason: reason)
-        let didCompleteBackendCleanup = await cleanupBackendReviews(request)
+        let didCompleteInitialBackendCleanup = await cleanupBackendReviews(request)
+        _ = await drainReviewWorkersForRuntimeStop(
+            runIDs: startingRunIDs,
+            timeout: workerDrainTimeout
+        )
         let locallyCancelledReviewRunIDs = cancelActiveReviewsLocallyForRuntimeStop(
             reason: reason,
             cancelWorkers: false
@@ -165,10 +178,23 @@ extension CodexReviewStore {
         let didDrainReviewWorkers = await drainReviewWorkersForRuntimeStop(
             timeout: workerDrainTimeout
         )
+        let didCompleteFinalBackendCleanup = await cleanupBackendReviews(request)
         return .init(
-            didCompleteBackendCleanup: didCompleteBackendCleanup,
+            didCompleteBackendCleanup:
+                didCompleteInitialBackendCleanup && didCompleteFinalBackendCleanup,
             didDrainReviewWorkers: didDrainReviewWorkers
         )
+    }
+
+    private func markActiveReviewCancellationsPendingForRuntimeStop(
+        reason: ReviewCancellation
+    ) {
+        for runRecord in orderedReviewRuns where runRecord.isTerminal == false {
+            runRecord.cancellationRequested = true
+            runRecord.core.lifecycle.cancellation = reason
+            runRecord.core.lifecycleMessage = reason.message
+            runRecord.core.lifecycle.errorMessage = reason.message
+        }
     }
 
     private func runtimeStopReviewCleanupRequest(
@@ -222,6 +248,14 @@ extension CodexReviewStore {
 
     package func drainReviewWorkersForRuntimeStop(timeout: Duration) async -> Bool {
         let tasks = runtimeState.allWorkerTasks()
+        return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
+    }
+
+    private func drainReviewWorkersForRuntimeStop(
+        runIDs: [String],
+        timeout: Duration
+    ) async -> Bool {
+        let tasks = runtimeState.activeWorkerTasks(for: runIDs)
         return await drainReviewWorkerTasksForRuntimeStop(tasks, timeout: timeout)
     }
 

@@ -117,6 +117,10 @@ final class CodexReviewStoreRuntimeState {
         activeWorkerTasks() + detachedWorkerTasks()
     }
 
+    func activeWorkerTasks(for runIDs: [String]) -> [Task<Void, Never>] {
+        runIDs.compactMap { reviewWorkerTasks[$0] }
+    }
+
     func clearRuntimeStopState(for runID: String) {
         removeActiveRun(for: runID)
         clearWaitingForNetworkRecovery(runID)
