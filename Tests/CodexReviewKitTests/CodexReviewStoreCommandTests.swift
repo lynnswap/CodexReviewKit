@@ -1342,6 +1342,45 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.core.lifecycle.status == .failed)
             #expect(read.core.lifecycle.errorMessage == "Review was interrupted by the backend.")
+            #expect(read.core.lifecycle.failure == .interruptedByBackend(message: nil))
+        }
+    }
+
+    @Test func typedTerminalFailureSurvivesStoreCommit() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-1" })
+        )
+        let failure = ReviewBackendFailure.invalidTerminalStatus(
+            rawStatus: "future-terminal",
+            turnID: "turn-1",
+            turnFailure: .init(
+                message: "Future terminal failure",
+                code: .unknown(rawValue: "future_code"),
+                additionalDetails: "Preserve this detail"
+            )
+        )
+
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(
+                await StoreSnapshotProbe(store: store)
+                    .waitUntilRunStatus(.running, runID: "run-1") != nil
+            )
+
+            await backend.yield(.failed(failure))
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.failure == failure)
+            #expect(
+                read.core.lifecycle.errorMessage
+                    == "Review ended with invalid terminal status future-terminal."
+            )
         }
     }
 

@@ -30,6 +30,7 @@ package struct ReviewRunCore: Codable, Sendable, Hashable {
         package var endedAt: Date?
         package var cancellation: ReviewCancellation?
         package var errorMessage: String?
+        package var failure: ReviewBackendFailure?
 
         package init(
             status: ReviewRunState,
@@ -37,7 +38,8 @@ package struct ReviewRunCore: Codable, Sendable, Hashable {
             startedAt: Date? = nil,
             endedAt: Date? = nil,
             cancellation: ReviewCancellation? = nil,
-            errorMessage: String? = nil
+            errorMessage: String? = nil,
+            failure: ReviewBackendFailure? = nil
         ) {
             self.status = status
             self.exitCode = exitCode
@@ -45,6 +47,7 @@ package struct ReviewRunCore: Codable, Sendable, Hashable {
             self.endedAt = endedAt
             self.cancellation = cancellation
             self.errorMessage = errorMessage
+            self.failure = failure
         }
     }
 

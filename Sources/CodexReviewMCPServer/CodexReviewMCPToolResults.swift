@@ -420,7 +420,94 @@ private extension ReviewRunCore.Lifecycle {
             "cancellable": .bool(cancellable),
             "cancellation": cancellation.map { $0.structuredContent() } ?? .null,
             "errorMessage": errorMessage.map(Value.string) ?? .null,
+            "failure": failure.map { $0.structuredContent() } ?? .null,
         ])
+    }
+}
+
+private extension ReviewBackendFailure {
+    func structuredContent() -> Value {
+        var object: [String: Value] = [
+            "message": .string(message),
+        ]
+        switch self {
+        case .message:
+            object["kind"] = .string("message")
+        case .missingReviewOutput(let turnID):
+            object["kind"] = .string("missingReviewOutput")
+            object["turnId"] = .string(turnID)
+        case .invalidTerminalStatus(let rawStatus, let turnID, let turnFailure):
+            object["kind"] = .string("invalidTerminalStatus")
+            object["rawStatus"] = .string(rawStatus)
+            object["turnId"] = .string(turnID)
+            object["turnFailure"] = turnFailure.map { $0.structuredContent() } ?? .null
+        case .turnFailed(let turnFailure):
+            object["kind"] = .string("turnFailed")
+            object["turnFailure"] = turnFailure.structuredContent()
+        case .interruptedByBackend(let backendMessage):
+            object["kind"] = .string("interruptedByBackend")
+            object["backendMessage"] = backendMessage.map(Value.string) ?? .null
+        }
+        return .object(object)
+    }
+}
+
+private extension ReviewTurnFailure {
+    func structuredContent() -> Value {
+        .object([
+            "message": .string(message),
+            "code": code.map { $0.structuredContent() } ?? .null,
+            "additionalDetails": additionalDetails.map(Value.string) ?? .null,
+        ])
+    }
+}
+
+private extension ReviewTurnFailure.Code {
+    func structuredContent() -> Value {
+        var object: [String: Value] = [:]
+        switch self {
+        case .contextWindowExceeded:
+            object["name"] = .string("contextWindowExceeded")
+        case .sessionBudgetExceeded:
+            object["name"] = .string("sessionBudgetExceeded")
+        case .usageLimitExceeded:
+            object["name"] = .string("usageLimitExceeded")
+        case .serverOverloaded:
+            object["name"] = .string("serverOverloaded")
+        case .cyberPolicy:
+            object["name"] = .string("cyberPolicy")
+        case .httpConnectionFailed(let status):
+            object["name"] = .string("httpConnectionFailed")
+            object["status"] = status.map { .int(Int($0)) } ?? .null
+        case .responseStreamConnectionFailed(let status):
+            object["name"] = .string("responseStreamConnectionFailed")
+            object["status"] = status.map { .int(Int($0)) } ?? .null
+        case .internalServerError:
+            object["name"] = .string("internalServerError")
+        case .unauthorized:
+            object["name"] = .string("unauthorized")
+        case .badRequest:
+            object["name"] = .string("badRequest")
+        case .threadRollbackFailed:
+            object["name"] = .string("threadRollbackFailed")
+        case .sandboxError:
+            object["name"] = .string("sandboxError")
+        case .responseStreamDisconnected(let status):
+            object["name"] = .string("responseStreamDisconnected")
+            object["status"] = status.map { .int(Int($0)) } ?? .null
+        case .responseTooManyFailedAttempts(let status):
+            object["name"] = .string("responseTooManyFailedAttempts")
+            object["status"] = status.map { .int(Int($0)) } ?? .null
+        case .activeTurnNotSteerable(let kind):
+            object["name"] = .string("activeTurnNotSteerable")
+            object["kind"] = .string(kind)
+        case .other:
+            object["name"] = .string("other")
+        case .unknown(let rawValue):
+            object["name"] = .string("unknown")
+            object["rawValue"] = .string(rawValue)
+        }
+        return .object(object)
     }
 }
 

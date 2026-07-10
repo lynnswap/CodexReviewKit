@@ -440,12 +440,45 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.failed(.message("Backend failed")))
+            await backend.yield(
+                .failed(
+                    .turnFailed(
+                        .init(
+                            message: "Backend failed",
+                            code: .httpConnectionFailed(status: 503),
+                            additionalDetails: "Retry later"
+                        )
+                    )
+                )
+            )
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == true)
             #expect(resolved.value(for: ["result", "structuredContent", "runId"]) as? String == "run-1")
             #expect(resolved.value(for: ["result", "structuredContent", "lifecycle", "status"]) as? String == "failed")
+            #expect(
+                resolved.value(for: [
+                    "result", "structuredContent", "lifecycle", "failure", "kind",
+                ]) as? String == "turnFailed"
+            )
+            #expect(
+                resolved.value(for: [
+                    "result", "structuredContent", "lifecycle", "failure",
+                    "turnFailure", "code", "name",
+                ]) as? String == "httpConnectionFailed"
+            )
+            #expect(
+                resolved.value(for: [
+                    "result", "structuredContent", "lifecycle", "failure",
+                    "turnFailure", "code", "status",
+                ]) as? Int == 503
+            )
+            #expect(
+                resolved.value(for: [
+                    "result", "structuredContent", "lifecycle", "failure",
+                    "turnFailure", "additionalDetails",
+                ]) as? String == "Retry later"
+            )
         }
     }
 

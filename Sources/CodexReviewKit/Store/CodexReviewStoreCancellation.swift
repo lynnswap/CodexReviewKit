@@ -49,6 +49,7 @@ extension CodexReviewStore {
         runRecord.cancellationRequested = false
         runRecord.core.lifecycle.cancellation = cancellation
         runRecord.core.lifecycle.status = .cancelled
+        runRecord.core.lifecycle.failure = nil
         runRecord.core.lifecycleMessage = cancellation.message
         runRecord.core.lifecycle.errorMessage =
             cancellation.message.nilIfEmpty
@@ -310,6 +311,9 @@ extension CodexReviewStore {
                 resolvedError
                 ?? reason.nilIfEmpty
                 ?? runRecord.core.lifecycle.errorMessage
+            runRecord.core.lifecycle.failure = .message(
+                runRecord.core.lifecycle.errorMessage ?? runRecord.core.lifecycleMessage
+            )
             runRecord.core.lifecycle.endedAt = clock.now()
         }
         noteReviewRunMutation()

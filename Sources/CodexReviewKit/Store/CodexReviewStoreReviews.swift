@@ -544,19 +544,29 @@ extension CodexReviewStore {
     private func markReviewRunning(_ runRecord: ReviewRunRecord, startedAt: Date) {
         runRecord.core.lifecycle.status = .running
         runRecord.core.lifecycle.startedAt = startedAt
+        runRecord.core.lifecycle.failure = nil
         runRecord.core.lifecycleMessage = "Review started."
         runRecord.core.finalReview = nil
         writeDiagnosticsIfNeeded()
     }
 
     private func markReviewFailed(_ runRecord: ReviewRunRecord, message: String) {
+        markReviewFailed(runRecord, failure: .message(message))
+    }
+
+    private func markReviewFailed(
+        _ runRecord: ReviewRunRecord,
+        failure: ReviewBackendFailure
+    ) {
         guard runRecord.isTerminal == false else {
             return
         }
         let endedAt = clock.now()
+        let message = failure.message
         runRecord.core.lifecycle.status = .failed
         runRecord.core.lifecycle.endedAt = endedAt
         runRecord.core.lifecycle.errorMessage = message
+        runRecord.core.lifecycle.failure = failure
         runRecord.core.lifecycleMessage = message
         runRecord.core.finalReview = nil
         writeDiagnosticsIfNeeded()
@@ -829,10 +839,10 @@ extension CodexReviewStore {
         case .interrupted(let message):
             markReviewFailed(
                 runRecord,
-                message: ReviewBackendFailure.interruptedByBackend(message: message).message
+                failure: .interruptedByBackend(message: message)
             )
         case .failed(let failure):
-            markReviewFailed(runRecord, message: failure.message)
+            markReviewFailed(runRecord, failure: failure)
         case .cancelled(let message):
             let cancellation = runRecord.core.lifecycle.cancellation ?? .system(message: message)
             try? completeCancellationLocally(
@@ -869,6 +879,8 @@ extension CodexReviewStore {
         let endedAt = clock.now()
         runRecord.core.lifecycle.status = .succeeded
         runRecord.core.lifecycle.endedAt = endedAt
+        runRecord.core.lifecycle.errorMessage = nil
+        runRecord.core.lifecycle.failure = nil
         runRecord.core.lifecycleMessage = "Review completed."
         runRecord.core.finalReview = finalReview
         writeDiagnosticsIfNeeded()

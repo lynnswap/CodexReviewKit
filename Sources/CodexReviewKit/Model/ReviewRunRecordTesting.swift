@@ -16,6 +16,7 @@ extension ReviewRunRecord {
         endedAt: Date? = nil,
         summary: String,
         errorMessage: String? = nil,
+        failure: ReviewBackendFailure? = nil,
         exitCode: Int? = nil
     ) -> ReviewRunRecord {
         ReviewRunRecord(
@@ -36,7 +37,9 @@ extension ReviewRunRecord {
                     startedAt: startedAt,
                     endedAt: endedAt,
                     cancellation: cancellation,
-                    errorMessage: errorMessage
+                    errorMessage: errorMessage,
+                    failure: failure
+                        ?? (status == .failed ? .message(errorMessage ?? summary) : nil)
                 ),
                 lifecycleMessage: summary
             ),

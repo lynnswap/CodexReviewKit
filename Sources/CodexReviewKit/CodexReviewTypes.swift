@@ -285,8 +285,8 @@ package extension CodexReviewBackendModel.Review {
     }
 }
 
-package struct ReviewTurnFailure: Equatable, Sendable {
-    package enum Code: Equatable, Sendable {
+package struct ReviewTurnFailure: Codable, Hashable, Sendable {
+    package enum Code: Codable, Hashable, Sendable {
         case contextWindowExceeded
         case sessionBudgetExceeded
         case usageLimitExceeded
@@ -321,7 +321,7 @@ package struct ReviewTurnFailure: Equatable, Sendable {
     }
 }
 
-package enum ReviewBackendFailure: Error, Equatable, Sendable {
+package enum ReviewBackendFailure: Error, Codable, Hashable, Sendable {
     case message(String)
     case missingReviewOutput(turnID: String)
     case invalidTerminalStatus(
