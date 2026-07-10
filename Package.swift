@@ -60,8 +60,8 @@ let package = Package(
         .target(
             name: "CodexReviewAppServer",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewKit",
             ],
             swiftSettings: [
@@ -71,7 +71,8 @@ let package = Package(
         .target(
             name: "CodexReviewMCPServer",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewKit",
                 .product(name: "MCP", package: "swift-sdk"),
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -85,8 +86,8 @@ let package = Package(
         .target(
             name: "CodexReviewHost",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewAppServer",
                 "CodexReviewMCPServer",
@@ -111,7 +112,8 @@ let package = Package(
             dependencies: [
                 "CodexReviewKit",
                 "ReviewChatLogUI",
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 .product(name: "ObservationBridge", package: "ObservationBridge"),
             ],
             swiftSettings: [
@@ -122,7 +124,8 @@ let package = Package(
             name: "ReviewChatLogUI",
             dependencies: [
                 "TextTransitions",
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -131,7 +134,8 @@ let package = Package(
         .target(
             name: "ReviewUIPreviewSupport",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewKit",
                 "ReviewUI",
@@ -169,7 +173,8 @@ let package = Package(
         .testTarget(
             name: "CodexReviewMCPServerTests",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 "CodexReviewMCPServer",
                 "CodexReviewTesting",
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -194,7 +199,8 @@ let package = Package(
         .testTarget(
             name: "ReviewUITests",
             dependencies: [
-                .product(name: "CodexKit", package: "CodexKit"),
+                .product(name: "CodexAppServerKit", package: "CodexKit"),
+                .product(name: "CodexDataKit", package: "CodexKit"),
                 .product(name: "CodexAppServerKitTesting", package: "CodexKit"),
                 "CodexReviewKit",
                 "CodexReviewTesting",

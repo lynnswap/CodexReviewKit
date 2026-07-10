@@ -1,5 +1,5 @@
 import Foundation
-import CodexKit
+import CodexAppServerKit
 import CodexReviewKit
 
 package struct ReviewMCPLogProjection: Sendable, Equatable {

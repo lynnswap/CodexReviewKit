@@ -1,5 +1,4 @@
 import AppKit
-import CodexKit
 import CodexReviewKit
 import Foundation
 import ObjectiveC

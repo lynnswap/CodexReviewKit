@@ -1,5 +1,6 @@
 import AppKit
-import CodexKit
+import CodexAppServerKit
+import CodexDataKit
 import OSLog
 
 private let logger = Logger(subsystem: "CodexReviewKit", category: "chat-log-target")

@@ -1,5 +1,5 @@
 import AppKit
-import CodexKit
+import CodexDataKit
 import CodexReviewKit
 
 @MainActor

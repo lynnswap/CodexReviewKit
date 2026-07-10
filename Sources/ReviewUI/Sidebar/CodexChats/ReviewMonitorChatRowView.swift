@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-import CodexKit
+import CodexDataKit
 
 @MainActor
 struct ReviewMonitorChatRowView: View {

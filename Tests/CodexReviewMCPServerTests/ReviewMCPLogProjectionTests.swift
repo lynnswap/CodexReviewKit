@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import CodexKit
+import CodexDataKit
 @testable import CodexReviewKit
 @testable import CodexReviewMCPServer
 

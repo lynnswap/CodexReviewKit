@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import CodexKit
+import CodexDataKit
 import ObservationBridge
 import CodexReviewKit
 
