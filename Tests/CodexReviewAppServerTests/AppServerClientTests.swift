@@ -135,7 +135,7 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
     }
 
-    @Test func backendDoesNotPromoteThreadScopedFinalAnswerDeltaWithoutTurnID() async throws {
+    @Test func backendRejectsItemDeltaWithoutRequiredTurnID() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
         try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
@@ -154,19 +154,18 @@ struct AppServerClientTests {
                 phase: "final_answer"
             )
         )
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(id: "turn-1", status: "completed")
-            )
-        )
-
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(
-            try await iterator.next()
-                == .failed(.missingReviewOutput(turnID: "turn-1")))
+        do {
+            _ = try await iterator.next()
+            Issue.record("Expected the malformed current-v2 notification to terminate the event stream.")
+        } catch {
+            #expect(
+                error.localizedDescription.contains(
+                    "Current-v2 item notification is missing required turnId."
+                )
+            )
+        }
     }
 
     @Test func backendDoesNotPromoteThreadlessAgentMessageToInlineReview() async throws {
@@ -348,12 +347,28 @@ struct AppServerClientTests {
         let secondAttempt = try await backend.startReview(makeReviewStart(runID: "run-2", sessionID: "session-2"))
 
         try await runtime.transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "review-thread-1",
+                turnID: "turn-1",
+                item: .init(type: "agentMessage", id: "msg-1", text: "")
+            )
+        )
+        try await runtime.transport.emitServerNotification(
             method: "item/agentMessage/delta",
             params: TestDeltaNotification(
                 threadID: "review-thread-1",
                 turnID: "turn-1",
                 itemID: "msg-1",
                 delta: "first"
+            )
+        )
+        try await runtime.transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "review-thread-2",
+                turnID: "turn-2",
+                item: .init(type: "agentMessage", id: "msg-1", text: "")
             )
         )
         try await runtime.transport.emitServerNotification(
@@ -421,6 +436,20 @@ struct AppServerClientTests {
                     model: "gpt-5"
                 ))
 
+        try await runtime.transport.emitServerNotification(
+            method: "item/started",
+            params: TestItemNotification(
+                threadID: "review-thread",
+                turnID: "turn-1",
+                item: .init(
+                    type: "commandExecution",
+                    id: "cmd-1",
+                    command: "swift test",
+                    aggregatedOutput: "",
+                    status: "inProgress"
+                )
+            )
+        )
         try await runtime.transport.emitServerNotification(
             method: "item/commandExecution/outputDelta",
             params: TestDeltaNotification(
@@ -886,6 +915,8 @@ private struct TestItem: Encodable, Sendable {
     var type: String
     var id: String
     var review: String?
+    var text: String?
+    var phase: String?
     var command: String?
     var cwd: String?
     var aggregatedOutput: String?
@@ -896,6 +927,8 @@ private struct TestItem: Encodable, Sendable {
         type: String,
         id: String,
         review: String? = nil,
+        text: String? = nil,
+        phase: String? = nil,
         command: String? = nil,
         cwd: String? = nil,
         aggregatedOutput: String? = nil,
@@ -905,6 +938,8 @@ private struct TestItem: Encodable, Sendable {
         self.type = type
         self.id = id
         self.review = review
+        self.text = text
+        self.phase = phase
         self.command = command
         self.cwd = cwd
         self.aggregatedOutput = aggregatedOutput
