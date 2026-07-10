@@ -183,7 +183,7 @@ CodexAppServer facade
               -> JSONRPCTransport (framing/I/O/process only)
           -> AppServerNotificationDecoder (single exhaustive current-v2 switch)
           -> NotificationRouter (typed routing only; Task を所有しない)
-          -> TurnReplayStore / AccountEventHub / ServerRequestRegistry
+          -> TurnReplayStore / ThreadEventHub / AccountEventHub / ServerRequestRegistry
 ```
 
 ## 4. Target owner map
@@ -199,8 +199,9 @@ CodexAppServer facade
 | `RequestSerializer` | scoped lane occupancy とcancel-aware waiter continuation | caller Taskがoperation completionを所有し、idle laneはlast leave/cancel後に除去 |
 | `RequestOperationState` | pre-write / written / response-bound / cleanup-complete commit point、caller-cancel bit | caller cancellationとwire operationを分離するchecked `Sendable` value。post-writeはresponse/required cleanupまでlaneを保持してから`CancellationError`を返す |
 | `AppServerNotificationDecoder` | raw method/params → current-v2 domain event | 単一 exhaustive switch。historical alias、malformed payloadを正常eventへ補完しない |
-| `NotificationRouter` | typed thread/turn routing、subscriber | run Task と無期限 terminal historyを所有しない |
+| `NotificationRouter` | typed thread/turn routing | run Task、subscriber、generation checkpoint、terminal historyを所有しない |
 | `TurnReplayStore` | active raw generation、weak generation-state registrations | terminal compact snapshotをstateへ渡してraw generationを削除し、自身はterminal snapshot/leaseをretainしない |
+| `ThreadEventHub` | reusable threadごとのcurrent compact generation、request前generation checkpoint、bounded subscribers | global append-only historyを持たず、early eventをcheckpointへroutingしてsuccess時だけcurrent generationへcommit。generation reset/connection closeで旧compact stateを解放する |
 | `TurnGenerationHandleState` | live connection lease / terminal compact snapshot / connection terminationの排他的state | public/package handle copyが共有する唯一のgeneration transition owner。terminalでleaseをnil化し、replay storeからはweak registrationだけを受ける |
 | `TurnOutcomeClassifier` | terminal response → exhaustive outcome | output の有無から unknown/nil/running を success にしない |
 | `ServerRequestRegistry` | `CodexServerRequestID` → handler Task/responder | handler Taskの唯一のowner。resolved/closeでcancel + await、method-specific responseのみencode |
@@ -259,6 +260,7 @@ CodexAppServer facade
 | `RequestSerializer` | package actor | Taskを作らない | queued waiterはcancel時即remove。active laneはpre-write cancelだけ即releaseし、written後はcorrelated response + method-required cleanupまで保持する。same operationのcleanupだけがscoped lane tokenでreentrant sendでき、last leave後にlaneを削除 |
 | `RequestOperationState` | `Synchronization.Mutex` checked `Sendable` value | callerがcancellation-shielded local operation Taskを1つ生成しhandleをscope終了までawait | write acceptance/response identity/caller-cancel/cleanup completionをexactly once記録。Task handleを保存・detachせず、callerはcancel後もcompletionをawaitする |
 | `TurnReplayStore` | package actor | Taskを作らない | live generation subscribers + weak handle-state registrationsを所有し、terminal snapshotをstateへ渡してraw historyを解放 |
+| `ThreadEventHub` | `Synchronization.Mutex` stateを持つchecked `Sendable` final class | Taskを作らない | threadごとのcurrent compact generation、request前checkpoint、bounded subscriber channel、connection failure terminalを所有。subscription cancellation endpointは同期remove/resumeしactor hopを作らない |
 | `TurnGenerationHandleState` | package actor | Taskを作らない | `.live(lease) → .terminal(compactSnapshot)` または `.terminated(error)` を一度だけ遷移し、live leaseを同transactionでrelease。collect/cancel/closeConnectionが同stateを読む |
 | `ServerRequestRegistry` | package actor | configured handler Taskを生成 | handler handle/responderの唯一owner。resolved/closeでcancel + await |
 | `AccountEventHub` | package actor | Taskを作らない | subscriber continuationとfinish completionを所有 |
@@ -989,10 +991,13 @@ public struct CodexReviewSession {
 - terminalへ切り替わったper-turn handleの `closeConnection()` はidempotent no-opである。再利用可能なthread/rootは引き続きshared authorityを閉じられる。
 - package review-event/response/progress iteratorはsubscriberごとにcapacity 256のbounded relayを `TurnReplayStore` へ登録する。incremental event overflow時はそのsubscriberのpending incremental eventsをcurrent accumulated `CodexTurnSnapshot` 1件へatomic compactし、snapshot以後のeventsだけを後置する。terminalはreserved non-droppable control slotを使い、必要ならfinal snapshot→terminalの順でdeliveryしてfinishする。slow subscriberはrouterや別subscriberをblockせず、overflowはdiagnosticへ記録する。public `CodexReviewSession`はincremental sequenceを公開せず、cached `collect/cancel/closeConnection`だけを提供する。
 - late review/response iteratorはraw historyをreplayせず、compact terminal snapshot→terminal eventの最大2件をyieldしてfinishする。package progress projectionはcumulative snapshotなのでbuffer newest 1 + reserved terminalとし、incremental item/delta projectionへ使わない。
+- reusable threadのpackage event sequenceは `ThreadEventHub` が所有する。`withThreadEventGeneration` はrequest送信前にopaque `ThreadEventGenerationCheckpoint`を登録し、request中のearly eventをそのcheckpointのbounded compact stateへroutingする。response successはcheckpointをcurrent generationへatomic commitし、failure/cancellationはexplicit discardする。`Int` history cursor、post-response global-history slicing、detached bridge Taskは残さない。detached reviewだけはresponseで確定したturn IDを `beginGeneration(including:)` へ渡し、hub内の同turn compact stateを採用する。
+- `ThreadEventHub` はthreadごとにcurrent generationを最大1件だけ保持し、subscriberごとにcapacity 256のbounded channelを持つ。257件目ではknown incremental eventsをcurrent `CodexTurnSnapshot` + newest token usage/statusへatomic compactし、unknown diagnosticsはbounded newest slotsだけを残す。terminal/closedはnon-droppable control eventで、必要ならfinal snapshot→terminal/closedの順にdeliveryする。同一turnの同値terminalはexactly-once、異なるterminalはcontract violationである。generation commitは未消費の旧generation queueをnew compact generationでsupersedeし、generation resetまたはconnection closeで旧stateを解放する。
+- thread event sequence/iteratorのtask cancellation、explicit cancel、最後のcopy releaseはsynchronous cancellation endpointでそのsubscriberだけをremoveし、待機continuationをresumeする。hub、sequence、routerはTaskやconnection leaseを保持しない。connection failureはpending raw eventsを破棄して全subscriberとlate subscriberを同じ `CodexAppServerError.connectionTerminated` で終了し、thread/closedはcompact stateをdelivery後にnormal finishする。
 - connection subscriberはwarning/retry/deprecation/unknownのnewest 32件 + reserved terminalだけを持つ。terminalは過去diagnosticをsupersedeして次deliveryとなり、late subscriberへ1件replayしてfinishする。
 - `AccountEventHub` はsparse rate-limit updateをfull `CodexRateLimits`へmergeしてfan-outし、payloadがfull accountでない`account/updated`はcoalescible `.accountChanged` invalidationとしてnewest 1件を保持する。full accountが必要なconsumerは`account()`をexplicit refetchする。subscriber bufferはnewest account invalidation 1 + newest rate-limit 1 + newest diagnostic 16とする。login terminalはbroad account streamへ入れずID-correlated `CodexLoginHandle.result()`だけが所有する。connection terminalをdropせず、raw sparse updateやunbounded historyをsubscriberへ移さない。
 - 再利用可能な `CodexThread` はconnection leaseだけを保持し、active/terminal generationを保持しない。各 response/review handleが自分のgeneration stateとterminal snapshotを所有するため、threadで次のturnを開始しても既存handleのlate resultを壊さない。
-- start/resume/review operation は request送信前に generation leaseを登録し、request中に届くearly eventを同じleaseへroutingする。routerのglobal append-only historyから後で拾う経路は残さない。
+- start/resume/review operation は request送信前に per-turn generation leaseとthread generation checkpointを登録し、request中に届くearly eventを同じownerへroutingする。routerのglobal append-only historyから後で拾う経路は残さない。
 - 全logical handle/value copyはconnection-wide single leaseを共有する。connection closeは残る全active generationをtyped terminationにする。
 - explicit `closeConnection()` completionが唯一のgraceful-close contractである。single leaseの最後のcopyが明示closeなしにdropされた場合、deinitはactor hopやownerless Taskを作らず`ProcessTerminationToken.terminateOnce()`だけを同期実行してchild-process leakを防ぐ。domain stream finish/task join/reap completionは保証しないため、tests/production compositionは必ず明示closeをawaitする。
 
@@ -4145,7 +4150,7 @@ pinned upstreamは `review_rollout_assistant` が同一review-exit operationのc
 1. **W0 — characterization and topology**: current-v2 terminal/error/close/query/fake/CRK invariantsをtestsで固定し、CodexKit umbrella削除とdirect importsへ移行。
 2. **W0.5 — MCP dependency lifecycle**: Swift SDK forkでrequest childrenのstructured ownershipとawaitable `Server.stop()`を実装・package testし、明示publish承認後にexact fork commitへpinして`Package.resolved`を更新する。CRK変更より先にfork contractをgreenにする。
 3. **W1 — AppServer terminal/error**: `CodexTurnOutcome`、legal turn snapshot、events/progress/collect、layered errors、deadlines。DataKit/CRK compile migrationを同じ変更系列で完了し、旧 classifierを削除。
-4. **W2 — AppServer lifecycle/wire**: `JSONRPCTransport`、connection close authority、strong handle leases、process token、handle replay、lane cleanup、typed server requests、notification disposition、diagnostics、item/account reducers、strict current-v2 decoder。各変更でTesting transportも同じseamへcompile migrationする。
+4. **W2 — AppServer lifecycle/wire**: `JSONRPCTransport`、connection close authority、strong handle leases、process token、handle replay、`ThreadEventHub` + request前generation checkpoint、lane cleanup、typed server requests、notification disposition、diagnostics、item/account reducers、strict current-v2 decoder。各変更でTesting transportも同じseamへcompile migrationする。
 5. **W3 — stock-login/account vertical slice**: SDKを `account/login/start` / cancel / completed + post-success account-update readinessへ縮約し、**同じintegration wave**でTesting login emitter/transport controls、Host `LoginSession`/`AccountRegistryStore`/`AccountRuntimeTransitionCoordinator`（unconfirmed-login handoff、journal-before-logout、final-stop arbitrationを含む）、CRK store/AuthModel throwing actions、ReviewUI catch sites、Tools factory/Host tests、one-shot URL openerへ移行してnative auth/WebSession/failure-count surfaceを削除する。SDKだけを先に削除してHost/UI/testsをcompile不能にする中間commitや、login fixtureをW4へ先送りするcommitは作らない。
 6. **W4 — non-login Testing/DataKit**: opaque current-v2 fixture、strict thread store/transport/emitter/injector、typed query plan、mutation strategy、load coordinator、shared observation、deterministic external fixture。
 7. **W5 — CRK core/recovery/MCP**: validated IDs/output、typed backend terminal/failure、publication barrier、cycle-free runtime、phase-scoped recovery worker、restart coordinator、in-memory run lifetimeへ揃えた`ReviewThreadRetentionRegistry`/crash orphan journal/final retirement、MCP session reservation/isolation/HTTP lifetimeをowner順に移行し、synthetic/fallback/resume-to-cancelを削除する。
