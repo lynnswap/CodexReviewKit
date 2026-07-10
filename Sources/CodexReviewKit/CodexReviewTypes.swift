@@ -285,11 +285,75 @@ package extension CodexReviewBackendModel.Review {
     }
 }
 
+package struct ReviewTurnFailure: Equatable, Sendable {
+    package enum Code: Equatable, Sendable {
+        case contextWindowExceeded
+        case sessionBudgetExceeded
+        case usageLimitExceeded
+        case serverOverloaded
+        case cyberPolicy
+        case httpConnectionFailed(status: UInt16?)
+        case responseStreamConnectionFailed(status: UInt16?)
+        case internalServerError
+        case unauthorized
+        case badRequest
+        case threadRollbackFailed
+        case sandboxError
+        case responseStreamDisconnected(status: UInt16?)
+        case responseTooManyFailedAttempts(status: UInt16?)
+        case activeTurnNotSteerable(kind: String)
+        case other
+        case unknown(rawValue: String)
+    }
+
+    package var message: String
+    package var code: Code?
+    package var additionalDetails: String?
+
+    package init(
+        message: String,
+        code: Code? = nil,
+        additionalDetails: String? = nil
+    ) {
+        self.message = message
+        self.code = code
+        self.additionalDetails = additionalDetails
+    }
+}
+
+package enum ReviewBackendFailure: Error, Equatable, Sendable {
+    case message(String)
+    case missingReviewOutput(turnID: String)
+    case invalidTerminalStatus(
+        rawStatus: String,
+        turnID: String,
+        turnFailure: ReviewTurnFailure?
+    )
+    case turnFailed(ReviewTurnFailure)
+    case interruptedByBackend(message: String?)
+
+    package var message: String {
+        switch self {
+        case .message(let message):
+            message
+        case .missingReviewOutput:
+            "Review completed without review output."
+        case .invalidTerminalStatus(let rawStatus, _, _):
+            "Review ended with invalid terminal status \(rawStatus)."
+        case .turnFailed(let failure):
+            failure.message
+        case .interruptedByBackend(let message):
+            message?.nilIfEmpty ?? "Review was interrupted by the backend."
+        }
+    }
+}
+
 package extension CodexReviewBackendModel.Review {
     enum Event: Equatable, Sendable {
         case started(turnID: String, reviewThreadID: String?, model: String?)
         case completed(CodexReviewBackendModel.Review.Completion)
-        case failed(String)
+        case interrupted(message: String?)
+        case failed(ReviewBackendFailure)
         case cancelled(String)
     }
 }

@@ -184,18 +184,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         guard abandonedReviewAttemptIDs.contains(run.attemptID) == false else {
             return
         }
-        let session = await reviewEventSession(for: run)
-        await session.requestCancellation(message: reason.message)
-        do {
-            _ = try await cancelReviewTurn(for: run)
-            await finishReviewEventStream(
-                threadID: run.threadID,
-                cancellationMessage: reason.message
-            )
-        } catch {
-            await session.clearCancellationRequest()
-            throw error
-        }
+        _ = try await cancelReviewTurn(for: run)
     }
 
     package func prepareReviewRestart(
@@ -260,7 +249,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         var completedMetrics: ReviewBackendEventSessionMetrics?
         var additionalCleanupThreadIDs: [String] = []
         if let session = unregisterReviewEventSession(for: run) {
-            await session.finish(cancellationMessage: nil)
+            await session.finish()
             let metrics = await session.metricsSnapshot()
             additionalCleanupThreadIDs = await session.cleanupThreadIDs()
             completedMetrics = metrics
@@ -440,16 +429,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         return Array(runsByAttemptID.values)
     }
 
-    private func finishReviewEventStream(
-        threadID: String,
-        cancellationMessage: String?
-    ) async {
-        guard let session = reviewEventSession(forThreadID: threadID) else {
-            return
-        }
-        await session.finish(cancellationMessage: cancellationMessage)
-    }
-
     private func cancelReviewTurn(
         for run: CodexReviewBackendModel.Review.Run
     ) async throws -> CodexTurnCancellation {
@@ -506,152 +485,93 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
 
 }
 
-private struct AppServerTypedReviewEvent: Sendable {
-    var events: [CodexReviewBackendModel.Review.Event]
-    var controlThreadID: String?
-
-    init(
-        events: [CodexReviewBackendModel.Review.Event],
-        controlThreadID: String? = nil
-    ) {
-        self.events = events
-        self.controlThreadID = controlThreadID
-    }
-}
-
-private enum AppServerTypedItemPhase {
-    case started
-    case updated
-    case completed
-}
-
 private enum AppServerTypedReviewEventAdapter {
     static func started(
         review: CodexReviewSession,
         run: CodexReviewBackendModel.Review.Run
-    ) -> AppServerTypedReviewEvent {
-        .init(
-            events: [
-                .started(
-                    turnID: review.turnID.rawValue,
-                    reviewThreadID: review.reviewThreadID.rawValue,
-                    model: run.model
-                )
-            ],
-            controlThreadID: review.reviewThreadID.rawValue
+    ) -> CodexReviewBackendModel.Review.Event {
+        .started(
+            turnID: review.turnID.rawValue,
+            reviewThreadID: review.reviewThreadID.rawValue,
+            model: run.model
         )
     }
 
     static func convert(
-        _ event: CodexReviewEvent,
-        review: CodexReviewSession
-    ) -> AppServerTypedReviewEvent {
-        let controlThreadID = review.reviewThreadID.rawValue
-        return switch event {
-        case .turnStarted:
-            .init(events: [], controlThreadID: controlThreadID)
-        case .turnCompleted(let response):
-            .init(events: terminalEvents(for: response), controlThreadID: controlThreadID)
-        case .turnFailed(_, let message):
-            .init(events: [.failed(message.nilIfEmpty ?? "Failed.")], controlThreadID: controlThreadID)
-        case .itemStarted(let item, _):
-            .init(events: itemEvents(item, phase: .started), controlThreadID: controlThreadID)
-        case .itemUpdated(let item, _):
-            .init(events: itemEvents(item, phase: .updated), controlThreadID: controlThreadID)
-        case .itemCompleted(let item, _):
-            .init(events: itemEvents(item, phase: .completed), controlThreadID: controlThreadID)
-        case .message,
-            .messageDelta:
-            .init(events: [], controlThreadID: controlThreadID)
-        case .reasoningSummaryPartAdded:
-            .init(events: [], controlThreadID: controlThreadID)
-        case .reasoningDelta:
-            .init(events: [], controlThreadID: controlThreadID)
-        case .tokenUsageUpdated:
-            .init(events: [], controlThreadID: controlThreadID)
-        case .statusChanged(.idle), .statusChanged(.active(activeFlags: _)):
-            .init(events: [], controlThreadID: controlThreadID)
-        case .statusChanged(.notLoaded):
-            .init(events: [.failed("Review thread is no longer loaded.")], controlThreadID: controlThreadID)
-        case .statusChanged(.systemError):
-            .init(events: [.failed("Review thread has a system error.")], controlThreadID: controlThreadID)
-        case .statusChanged(.unknown(let status)):
-            .init(
-                events: unknownStatusEvents(status, turnID: review.turnID.rawValue),
-                controlThreadID: controlThreadID
-            )
-        case .closed:
-            .init(events: [.failed("Review thread closed.")], controlThreadID: controlThreadID)
-        case .unknown(let raw):
-            .init(events: unknownEvents(raw), controlThreadID: controlThreadID)
-        }
-    }
-
-    private static func terminalEvents(
-        for response: CodexResponse
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        if let message = response.errorMessage?.nilIfEmpty {
-            return terminalFailureEvents(status: response.status, message: message)
-        }
-        if response.status?.isFailure == true {
-            return terminalFailureEvents(
-                status: response.status,
-                message: response.status?.rawValue ?? "Failed."
+        _ outcome: CodexTurnOutcome
+    ) -> CodexReviewBackendModel.Review.Event {
+        switch outcome {
+        case .completed(let response):
+            guard let finalReview = response.transcript.reviewOutputText?.nilIfEmpty else {
+                return .failed(.missingReviewOutput(turnID: response.turnID.rawValue))
+            }
+            return .completed(finalReview: finalReview)
+        case .interrupted:
+            return .interrupted(message: nil)
+        case .failed(let failedTurn):
+            return .failed(.turnFailed(map(failedTurn.error)))
+        case .invalidTerminalStatus(let rawStatus, let error, let response):
+            return .failed(
+                .invalidTerminalStatus(
+                    rawStatus: rawStatus,
+                    turnID: response.turnID.rawValue,
+                    turnFailure: error.map(map)
+                )
             )
         }
-        guard let finalReview = reviewCompletionText(for: response) else {
-            return [.failed("Review completed without review output.")]
+    }
+
+    private static func map(_ error: CodexTurnError) -> ReviewTurnFailure {
+        .init(
+            message: error.message,
+            code: error.info.map(map),
+            additionalDetails: error.additionalDetails
+        )
+    }
+
+    private static func map(_ info: CodexErrorInfo) -> ReviewTurnFailure.Code {
+        switch info {
+        case .contextWindowExceeded:
+            .contextWindowExceeded
+        case .sessionBudgetExceeded:
+            .sessionBudgetExceeded
+        case .usageLimitExceeded:
+            .usageLimitExceeded
+        case .serverOverloaded:
+            .serverOverloaded
+        case .cyberPolicy:
+            .cyberPolicy
+        case .httpConnectionFailed(let status):
+            .httpConnectionFailed(status: status)
+        case .responseStreamConnectionFailed(let status):
+            .responseStreamConnectionFailed(status: status)
+        case .internalServerError:
+            .internalServerError
+        case .unauthorized:
+            .unauthorized
+        case .badRequest:
+            .badRequest
+        case .threadRollbackFailed:
+            .threadRollbackFailed
+        case .sandboxError:
+            .sandboxError
+        case .responseStreamDisconnected(let status):
+            .responseStreamDisconnected(status: status)
+        case .responseTooManyFailedAttempts(let status):
+            .responseTooManyFailedAttempts(status: status)
+        case .activeTurnNotSteerable(let kind):
+            .activeTurnNotSteerable(kind: kind)
+        case .other:
+            .other
+        case .unknown(let rawValue):
+            .unknown(rawValue: rawValue)
         }
-        return [
-            .completed(finalReview: finalReview)
-        ]
-    }
-
-    private static func reviewCompletionText(for response: CodexResponse) -> String? {
-        response.transcript.reviewOutputText?.nilIfEmpty
-            ?? response.finalAnswer?.nilIfEmpty
-            ?? response.transcript.finalAnswer?.nilIfEmpty
-    }
-
-    private static func unknownStatusEvents(
-        _: String,
-        turnID _: String
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        []
-    }
-
-    private static func terminalFailureEvents(
-        status: CodexTurnStatus?,
-        message: String
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        switch status {
-        case .interrupted, .cancelled:
-            [.cancelled(message)]
-        case .failed, .running, .completed, .unknown, nil:
-            [.failed(message)]
-        }
-    }
-
-    private static func itemEvents(
-        _ item: CodexThreadItem,
-        phase: AppServerTypedItemPhase
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        guard item.kind.rawValue != "enteredReviewMode" else {
-            return []
-        }
-        return []
-    }
-
-    private static func unknownEvents(
-        _: CodexRawNotification
-    ) -> [CodexReviewBackendModel.Review.Event] {
-        []
     }
 }
 
 private actor AppServerReviewEventSession {
     private let pipeline: ReviewBackendEventSession
-    private var typedReviewStreamTask: Task<Void, Never>?
+    private var terminalCollectionTask: Task<Void, Never>?
     private var reviewSession: CodexReviewSession?
 
     init(
@@ -687,26 +607,18 @@ private actor AppServerReviewEventSession {
         await pipeline.cleanupThreadIDs()
     }
 
-    func requestCancellation(message: String) async {
-        await pipeline.requestCancellation(message: message)
-    }
-
-    func clearCancellationRequest() async {
-        await pipeline.clearCancellationRequest()
-    }
-
-    func finish(cancellationMessage: String?) async {
-        cancelTypedReviewStream()
-        await pipeline.finish(cancellationMessage: cancellationMessage)
+    func finish() async {
+        cancelTerminalCollection()
+        await pipeline.finish(throwing: nil)
     }
 
     func finish(throwing error: (any Error)?) async {
-        cancelTypedReviewStream()
+        cancelTerminalCollection()
         await pipeline.finish(throwing: error)
     }
 
     func abandon() async {
-        cancelTypedReviewStream()
+        cancelTerminalCollection()
         await pipeline.abandon()
     }
 
@@ -721,11 +633,11 @@ private actor AppServerReviewEventSession {
     func detach(subscriptionID _: Int) {}
 
     func startConsuming(_ review: CodexReviewSession) {
-        guard typedReviewStreamTask == nil else {
+        guard terminalCollectionTask == nil else {
             return
         }
         reviewSession = review
-        typedReviewStreamTask = Task { [weak self] in
+        terminalCollectionTask = Task { [weak self] in
             await self?.consume(review)
         }
     }
@@ -741,21 +653,22 @@ private actor AppServerReviewEventSession {
 
     private func consume(_ review: CodexReviewSession) async {
         defer {
-            typedReviewStreamTask = nil
+            terminalCollectionTask = nil
             if reviewSession?.id == review.id {
                 reviewSession = nil
             }
         }
         let run = await pipeline.currentRun()
-        await receive(AppServerTypedReviewEventAdapter.started(review: review, run: run))
+        await receive(
+            AppServerTypedReviewEventAdapter.started(review: review, run: run),
+            controlThreadID: review.reviewThreadID.rawValue
+        )
         do {
-            for try await event in review.events {
-                if Task.isCancelled {
-                    return
-                }
-                await receive(AppServerTypedReviewEventAdapter.convert(event, review: review))
-            }
-            await finish(throwing: nil)
+            let outcome = try await review.collect()
+            await receive(
+                AppServerTypedReviewEventAdapter.convert(outcome),
+                controlThreadID: review.reviewThreadID.rawValue
+            )
         } catch is CancellationError {
             await finish(throwing: CancellationError())
         } catch {
@@ -763,13 +676,16 @@ private actor AppServerReviewEventSession {
         }
     }
 
-    private func receive(_ converted: AppServerTypedReviewEvent) async {
-        await pipeline.receive(converted.events, controlThreadID: converted.controlThreadID)
+    private func receive(
+        _ event: CodexReviewBackendModel.Review.Event,
+        controlThreadID: String
+    ) async {
+        await pipeline.receive([event], controlThreadID: controlThreadID)
     }
 
-    private func cancelTypedReviewStream() {
-        typedReviewStreamTask?.cancel()
-        typedReviewStreamTask = nil
+    private func cancelTerminalCollection() {
+        terminalCollectionTask?.cancel()
+        terminalCollectionTask = nil
         reviewSession = nil
     }
 }

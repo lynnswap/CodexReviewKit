@@ -47,6 +47,22 @@ struct ReviewBackendEventSessionTests {
         #expect(metrics.terminalLatencyMs != nil)
         #expect(await recorder.finishedMetrics() == metrics)
     }
+
+    @Test func callerCancellationDoesNotBecomeServerInterruption() async throws {
+        let interruptedSession = ReviewBackendEventSession(run: makeRun())
+        let interruptedAttempt = await interruptedSession.attempt()
+        await interruptedSession.receive([.interrupted(message: nil)])
+
+        #expect(try await nextEvent(from: interruptedAttempt.events) == .interrupted(message: nil))
+
+        let cancelledSession = ReviewBackendEventSession(run: makeRun())
+        let cancelledAttempt = await cancelledSession.attempt()
+        await cancelledSession.finish(throwing: CancellationError())
+
+        await #expect(throws: CancellationError.self) {
+            try await cancelledAttempt.events.next()
+        }
+    }
 }
 
 private actor ReviewBackendEventSessionRecorder {

@@ -1319,6 +1319,30 @@ struct CodexReviewStoreCommandTests {
         }
     }
 
+    @Test func serverInterruptionWithoutPendingCancellationFailsReview() async throws {
+        let backend = FakeCodexReviewBackend()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            async let result = store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .baseBranch("main"))
+            )
+            try #require(
+                await StoreSnapshotProbe(store: store)
+                    .waitUntilRunStatus(.running, runID: "run-1") != nil
+            )
+
+            await backend.yield(.interrupted(message: nil))
+            let read = try await result
+
+            #expect(read.core.lifecycle.status == .failed)
+            #expect(read.core.lifecycle.errorMessage == "Review was interrupted by the backend.")
+        }
+    }
+
     @Test func pendingNetworkOutageDefersStreamFailureUntilRecovery() async throws {
         let initialRun = CodexReviewBackendModel.Review.Run(
             threadID: "thread-1",
@@ -1502,7 +1526,7 @@ struct CodexReviewStoreCommandTests {
             )
             async let cancel = store.cancelReview(runID: "run-1", cancellation: .mcpClient(message: "Stop"))
             try await backend.waitForInterruptReview(timeout: .seconds(2))
-            await backend.yield(.completed(finalReview: "No issues found."))
+            await backend.yield(.interrupted(message: nil))
             await interruptGate.open()
             _ = try await cancel
             let read = try await result

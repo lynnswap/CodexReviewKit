@@ -826,8 +826,13 @@ extension CodexReviewStore {
             runRecord.core.lifecycleMessage = "Review started."
         case .completed(let completion):
             completeReview(runRecord, finalReview: completion.finalReview)
-        case .failed(let message):
-            markReviewFailed(runRecord, message: message)
+        case .interrupted(let message):
+            markReviewFailed(
+                runRecord,
+                message: ReviewBackendFailure.interruptedByBackend(message: message).message
+            )
+        case .failed(let failure):
+            markReviewFailed(runRecord, message: failure.message)
         case .cancelled(let message):
             let cancellation = runRecord.core.lifecycle.cancellation ?? .system(message: message)
             try? completeCancellationLocally(
@@ -889,7 +894,7 @@ extension CodexReviewStore {
 private extension CodexReviewBackendModel.Review.Event {
     var completesReviewRun: Bool {
         switch self {
-        case .completed, .failed, .cancelled:
+        case .completed, .interrupted, .failed, .cancelled:
             true
         case .started:
             false

@@ -39,7 +39,6 @@ package actor ReviewBackendEventSession {
     private let mailbox: BackendReviewEventMailbox
     private let callbacks: ReviewBackendEventSessionCallbacks
     private var reviewThreadIDsForCleanup: [String] = []
-    private var cancellationRequestedMessage: String?
     private let createdAt = Date()
     private var finished = false
     private var metrics = ReviewBackendEventSessionMetrics()
@@ -76,19 +75,6 @@ package actor ReviewBackendEventSession {
         var threadIDs = reviewThreadIDsForCleanup.filter { $0 != run.threadID }
         threadIDs.append(run.threadID)
         return threadIDs
-    }
-
-    package func requestCancellation(message: String) {
-        cancellationRequestedMessage = message
-    }
-
-    package func clearCancellationRequest() {
-        cancellationRequestedMessage = nil
-    }
-
-    package func finish(cancellationMessage: String?) async {
-        cancellationRequestedMessage = cancellationMessage
-        await finishSession(cancellationMessage: cancellationMessage)
     }
 
     package func finish(throwing error: (any Error)?) async {
@@ -137,18 +123,6 @@ package actor ReviewBackendEventSession {
         }
     }
 
-    private func finishSession(cancellationMessage: String?) async {
-        guard finished == false else {
-            return
-        }
-        if let cancellationMessage {
-            _ = await emit(.cancelled(cancellationMessage))
-        } else {
-            await mailbox.finish()
-        }
-        finished = true
-    }
-
     private func noteReviewThreadIDForCleanup(_ reviewThreadID: String?) {
         guard let reviewThreadID = reviewThreadID?.nilIfEmpty,
             reviewThreadID != run.threadID,
@@ -176,7 +150,7 @@ package actor ReviewBackendEventSession {
         switch event {
         case .started(let turnID, _, _):
             await callbacks.recordTurnStarted(turnID)
-        case .completed, .failed, .cancelled:
+        case .completed, .interrupted, .failed, .cancelled:
             await callbacks.recordFinished(run, metrics)
         }
     }
@@ -203,7 +177,7 @@ package actor ReviewBackendEventSession {
 private extension CodexReviewBackendModel.Review.Event {
     var isReviewBackendTerminal: Bool {
         switch self {
-        case .completed, .failed, .cancelled:
+        case .completed, .interrupted, .failed, .cancelled:
             true
         case .started:
             false

@@ -176,7 +176,7 @@ package actor BackendReviewEventMailbox {
 
     private static func isTerminal(_ event: CodexReviewBackendModel.Review.Event) -> Bool {
         switch event {
-        case .completed, .failed, .cancelled:
+        case .completed, .interrupted, .failed, .cancelled:
             return true
         case .started:
             return false

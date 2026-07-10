@@ -440,7 +440,7 @@ struct CodexReviewMCPHTTPServerTests {
                 sessionID: sessionID,
                 bodyData: requestBody
             )
-            await backend.yield(.failed("Backend failed"))
+            await backend.yield(.failed(.message("Backend failed")))
             let resolved = try decodeSSEJSON(from: try await responseData)
 
             #expect(resolved.value(for: ["result", "isError"]) as? Bool == true)

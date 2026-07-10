@@ -135,35 +135,6 @@ struct AppServerClientTests {
         #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
     }
 
-    @Test func backendCompletesReviewFromCompatibleFinalAnswerWhenReviewOutputIsAbsent() async throws {
-        let runtime = try await CodexAppServerTestRuntime.start()
-        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
-        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
-        await runtime.transport.waitForNotificationStreamCount(1)
-        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
-
-        let attempt = try await backend.startReview(makeReviewStart(target: .baseBranch("main")))
-        var iterator = eventSequence(attempt).makeAsyncIterator()
-
-        try await runtime.transport.emitServerNotification(
-            method: "turn/completed",
-            params: TestTurnNotification(
-                threadID: "review-thread",
-                turn: .init(
-                    id: "turn-1",
-                    status: "completed",
-                    items: [
-                        .finalAnswer(id: "assistant-final", text: "No issues found.")
-                    ]
-                )
-            )
-        )
-
-        #expect(
-            try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .completed(finalReview: "No issues found."))
-    }
-
     @Test func backendDoesNotPromoteThreadScopedFinalAnswerDeltaWithoutTurnID() async throws {
         let runtime = try await CodexAppServerTestRuntime.start()
         try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
@@ -193,7 +164,9 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .failed("Review completed without review output."))
+        #expect(
+            try await iterator.next()
+                == .failed(.missingReviewOutput(turnID: "turn-1")))
     }
 
     @Test func backendDoesNotPromoteThreadlessAgentMessageToInlineReview() async throws {
@@ -220,7 +193,9 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "thread-1", model: "gpt-5"))
-        #expect(try await iterator.next() == .failed("Review completed without review output."))
+        #expect(
+            try await iterator.next()
+                == .failed(.missingReviewOutput(turnID: "turn-1")))
     }
 
     @Test func backendFailsCompletedReviewWithoutReviewOutput() async throws {
@@ -243,7 +218,121 @@ struct AppServerClientTests {
 
         #expect(
             try await iterator.next() == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
-        #expect(try await iterator.next() == .failed("Review completed without review output."))
+        #expect(
+            try await iterator.next()
+                == .failed(.missingReviewOutput(turnID: "turn-1")))
+    }
+
+    @Test func backendPreservesTypedTurnFailure() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart())
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(
+                    id: "turn-1",
+                    status: "failed",
+                    error: .init(
+                        message: "Capacity exhausted.",
+                        codexErrorInfo: "serverOverloaded",
+                        additionalDetails: "retry after the maintenance window"
+                    )
+                )
+            )
+        )
+
+        #expect(
+            try await iterator.next()
+                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(
+            try await iterator.next()
+                == .failed(
+                    .turnFailed(
+                        .init(
+                            message: "Capacity exhausted.",
+                            code: .serverOverloaded,
+                            additionalDetails: "retry after the maintenance window"
+                        )
+                    )
+                )
+        )
+    }
+
+    @Test func backendKeepsServerInterruptionDistinctFromCallerCancellation() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart())
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(id: "turn-1", status: "interrupted")
+            )
+        )
+
+        #expect(
+            try await iterator.next()
+                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(try await iterator.next() == .interrupted(message: nil))
+    }
+
+    @Test func backendPreservesUnknownTerminalStatusError() async throws {
+        let runtime = try await CodexAppServerTestRuntime.start()
+        try await runtime.transport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await runtime.transport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "review-thread")
+        await runtime.transport.waitForNotificationStreamCount(1)
+        let backend = AppServerCodexReviewBackend(appServer: runtime.server)
+
+        let attempt = try await backend.startReview(makeReviewStart())
+        var iterator = eventSequence(attempt).makeAsyncIterator()
+
+        try await runtime.transport.emitServerNotification(
+            method: "turn/completed",
+            params: TestTurnNotification(
+                threadID: "review-thread",
+                turn: .init(
+                    id: "turn-1",
+                    status: "pausedByFutureServer",
+                    error: .init(
+                        message: "Future terminal detail.",
+                        codexErrorInfo: "futureErrorCode",
+                        additionalDetails: "future additional detail"
+                    )
+                )
+            )
+        )
+
+        #expect(
+            try await iterator.next()
+                == .started(turnID: "turn-1", reviewThreadID: "review-thread", model: "gpt-5"))
+        #expect(
+            try await iterator.next()
+                == .failed(
+                    .invalidTerminalStatus(
+                        rawStatus: "pausedByFutureServer",
+                        turnID: "turn-1",
+                        turnFailure: .init(
+                            message: "Future terminal detail.",
+                            code: .unknown(rawValue: "futureErrorCode"),
+                            additionalDetails: "future additional detail"
+                        )
+                    )
+                )
+        )
     }
 
     @Test func backendIgnoresAgentMessageDeltasInLifecycleStream() async throws {
@@ -718,12 +807,25 @@ private struct TestTurn: Encodable, Sendable {
     var id: String
     var status: String
     var items: [TestItem]?
+    var error: TestTurnError?
 
-    init(id: String, status: String, items: [TestItem]? = nil) {
+    init(
+        id: String,
+        status: String,
+        items: [TestItem]? = nil,
+        error: TestTurnError? = nil
+    ) {
         self.id = id
         self.status = status
         self.items = items
+        self.error = error
     }
+}
+
+private struct TestTurnError: Encodable, Sendable {
+    var message: String
+    var codexErrorInfo: String?
+    var additionalDetails: String?
 }
 
 private struct TestDeltaNotification: Encodable, Sendable {
@@ -776,8 +878,6 @@ private struct TestItemNotification: Encodable, Sendable {
 private struct TestItem: Encodable, Sendable {
     var type: String
     var id: String
-    var text: String?
-    var phase: String?
     var review: String?
     var command: String?
     var cwd: String?
@@ -788,8 +888,6 @@ private struct TestItem: Encodable, Sendable {
     init(
         type: String,
         id: String,
-        text: String? = nil,
-        phase: String? = nil,
         review: String? = nil,
         command: String? = nil,
         cwd: String? = nil,
@@ -799,24 +897,12 @@ private struct TestItem: Encodable, Sendable {
     ) {
         self.type = type
         self.id = id
-        self.text = text
-        self.phase = phase
         self.review = review
         self.command = command
         self.cwd = cwd
         self.aggregatedOutput = aggregatedOutput
         self.exitCode = exitCode
         self.status = status
-    }
-
-    static func finalAnswer(id: String, text: String) -> TestItem {
-        .init(
-            type: "agentMessage",
-            id: id,
-            text: text,
-            phase: "final_answer",
-            status: "completed"
-        )
     }
 
     static func exitedReviewMode(id: String, review: String) -> TestItem {
