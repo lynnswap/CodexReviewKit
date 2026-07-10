@@ -920,9 +920,8 @@ public struct CodexRetryDiagnostic: Equatable, Sendable {
 }
 
 public struct CodexDeprecationNotice: Equatable, Sendable {
-    public var feature: String { get }
-    public var message: String { get }
-    public var replacement: String? { get }
+    public var summary: String { get }
+    public var details: String? { get }
 }
 
 public struct CodexConnectionEvents: AsyncSequence, Sendable {
@@ -975,6 +974,7 @@ public struct CodexReviewSession {
 }
 ```
 
+- `CodexDeprecationNotice` は pinned `DeprecationNoticeNotification` の `summary` / `details` をlosslessに保持する。`details` はmigration stepsまたはrationaleを含み得るため、`feature` / `replacement` を推測で合成しない。
 - connection/account sequencesはroot-bound non-retaining subscriptionで、connection leaseを持たずapp-server processを延命しない。sequence/iteratorのtask cancellation、`cancel()`、最後のcopy releaseはいずれもそのsubscriberだけをunsubscribeする。root `CodexAppServer`の明示closeはconnection sequenceへ`.terminated(.closedByCaller)`を必達させて両sequenceをfinishし、transport/process failureはconnection sequenceへtyped terminalをyieldしたうえでaccount iteratorを`CodexAppServerError.connectionTerminated`で終了する。
 - `ConnectionTerminationArbiter`はsupervisor actorが最初に受理したterminal causeを固定する。explicit close requestがEOF/process exit signalより先なら`.closedByCaller`、transport failureが先なら`.transportFailure`、process waiter exitが先なら`.processExited`である。後着causeはdiagnosticへ残すだけでpublic terminalを上書きしない。hubはbounded diagnosticsとこのcompact terminalだけを保持し、late connection subscriberへterminal 1件をreplayしてfinishする。
 - `close()` は `ConnectionSupervisor` のshared close taskへ収束し、§5.3の固定順序を最後まで完了する。
