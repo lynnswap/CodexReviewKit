@@ -1,206 +1,222 @@
-# CodexKit / CodexReviewKit 設計・API 監査(2026-07-10)
+# CodexKit / CodexReviewKit 設計・API 監査（2026-07-10）
 
 | 項目 | 内容 |
 |---|---|
-| 対象 | CodexKit `3f6216c`(CodexAppServerKit / CodexDataKit / CodexAppServerKitTesting)、CodexReviewKit `6c1b432` |
-| 一次情報 | upstream codex `8347b8d`(/Users/kn/Dev/codex)、openai-python `2.43.0`(SDK ergonomics ベンチマーク) |
-| 方法 | multi-agent 監査: 7 mapper(AppServerKit / DataKit / Testing / upstream protocol / openai-python / 消費側 workaround / CRK 構造)+ 3 cross 分析(coverage / conformance / DX)→ 重複統合(raw 130 → canonical 89)→ 領域別 adversarial 検証 |
-| 検証ステータス | high+medium 53 件を検証: **CONFIRMED 50 / PLAUSIBLE 1 / REFUTED 2**。low 36 件は未検証(Appendix B) |
+| 対象 | CodexKit `3f6216c`（CodexAppServerKit / CodexDataKit / CodexAppServerKitTesting）、CodexReviewKit `6c1b432` |
+| 一次情報 | upstream codex `8347b8d`（固定 worktree: `/Users/kn/Dev/checkout/codex-8347b8d`）、CodexKit `3f6216c`（`/Users/kn/Dev/checkout/CodexKit`） |
+| 方法 | owner map → protocol / lifecycle / identity invariant → static trace。初期 mapper の raw 130 件を canonical 89 件へ統合し、初期 high+medium 53 件を adversarial に再検証 |
+| 検証ステータス | 初期 high+medium 53 件と追加 low 1 件を再判定: **CONFIRMED 49 / PLAUSIBLE 1 / REFUTED・NOT ADOPTED 4**。採用 50 件は Appendix A（high 10 / medium 33 / low 7）、low 35 件は未検証のまま Appendix B |
 
-読み方: 各 finding は Appendix A に id 付きで詳細(証拠 file:line、検証トレース)を収録。本文はクラスタ単位の構造分析。パス表記は `CK:` = CodexKit(`dependencies/CodexKit`)、`CRK:` = 本 repo、`UP:` = upstream codex。
+読み方: 本文はクラスタ単位の判断、Appendix A は id 付きの証拠と failure trace である。パス表記は `CK:` = CodexKit、`CRK:` = 本 repo、`UP:` = upstream codex。severity は実装の存在ではなく、確認できた到達性と利用者影響で再評価した。
 
 ## 1. 結論
 
-PR #16(2026-07-02)時点の 3 弱境界のうち 2.5 は解消済み:
+PR #16（2026-07-02）で問題だった generation 境界と observation multicast は解消済みである。`withThreadEventGeneration` が SDK の generation 切替を所有する。CRK では review worker pipeline が stale-event rejection を共同所有し、`ReviewWorkerEventSource` は subscription generation と pre-enqueue guard、`consumeReviewEvents` / `ReviewNetworkRecoveryLoopState` は attemptID と post-enqueue guard を担う。
 
-1. **generation 境界 — 解消**。`withThreadEventGeneration` が turn/start・compact・review/start・resume の cursor 切替を所有し、`inferredCurrentGenerationEvents` は削除済み。owner レベルのテストで pin されている。
-2. **observation multicast — 解消**。`ThreadEventPump` が model mutation を所有し、`CodexAsyncStreamRelay` が per-subscriber broadcast を行う。
-3. **item identity — 形を変え残存**。`CodexMessageDelta.itemID` は依然 optional(upstream は required)で、fallback-ID/text-dedup 機構は実在しない `agent/message` decode が唯一の駆動源(→ `dk-optional-delta-id-workaround-layer`, `cov-dead-compat-notifications`)。
+現状は単一の「upstream v2 終端契約の誤読」には集約できない。確認できた弱境界は次の 4 群である。
 
-**現存する最大の欠陥は「upstream v2 終端契約の誤読」1 点に集約される。** この誤読が SDK 全層(router / turn sequences / DataKit phase)に染み出し、その代償として旗艦消費者である本 repo が SDK の高レベル review API(`progress` / `collect()` / `response`)を**一切使わず** raw events 上に終端分類を再実装している(`use-highlevel-surface-bypass`)。SDK の便利層を SDK 作者自身が使えないことが、この層の契約が誤っていることの最強の証拠である。
+1. **turn outcome の分類** — upstream の server-side interrupt は `turn/completed(status=interrupted, error=nil)` だが、`CodexTurnStatus.isFailure` が `interrupted` を failure に畳み、collector / progress / DataKit に伝播する。これは最も広い cross-layer cluster である。
+2. **resource lifecycle** — router が自身を保持する Task cycle、`close()` が Task completion を await しない構造、router history と serializer lane の無期限保持に、単一 close/retention owner がない。
+3. **wire boundary** — invented login method、server request への protocol-invalid `{}` 応答、request/transport/decode error の public 型への不完全な写像、現行 v2 で emit されない compatibility route が同居する。
+4. **DataKit / Testing policy owner** — mutation ごとの local-apply/refetch 判断、同時 `load()`、fake の list semantics、手書き wire fixture が別々の source of truth を持つ。
 
-## 2. upstream 契約の一次事実(全て codex-rs 現物で確認済み)
+CRK は raw JSON-RPC を再実装していない。public typed surface の `CodexReviewSession.events` と `cancel()` を使い、terminal aggregate の `progress` / `collect()` / `response` は使っていない（`use-highlevel-surface-bypass`）。これは aggregate 層の outcome/output 契約に摩擦がある証拠だが、SDK の高水準 API 全体が利用不能という証拠ではない。
 
-| protocol 事実 | 根拠(UP: codex-rs) | CodexKit の現状 |
+`thread/closed` cluster は production P1 から外す。upstream 一般では、最後の subscription が unsubscribe または server が存続する multi-connection transport の disconnect で除去され、thread が inactive/idle になると unload する。running thread は unload しない。persisted thread は resume できるが ephemeral thread は unload 後に resume できない。CodexKit の stdio transport は unsubscribe を送らず、last connection close で app-server 自体が終了するため、pinned baseline の live connection から `.closed` は通常観測不能である。
+
+## 2. upstream 契約の一次事実
+
+| protocol 事実 | 根拠（UP: `codex-rs`） | CodexKit への含意 |
 |---|---|---|
-| turn の terminal は **`turn/completed` のみ**。結果は payload の `turn.status`(completed / interrupted / failed / inProgress) | `app-server-protocol/src/protocol/v2/turn.rs:30-35, 392-395` | `turn/failed`・`turn/cancelled` を decode(`CK:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:661,748`)— upstream 全履歴に不存在 |
-| `interrupted` はユーザー中断の**正常終端**(error なし) | turn_processor の interrupt 経路 | `CodexTurnStatus.isFailure` が interrupted/cancelled を失敗扱い(`CK:Sources/CodexAppServerKit/CodexDomainTypes.swift:1878`) |
-| `thread/closed` は **idle unload 通知(再開可)**。終端ではない | `app-server/src/request_processors/thread_lifecycle.rs:406-436` | router が全 subscriber を終端、DataKit は走行中 turn を `.completed` に捏造(`CK:Sources/CodexDataKit/CodexModel.swift:1258`) |
-| `item/updated`・`agent/message` という notification は存在しない | `protocol/common.rs:1613-1710`(grep 0 件) | 両方 decode。`agent/message` が fallback-ID subsystem の唯一の駆動源 |
-| client→server の login request は `account/login/start` / `account/login/cancel` のみ | `protocol/common.rs:1001-1008` | `account/login/complete` + `nativeWebAuthentication` は **invented**(`git log --all -S` 空) |
-| `thread/rollback` は "will be removed soon" | protocol 定義の deprecation 注記 | review restart / `rollback(turnCount:)` / `.revertTranscript` の 3 public 挙動が依存 |
-| `account/rateLimits/updated` は sparse な rolling update(merge 前提) | notification 定義の doc | 置換適用(merge owner 不在)で secondary/planType が消える |
-| server→client request(userInput / permissions)は typed 応答必須 | `ToolRequestUserInputResponse` 等の serde | デフォルトハンドラの `{}` 応答は upstream 側 serde 失敗 → error ログ付き deny 降格 |
+| 現行 v2 の turn terminal notification は `turn/completed`。結果は `turn.status`（completed / interrupted / failed / inProgress） | `app-server-protocol/src/protocol/v2/turn.rs:29-35`、`app-server/README.md` の turn lifecycle | `interrupted` と `failed` を別 outcome に保つ必要がある。Swift aggregate が return / typed outcome / throw のどれを選ぶかは SDK 契約として別途決める |
+| server-side interrupt は `status=interrupted, error=nil` で完了する | `app-server/src/bespoke_event_handling.rs:1438-1459` | `isFailure` への単純集約は情報を失う。caller Task cancellation は `CancellationError` として別に扱う |
+| `thread/closed` は最後の subscription が unsubscribe（または server が存続する multi-connection disconnect）で除去された後の inactive/idle unload。running 中は unload しない。persisted thread だけが後で resume 可能 | `app-server/README.md:140-162,455-477`、`thread_state.rs:542-564`、`thread_processor.rs:2607-2619`、`thread_lifecycle.rs:55-60,351-354,406-436`、`app-server/src/lib.rs:718-719,996-1016,1156-1166` | CodexKit stdio は unsubscribe を送らず、last connection close で server が終了するため `.closed` は通常観測不能。injected/future `.closed` で generation を終えること自体は整合し、turn outcome 合成だけが誤り |
+| `turn/failed` と `item/updated` は一時期 schema に存在したが、現行 baseline ではなく実装から emit された証拠もない。`turn/cancelled` と `agent/message` は exact method history も確認できない | upstream history `a010c1b7fcce` → `ce35cb16b279`、現行 `protocol/common.rs` | 削除は compatibility policy を決めてから行う。fallback identity は `agent/message` だけでなく itemID 欠損 delta でも駆動するが、現行 valid v2 wire は itemID required |
+| client→server login request は `account/login/start` / `account/login/cancel`。stock flow の完了は server notification `account/login/completed` | `app-server-protocol/src/protocol/common.rs:1001-1013,1705-1708`、`account.rs:68-86,124-137` | client request `account/login/complete` + `nativeWebAuthentication` は stock codex との契約にない |
+| `thread/rollback` は “will be removed soon” と明記 | protocol definition の deprecation 注記 | fork/resume が replacement だとは一次情報から断定できない。依存を一箇所へ隔離し、移行仕様を upstream と確定する |
+| `account/rateLimits/updated` は sparse rolling update | `app-server-protocol/src/protocol/v2/account.rs:508-515` | snapshot 置換ではなく merge owner が必要 |
+| server→client request は method ごとの typed response を要求し、abort は `serverRequest/resolved` で通知される | request/response serde、`protocol/v2/notification.rs:52-57` | default `{}` と resolved 無視は request lifecycle contract を破る |
 
-## 3. Owner map — SDK 側の弱境界(現状 → あるべき姿)
+## 3. Owner map
 
-| 責務 | 現状 owner | 問題 | あるべき owner |
+### CodexKit
+
+| 責務 | 現状 | 破られた invariant | 推奨 owner |
 |---|---|---|---|
-| turn 終端の意味論 | `CodexTurnStatus.isFailure` + 各層の独自解釈 | interrupted=失敗の誤読が collect/progress/DataKit phase に増殖 | `CodexTurnStatus` 1 箇所での 3 値終端(成功 / 中断 / 失敗) |
-| thread lifecycle | router(closed=終端と誤読) | unload を終端化、subscriber 即終了、DataKit が成功を捏造 | router が closed を「unload・再購読可」として扱う |
-| エラー型 | **不在** — package `JSONRPC.Error` が素通り | 型で catch 不能。`CodexAppServerError` の 3 case は dead。`error.data`(CodexErrorInfo)全破棄 | send boundary 1 箇所での public typed error へのマップ |
-| 資源解放 | **不在** — deinit ゼロ | router history 無限成長、close() 忘れで codex 子プロセス孤児化 | terminal turn 後の履歴 prune + deinit backstop |
-| fetch mutation 戦略(DataKit) | **不在** — insert/archive/revalidate/remove/refresh が各自判断 | `fix(data)` 9 連続の根。insert だけ `usesServerOwnedOrdering` を見ない非対称が現存 | 単一の per-mutation strategy 型 |
-| wire fixture | **不在** — SDK tests / Testing target / CRK preview の 3 箇所で手書き | 実在しない `turn/failed`・status `"cancelled"` が fixture に混入済み | Testing target が typed emitter を提供 |
+| turn outcome | `CodexTurnStatus.isFailure` と各 sequence / DataKit の分岐 | completed / interrupted / failed と caller cancellation が保存されず、unknown/nil/nonterminal status の扱いも暗黙 | public terminal-outcome 型。completed / interrupted / failed に加え、unknown・nil・terminal notification 内の inProgress は typed invalid-terminal outcome として fail loud |
+| request error boundary | public `CodexAppServerError` は一部で使うが、request/transport/decode error は package/private/raw 型が多い | consumer が server rejection / spawn / invalid response を安定した型で分岐できない | transport が error envelope/data を保持し、client が requestID と request/decode mapping、public start/factory が spawn/scaffold mapping を所有 |
+| connection close | router → Task → router の strong cycle。stop は cancel するが completion を await しない | close 完了後に Task / transport / process が停止した証明がない | 単一 async close authority が I/O stop、Task cancel、Task completion await を所有。独立した synchronous process-terminator token を deinit backstop にする |
+| replay retention | router history と serializer lane が append-only | connection lifetime が memory upper bound になる一方、late/repeated `result()` は terminal replay に依存 | raw deltasを finalized snapshotへ compactし、その snapshotも handle lifetime または documented TTL/LRU + typed expiryで bound。無期限 late resultを保証するなら外部永続 ownerが必要。laneはin-flight完了後に除去 |
+| thread unload | router は current thread generation を finish（整合）するが reason は型に出さず、DataKit/CRK は turn outcome を合成 | generation end と turn success/failure は別契約 | router は必要なら typed unload reason を公開し、DataKit/adapter は outcome を合成しない。persisted resume は新 generation |
+| fetch mutation policy | insert/archive/revalidate/remove/refresh が個別判断 | 同じ membership/order invariant に複数 strategy がある | query plan から導出する単一 per-mutation strategy |
+| wire fixture | SDK tests / Testing target / CRK preview が手書き | fake dialect が production protocol を上書きする | Testing target の method-specific typed builders。現行 method だけを既定で提供 |
 
-### CodexReviewKit 側 owner map(要点)
+### CodexReviewKit
 
-健全な境界(維持すべきもの):
+維持すべき owner:
 
-- domain core(`CodexReviewKit` target)は transport 非依存(import scan で確認: Foundation/Observation/ObservationBridge/Network のみ)
-- UI target は CodexAppServerKit を import しない。preview は `CodexAppServerTestRuntime`(transport 層)で fake し、本番 data flow を保存
-- review event の generation/identity は `ReviewWorkerEventSource`(単調増加 subscription ID + attemptID gating)で構造的に所有 — PR #16 型の cursor dance をこの repo では解消済み
-- MCP session lifecycle は `closeSession` 1 経路に集約。chat-log render は純粋な再投影 + document diff
+- domain core は transport 非依存で、UI target も CodexAppServerKit を import しない。
+- preview は `CodexAppServerTestRuntime` で transport を fake 化し、本番 data flow を通す。
+- review worker pipeline が generation boundary を所有する。`ReviewWorkerEventSource` の subscription generation / pre-enqueue guard と、consumer/recovery state の attemptID / post-enqueue guard はどちらも削除対象ではない。
+- MCP session close は `closeSession`、chat-log render は純粋 projection + document diff に集約されている。
 
-弱い境界:
+弱い owner:
 
-- **login/auth teardown が owner 不在**: `LiveCodexReviewStoreBackend` の 9 mutable fields を 7 つの exit path が手動 reset(`arch-login-state-no-owner`、repo 内で最弱)
-- attemptID identity が 3 層で `"attempt-1"` に fallback し、lookup 経路の get-or-create が registry を clobber(`arch-attempt-id-fallback`)
-- source/review の dual-thread identity を 3 層が独立に再導出(`use-dual-thread-identity`)
-- `CodexReviewHost` + `DirectCodexReviewStoreBackend` はテスト専用の重複 production code(copy-drift 実在: `arch-host-target-test-only`)
+- login flow の 9 state values を 8 cluster が異なる subset で協調し、app-server-scoped `authNotificationTask` は別責務として隣接する（`arch-login-state-no-owner`）。
+- `attemptID` の `"attempt-1"` default は source of truth を増やすが、review run は memory-only で production 作成経路は UUID を設定する。現状は collision bug ではなく latent migration/API hazard（`arch-attempt-id-fallback`）。
+- SDK は `CodexReviewIdentity.sourceThreadID` / `activeTurnThreadID` を持つが、CRK の Run/event plane が String に type-erase し、3 層で再導出する（`use-dual-thread-identity`）。
+- 未使用なのは `CodexReviewHost` **class** と `DirectCodexReviewStoreBackend` であり、production composition を持つ `CodexReviewHost` target 全体ではない（`arch-host-target-test-only`）。
 
-## 4. DX 評価(openai-python の 17 契約をベンチマーク)
+## 4. Consumer-action based DX 評価
 
-**CodexAppServerKit**: 層設計は優秀(transport actor → per-thread serial lane + overload retry → replay 付き router → 値型 domain surface)。寛容 decode(`.unknown` / `rawPayload` 保持)、-32001 限定の jittered retry、fail-fast init、再生可能 stream、tri-state config patch、transport 層 testing product はベンチマーク水準を満たす。弱いのは異常系一式:
+外部 SDK の点数や「17 契約」は証拠表を作っていないため評価根拠にしない。ここでは、CRK が public API だけで start / observe / cancel / close / recover を完遂できるかで評価する。
 
-- エラー: 消費者が型で catch できない(CRK に typed catch 0 件、`localizedDescription` 還元 ~30 箇所)
-- タイムアウト: init handshake・全 request・`collect()` に deadline なし
-- キャンセル: task cancel が `transportClosed` に化ける。同じ `CodexResponseStream` で iteration break(server 継続)と collect() 中 cancel(server 中断)の意味論が割れており、README 以外に文書なし
-- `turn/interrupt` の正しさがエラーメッセージ文字列 parse(`" but found "` split)に依存
+**CodexAppServerKit** は transport actor、per-thread serial lane、overload retry、replay router、`.unknown` + raw payload 保持を備え、正常系の層分離は明快である。弱いのは境界失敗時の consumer action である。
 
-**CodexDataKit**: SwiftData アナロジーは object identity については誠実(fetch は identity 安定な live `@Observable` model を in-place mutate)だが、4 点で開発者を裏切る:
+- request/transport/decode error の一部が public taxonomy に入らず、CRK は `localizedDescription` へ 37 箇所で還元している。一方、turn failure、collector の transport close、restart、login validation には `CodexAppServerError` が実際に使われているため「型で何も catch できない」は誤り。
+- initialize handshake と request response に deadline がない。valid な review は長時間無イベントになり得て heartbeat もないため、inter-event-gap timeout は導入しない。optional handshake/per-request deadline と caller-specified overall turn deadlineを分ける。
+- caller Task cancellation が event iteration 中に起き、stream が terminal event なしで nil 終了した経路だけ `.transportClosed` へ化け得る。turn/start request 自体の cancellation は `CancellationError` を保つ。
+- stale/no-active `turn/interrupt` error は plain `invalid_request(message)` で structured data を持たない。`CodexErrorInfo` を保存するだけでは string parse は消えず、upstream の structured interrupt error または別の typed affordance が必要である。
 
-1. **ライブではない** — `@CodexQuery` は外部変更(CLI での thread 作成・rename・archive)を観測しない。upstream の `thread/*` notification の ingestion が無い
-2. `#Predicate` は 5-key whitelist で、外すと **SwiftUI update() 内で `preconditionFailure`**(SwiftData は throw)
-3. `isArchived` に触れない predicate に `archived == false` が**暗黙注入**される(文書化なし)
-4. `includePendingChanges` の意味が SwiftData と別物で、公開 mutable フィールドがあるのに `save()` が無い
+**CodexDataKit** は identity-stable な `@Observable` model を in-place 更新する。一方、API 名から想起される契約との差は明文化が必要である。
 
-2 パッケージ分割自体は明快で、下方 interop(`container.appServer` / `CodexStartedReview.session`)も実際に使われている。ただし AppServerKit 側での mutation が DataKit fetch results に反映されない coherence 境界は未文書。
+1. `@CodexQuery` は外部 process による thread list 変更を自動 ingest しない。これは「live query」の範囲を server event にまで広げるかという product contract の不足である。
+2. unsupported predicate/sort は query construction / SwiftUI update 経路で `preconditionFailure` になる。SwiftData の explicit `ModelContext.fetch` には throwing path があるため、少なくとも explicit load では validation error を返せる surface が望ましい。
+3. `isArchived` を含まない predicate に `archived == false` を暗黙注入する。
+4. `includePendingChanges` と public mutable server-owned fields の意味が、保存 API 不在のまま不明瞭である。
 
 ## 5. API 過不足
 
-### 過剰(存在しない・無意味な API)
+### stock upstream と整合しない surface
 
-| API | 問題 | finding |
+| surface | 判断 | finding |
 |---|---|---|
-| `account/login/complete` + `nativeWebAuthentication` | upstream 全履歴に不存在。素の codex では native web-auth が無言で never engage。fork 前提なら明示が必要 | `cov-invented-login-complete` |
-| `turn/failed`・`turn/cancelled`・`item/updated`・`agent/message` decode | v2 に不存在。public `.turnFailed` は永久に発火しない。`agent/message` が fallback-ID 機構を駆動。CRK preview が `item/updated` に依存し、invented semantics が外に漏れている | `cov-dead-compat-notifications` |
-| `CodexTurnStatus.cancelled` | protocol が emit しない独自 case。CRK が分岐している | `cov-invented-turn-status`(low) |
-| `CodexReviewSession.steer()` | upstream が review turn への steer をカテゴリカルに拒否(`activeTurnNotSteerable`)— 必ず失敗する public API | `conf-review-steer-always-rejected`(low) |
-| `Permissions.profileSelection`(object 形) | upstream は plain string 期待。latent wire break | `conf-permissions-object-shape`(low) |
+| `account/login/complete` + `nativeWebAuthentication` | stock codex に存在しない。fork 契約なら capability と binary pin を明記し、そうでなければ撤去 | `cov-invented-login-complete` |
+| current-v2 で emit されない notification/status | `turn/failed` / `item/updated` には短命な historical schema があるため、単純な「全履歴に不存在」ではない。互換期間を決め、Testing の既定 fixture から invented dialect を除く | `cov-dead-compat-notifications` |
 
-### 不足(消費側が代償を払っている)
+### consumer story から確認できる不足
 
 | 欠落 | 消費側の代償 | finding |
 |---|---|---|
-| typed error taxonomy + `error.data` 保持 | typed catch 0 件、message 文字列 match、SDK 自身も interrupt 判定を文字列 parse | `dx-error-taxonomy-uncatchable`, `conf-error-payload-discarded` |
-| timeout | ホスト側で手作りタイムアウト。wedged binary で起動永久ハング | `dx-no-timeout-story` |
-| outbound raw JSON-RPC escape hatch | 週次で動く upstream の新 method を呼べない(send path は 1 本なので追加は安価) | `dx-no-raw-escape-hatch` |
-| server→client request の typed surface + `serverRequest/resolved` | `{}` 応答は upstream 側 serde 失敗 → deny 降格。custom handler は abort 時に永久待ち | `cov-server-requests-untyped`, `conf-server-request-resolved-ignored` |
-| identity での cancel | registry miss 時にセッション全体を resume してから cancel | `use-resume-to-cancel` |
-| review 最終出力の所在の契約 | 3 段 fallback チェーン + 2 層での失敗合成(この領域だけで fix 5+ commits) | `use-review-output-location` |
-| 死活監視 surface | `accountEvents` stream の throw を「サーバー死亡」のサイドチャネルとして利用 | `use-runtime-death-side-channel` |
-| `deprecationNotice` / `error.willRetry` の typed 化 | thread/rollback 除去シグナルと transient-retry シグナルが不可視 | `cov-error-warning-untyped` |
-| thread lifecycle notification の DataKit ingestion | MCP provider が read 毎に全 refresh + silent catch | `dk-query-not-live-external`, `use-mcp-refresh-fallback` |
+| stable public request/transport/decode error + `error.data` / requestID | message parse、failure category の type erase | `dx-error-taxonomy-uncatchable`, `conf-error-payload-discarded` |
+| optional handshake / request / overall-turn deadline | wedged binary/request を caller が分類して打ち切れない | `dx-no-timeout-story` |
+| server→client request の method-specific response + resolved lifecycle | default `{}` が decode failure、abort 後 handler が残る | `cov-server-requests-untyped`, `conf-server-request-resolved-ignored` |
+| explicit connection termination surface | typed notification stream failureを runtime termination signal と兼用 | `use-runtime-death-side-channel` |
+| typed warning / deprecation / retry projection | raw `.unknown(CodexRawNotification)` を読めば見えるが、typed progress と CRK adapter では落ちる | `cov-error-warning-untyped` |
+| external-change freshness contract | MCP read は on-demand snapshot ownerとして refresh するが、projection 不在と refresh failure が同じ nil になる | `dk-query-not-live-external`, `use-mcp-refresh-fallback` |
 
-### 適切に無いもの(問題なし)
+`CodexTranscript.reviewOutputText` は README と実装に既にある primary review-output contract である。CRK の `reviewOutputText ?? finalAnswer ?? transcript.finalAnswer` は SDK 欠落への補償ではなく、削除可能な consumer-side redundancy（`use-review-output-location`）。outbound raw JSON-RPC escape hatch は consumer story と method lane/capability/experimental gating の設計がないため、今回の不足には数えない（§7）。
 
-`fs/*`、`mcpServer/*`、skills、plugins、exec/process、realtime、remoteControl 系 — 消費者に需要がなく workaround 圧力も観測されず。CRK production code に手書き JSON-RPC はゼロ(raw 文字列は preview/test transport に限定)。`review/start`・ReviewTarget・ReviewDelivery は upstream と正確に一致。v1 deprecated methods は正しく不採用。
+### 適切に無いもの
 
-## 6. 修正方針(優先順位付き)
+`fs/*`、`mcpServer/*`、skills、plugins、exec/process、realtime、remoteControl 系には CRK の需要や workaround pressure がない。CRK production code に手書き JSON-RPC はなく、raw JSON は preview/test transport に限定される。`review/start` の request method・ReviewTarget・ReviewDelivery は一致するが、upstream required の `reviewThreadId` を CodexKit response DTO が optional に弱めている点は別の low-level contract gap である。
 
-### P1 — SDK の契約修正
+## 6. 修正方針
+
+### P1 — public contract と lifecycle owner
 
 | # | 修正 | 回復する invariant | findings |
 |---|---|---|---|
-| 1 | turn 終端の 3 値化: `isFailure` から interrupted/cancelled を外し、`collect()`/`respond()` は中断時に throw せず返す。progress の `.failed` 報告も分岐 | ユーザー中断は失敗ではない(upstream 契約) | `conf-interrupted-is-failure`, `dx-cancel-semantics-inconsistent` |
-| 2 | `thread/closed` = unload: subscriber を終端しない、DataKit が `.completed` を捏造しない | thread の生死は server が所有し unload は状態遷移 | `ask-thread-closed-terminal`, `dk-closed-fabricates-completion` |
-| 3 | send boundary 1 箇所で typed error 化(code + CodexErrorInfo + requestID)、CancellationError 透過、per-request timeout。interrupt 判定を `codexErrorInfo` の typed 判別へ | 失敗の分類は SDK が所有する | `dx-error-taxonomy-uncatchable`, `conf-error-payload-discarded`, `ask-cancel-collect-misreported`, `ask-interrupt-error-string-parsing`, `dx-no-timeout-story` |
-| 4 | terminal turn 後の router history prune(replay 契約と両立する設計)+ deinit backstop | 接続寿命 = 資源上限 | `ask-router-history-unbounded`, `ask-process-leak-no-deinit` |
-| 5 | invented login surface の決着(fork 前提の明示 or 撤去)。`thread/rollback` 依存の脱却計画(まず deprecationNotice の typed 化) | public API は実在する upstream 契約に裏付けられる | `cov-invented-login-complete`, `cov-rollback-deprecated` |
+| 1 | public terminal-outcome 型を `completed / interrupted / failed / invalidTerminalStatus(rawStatus,response)` として定義し、collector / progress / DataKit / CRK adapter を同じ exhaustive mapping へ接続する。unknown、nil、terminal notification内のinProgressをoutput有無からsuccess/failureへ推測しない。caller Task cancellationは`CancellationError`、server interruptはtyped outcomeとして区別する | wire の分類情報を convenience/adapter layer が失わず、未知状態を誤分類しない | `conf-interrupted-is-failure`, `ask-cancel-collect-misreported`, `dx-cancel-semantics-inconsistent`, `use-highlevel-surface-bypass` |
+| 2 | transport が JSON-RPC error envelope/data を保持し、`AppServerClient` が requestID と request/decode errorを写像、public start/factory が spawn/scaffold errorを写像する。optional handshake/request deadlineを各 ownerに置き、overall turn deadlineは caller policy。interrupt parse 撤去は structured server affordanceを upstream と合意 | consumer が failure category ごとの次 action を選べる | `dx-error-taxonomy-uncatchable`, `conf-error-payload-discarded`, `ask-interrupt-error-string-parsing`, `dx-no-timeout-story` |
+| 3 | router Task の strong edge を切り、単一 `close()` が producer/I/O stop → Task cancel → Task completion await → handle release を完了する。process group は独立 terminator tokenを deinit backstopにする。raw history は finalized snapshotへ compactし、snapshot自体も turn-handle lifetimeまたは documented TTL/LRU + typed `resultExpired` で evictする。無期限 repeated late resultを要求するなら外部 persistenceへ移す | close 後にTask/transport/processが残らず、replay契約を保ったままconnection memoryがbounded | `ask-process-leak-no-deinit`, `ask-router-history-unbounded` |
+| 4 | invented login surface を撤去または fork capability として pin。server request は method-specific default decline と `serverRequest/resolved` cleanup を実装 | public API と wire method、request lifecycle が一致する | `cov-invented-login-complete`, `cov-server-requests-untyped`, `conf-server-request-resolved-ignored` |
+| 5 | current `commandExecution/outputDelta` は append merge、feature-gated current `fileChange/patchUpdated` は structured snapshot replace/mergeとして既存 item metadataを保つ。legacy `fileChange/outputDelta` は compatibility policyへ隔離する。rate-limit sparse updateはlast snapshotへmerge | delta/snapshot update の semantic owner が item を壊さない | `conf-command-delta-clobbers-item`, `conf-ratelimits-replace-not-merge` |
 
-P1-1/2 が入ると、CRK 側 terminal-cascade 3 層(`use-terminal-cascade`)、`.closed→.failed` 変換(`arch-closed-maps-to-failed`)、high-level surface bypass(`use-highlevel-surface-bypass`)の削除条件が立つ。
+`thread/closed` による thread-generation completion 自体は P1 ではない。DataKit/CRK の outcome synthesis は今削除できる。将来 unsubscribe surface または multi-connection unload を扱うとき、typed end reason、persisted resume の新 generation、ephemeral unload の非 resumable 性を contract test で固定する。
 
-### P2 — 再発防止の契約整合
+### P2 — DataKit / Testing の再発防止
 
 | # | 修正 | findings |
 |---|---|---|
-| 6 | DataKit mutation 戦略の単一 owner 化 + `load()` の直列化 / generation token | `dk-mutation-strategy-scattering`, `dk-unserialized-fetch-loads` |
-| 7 | dead decode 4 種の削除 + `CodexMessageDelta.itemID` required 化(fallback-ID subsystem ごと削除) | `cov-dead-compat-notifications`, `dk-optional-delta-id-workaround-layer` |
-| 8 | Testing fake の契約一致: unstubbed fail-fast、thread/list の archived/sort 実装、server-request 注入 API、typed wire emitter | `test-unstubbed-method-silent-success`, `test-store-ignores-archived-and-sort`, `test-no-server-request-injection`, `test-handrolled-notification-schemas-drift` |
-| 9 | predicate の throwing validation 化 + archived 暗黙注入の廃止(最低限、両方の文書化) | `dk-predicate-runtime-crash-contract`, `dk-implicit-archived-scope` |
-| 10 | server request の typed surface + `serverRequest/resolved` 処理 | `cov-server-requests-untyped`, `conf-server-request-resolved-ignored` |
+| 6 | DataKit mutation strategy を query plan 由来の単一 owner にし、`load()` を serial task または generation token で latest-wins にする | `dk-mutation-strategy-scattering`, `dk-unserialized-fetch-loads` |
+| 7 | current-v2 と historical compatibility policy を決める。Testing の default builders は現行 method（例: `emitTurnCompleted`、`emitCommandExecutionOutputDelta`、`emitFileChangePatchUpdated`、server request）だけを提供し、legacy builderは明示namespaceへ隔離 | `cov-dead-compat-notifications`, `test-fictional-turn-failed-pins-phase-contract`, `test-handrolled-notification-schemas-drift` |
+| 8 | fake を fail-fast にし、thread/list の archived/sort と実 transport の cancellation を実装する。server-request injection は in-memory fake から test 可能にする | `test-unstubbed-method-silent-success`, `test-store-ignores-archived-and-sort`, `test-fake-cancel-in-flight-returns-success`, `test-no-server-request-injection` |
+| 9 | predicate/sort validation を throwing construction/load surfaceへ移し、archived default と external-change freshness scope を文書化する | `dk-predicate-runtime-crash-contract`, `dk-implicit-archived-scope`, `dk-query-not-live-external` |
+| 10 | warning/deprecation/retry と connection termination を typed lifecycle/event surfaceへ投影する。raw payload は diagnostic escape として保持する | `cov-error-warning-untyped`, `use-runtime-death-side-channel` |
 
-### P3 — 消費側の整理
+### P3 — CodexReviewKit の整理
 
 | # | 修正 | 条件 |
 |---|---|---|
-| 11 | terminal-cascade / `.closed→.failed` / resume-to-cancel / observe 直列化の縮小 | P1-1,2 と SDK cancel API の後 |
-| 12 | **今すぐ削除可能**: item-status 再導出 cascade(SDK `2a4d2f5` が所有済み — 検証で確定)、dead adapter branches、`CodexReviewHost` + `DirectCodexReviewStoreBackend` | 即時 |
-| 13 | login teardown の owner 化(9 fields を単一 session 型へ)、`"attempt-1"` fallback 除去、ForTesting forwarder 3 層(~100 accessors)の直接 seam 化 | 即時 |
+| 11 | login state を単一 `LoginSession` owner に集約し、全 exit path が同じ async terminate completion を待つ | 即時 |
+| 12 | adapter 境界で `reviewOutputText` の欠損を一度だけ typed failure にし、成功側の `Completion.finalReview` を non-optional にする。3段 fallbackと store/MCP の重複検査、item-status再導出、未使用 `CodexReviewHost` class + `DirectCodexReviewStoreBackend` を削除 | 即時。class 削除は target 削除を意味しない |
+| 13 | core に CRK domain の review-thread identity（source / active-turn pair）を置き、adapter が `CodexReviewIdentity` から一度だけ写像する。String 再導出を削除し、transport 非依存を保つ。presentation dedup は typed item kind + turn relation で行い、distinct semantic items を persistence で一つに潰さない | 即時に型設計、既存 decoder contract の確認後に移行 |
+| 14 | `"attempt-1"` default を削除する。queued Run の nil は許しても、threadID を持つ backend Run の復元では attemptID を必須にして fail fast。resume-to-cancel は到達する consumer story を先に証明し、必要なら cancel-by-identity 後に削除。observe serialization は awaitable rebind 後に削除 | attempt default は即時、他は各 contract 後 |
 
-## 7. won't-fix(観測誤りとして反証済み)
+backend adapter は P1-1 の public outcome を exhaustively mapし、現行の interrupted→cancelled repair と unknown/nil/running + output→completed 推測を削除する。一方、store の `completePendingCancellationIfNeeded` は「product の cancellation request が backend terminal と競合したとき cancellation wins」という別 invariant を所有し、SDK修正後も残す。`ReviewBackendEventSession` の terminal は backend abstraction の契約であり、SDK event と同一視して全削除しない。
 
-- **`test-fake-close-clean-finish-hangs-subscribers`**(fake close() で subscriber がハング): fake の `close()` は package-scoped で消費者から到達不能。public 経路 `CodexAppServer.close()` は `router.stop()` が先に throwing finish するためハングは起きない。`finishNotificationStreams(throwing:)` は public(`CK:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:1000`)。残る clean/throwing 終端の非対称は low。
-- **`use-item-status-rederivation`**(SDK が item status を finalize しない): 前提が誤り。CodexKit `2a4d2f5`(2026-07-01)が全 terminal 経路で `itemByApplyingTerminalLifecycleStatus` を適用済み(`CK:Sources/CodexDataKit/CodexModel.swift:1703-1740`)、exitCode ルールも SDK 側に同一実装(:1765-1773)。CRK 側 projection cascade(`CRK:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogProjection.swift:557-596`)は live workaround ではなく削除可能な残骸 → P3-12。
+## 7. 反証・今回採用しない提案
+
+- **REFUTED — `test-fake-close-clean-finish-hangs-subscribers`**: fake の `close()` は package-scoped で consumer から到達不能。public `CodexAppServer.close()` は先に `router.stop()` で stream を finish する。clean/throwing 終端の非対称は low の設計課題だが、報告された hang trace は成立しない。
+- **REFUTED — `use-item-status-rederivation`**: CodexKit `2a4d2f5` が全 terminal 経路で `itemByApplyingTerminalLifecycleStatus` を適用済み。CRK projection の再導出は live workaround ではなく削除可能な残骸である。
+- **REFUTED — `use-subscription-generation-guards`**: review worker pipeline が責務を分担している。`ReviewWorkerEventSource` は subscription generation と pre-enqueue guard、`consumeReviewEvents` / `ReviewNetworkRecoveryLoopState` は attemptID と post-enqueue guard を所有し、tests も pin する。これは owner 不在ではない。supersede reason の typed 化は追加 DX になり得るが、guard の削除理由にはならない。
+- **NOT ADOPTED — `dx-no-raw-escape-hatch`**: raw send の不存在は事実だが、CRK の consumer storyがなく、upstream request は method-specific serialization lane、capability、experimental gatingを持つ。単純な `sendRaw(method:params:)` はそれらを迂回するため、現時点の不足・「安価な追加」とは判定しない。
 
 ## 8. テストチェックリスト
 
-- [ ] `turn/completed(status=interrupted)` で `collect()` が throw しない — sibling: `respond()`、`progress`、DataKit `chat.phase`
-- [ ] `thread/closed` 後に同 thread を resume でき、subscriber が終端しない
-- [ ] 実 wire 形状(`turn/completed` + status=failed + `turn.error`)で `chat.phase == .failed` を pin(fictional `turn/failed` テスト `CK:Tests/CodexDataKitTests/CodexDataKitTests.swift:8091` の置換)
-- [ ] fake: unstubbed method で fail-fast
-- [ ] fake: `thread/list` が archived・sortKey・sortDirection を尊重
-- [ ] cancel 中の `respond()` が `CancellationError` を投げる
-- [ ] 並行 `load()` の順序(A→B→A 完了で items/cursor が一致)
-- [ ] `close()` なしの drop で子プロセスが reap される
-- [ ] 長寿命接続で router history が prune される
-- [ ] `serverRequest/resolved` で custom handler の待機が解放される
+- [ ] server-side `turn/completed(status=interrupted,error=nil)` が typed interrupted outcome になり、failed と区別される — sibling: collector / progress / DataKit phase
+- [ ] terminal notification の unknown / nil / inProgress status は typed `invalidTerminalStatus` になり、CRK adapter も output text の存在だけで `.completed` を合成しない
+- [ ] caller Task cancellation が turn/start request 中と event iteration 中の双方で `CancellationError` になり、server-side interrupted と区別される
+- [ ] current wire `turn/completed(status=failed,turn.error)` で `chat.phase == .failed` を pinし、fictional `turn/failed` fixture を置換する
+- [ ] explicit close が router/producer Task completion と child-process reap を awaitし、二重 close も同じ completionへ収束する
+- [ ] long-lived connection で raw history・finalized snapshot・serializer lane が retention policyどおり解放され、期限内の repeated late `result()` と期限後の typed `resultExpired` が一致する
+- [ ] command output delta は command/cwd と既存 output を保って appendされ、feature enabled 時の fileChange patchUpdated は item metadata を保って structured snapshot を適用する
+- [ ] login の success / cancel / web-session error / account-update error / runtime death / explicit close の全 exit path が fields、tasks、temporary runtime を解放する
+- [ ] fake は unstubbed method で fail-fast し、thread/list の archived/sort と in-flight cancellation（cancelled waiterは `CancellationError`、late responseは破棄）を production と一致させる
+- [ ] `serverRequest/resolved` が pending handler を解放し、requestUserInput/permissions/DynamicToolCall/MCP elicitation の既定 decline が valid wire shape になる
+- [ ] 並行 `load()` の A→B→A completion で items/cursor が選択した latest-wins contract と一致する
+- [ ] injected `.closed` / `.notLoaded` は turn success/failure を合成しない。将来 unsubscribe/multi-connection transport を実装する場合、persisted resume の新 generationと ephemeral unload の非 resumable 性を integration test で pinする
+- [ ] stale old-attempt event は `ReviewWorkerEventSource` の pre-enqueue guard と consumer/recovery state の attemptID + post-enqueue guardで捨てられる（既存 regression を維持）
+- [ ] review output は adapter 境界で `reviewOutputText` を一度だけ採用する。欠損は一度だけ typed failure、成功 completion は non-optional とし、final assistant message は distinct semantic item として保持する
+- [ ] inline / detached review の source/active-turn identity pair が adapter → store → MCP を通して保存される
+- [ ] threadID を持つ backend Run の attemptID 欠損は `"attempt-1"` を作らず fail fast する
+- [ ] in-flight observation registration の cancel/rebind が awaitable completion で同期する
+- [ ] CRK login teardown・review output・item status cleanup の削除後も product cancellation-wins arbitration が維持される
 
-**観測性の欠落**: `error` notification の `willRetry`(唯一の transient-retry シグナル)と `deprecationNotice` が `.unknown` 経由で不可視。typed event 化を P2-10 に含める。
+**観測性**: `error.willRetry` と `deprecationNotice` は raw `.unknown` から読めるが、typed progress / CRK adapter では失われる。connection termination、retry、deprecation をそれぞれ意味のある lifecycle/event 境界へ投影する。
 
 ## 9. 監査の限界
 
-- low 36 件(Appendix B)は adversarial 検証を通していない(レートリミット対応で検証対象を high+medium に絞った)。
-- ReviewChatLogUI / ReviewUI の view 層は core state ファイル精読 + view skim に留まる。
+- Appendix B の low 35 件は adversarial 検証を通しておらず、本文の確定判断には使わない。
+- ReviewChatLogUI / ReviewUI は core state と projection を精読したが、全 view path の runtime probe は行っていない。
+- `thread/closed` の current unreachability は CodexKit stdio と upstream shutdown の static trace に基づく。将来 unsubscribe または server が存続する multi-connection transport を使う場合は再監査が必要。
 - `TextTransitions`、`scripts/`、`Tools/` は対象外。
 
 ---
 
-## Appendix A: 検証済み findings(high + medium、51 件)
+## Appendix A: 検証済み findings（再評価後、50 件）
 
 各項目: 検証 verdict / 調整後 severity / 位置 / 内容 / 証拠。kind: bug = 実挙動の欠陥、protocol-mismatch = upstream 契約との不一致、api-design / usability = 設計判断、coverage-gap = API 過不足、test-gap = テスト欠落、workaround = 消費側補償、architecture = 構造。
 
-### `arch-login-state-no-owner` — Login/auth session teardown invariant has no owner: 9 mutable fields reset by hand at 7 call sites in LiveCodexReviewStoreBackend
+### `arch-login-state-no-owner` — Login/auth session teardown invariant has no owner: 9 login-state values are coordinated across 8 reset clusters
 
 **CONFIRMED / high / architecture** — `CodexReviewKit:Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift:218`
 
-Login-flow state (loginChallenge, loginBackend, loginAppServer, loginCodexHomeURL, loginActivation, isWaitingForLoginAccountUpdate, activeAuthenticationSession, authenticationTask, loginNotificationTask) is torn down by manually nil-ing/cancelling each field in 7 places with subtly different orderings and subsets (cancelAuthentication, startLogin catch, monitorAuthenticationSession catch, handleAuthenticationSessionCancelled, handleLoginCompletedNotification failure, finishCompletedLoginAfterAccountUpdate, takeLoginRuntimeForCleanup). Any new exit path must replicate the full reset or leak an isolated app-server process/temp CODEX_HOME. The strongest owner-absent signal in the repo; the 2127-line class also owns app-server lifecycle, MCP HTTP server, rate-limit refresh, and account-registry persistence.
+Login-flow state (`loginChallenge`, `loginBackend`, `loginAppServer`, `loginCodexHomeURL`, `loginActivation`, `isWaitingForLoginAccountUpdate`, `activeAuthenticationSession`, `authenticationTask`, `loginNotificationTask`) is coordinated by manually nil-ing/cancelling different subsets across 8 clusters: the 7 complete/exit paths originally identified plus the partial reset in `startLogin`. `loginActivation` participates in the state machine but is not reset like the other fields; `authNotificationTask` is a tenth nearby field but is app-server-scoped. `PendingLoginRuntimeCleanup` already groups part of runtime cleanup, yet does not own the whole login session or all exit paths. Any new exit path must reproduce ordering and ownership or retain an isolated app-server process / temporary CODEX_HOME.
 
-- 証拠: LiveCodexReviewStoreBackend.swift:218-227 fields; reset copies :670-702, :915-940, :974-991, :1033-1062, :1300-1321, :1338-1384, :1559-1578 — same invariant, different order/subset.
-- 検証時の訂正: Field count is 10, not 9 (finding omitted authNotificationTask :226, which is app-server-scoped rather than login-scoped, so 9 login-flow fields is defensible). Reset-site count: 7 clusters as claimed, plus an 8th partial subset reset inside startLogin at :885-888 the finding missed — strengthening, not weakening, the claim.
+- 証拠: LiveCodexReviewStoreBackend.swift:218-227 fields; reset clusters :670-702, :885-888, :915-940, :974-991, :1033-1062, :1300-1321, :1338-1384, :1559-1578 — same invariant, different order/subset.
 - 修正の方向: Extract a LoginSession type (challenge + runtime + web session + tasks) with a single terminate(reason:) as the only teardown path; the backend holds at most `var loginSession: LoginSession?`.
 
-### `ask-cancel-collect-misreported` — Cancelling a task awaiting respond()/collect() surfaces transportClosed instead of CancellationError
+### `ask-cancel-collect-misreported` — Task cancellation during event iteration can surface transportClosed instead of CancellationError
 
 **CONFIRMED / high / bug** — `CodexKit:Sources/CodexAppServerKit/CodexTurnSequences.swift:490`
 
-On task cancellation AsyncThrowingStream returns nil (does not throw), so collect()'s for-loop exits without a terminal event and throws CodexAppServerError.transportClosed — misclassifying every user cancellation as a transport failure for respond(to:), CodexResponseStream.collect(), and waitForCancelledResponse (CodexDomainTypes.swift:2111). Consumer already works around it: AppServerCodexReviewBackend checks Task.isCancelled explicitly (:753) and its `catch is CancellationError` branch (:759) is unreachable.
+When caller cancellation happens after the turn exists and while `collect()` is iterating `turn.events`, the `AsyncThrowingStream` iterator can return nil. The collector then reaches its unconditional `CodexAppServerError.transportClosed`, losing the caller-cancellation category. Cancellation during the earlier turn/start request still propagates `CancellationError`; the defect is not every cancellation path. CRK checks `Task.isCancelled` around its typed event loop because terminal-less iteration and server-side interruption need separate handling.
 
 - 証拠: CodexTurnSequences.swift:466-491 loop then `throw CodexAppServerError.transportClosed`; CodexDomainTypes.swift:1994-2008 collect() never converts loop-exit to CancellationError; consumer workaround CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:753-759.
-- 失敗トレース: 1) Consumer awaits thread.respond(to:) = streamResponse().collect() (CodexThreadOperations.swift:74). 2) collect() (CodexDomainTypes.swift:1994-2008) awaits turn.result() → CodexResponseCollector.collect iterating turn.events (CodexTurnSequences.swift:468). 3) Consumer cancels the awaiting Task; onCancel fires the detached `Task { try? await turn.interrupt() }` (:2002-2007); the AsyncThrowingStream iterator returns nil per cancellation semantics. 4) The for-loop exits without .completed/.failed → `throw CodexAppServerError.transportClosed` (CodexTurnSequences.swift:490). 5) collect()'s catch runs handleFailure() then rethrows (:1999-2000) — caller receives .transportClosed for a user-initiated cancel; same shape for waitForCancelledResponse (CodexDomainTypes.swift:2111).
-- 修正の方向: collect()/result() own the terminal contract: after loop exit without terminal, check Task.isCancelled and throw CancellationError (or typed .cancelled); reserve transportClosed for real transport termination.
+- 失敗トレース: 1) Consumer awaits `thread.respond(to:)` = `streamResponse().collect()` (CodexThreadOperations.swift:74). 2) `collect()` awaits `turn.result()`, whose collector iterates `turn.events` (CodexTurnSequences.swift:468). 3) Caller cancels after iteration began; the cancellation handler starts an ownerless unstructured `Task { try? await turn.interrupt() }` and the iterator can return nil. 4) The loop exits without `.completed` / `.failed` and line 490 throws `.transportClosed`. 5) Caller receives transport failure for this cancellation path; `waitForCancelledResponse` has the same terminal-less-loop shape.
+- 修正の方向: A shared stream-exit classifier used by collector/result and `waitForCancelledResponse` owns the distinction: caller Task cancelled → `CancellationError`; observed transport termination → `transportClosed`; neither but terminal missing → typed invalid stream end. Do not use a typed server `.cancelled` outcome for caller Task cancellation.
 
 ### `ask-process-leak-no-deinit` — Dropping CodexAppServer without close() leaks the spawned codex child process
 
 **CONFIRMED / high / bug** — `CodexKit:Sources/CodexAppServerKit/AppServerProcessTransport.swift:153`
 
-Process termination is reachable only via close()/stdout-EOF (closeTransport); neither the transport nor CodexAppServer has a deinit backstop, and the child runs in its own process group (POSIX_SPAWN_SETPGROUP), so losing the last reference orphans a running `codex app-server` process. Repeated container recreation (login change, tests forgetting close()) accumulates orphans; reaping (reapIfExited) only runs inside terminateAndWait.
+Process termination is reachable only via `close()` / stdout EOF (`closeTransport`). In addition, the router stores `routerTask` while that Task strongly captures the router, forming `router → task → router → client → transport`. Dropping the public server without explicit close therefore does not make the transport unreachable; neither object deallocation nor stdin-EOF can provide cleanup. The child runs in its own process group and reaping is only performed by `terminateAndWait`.
 
-- 証拠: AppServerProcessTransport.swift:153-172 close()/closeTransport only termination paths; :662-663 setpgroup; grep deinit over Sources/CodexAppServerKit = zero hits; CodexAppServer.swift:216-223 close() is sole teardown.
-- 検証時の訂正: Finding understates it: not only is there no deinit backstop, a router-side retain cycle (routerTask strongly captures the router at CodexAppServerNotificationRouter.swift:89-97 while the router stores it at :19) means the transport can never deallocate without close(), so the Swift objects leak too and any dealloc-based stdin-EOF fallback is unreachable.
+- 証拠: AppServerProcessTransport.swift:153-172 close/closeTransport; :662-663 process group; CodexAppServerNotificationRouter.swift:19,84-97 stored Task and strong capture; :168-171 stop cancels without awaiting; CodexAppServer.swift:216-223 explicit close.
 - 失敗トレース: 1) CodexAppServer.init spawns codex app-server in its own process group (AppServerProcessTransport.swift:60-111, :662-663) and starts the router (CodexAppServer.swift:176-179). 2) router.start() creates the routerTask retain cycle (CodexAppServerNotificationRouter.swift:19,:89-97). 3) Consumer recreates its container (login change / test forgets close()) and drops the last CodexAppServer reference without calling close() (CodexAppServer.swift:220-223, the sole teardown). 4) No deinit exists anywhere in the target; terminateAndWait is never invoked; the router/client/transport chain stays resident and the codex child keeps running. 5) Each recreation adds one orphaned codex process plus one leaked actor graph.
-- 修正の方向: Transport owns 'no reachable transport ⇒ no child process': add a deinit that signals the process group (synchronous kill + detached reap) or hold the pid in a terminator token independent of actor lifetime; at minimum log the leaked pid.
+- 修正の方向: Primary owner is explicit async close: break the Task strong edge, signal producer/I/O stop, cancel the stored Task, and await its completion before releasing client/transport. Separately keep the pid/process-group capability in a synchronous terminator token independent of the actor graph and use its deinit only as a best-effort signal/log backstop. deinit must not own async reap completion.
 
 ### `ask-router-history-unbounded` — Notification router event history grows without bound for the connection lifetime
 
@@ -210,170 +226,156 @@ turnHistoryByTurnID, threadHistoryByThreadID and threadIDByTurnID are append-onl
 
 - 証拠: CodexAppServerNotificationRouter.swift:20-22 dictionaries; :302 and :315 appends; grep shows no removeValue on any of the three maps. AppServerClient.swift:208-215 lane(for:) inserts, never removes.
 - 失敗トレース: 1) Consumer keeps one CodexAppServer for app lifetime (CodexReviewHost pattern) and runs reviews continuously. 2) Every streamed notification with a turnId is decoded and appended to turnHistoryByTurnID (CodexAppServerNotificationRouter.swift:302) and, when threadId resolves, again to threadHistoryByThreadID via appendThreadEvent (:297,:314-315); item events carry full rawPayload Data (:904, :1400). 3) turn/completed arrives; isTerminalTurnEvent (:512-520) only triggers finishTurnSubscribers (:308-310); both history entries for the finished turn remain forever. 4) thread/closed (:333-335) likewise removes no history. 5) After N reviews × thousands of delta events each, resident memory holds two copies of every delta ever streamed plus one SerialLane per thread (AppServerClient.swift:208-215) until process exit.
-- 修正の方向: Router owns retention: prune turn history at terminal+no-replay-consumers, and drop thread history behind the current generation cursor (beginThreadEventGeneration already knows the cutoff).
+- 修正の方向: Router owns retention without breaking late/repeated replay. At terminal, compact raw deltas into a finalized response/transcript/terminal snapshot, then bound snapshot count by turn-handle lifetime or documented TTL/LRU with typed `resultExpired`. If indefinite repeated `result()` is a requirement, move finalized results to an external persistence owner rather than keeping them in connection memory. Remove serializer lanes after in-flight work completes.
 
-### `conf-interrupted-is-failure` — User-interrupted turns are classified as failures across every SDK layer (isFailure includes interrupted/cancelled), so collect()/progress/DataKit all misreport user cancels as errors
+### `conf-interrupted-is-failure` — Collector, progress, and DataKit classify server-side interrupted outcomes as failures
 
 **CONFIRMED / high / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:1878`
 
-Upstream, the only turn-terminal event is turn/completed and status=interrupted is a normal non-failure outcome (interrupt → status Interrupted, error None). CodexTurnStatus.isFailure returns true for .interrupted and .cancelled and every terminal path keys off it: CodexResponseCollector/respond() throw turnFailedWithResponse, turn/review progress sequences yield phase .failed, CodexModel.fail(with:"interrupted") marks the whole chat .failed on turnCompleted and again on refresh (CodexModel.swift:1145-1151, 2371-2376), with CodexDataPhase having no non-failure interrupted terminal. waitForCancelledResponse uses a third inconsistent mapping. Consumer proof: zero collect() call sites in CodexReviewKit; the backend re-splits interrupted/cancelled back out of the failure path (AppServerCodexReviewBackend.swift:623-633) and elsewhere guesses via `error is CancellationError`, missing server-side interrupts. Cross-ref use-terminal-cascade, use-highlevel-surface-bypass, cov-invented-turn-status.
+Upstream emits one turn-terminal method, `turn/completed`, and server-side interrupt completes as status `interrupted` with no `TurnError`. `CodexTurnStatus.isFailure` nevertheless returns true for `.interrupted` and the aggregate layers key off it: collector/respond throw `turnFailedWithResponse`, progress yields `.failed`, and DataKit marks the chat failed on the event and on refresh. `waitForCancelledResponse` already distinguishes `.interrupted/.cancelled` and returns normally, demonstrating that the inconsistency is limited to the collector/progress/DataKit paths rather than every SDK layer. Whether another Swift aggregate returns `CodexResponse`, a typed outcome, or a typed interruption is an API choice.
 
-- 証拠: CodexDomainTypes.swift:1878-1885 isFailure incl. interrupted/cancelled; CodexTurnSequences.swift:303-309,440-447,477-487; CodexModel.swift:1145-1151,2371-2376; CodexDomainTypes.swift:2088-2112 divergent waitForCancelledResponse; upstream turn.rs:28-36 TurnStatus, bespoke_event_handling.rs:1438-1460 interrupt → Interrupted/error None; consumer AppServerCodexReviewBackend.swift:626-631.
-- 検証時の訂正: Citation nit: TurnStatus is turn.rs:29-35 (cited 28-36); DataKit refresh re-fail is CodexModel.swift:2368-2372 (cited 2371-2376). Substance accurate.
-- 失敗トレース: (1) User cancels a running turn (CodexResponseStream.cancel() -> turn/interrupt, or any server-side interrupt); (2) upstream emits turn/completed {turn.status: "interrupted", error: null} (bespoke_event_handling.rs:1448-1459); (3) router decodes .completed(CodexResponse status .interrupted) (CodexAppServerNotificationRouter.swift:659-660, :1011-1026; "interrupted" -> .interrupted CodexDomainTypes.swift:1852-1853); (4) CodexResponseCollector.collect / CodexTurn.result: result.status?.isFailure == true because isFailure includes .interrupted (CodexDomainTypes.swift:1878-1885) -> throws CodexAppServerError.turnFailedWithResponse (CodexTurnSequences.swift:482-484) — a normal user cancel surfaces as a thrown turn failure; (5) progress sequences yield phase .failed(.turnFailedWithResponse) (CodexTurnSequences.swift:303-309, :440-447); (6) DataKit marks the whole chat .failed("interrupted") on turnCompleted (CodexModel.swift:1145-1151) and again on every refresh (:2368-2372), with no non-failure interrupted phase available (CodexDataPhase.swift:3-8); (7) consumer must compensate by re-splitting interrupted/cancelled out of the failure path (AppServerCodexReviewBackend.swift terminalFailureEvents ~:626-633).
-- 修正の方向: The terminal-outcome type owns the distinction: replace isFailure-driven branching with a three-way outcome (completed | interrupted | failed(TurnError)) on CodexResponse/progress phases; collect() returns the response for any terminal status, throwing only for failed/errorMessage; DataKit lands interruption as loaded/idle with turn.status == .interrupted.
+- 証拠: CodexDomainTypes.swift:1878-1885 `isFailure`,2088-2112 contrasting cancellation wait; CodexTurnSequences.swift:303-309,440-447,477-487; CodexModel.swift:1145-1151,2368-2372; upstream turn.rs:29-35 and bespoke_event_handling.rs:1438-1459; consumer AppServerCodexReviewBackend.swift:626-631.
+- 失敗トレース: (1) Explicit `CodexResponseStream.cancel()` or another server-side interrupt leads to `turn/completed {status:"interrupted", error:null}`. (2) Router decodes `.completed(response.status=.interrupted)`. (3) Collector/result checks `isFailure` and throws `turnFailedWithResponse`; progress yields `.failed`. (4) DataKit marks the chat failed on the event and refresh. (5) CRK's adapter re-splits the interrupted status. This trace is distinct from cancelling the caller Task that awaits collect.
+- 修正の方向: A public terminal-outcome type owns `completed | interrupted | failed(TurnError) | invalidTerminalStatus(rawStatus,response)`. Collector/progress/DataKit switch exhaustively over it; unknown/nil/inProgress terminal payloads fail loud without guessed classification, and caller Task cancellation remains `CancellationError`. Choose the aggregate return/throw shape at an API design gate.
 
 ### `cov-invented-login-complete` — Native web-auth login path (account/login/complete + nativeWebAuthentication) is invented; upstream never had it in any revision
 
 **CONFIRMED / high / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:2285`
 
-CodexKit's public 3-step native login sends account/login/start with an extra nativeWebAuthentication:{callbackUrlScheme} field, decodes it back from the response, and completeLogin sends method account/login/complete. None of this exists upstream at HEAD 8347b8d and `git log --all -S` shows it never existed. Against a stock server: the extra field is silently ignored, the response never echoes nativeWebAuthentication, so the consumer's gate `completesLoginThroughCallback: nativeCallbackScheme != nil` is always false and the ASWebAuthenticationSession callback-completion feature silently never engages; completeLogin would fail method-not-found. Consumer ships real wiring and CodexKit's README documents it as standard API with no fork requirement noted. If a patched codex build is intentionally targeted, that dependency is undocumented and unpinned.
+CodexKit's public 3-step native login sends account/login/start with an extra nativeWebAuthentication:{callbackUrlScheme} field, decodes it back from the response, and completeLogin sends method account/login/complete. None of this exists upstream at HEAD 8347b8d and `git log --all -S` shows it never existed. Stock codex completes the flow by emitting `account/login/completed`; there is no client completion request. Against a stock server, the extra field is silently ignored and the response never echoes nativeWebAuthentication, so the consumer's ASWebAuthenticationSession callback-completion gate never engages; the unknown completion request fails as `invalid_request` (-32600) on this baseline. If a patched codex build is intentionally targeted, that dependency is undocumented and unpinned.
 
-- 証拠: AppServerRequests.swift:2285 method, :2144-2162 NativeWebAuthentication + Params field; CodexAppServer.swift:799-812,855-862; upstream common.rs:1001-1013 no login/complete, account.rs:68-86,124-137 no nativeWebAuthentication; git log --all -S in /Users/kn/Dev/codex returns nothing; consumer LiveCodexReviewStoreBackend.swift:911,961; README.md:418-421.
-- 検証時の訂正: Citation fix: the README documenting the flow is CodexKit Sources/CodexAppServerKit/README.md:414-421, not the top-level README.md:418-421 (top-level README has no login content, 94 lines). Method line is AppServerRequests.swift:2285 as cited.
-- 失敗トレース: Against a stock codex app-server: (1) CodexAppServer.loginChatGPT(nativeWebAuthentication:) sends account/login/start with extra field nativeWebAuthentication:{callbackUrlScheme} (CodexAppServer.swift:799-812; AppServerRequests.swift:2162,2255); (2) upstream deserializes LoginAccountParams::Chatgpt which has no such field (account.rs:68-86) — extra field silently ignored, no deny_unknown_fields; (3) response is {type:"chatgpt", loginId, authUrl} only (account.rs:~125-137), so decodeIfPresent(nativeWebAuthentication) yields nil (AppServerRequests.swift:2207-2210) and CodexChatGPTLogin.nativeWebAuthentication == nil; (4) consumer gate completesLoginThroughCallback: nativeCallbackScheme != nil is always false (LiveCodexReviewStoreBackend.swift:911), so the ASWebAuthenticationSession callback-completion feature never engages, silently; (5) any caller that follows the README's documented step 3 and calls completeLogin sends method account/login/complete (AppServerRequests.swift:2285) which no codex revision has ever implemented -> JSON-RPC method-not-found at runtime.
+- 証拠: AppServerRequests.swift:2285 method, :2144-2162 `NativeWebAuthentication` + Params; CodexAppServer.swift:799-812,855-862; upstream common.rs:1001-1013 and account.rs:68-86,124-137; upstream history `git log --all -S`; consumer LiveCodexReviewStoreBackend.swift:911,961; `Sources/CodexAppServerKit/README.md:414-421`.
+- 失敗トレース: Against a stock codex app-server: (1) CodexAppServer.loginChatGPT(nativeWebAuthentication:) sends account/login/start with extra field nativeWebAuthentication:{callbackUrlScheme} (CodexAppServer.swift:799-812; AppServerRequests.swift:2162,2255); (2) upstream deserializes LoginAccountParams::Chatgpt which has no such field (account.rs:68-86) — extra field silently ignored; (3) response is {type:"chatgpt", loginId, authUrl} only, so native callback data decodes nil; (4) consumer callback-completion gate remains false; (5) `completeLogin` sends unknown `account/login/complete`, which pinned app-server maps to `invalid_request` (-32600) in message_processor.rs:91-99/error_code.rs:3-6.
 - 修正の方向: Wire layer owns method-name truth: delete the invented surface, or document and pin the fork as the supported server and gate the API on a capability check — a nonexistent method must not be a public API's only completion path.
 
 ### `cov-rollback-deprecated` — Review restart, rollback(turnCount:) and revertTranscript are built on thread/rollback, which upstream marks 'will be removed soon'
 
 **CONFIRMED / high / coverage-gap** — `CodexKit:Sources/CodexAppServerKit/CodexAppServer.swift:510`
 
-Three public behaviors depend on thread/rollback: CodexThread.rollback(turnCount:), restartPreparedReview's mandatory rollback of the interrupted turn, and transcriptErrorHandlingPolicy .revertTranscript (CodexResponseStream.handleFailure). Upstream: 'DEPRECATED: thread/rollback will be removed soon.' The consumer's core review-recovery flow calls prepareReviewRestart/restartPreparedReview; when upstream removes the method, restart fails at runtime with method-not-found mid-recovery, after the turn was already interrupted. Compounding: deprecationNotice notifications are surfaced only as .unknown (cross-ref cov-error-warning-untyped), so the removal warning is invisible.
+Three public behaviors depend on thread/rollback: CodexThread.rollback(turnCount:), restartPreparedReview's mandatory rollback of the interrupted turn, and transcriptErrorHandlingPolicy .revertTranscript (CodexResponseStream.handleFailure). Upstream: 'DEPRECATED: thread/rollback will be removed soon.' The consumer's core review-recovery flow calls prepareReviewRestart/restartPreparedReview; when upstream removes the method, restart will fail at runtime mid-recovery after the turn was already interrupted. The future error code is not yet a contract. `deprecationNotice` is retained only as raw `.unknown`; typed progress and CRK's adapter do not surface it.
 
 - 証拠: CodexAppServer.swift:505-513 rollback in restart; CodexThreadOperations.swift:335-339; CodexDomainTypes.swift:2127-2135,2185-2193 revert policy; AppServerRequests.swift:1469 method; upstream thread.rs:1045 deprecation, common.rs:616; consumer CodexReviewStoreReviews.swift:676,744.
-- 修正の方向: Decide what restart/revert mean without rollback (upstream direction is fork/resume-based history editing), isolate the dependency behind one internal seam, and surface deprecationNotice as a typed event so consumers get the removal signal.
+- 修正の方向: Isolate rollback behind one internal seam and define restart/revert semantics when it disappears. Fork/resume-based editing is a candidate inference, not a documented replacement; confirm the migration contract with upstream. Surface `deprecationNotice` as a typed event so consumers see the removal signal.
 
-### `dx-error-taxonomy-uncatchable` — Public API throws package/private error types; CodexAppServerError taxonomy is mostly dead — consumers cannot catch anything by type
+### `dx-error-taxonomy-uncatchable` — Request/transport/decode failures often escape the public error taxonomy
 
 **CONFIRMED / high / api-design** — `CodexKit:Sources/CodexAppServerKit/JSONRPC.swift:33`
 
-Every request rethrows package-scoped JSONRPC.Error unmapped (uncatchable by type); the most common first-run failure (codex not installed) throws private AppServerProcessTransportError; undecodable responses throw raw DecodingError. CodexAppServerError's serverBusy/retryLimitExceeded/malformedNotification have zero throw sites, .jsonRPC is thrown only for client-side login-URL validation with a fabricated -32602, and after overload retries the raw JSONRPC.Error is rethrown instead of .retryLimitExceeded. router.stop() also finishes all event streams with JSONRPC.Error.closed even on graceful close(), so long-lived for-await loops throw an untypeable error on normal shutdown. Consumer confirms: zero typed catches in CodexReviewKit, 30+ localizedDescription reductions — binary-missing, server-rejection and SDK decode bugs render identically.
+Requests rethrow package-scoped `JSONRPC.Error`, process launch can throw private `AppServerProcessTransportError`, and response decode can throw raw `DecodingError`. Several `CodexAppServerError` cases have no throw site, and overload retry exhaustion rethrows the raw JSON-RPC error. Graceful `router.stop()` also finishes event streams with `JSONRPC.Error.closed`. This does not make the entire public error type dead: turn failures, collector transport close, restart, and login validation do use `CodexAppServerError`. The actual gap is that request rejection, spawn failure, invalid response, and graceful/abnormal termination cannot be exhaustively discriminated by public type.
 
-- 証拠: JSONRPC.swift:3,33-48 package enum; AppServerClient.swift:115-134 rethrows unmapped; AppServerProcessTransport.swift:873 private error enum; CodexDomainTypes.swift:2839-2841 dead cases (grep: declaration-only); CodexAppServer.swift:1105-1133 only .jsonRPC sites; router stop CodexAppServerNotificationRouter.swift:168-172; consumer LiveCodexReviewStoreBackend.swift:511 et al.
-- 検証時の訂正: Consumer localizedDescription count is 37 (finding said 30+ — consistent).
-- 修正の方向: AppServerClient owns the transport→domain error boundary: map JSONRPC/transport/decode failures into public CodexAppServerError cases (spawnFailed, serverError(code:message:), invalidResponse, transportClosed) at the single send boundary, delete or wire the dead cases, and finish streams without error on graceful close.
+- 証拠: JSONRPC.swift:3,33-48 package enum; AppServerClient.swift:115-134; AppServerProcessTransport.swift:873 private error; CodexDomainTypes.swift:2839-2841; CodexAppServer.swift:1105-1133; router stop CodexAppServerNotificationRouter.swift:168-172; CRK has 37 `localizedDescription` reductions.
+- 修正の方向: Split ownership by information availability: transport preserves JSON-RPC envelope/data and terminal reason; AppServerClient maps request/decode failures and attaches requestID; public start/factory maps private spawn/scaffold failures before a client exists. Delete or wire dead cases, and define graceful stream finish separately from abnormal close.
 
-### `dx-no-timeout-story` — No deadline/timeout anywhere: init handshake, every request, and collect() can hang forever with no dedicated timeout error
+### `dx-no-timeout-story` — No handshake/request/overall-turn deadline surface or dedicated timeout error
 
 **CONFIRMED / high / api-design** — `CodexKit:Sources/CodexAppServerKit/AppServerClient.swift:89`
 
-No timeout mechanism exists in CodexAppServerKit (grep-verified; the only Duration uses are shutdown grace and turn metadata). CodexAppServer.init awaits the initialize handshake with no deadline (wedged binary hangs app startup forever); every request parks a CheckedContinuation resolved only by response or transport close; collect()/turn streams finish only on a terminal turn event or close — the router finishes thread subscribers on thread/closed but not turn subscribers, so one missing turn/completed wedges collect() permanently. No TimeoutError type exists. The consumer compensates with hand-rolled timeout scaffolding (observation awaiter, worker drain, test wrappers).
+CodexAppServerKit has no initialize-handshake or request-response deadline. `CodexAppServer.init` can wait indefinitely for initialize, and each request continuation is resolved only by a response, cancellation, or transport close. Aggregate turn waits also have no caller-supplied overall deadline. Existing CRK timeouts are different contracts: product terminal wait, MCP long-poll/re-await, runtime shutdown drain, and retry backoff; they are not compensators for one missing SDK timer.
 
-- 証拠: AppServerClient.swift:89-137 no deadline; AppServerProcessTransport.swift:113-131 parked continuation; router :308-310 vs :333-335 asymmetry; CodexDomainTypes.swift:404-441 no deadline field; consumer ReviewObservationAwaiter.swift:40-56, CodexReviewStoreCancellation.swift:243-254, CodexReviewStoreReviews.swift:34-59.
-- 修正の方向: AppServerClient owns per-request deadlines (optional Duration raced via structured concurrency, dedicated public timeout error distinct from transportClosed); Configuration owns the handshake deadline; streaming turns get an inter-event-gap deadline.
+- 証拠: AppServerClient.swift:89-137; AppServerProcessTransport.swift:113-131; CodexDomainTypes.swift:404-441. CRK contracts: ReviewObservationAwaiter.swift:40-56, CodexReviewStoreCancellation.swift:243-254, CodexReviewStoreReviews.swift:34-59. CodexKit README notes valid long quiet reviews and upstream exposes no heartbeat.
+- 修正の方向: Configuration owns an optional handshake deadline; AppServerClient owns optional per-request response deadlines; aggregate turn APIs accept a caller-specified overall deadline. Do not add an inter-event-gap deadline without a heartbeat contract.
 
 ### `test-store-ignores-archived-and-sort` — Store-backed thread/list ignores archived, sortKey and sortDirection — parameters DataKit always sends and whose serialization is itself pinned by tests
 
 **CONFIRMED / high / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:706`
 
-filteredThreadSnapshots filters only cwd/modelProviders/sourceKinds/searchTerm. With the store: archived:true and archived:false queries return identical membership with every thread stamped with the query's archived flag (fabricated scoping), and list order is store insertion order rather than the recency/created_at descending order DataKit explicitly trusts. Consumer previews already hand-stub thread/archive and track archived IDs themselves — the workaround signal that the store's mutation/scope owner is missing.
+`filteredThreadSnapshots` filters only cwd/modelProviders/sourceKinds/searchTerm. With the store, archived:true and archived:false queries return identical membership and DataKit stamps each returned model with the query scope. Ordering is initial snapshot order with upserted items moved to the front, not the requested sortKey/sortDirection nor necessarily upstream's default created_at descending. Consumer previews hand-stub thread/archive and track archived IDs themselves.
 
-- 証拠: CodexAppServerTestRuntime.swift:706-754 (no archived/sortKey/sortDirection reference); Params carry them AppServerRequests.swift Thread.List.Params; DataKit pins them CodexAppServerKitTests.swift:592-618; archived stamped CodexAppServer.swift:657; upstream thread.rs:1077-1094; consumer workaround ReviewMonitorPreviewAppServerRuntime.swift:335-341.
-- 検証時の訂正: The citation 'archived stamped CodexAppServer.swift:657' is imprecise: :657 only serializes query.archived into the request; the stamping owner is DataKit's CodexFetchRequest.swift:1134-1139, which sets isArchived from the query scope on every returned chat. List order is init-order with upsert-moved-to-front (recency-of-mutation), not strict insertion order, but it still ignores sortKey/sortDirection and the upstream created_at-descending default. Upstream cite is protocol/v2/thread.rs.
+- 証拠: CodexAppServerTestRuntime.swift:68,706-754; request serialization CodexAppServer.swift:657; DataKit stamping CodexFetchRequest.swift:1134-1139; upstream `app-server-protocol/src/protocol/v2/thread.rs:1077-1094`; consumer workaround ReviewMonitorPreviewAppServerRuntime.swift:335-341.
 - 失敗トレース: 1) Test seeds store with threads T1,T2 and wires stubThreads (CodexAppServerTestRuntime.swift:569-585). 2) DataKit archive view issues thread/list with archived:true (CodexModelContext.swift:2395-2399 -> CodexAppServer.swift:657). 3) Store's listThreadResponse -> filteredThreadSnapshots ignores request.archived (CodexAppServerTestRuntime.swift:706-754) and returns T1,T2. 4) DataKit stamps both isArchived=true (CodexFetchRequest.swift:1139). 5) The archived:false query returns the identical membership stamped false — archived and non-archived views show the same threads, contradicting v2/thread.rs:1091-1094. Sort: a sortKey:created_at/desc request returns raw snapshotOrder (:68) regardless of the requested key/direction.
 - 修正の方向: CodexAppServerTestThreadStore owns the full thread/list contract it advertises: honor archived scope, sort by requested key/direction with upstream defaults, and back archive/unarchive/delete mutations so consumers stop re-implementing them.
 
-### `use-item-identity-text-dedup` — UI dedups review output and reasoning mirrors by normalized-text equality and re-parses rawPayload JSON to absorb unstable item identity
+### `use-item-identity-text-dedup` — UI uses normalized text and raw payload kind to choose a presentation among distinct transcript items
 
-**CONFIRMED / high / workaround** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogProjection.swift:624`
+**CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogProjection.swift:624`
 
-One logical entry reaches the consumer as multiple items with different IDs (review output as exitedReviewMode item AND assistant message; one reasoning entry under two payload kinds: agent_reasoning event mirror + reasoning item). The projection maintains three text-equality compensation mechanisms — ReviewOutputKey turn-scoped dedup, the PendingReasoningMirrors pairing state machine keyed by scopeID+trimmed text, and RawPayloadKind JSON-decoding of item.rawPayload because the typed API exposes no payload-kind discriminator. Recurrence: 7 of 11 commits touching the file fix this dedup/status area (45b64f1, 537a9e4, 4c79ed5...). The SDK independently does its own text-signature fallback resolution (CodexFallbackAgentMessageSignature) — the same identity invariant implemented twice at two layers with no owner (cross-ref dk-optional-delta-id-workaround-layer).
+Upstream intentionally emits `exitedReviewMode` and then a final `agentMessage`; they are distinct semantic items even when their text matches. DataKit must preserve both. CRK chooses a less repetitive UI presentation using `ReviewOutputKey`, a `PendingReasoningMirrors` pairing state machine keyed by scopeID + trimmed text, and `RawPayloadKind` decoded from `item.rawPayload` because the typed model lacks the discriminator needed by that presentation policy. The churn is real, but the root is not “one persisted logical item lacks a stable ID.” SDK fallback-message identity is a separate compatibility subsystem for invalid/missing item IDs.
 
 - 証拠: ReviewMonitorCodexChatLogProjection.swift:94-107,137-141,258-314 output dedup; :619-651 PendingReasoningMirrors; :316-323,653-674 RawPayloadKind rawPayload decode; SDK twin CodexModel.swift:53-58,926-945,1323-1332; git log --follow fix churn.
-- 修正の方向: CodexDataKit owns canonical item identity: one persisted item per logical entry with stable itemID and a typed payloadKind discriminator; consumer text-matching and raw-JSON parsing then die.
+- 修正の方向: Preserve both semantic items in DataKit. Expose typed item kind and turn/review relation so the UI projection can choose a presentation without raw JSON or text equality; dedup remains presentation-owned.
 
-### `use-terminal-cascade` — Three-layer terminal-status cascade in the consumer compensates for the SDK's missing cancelled-terminal contract
+### `use-terminal-cascade` — SDK outcome adaptation and product cancellation arbitration are conflated as one workaround cluster
 
-**CONFIRMED / high / workaround** — `CodexReviewKit:Sources/CodexReviewKit/Store/CodexReviewStoreReviews.swift:812`
+**CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewKit/Store/CodexReviewStoreReviews.swift:812`
 
-Because CodexKit has no first-class cancelled terminal (interrupted classified as failure; cross-ref conf-interrupted-is-failure), the consumer rewrites terminal status at three layers: backend adapter re-derives .cancelled from interrupted/cancelled status; ReviewBackendEventSession emits a synthetic .cancelled on finish and ignores all later events via a finished flag (metrics.ignored instruments expected duplicate/late terminals); the store's completePendingCancellationIfNeeded is called at 7 sites and rewrites ANY backend terminal to cancelled while cancellationRequested is set. Expected: one typed terminal per turn from the SDK.
+The backend adapter reclassifies CodexKit's `interrupted/cancelled` status as CRK `.cancelled`; that part compensates for `conf-interrupted-is-failure`. Two adjacent mechanisms have different owners and must not be deleted with it: `ReviewBackendEventSession` provides exactly one terminal for the backend abstraction, and the store's `completePendingCancellationIfNeeded` enforces product policy that an accepted cancellation request wins a race with a backend terminal. The latter is called at 6 sites.
 
-- 証拠: CodexReviewStoreReviews.swift:812 (also 685,702,706,729,735,843); ReviewBackendEventSession.swift:124-127 finished guard, :144-146 synthetic .cancelled; AppServerCodexReviewBackend.swift:627-633; SDK CodexDomainTypes.swift:1878-1882, router :661,:748.
-- 検証時の訂正: completePendingCancellationIfNeeded has 6 call sites (CodexReviewStoreReviews.swift:685,702,706,729,735,812), not 7; 7 counts the definition at :843. Everything else accurate.
-- 修正の方向: CodexAppServerKit owns terminal typing: review surfaces deliver exactly one typed terminal (completed|cancelled|failed) per turn, deriving cancelled from turn/completed+interrupted; consumer layers collapse to record-keeping.
+- 証拠: CodexReviewStoreReviews.swift:685,702,706,729,735,812 calls and :843 definition; ReviewBackendEventSession.swift:124-127,144-146; AppServerCodexReviewBackend.swift:627-633; SDK CodexDomainTypes.swift:1878-1882.
+- 修正の方向: After CodexKit exposes a typed interrupted outcome, delete only the adapter's status repair. Keep the backend's single-terminal contract and the store's cancellation-wins arbitration unless their product requirements change.
 
-### `arch-attempt-id-fallback` — attemptID identity is fabricated by "attempt-1" fallbacks and unknown attempts silently get a fresh registered event session that clobbers thread registries
+### `arch-attempt-id-fallback` — "attempt-1" defaults create a latent second source of attempt identity
 
-**CONFIRMED / medium / bug** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:349`
+**CONFIRMED / low / api-design** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:349`
 
-Attempt identity gates event consumption and session lookup, yet is defaulted in three layers (Run.init default, decode fallback, backendRun reconstruction all "attempt-1"). When cancelReview takes the backendRun fallback branch and the backend has no session for that attemptID, reviewEventSession(for:) silently creates AND registers a new session, overwriting activeReviewAttemptIDByThreadID and the canonical-threadID map for all associated threads — a get-or-create mutation on what callers treat as a lookup. Same fallback-identity pattern the prior CodexKit audit flagged, one layer up.
+Attempt identity gates event consumption and session lookup, yet three construction/decoding paths can default it to `"attempt-1"`. `reviewEventSession(for:)` is get-or-create and registration mutates the thread→attempt maps. Those facts create a latent collision hazard if a legacy/migrated record without identity is ever restored beside a live attempt. However, current review runs are memory-only, production Run creation supplies a UUID, and `applyBackendRun` stores threadID and attemptID together. No relaunch/persistence decode path into the store was found, so the original stale-record collision trace is not a current production bug. Get-or-create can also be intentional for runtime restoration.
 
-- 証拠: AppServerCodexReviewBackend.swift:349-358 get-or-create+register, :360-382 registry overwrite; CodexReviewTypes.swift:239,254 fallbacks; CodexReviewStoreReviews.swift:906 reconstruction fallback, :431-450 caller branch, :1027-1029 attemptID gate.
-- 検証時の訂正: The registry-clobber harm is narrower than the wording implies: reaching the fallback branch with a live competing attempt on the same threadID requires a persisted record whose attemptID is nil while another attempt reuses that threadID (thread reuse exists — restartPreparedReview keeps interruptedRun.threadID :247 — but restarts persist real attemptIDs via applyBackendRun :237, so the collision needs legacy data). The unconditional facts stand: a cancel of a stale record fabricates identity and mutates registries via what every caller treats as a lookup.
-- 失敗トレース: 1) Run record persisted with threadID set but attemptID nil (legacy schema; ReviewRunCore.swift:5 Optional, CodexReviewTypes.swift:254 decode fallback). 2) After relaunch, runtimeState has no activeRun, so cancelReview takes the backendRun branch (CodexReviewStoreReviews.swift:431) with fabricated attemptID "attempt-1" (:906). 3) backend.interruptReview → AppServerCodexReviewBackend.swift:187 reviewEventSession(for:) → no session for "attempt-1" → new AppServerReviewEventSession created and registered (:355-356). 4) registerReviewEventSession overwrites activeReviewAttemptIDByThreadID[threadID]="attempt-1" and canonical map for all associated threads (:373-380); any later thread-keyed lookup (finishReviewEventStream :447, metrics :324) resolves to the fabricated session instead of a real one. 5) The new session has no reviewSession, so cancelReviewTurn's session path returns nil (:736-738) and the code silently resume-and-cancels via appServer (:466-470) — a phantom session remains registered for a nonexistent attempt.
-- 修正の方向: Backend owns attempt identity: interrupt/cleanup for an unknown attemptID is a no-op-with-log or explicit error, never a fabricated registered session; drop the "attempt-1" fallbacks and make attemptID non-optional at the store record so missing identity fails fast.
+- 証拠: AppServerCodexReviewBackend.swift:349-382 get-or-create/registration; CodexReviewTypes.swift:239,254 defaults; CodexReviewStoreReviews.swift:234-242 `applyBackendRun`, :906 reconstruction, :1027-1029 gate; CodexReviewStore.swift:11 memory-only state.
+- 修正の方向: Remove the sentinel now. A queued Run may have no backend identity, but reconstruction of a backend Run with threadID requires a real attemptID and fails fast if it is absent. Keep get-or-create restoration semantics separate; do not turn every unknown attempt into no-op.
 
-### `arch-closed-maps-to-failed` — Consumer maps CodexReviewEvent.closed (upstream idle-unload, resumable) to review failure
+### `arch-closed-maps-to-failed` — Adapter contains a latent `.closed` / `.notLoaded` to failure mapping
 
-**CONFIRMED / medium / protocol-mismatch** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:584`
+**CONFIRMED / low / protocol-mismatch** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:584`
 
-AppServerTypedReviewEventAdapter maps .closed → [.failed("Review thread closed.")] and statusChanged(.notLoaded) → failed, turning an unload notification into a terminal user-visible failure. The SDK forwards .closed with no semantics and its progress sequence silently ends on it (cross-ref ask-thread-closed-terminal), so the consumer invents semantics. Harmless today only because the finished-flag terminal-cascade guard ignores post-terminal events; if .closed ever precedes the terminal (e.g. deferred deleteThread ordering changes), a successful review is recorded failed. The backend already has restart/resume machinery (prepareReviewRestart/resumeReview) that .closed bypasses.
+`AppServerTypedReviewEventAdapter` maps `.closed` and `statusChanged(.notLoaded)` to a user-visible failure. The mapping is semantically wrong for an unload/status event, but no current user-visible failure trace was established: CodexKit does not send unsubscribe, upstream does not unload a running turn, and when unload occurs after a terminal event `BackendReviewEventMailbox.terminal` drops the later failure. This is latent cleanup, not a confirmed production failure.
 
-- 証拠: AppServerCodexReviewBackend.swift:583-584, :574-575; restart machinery :201-257,466-470; upstream thread_lifecycle.rs:397-436; SDK pass-through CodexDomainTypes.swift:720,749-750; CodexTurnSequences.swift:329-331.
-- 検証時の訂正: Minor: the post-terminal protection is BackendReviewEventMailbox.terminal (append guard in CodexReviewBackend.swift), not the ReviewBackendEventSession `finished` flag — that flag (ReviewBackendEventSession.swift:44,124) is only set by finish()/abandon(), not on terminal emit (receive() at :133-137 returns without setting finished). The protective effect is as described. Also, upstream ordering makes the latent bug hard to hit: unload requires the thread to be idle (turn already completed), so turn/completed reaches the mailbox first in the observed server code.
-- 失敗トレース: Latent path (guarded today): 1) review turn completes → adapter emits .completed (AppServerCodexReviewBackend.swift:553-554,590-607) → mailbox.terminal=.finished (CodexReviewBackend.swift append). 2) app-server later unloads the idle review thread → thread/closed (thread_lifecycle.rs:429-434) → SDK forwards .closed (CodexDomainTypes.swift:749-750) → adapter converts to .failed("Review thread closed.") (AppServerCodexReviewBackend.swift:583-584) → dropped only by the mailbox terminal guard. If .closed ever reaches the mailbox before the terminal (guard removed, or ordering change), the completed review is recorded failed. The mapping itself (unload → user-visible failure) is the confirmed protocol mismatch.
-- 修正の方向: Adapter classifies .closed as an interruption eligible for the existing restart path (or a distinct terminal reason), not a failure — ultimately fixed by the SDK modeling .closed as non-terminal unload.
+- 証拠: AppServerCodexReviewBackend.swift:574-575,583-584; BackendReviewEventMailbox append guard in CodexReviewBackend.swift; ReviewBackendEventSession.swift:44,124,133-137; upstream thread_lifecycle.rs:351-354,406-436.
+- 修正の方向: Remove success/failure synthesis from `.closed` / `.notLoaded`. Model unload/generation end separately; persisted resume starts a new generation, while ephemeral unload is not resumable. Do not reclassify unload as cancellation/interruption.
 
-### `arch-host-target-test-only` — CodexReviewHost + DirectCodexReviewStoreBackend are production code with only test callers, duplicating Live backend adaptation logic
+### `arch-host-target-test-only` — CodexReviewHost class + DirectCodexReviewStoreBackend have only test callers and duplicate Live adaptation
 
 **CONFIRMED / medium / architecture** — `CodexReviewKit:Sources/CodexReviewHost/CodexReviewHost.swift:45`
 
 CodexReviewHost and its private DirectCodexReviewStoreBackend have no production callers (the app composes via CodexReviewStore.makeLiveStore); only CodexReviewHostTests use them. DirectCodexReviewStoreBackend re-implements the Live backend's snapshot/auth adaptation without persistence — two maintained copies already showing copy-drift: the dead ternary `selectedAccount == nil ? .signedOut : .signedOut` appears in both.
 
 - 証拠: grep CodexReviewHost( → only CodexReviewHostTests.swift:101,116,150; app composition CodexReviewMonitorApp.swift:288; duplicated mappings CodexReviewHost.swift:81-101,246-291 vs LiveCodexReviewStoreBackend.swift:590-613,1102-1163,1641-1651; dead ternary CodexReviewHost.swift:155,160 and LiveCodexReviewStoreBackend.swift:697,1161.
-- 修正の方向: Delete the class and test the store against a CodexReviewTesting fake of CodexReviewBackend, or promote it to the real headless composition root sharing mapping helpers with the Live backend — one owner for backend→store adaptation.
+- 修正の方向: Delete the unused class and its private backend, then test the store against a CodexReviewTesting fake of `CodexReviewBackend`; alternatively promote the class to a real headless composition root. This finding does not justify deleting the `CodexReviewHost` target, which contains the production Live backend.
 
-### `arch-testing-forwarder-chains` — ~100 ForTesting accessors mechanically forwarded through three layers (scroll view → chat-log target → transport VC)
+### `arch-testing-forwarder-chains` — 107/124 ForTesting accessors are mechanically forwarded through UI layers
 
 **CONFIRMED / medium / test-gap** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogTarget.swift:351`
 
-ReviewMonitorCodexChatLogTarget devotes ~510 of its 861 lines to a DEBUG extension forwarding every test probe to logScrollView; ReviewMonitorTransportViewController repeats the list one layer up (~570 lines) prefixed with `log`. Every new leaf capability requires three mechanical wrapper edits — tests lack a direct seam to the leaf render surface, and the noise hides the two types' real contract (bind/clear/render).
+ReviewMonitorCodexChatLogTarget exposes 107 testing accessors, largely forwarding probes to `logScrollView`; ReviewMonitorTransportViewController exposes 124, including its own probes plus another forwarding layer. Every new leaf capability requires mechanical wrapper edits and hides the real bind/clear/render contract.
 
-- 証拠: ReviewMonitorCodexChatLogTarget.swift:351-861 (:373-379 example); ReviewMonitorTransportViewController.swift:205-771 (:247-257 same accessors re-wrapped).
-- 検証時の訂正: Accessor count is slightly above the finding's "~100": 107 at the target layer and 124 at the VC layer (the VC adds a few of its own probes, e.g. placeholder state :235-245, that are not forwards). Line spans as cited.
+- 証拠: ReviewMonitorCodexChatLogTarget.swift:351-861; ReviewMonitorTransportViewController.swift:205-771, including its own placeholder probes at :235-245.
 - 修正の方向: Expose the leaf inspection object once (DEBUG-only Inspector at each level, or let tests reach the scroll view directly) so probes are defined in exactly one place.
 
 ### `ask-interrupt-error-string-parsing` — turn/interrupt correctness depends on parsing upstream error message strings, plus a fixed 5x50ms retry that also fires for already-finished turns
 
 **CONFIRMED / medium / workaround** — `CodexKit:Sources/CodexAppServerKit/CodexThreadOperations.swift:513`
 
-interruptCodexTurn discovers the active turn by splitting the server error message on " but found " (activeTurnID) and retries on lowercase substrings "no active turn"+"interrupt", sending turnId:"" as a deliberate mismatch probe. These match today's exact format! strings (which already differ between upstream call sites) and are not a contract — any rewording silently breaks cancel. Upstream returns the same 'no active turn' error for both not-yet-activated and already-terminal turns, so cancelling a just-finished turn burns ~250ms of retries then throws an untypeable JSONRPC.Error instead of being treated as already-cancelled. The post-loop `throw CancellationError()` (:496) is unreachable. Root cause is an upstream affordance gap (no structured code / active-turn query); cross-ref conf-error-payload-discarded.
+`interruptCodexTurn` discovers a conflicting active turn by splitting a plain server error message on `" but found "` and retries messages containing `"no active turn"` + `"interrupt"`. When turnID is nil, CodexKit sends `""`; upstream treats that as a startup interrupt which bypasses the expected-turn check, not as a mismatch probe. The string discovery path is used only for a non-empty stale turnID. Upstream returns plain `invalid_request(message)` with no structured `error.data` for stale/no-active cases, so preserving existing `CodexErrorInfo` alone cannot remove the parse. A just-finished turn also triggers the fixed 5×50ms retry and then rethrows.
 
-- 証拠: CodexThreadOperations.swift:465-532 retry loop, activeTurnID parse, isExpectedTurnNotActive; upstream /Users/kn/Dev/codex/codex-rs/app-server/src/request_processors/turn_processor.rs:904,1364-1373 differing message shapes and :1371 terminal-turn same-error path.
-- 検証時の訂正: One evidence claim is wrong: `turnId:""` is not a 'deliberate mismatch probe'. Upstream treats empty turn_id as a startup interrupt (turn_processor.rs:1352,:1358,:1389) that bypasses the active-turn check and interrupts whatever is running, succeeding without error; CodexKit only sends "" when turnID is nil (CodexThreadOperations.swift:507-510, e.g. cancelActiveTurn(expectedTurnID: nil) :233-243). The ' but found ' discovery fires only when a non-empty stale turnID is sent. Core finding (string coupling, wasted retry on terminal turns, unreachable :496) stands.
+- 証拠: CodexThreadOperations.swift:465-532; upstream `app-server/src/request_processors/turn_processor.rs:904,1352,1358,1364-1373,1389`.
 - 失敗トレース: 1) Turn finishes; UI cancel races it: CodexResponseStream.cancel() → interruptCodexTurn (CodexThreadOperations.swift:466). 2) Server replies invalid_request 'no active turn to interrupt' (turn_processor.rs:1370-1373). 3) isExpectedTurnNotActive matches (:524-532) → sleep 50ms, retry; repeats 5 times (~250ms+ RPC latency) (:472-481,:499-500). 4) Attempt 5: retry gate fails; message has no ' but found ' so activeTurnID is nil → `throw error` (:482-485) — the untypeable package JSONRPC.Error surfaces for what is semantically an already-cancelled success. Separately, any upstream rewording of these format! strings silently breaks both the retry match and active-turn redirect.
-- 修正の方向: Consult router history (hasTerminalTurnEvent) before retrying so locally-known-terminal turns are idempotent successful cancels; resolve the active turn via thread/read instead of the error probe; push upstream for structured error codes, and key retry/redirect on typed error data once error.data is carried through.
+- 修正の方向: Short-circuit locally known terminal turns as idempotent cancellation, but do not infer unknown server state from absence of history. Ask upstream for structured stale/no-active/active-turn identity data or a typed cancel-by-identity affordance; only then delete message parsing.
 
-### `ask-thread-closed-terminal` — thread/closed (idle unload, resumable) is treated as the terminal thread event, permanently finishing subscribers and ending review sequences without a result
+### `ask-thread-closed-terminal` — Router ends the current thread generation on unload without exposing a typed end reason
 
-**CONFIRMED / medium / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:333`
+**CONFIRMED / low / api-design** — `CodexKit:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:333`
 
-Upstream emits thread/closed when an idle, subscriber-less thread is unloaded from memory — resumable, not terminal. The router finishes all thread subscribers on .closed and isTerminalThreadEvent is true only for .closed; new subscribers finish immediately while .closed is in the current generation. CodexReviewProgressSequence returns nil on .closed without ever yielding a terminal phase, CodexReviewEventSequence reports .closed as terminal, and CodexResponseCollector throws .transportClosed when a stream ends without turn/completed even though the transport is fine. Consumers are forced to invent semantics (see arch-closed-maps-to-failed) and passive thread.events observers see their loop end on server GC of an idle thread.
+The router finishes thread subscribers on `.closed` and records it as the current generation's terminal thread event. That is compatible with upstream unload: no further events arrive for that loaded generation. The API-design gap is that review progress/event consumers get an undifferentiated end rather than a typed unload/generation-end reason; the router itself does not synthesize turn completion/failure. On the pinned CodexKit stdio baseline, no unsubscribe is sent and last connection close terminates the app-server, so an observable `.closed` is normally unreachable. `CodexResponseCollector` reads a turn stream and is not directly ended by `.closed`.
 
-- 証拠: Router :333-335 finishThreadSubscribers on .closed, :522-527 isTerminalThreadEvent; CodexTurnSequences.swift:155-157,:238-239,:329-331,:344-345,:490; upstream /Users/kn/Dev/codex/codex-rs/app-server/src/request_processors/thread_lifecycle.rs:397-435 idle-unload emits ThreadClosedNotification{thread_id} only.
-- 失敗トレース: 1) Consumer holds a passive `for await event in thread.events` observer (CodexThreadOperations.swift:9-27) on a thread that goes idle with no server-side subscribers. 2) Upstream unloads it and emits thread/closed (thread_lifecycle.rs:397-435) — thread still resumable via thread/resume (common.rs:488). 3) Router decodes .closed (CodexAppServerNotificationRouter.swift:822-823) and permanently finishes every thread subscriber (:333-335). 4) Any new subscriber for that thread finishes immediately because .closed sits in the current generation (:378-381,:388-392,:522-527). 5) A CodexReviewProgressSequence consumer's loop ends with no terminal phase ever yielded (CodexTurnSequences.swift:329-331), so the review appears to vanish rather than remain resumable — SDK invents terminal-ness the protocol does not promise.
-- 修正の方向: Router owns thread-stream lifetime: model .closed as a non-terminal 'unloaded' state (subscribers stay open or finish with a distinct reason), give 'ended without terminal event' its own error instead of transportClosed, and keep terminal-ness tied to connection close and explicit archive/delete.
+- 証拠: Router :333-335,522-527; CodexTurnSequences.swift:155-157,238-239,329-331,344-345; CodexAppServer.swift:368-382; CodexThreadOperations.swift:391-399; AppServerProcessTransport.swift:969-974; upstream README:140-162,455-477, thread_state.rs:542-564, thread_processor.rs:2607-2619, thread_lifecycle.rs:55-60,351-354,406-436, lib.rs:718-719,996-1016,1156-1166.
+- 修正の方向: Keep generation completion semantics. Add a typed `unloaded/generationEnded` reason only if consumers need to distinguish it from connection termination; never turn it into turn success/failure. Persisted resume starts a fresh generation, while ephemeral unload is not resumable.
 
-### `conf-command-delta-clobbers-item` — commandExecution/fileChange output deltas replace the transcript item, wiping command text and prior output during streaming
+### `conf-command-delta-clobbers-item` — command output and current fileChange patch updates replace the transcript item with partial content
 
 **CONFIRMED / medium / bug** — `CodexKit:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:887`
 
-itemUpdate builds a CodexThreadItem with content .command(.init(command: "", output: <this delta only>)) and CodexTranscriptAccumulator.upsert does items[index] = item, wholesale-replacing the item/started item (which carried the real command/cwd) — transcript consumers see the command string vanish and output show only the LAST delta chunk instead of the concatenation upstream guarantees. item/completed later restores the item, so corruption is transient but visible for the whole command runtime. CodexDataKit independently compensates with accumulatesOutputDeltas merge logic — the recurrence signal that the merge invariant has no owner in the shared accumulator. Cross-ref ask-delta-random-item-identity (identity half of the same function).
+For current `item/commandExecution/outputDelta`, `itemUpdate` builds content with an empty command and only the latest delta; `CodexTranscriptAccumulator.upsert` replaces the `item/started` snapshot that carried command/cwd and prior output. Current `item/fileChange/patchUpdated` is emitted from `EventMsg::PatchApplyUpdated` only when the under-development `apply_patch_streaming_events` feature is enabled (default false); when reached, the same helper constructs a partial item and replaces existing metadata rather than applying the structured snapshot. Deprecated `item/fileChange/outputDelta` is compatibility-only. The medium severity is supported by the normally reachable command path alone.
 
-- 証拠: CodexAppServerNotificationRouter.swift:887-905; CodexTurnSequences.swift:667-668 replace-on-upsert; upstream concatenation contract app-server README:1399, item.rs:1400-1408; compensator CodexModel.swift:1193-1197.
-- 検証時の訂正: Citation nit: upstream README's explicit 'concatenate delta values' sentence at :1399 is in the agentMessage section; for commandExecution the chunk-append semantics follow from README:697-705 (zero or more outputDelta chunks for the same item id) rather than an explicit concatenation sentence. Does not change the conclusion: showing only the last chunk and erasing command/cwd is wrong under either reading.
+- 証拠: CodexAppServerNotificationRouter.swift:773-780,887-905; CodexTurnSequences.swift:667-668; upstream event_mapping.rs:417-423 and README:1418 patchUpdated, apply_patch.rs:85-95 and features/src/lib.rs:949-953 feature gate/default, README:1411-1414 command delta, :1416-1419 legacy file delta; compensator CodexModel.swift:1193-1197.
 - 失敗トレース: (1) Server: item/started with commandExecution item {id: "item_1", command: "cargo test", cwd: "/repo"} -> accumulator stores full item (router :753-757; CodexTurnSequences.swift:670-672); (2) server streams item/commandExecution/outputDelta {itemId: "item_1", delta: "chunk A"} -> router itemUpdate builds CodexThreadItem(id: "item_1", content: .command(command: "", output: "chunk A")) (router :887-905); (3) upsert finds index for "item_1" and executes items[index] = item (CodexTurnSequences.swift:667-668) — command text and cwd vanish from the transcript, output shows only "chunk A"; (4) next delta {delta: "chunk B"} replaces again -> output shows only "chunk B", never "chunk Achunk B"; (5) any CodexThreadTranscriptSequence / CodexReviewProgressSequence / CodexResponseStream snapshot consumer renders the corrupted item for the entire command runtime until item/completed's aggregatedOutput restores it. CodexDataKit consumers are shielded only by the per-layer compensator (CodexModel.swift:1193-1197).
-- 修正の方向: Transcript accumulator owns item-merge semantics: typed partial updates (append output, never replace command/cwd/status) in one place consumed by both the accumulator and DataKit, deleting per-layer compensators.
+- 修正の方向: Transcript accumulator owns method-specific update semantics: append command output; apply fileChange patch snapshots while preserving item identity/metadata; keep legacy text delta separate. DataKit consumes the same update operation instead of re-implementing it.
 
-### `conf-error-payload-discarded` — CodexErrorInfo and JSON-RPC error.data are dropped everywhere, forcing string-matching on error messages
+### `conf-error-payload-discarded` — Structured JSON-RPC error data is not preserved across the public request boundary
 
 **CONFIRMED / medium / coverage-gap** — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:1140`
 
-Upstream TurnError = {message, codexErrorInfo?, additionalDetails?} with a rich enum (contextWindowExceeded, usageLimitExceeded, activeTurnNotSteerable{turnKind}, ...), and steer/interrupt failures serialize the full TurnError into JSON-RPC error.data. CodexKit decodes only {message} and the transport discards error.data entirely. Consequences: consumers cannot distinguish error classes without parsing prose; CodexKit itself must string-match upstream error text for interrupt retry/redirect (cross-ref ask-interrupt-error-string-parsing); `error` notifications' structured payload is invisible (cross-ref cov-error-warning-untyped).
+Upstream `TurnError` includes `codexErrorInfo` and `additionalDetails`, and several request failures serialize structured data that distinguishes context-window, usage-limit, steerability, and related categories. CodexKit decodes only message in its request DTO and the transport does not preserve JSON-RPC `error.data`, so those categories cannot reach a public typed error. The interrupt retry/redirect is a separate upstream gap: current stale/no-active interrupt responses are plain `invalid_request(message)` with no structured data, so preserving data alone will not remove that string parse. Error notifications remain raw-readable via `.unknown` but are not typed.
 
-- 証拠: AppServerRequests.swift:1140-1147 message-only; AppServerProcessTransport.swift:251-258 data never touched; upstream thread_data.rs:266-275 TurnError, shared.rs:63-111 CodexErrorInfo, turn_processor.rs:910-941 TurnError in error.data.
-- 検証時の訂正: Citation nits: CodexErrorInfo enum body is shared.rs:~92-133 (cited 63-111 — that range covers the doc comment/TurnError vicinity); TurnError-into-error.data is turn_processor.rs:921-951 (cited 910-941, same code block); the file is app-server/src/request_processors/turn_processor.rs. Substance accurate.
-- 修正の方向: Transport carries error.data through JSONRPC.Error; decode TurnError/CodexErrorInfo once (with .other catch-all) so flow control and consumer UX key off typed codes.
+- 証拠: AppServerRequests.swift:1140-1147 message-only; AppServerProcessTransport.swift:251-258 data not preserved; upstream thread_data.rs:266-275 `TurnError`, shared.rs:92-133 `CodexErrorInfo`, `app-server/src/request_processors/turn_processor.rs:921-951` error.data serialization.
+- 修正の方向: Preserve `error.data` in the transport and decode known `TurnError/CodexErrorInfo` values with an unknown/raw catch-all at the public error boundary. Separately request structured interrupt error data or a typed cancel affordance upstream.
 
 ### `conf-ratelimits-replace-not-merge` — account/rateLimits/updated is replace-applied instead of merged into the last snapshot
 
@@ -381,9 +383,8 @@ Upstream TurnError = {message, codexErrorInfo?, additionalDetails?} with a rich 
 
 Upstream documents the notification as a sparse rolling update ('merge available values into the most recent read response... does not clear a previously observed value'). CodexAppServer.accountEvent builds a brand-new CodexRateLimits from only the notification, so an update carrying only primary clears secondary and planType for consumers treating the event as current state; no merge owner is exposed. The read response also silently drops rateLimitResetCredits, credits, limitName, individualLimit.
 
-- 証拠: CodexAppServer.swift:1166-1182; AppServerRequests.swift:1839-1884 partial decode; upstream account.rs:505-515 sparse-merge doc, :289-295 dropped fields.
-- 検証時の訂正: Citation nits: the sparse-merge doc is account.rs:495-506 (cited 505-515); of the dropped fields, rateLimitResetCredits is at account.rs:~294 in GetAccountRateLimitsResponse while limitName/credits/individualLimit (plus rateLimitReachedType, not listed in the finding) are RateLimitSnapshot fields at account.rs:516-529 (finding cited :289-295 for all). Substance accurate.
-- 失敗トレース: (1) Client reads full snapshot: primary+secondary windows and planType populated; (2) server later emits account/rateLimits/updated carrying only {limitId: "codex", primary: {...}} — legal per the sparse-update contract (account.rs:495-506, all RateLimitSnapshot fields Optional :516-529); (3) CodexAppServer.accountEvent decodes it and constructs a brand-new CodexRateLimits from only that payload (CodexAppServer.swift:1166-1182); (4) a consumer treating .rateLimitsUpdated as current state (the natural reading of an event named 'updated' with no partial-delta typing) now observes secondary == nil and planType == nil — previously observed values read as cleared, violating the upstream 'does not clear a previously observed value' contract; no SDK API exposes the previous snapshot to merge against.
+- 証拠: CodexAppServer.swift:1166-1182; AppServerRequests.swift:1839-1884; upstream account.rs:508-515 sparse merge, :294 `rateLimitResetCredits`, :520-529 `limitName` / `credits` / `individualLimit` / `rateLimitReachedType`.
+- 失敗トレース: (1) Client reads full snapshot: primary+secondary windows and planType populated; (2) server emits a legal sparse update with only primary (account.rs:508-515; optional fields :520-529); (3) CodexAppServer constructs a brand-new CodexRateLimits from that payload; (4) consumer now observes secondary/planType nil although absence must not clear prior values.
 - 修正の方向: CodexAppServer holds the last snapshot and emits merged state (or explicitly types the event as a partial delta) so 'absent field' can never read as 'cleared value'.
 
 ### `conf-server-request-resolved-ignored` — serverRequest/resolved is never handled, so aborted server requests leave client handlers hanging
@@ -392,50 +393,45 @@ Upstream documents the notification as a sparse rolling update ('merge available
 
 Upstream aborts pending server→client requests on turn start/complete/interrupt and announces it via serverRequest/resolved {threadId, requestId}. CodexKit routes it to .unknown and nothing correlates it with in-flight serverRequestHandler invocations: a custom handler awaiting user input waits forever (its Task in AppServerProcessTransport.respond is never cancelled) and its late answer is silently ignored server-side. Invisible with the default auto-decline handler, inherited by any consumer implementing interactive approvals. Cross-ref cov-server-requests-untyped.
 
-- 証拠: Router decodeThreadEvent default → .unknown (CodexAppServerNotificationRouter.swift:824-826); unmanaged handler tasks AppServerProcessTransport.swift:234-245,289-313; upstream v2/notification.rs:50-56 ServerRequestResolvedNotification, abort sites bespoke_event_handling.rs:154,184,1048.
-- 検証時の訂正: Citation nit: ServerRequestResolvedNotification is at v2/notification.rs:52-57 (finding cited :50-56); abort call sites are :154, :184, :1047-1049. Substance accurate.
+- 証拠: Router default `.unknown` at CodexAppServerNotificationRouter.swift:824-826; handler tasks AppServerProcessTransport.swift:234-245,289-313; upstream v2/notification.rs:52-57; abort sites bespoke_event_handling.rs:154,184,1047-1049.
 - 修正の方向: Transport (owner of server-request lifecycle) tracks in-flight server requests by id, observes serverRequest/resolved, and cancels the corresponding handler task / exposes cancellation to the handler API.
 
-### `cov-dead-compat-notifications` — Router decodes four notifications that do not exist upstream (turn/failed, turn/cancelled, item/updated, agent/message); dead paths drive live machinery and consumer fixtures
+### `cov-dead-compat-notifications` — Router keeps current-dead and historical compatibility notification routes without an explicit policy
 
 **CONFIRMED / medium / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:661`
 
-None of these methods exist in upstream v2 ServerNotification (common.rs:1613-1710; grep: 0 hits). Consequences: (1) public .turnFailed can never fire — real failures arrive only as turn/completed status=failed, so consumers switching on .turnFailed see nothing, and generation-boundary logic carries dead .turnFailed branches (:567-570); (2) the agent/message path is the sole producer of the fallback-ID system (CodexAgentMessageFallbackID, upsert(replacingFallbackID:), CodexModel text-signature dedup) — dead protocol surface driving live complexity; (3) consumer previews are built on item/updated (ReviewMonitorPreviewAppServerRuntime.swift:563) and deprecated item/fileChange/outputDelta (:632), and SDK tests feed agent/message and turn/failed fixtures, so fakes exercise flows no real server produces. Cross-ref: test-fictional-turn-failed-pins-phase-contract, dk-optional-delta-id-workaround-layer, conf-interrupted-is-failure.
+The pinned v2 baseline emits none of `turn/failed`, `turn/cancelled`, `item/updated`, or `agent/message`; real failures arrive through `turn/completed(status=failed)`. History is nuanced: `turn/failed` and `item/updated` briefly existed in the protocol schema around upstream `a010c1b7fcce` and were removed in `ce35cb16b279`, with no implementation emission found; the other two exact methods were not found. The router nevertheless exposes `.turnFailed` branches and current tests/previews emit these methods. Fallback IDs are minted both by `.message` compatibility events and by agent-message deltas missing itemID; the former performs fallback promotion. Current valid v2 requires delta itemID, so both inputs are compatibility behavior rather than normal-wire identity.
 
-- 証拠: Router :661-662,:668,:698-706,:748-751,:758-762,:788-796 dead method cases; upstream /Users/kn/Dev/codex/codex-rs/app-server-protocol/src/protocol/common.rs:1613-1717 has only TurnStarted/TurnCompleted for turn lifecycle; grep for the four quoted method strings in app-server-protocol/src returns nothing; fallback machinery CodexDomainTypes.swift:2234-2249, CodexTurnSequences.swift:647-693; fixtures CodexAppServerKitTests.swift:3541,3575,3662, CodexDataKitTests.swift:8091.
-- 検証時の訂正: One sub-claim is imprecise: agent/message is not the SOLE producer of the fallback-ID system. Fallback IDs are also minted by item/agentMessage/delta events whose itemID is absent (router AgentMessageDeltaPayload.itemID optional, CodexAppServerNotificationRouter.swift:1084-1096; CodexTurnSequences.swift:675-689 append(delta,fallbackItemID:)). agent/message is the sole producer of .message events that drive upsert(replacingFallbackID:) resolution. The thrust survives because upstream requires item_id on agent-message deltas (item.rs:1333-1338 AgentMessageDeltaNotification.item_id: String, non-optional), so the delta-side fallback path is equally dead against a real v2 server. Also minor: dead .turnFailed generation-boundary branches are at router :485, :549, :574-575 (finding cited :567-570).
-- 失敗トレース: Consumer switches on public CodexThreadEvent.turnFailed (e.g. CodexReviewKit:Sources/CodexReviewAppServer expects failure events): (1) real server fails a turn -> emits only turn/completed with turn.status=failed (upstream common.rs:1636 TurnCompleted is the only turn-terminal notification; TurnStatus turn.rs:29-35); (2) CodexKit router decodes it as .turnCompleted(response) (CodexAppServerNotificationRouter.swift:746-747), never .turnFailed (:748-752 requires method turn/failed|turn/cancelled which no server sends, grep 0 in app-server-protocol/src); (3) the consumer's .turnFailed branch never executes; failure must be re-derived from response.status/errorMessage. Meanwhile SDK tests and previews pass because their fakes emit the nonexistent methods (CodexAppServerKitTests.swift:3541; ReviewMonitorPreviewAppServerRuntime.swift:562), so fakes diverge from any real server.
-- 修正の方向: Router owns the wire-method surface: delete nonexistent-method branches (or synthesize .turnFailed from turn/completed+failed so the typed event means what it says), make delta itemId required, delete the fallback-ID machinery they feed, and migrate preview/test fixtures to real v2 notifications.
+- 証拠: Router :485,549,574-575,661-662,668,698-706,748-751,758-762,788-796; current protocol common.rs:1613-1710; historical commits `a010c1b7fcce` / `ce35cb16b279`; optional delta decode router :1084-1096; fallback append/promotion CodexTurnSequences.swift:647-693; upstream item.rs:1333-1338; fixtures CodexAppServerKitTests.swift:3541,3575,3662 and CodexDataKitTests.swift:8091.
+- 失敗トレース: (1) Real failure emits `turn/completed(status=failed)` (upstream common.rs:1631; turn.rs:29-35). (2) Router decodes `.turnCompleted`, never `.turnFailed`, whose branch requires current-dead methods. (3) Consumer must derive failure from response status/error. SDK tests/previews can still pass against their compatibility dialect.
+- 修正の方向: Publish a compatibility window. Default router/testing semantics follow current v2; historical methods, if retained, live in an explicit legacy namespace with removal tests. Do not synthesize a second terminal wire event. Make current-v2 delta itemID required and migrate fixtures to `turn/completed` and current item-specific deltas.
 
 ### `cov-error-warning-untyped` — error/warning/deprecationNotice/configWarning are specially routed but never typed; turn/completed decode failure degrades to synthetic success
 
 **CONFIRMED / medium / coverage-gap** — `CodexKit:Sources/CodexAppServerKit/CodexAppServerNotificationRouter.swift:556`
 
-The router has a bespoke routing list for exactly these four methods, but decodeThreadEvent/decodeTurnEvent have no cases for them, so they surface only as .unknown — consumers drop them (AppServerCodexReviewBackend unknownEvents returns []), making 'model retrying' (ErrorNotification.will_retry, the only transient-retry signal) and deprecation warnings (incl. thread/rollback removal) invisible; willRetry is not decoded anywhere. Since v2 ErrorNotification always carries threadId/turnId, the unscoped broadcast branch (:274-286) is unreachable. Related leniency: turnResult() decodes turn/completed with try? — an undecodable payload yields a CodexResponse with empty turnID/nil status that CodexResponseCollector treats as success; TurnError.codex_error_info/additional_details are dropped (cross-ref conf-error-payload-discarded).
+The router specially routes these four methods but has no typed cases, so they surface as `.unknown(CodexRawNotification)`. They are therefore available to a raw-aware consumer, not globally invisible; typed progress and CRK's adapter drop them. The unscoped broadcast branch is unreachable for `error` because it requires threadID/turnID, but it is load-bearing for `warning` (optional threadID), `deprecationNotice` (no threadID), and config warnings. Related leniency remains: `turnResult()` uses `try?`; an undecodable `turn/completed` becomes an empty/nil-status response that the collector can treat as success.
 
-- 証拠: Router :556-563 isUnscopedDiagnosticNotification, :274-286 broadcast, decode switches :657-731,:743-827 no cases → .unknown; :1011-1026 turnResult try?; upstream notification.rs:41-48 ErrorNotification, thread_data.rs:270-276 TurnError; consumer AppServerCodexReviewBackend.swift:585-586,645-650.
-- 検証時の訂正: One sub-claim is overbroad: the unscoped broadcast branch (:274-286) is unreachable only for the "error" method (ErrorNotification.thread_id/turn_id required, notification.rs:41-48). It IS reachable and load-bearing for warning (thread_id: Option<String>, notification.rs:21-26), deprecationNotice (no thread_id field at all, notification.rs:11-16), and configWarning. The rest of the finding stands as stated.
+- 証拠: Router :274-286,556-563,657-731,743-827,1011-1026; upstream notification.rs:11-16,21-26,41-48; consumer AppServerCodexReviewBackend.swift:585-586,645-650.
 - 修正の方向: Add typed .errorReported(message:willRetry:) and warning-family events owned by the router (routing infra already exists), and make turn/completed decode failure loud instead of synthesizing empty success.
 
 ### `cov-server-requests-untyped` — Server-initiated requests have no typed surface and the default handler answers protocol-invalid {} for requestUserInput/permissions
 
 **CONFIRMED / medium / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKit/CodexAppServer.swift:128`
 
-defaultServerRequestHandler declines only the two commandExecution/fileChange approvals; every other server request gets emptyResult() = {}. Upstream requires `answers` on ToolRequestUserInputResponse and `permissions` on PermissionsRequestApprovalResponse — {} fails serde, upstream error!-logs and substitutes empty answers/grant, so every such reply is a logged contract violation degrading to deny. No typed params or decision enums exist even for the approvals the SDK special-cases; item/tool/requestUserInput, item/permissions/requestApproval, mcpServer/elicitation/request have zero CodexKit references, yet Configuration docs claim support for these flows and experimentalApi:true keeps experimental requests in play. Cross-ref conf-server-request-resolved-ignored (stale-request cancellation) and test-no-server-request-injection.
+`defaultServerRequestHandler` declines commandExecution/fileChange approvals with known shapes; every other request gets `{}`. Upstream requires method-specific fields for requestUserInput and permissions, so `{}` fails serde and is logged before the server substitutes a deny/empty result. Dynamic tool calls and MCP elicitation also require method-specific lifecycle decisions. Unknown methods should receive a JSON-RPC error, not a fabricated success object. No typed params/decision enums exist for this public handler surface.
 
 - 証拠: CodexAppServer.swift:128-138 default handler {} fallback, :98-102 doc claim; CodexAppServerRequest.swift:4-34 raw-only shape; upstream item.rs:1644-1646 (answers required), permissions.rs:769-777 (permissions required), bespoke_event_handling.rs:1618-1623,1816-1824 malformed-response handling; request list common.rs:1462-1493.
 - 失敗トレース: (1) Server sends item/tool/requestUserInput (common.rs:1475-1478) to a CodexKit host using the default configuration; (2) defaultServerRequestHandler hits the default: branch and returns .emptyResult() = {} (CodexAppServer.swift:136-137); (3) transport writes {"id":n,"result":{}} (AppServerProcessTransport.swift:289-296, :315-328); (4) server deserializes ToolRequestUserInputResponse from {} -> serde error because answers is required (item.rs:1644-1646) -> error!("failed to deserialize ToolRequestUserInputResponse") and substitutes answers: {} (bespoke_event_handling.rs:1617-1623). Every such exchange is a logged contract violation degrading to an empty/deny answer; same for item/permissions/requestApproval via permissions.rs:769-777 and bespoke_event_handling.rs:1817-1824.
 - 修正の方向: The default handler owns 'safe decline' for all interactive requests: enumerate known methods with valid decline-shaped responses and answer unknown methods with a JSON-RPC error; add typed request cases + decision enums, keeping raw only as escape hatch.
 
-### `dk-closed-fabricates-completion` — .closed unload notification terminalizes running turns as .completed, fabricating success in the DataKit model
+### `dk-closed-fabricates-completion` — DataKit can synthesize `.completed` from unload/status events in stale-state paths
 
-**CONFIRMED / medium / protocol-mismatch** — `CodexKit:Sources/CodexDataKit/CodexModel.swift:1258`
+**CONFIRMED / low / protocol-mismatch** — `CodexKit:Sources/CodexDataKit/CodexModel.swift:1258`
 
-thread/closed says nothing about turn outcomes (unload only, resumable), yet CodexChat.apply(.closed) sets status .notLoaded and force-marks every non-terminal turn and its items .completed with a synthesized completedAt; same fabrication via terminalTurnStatus for statusChanged(.idle/.notLoaded) (:1692-1701). Mid-turn unload records a success that never happened until a later snapshot contradicts it. Cross-ref ask-thread-closed-terminal (router half of the same protocol misreading).
+`thread/closed` and thread status do not declare a turn outcome, yet `CodexChat.apply(.closed)` and `terminalTurnStatus` for `.idle/.notLoaded` can mark locally non-terminal turns/items `.completed` with synthesized timestamps. Upstream never unloads a running thread, and `.closed` is not normally reachable in the pinned CodexKit. The branch matters only if the local model is stale/non-terminal because a terminal event was missed or reordered; it is a latent fabrication path, not a mid-turn server trace.
 
-- 証拠: CodexModel.swift:1258-1264 `case .closed: setStatus(.notLoaded); terminalizeActiveTurns(status: .completed, ...)`; :1692-1701 mapping; upstream thread.rs:1467-1469 ThreadClosedNotification{thread_id} only.
-- 検証時の訂正: One premise is imprecise: upstream never unloads mid-turn — the unload loop skips while AgentStatus::Running (thread_lifecycle.rs:351-354), so 'mid-turn unload' does not happen server-side. The fabrication is reachable only when the client model still holds a non-terminal turn at .closed/.idle time (missed or out-of-order turn/completed, resumed stale state); the statusChanged(.idle/.notLoaded) mapping at :1692-1701 is the more reachable path. The mismatch itself (assigning a terminal .completed outcome to a pure unload/status notification) is confirmed.
-- 失敗トレース: 1) Client model holds turn T with status inProgress (e.g. terminal turn/completed event missed after resubscribe, or resumed thread seeded with a stale running turn). 2) Server unloads the idle thread and broadcasts thread/closed {threadId} (thread_lifecycle.rs:429-434). 3) Router decodes it to .closed (CodexAppServerNotificationRouter.swift:822-823). 4) CodexChat.apply hits case .closed (CodexModel.swift:1258-1264) -> terminalizeActiveTurns(status: .completed) (:1669-1690) sets T.status = .completed and stamps its items completedAt = now (:1703-1733). 5) T's true upstream outcome may be Interrupted or Failed (v2/turn.rs:30-35); the model now records a success the server never declared, until a later snapshot contradicts it.
+- 証拠: CodexModel.swift:1258-1264,1669-1701,1703-1733; upstream thread.rs:1467-1469 and thread_lifecycle.rs:351-354.
 - 修正の方向: Event-application layer leaves non-terminal statuses untouched on unload (or introduces explicit .unknown/.interruptedByUnload) and lets the next authoritative snapshot decide; terminal statuses only from server-declared terminal events.
 
 ### `dk-implicit-archived-scope` — Predicates that don't mention isArchived silently get archived == false injected
@@ -451,17 +447,16 @@ CodexThreadServerFilter.init injects archived=false whenever the lowered predica
 
 **CONFIRMED / medium / architecture** — `CodexKit:Sources/CodexDataKit/CodexFetchRequest.swift:818`
 
-Each registration handler re-derives 'apply locally or refetch' with a different guard set: insert checks only membershipRequiresServerRefresh; archive/revalidate add usesServerOwnedOrdering; remove special-cases fetchOffset > 0; workspace refresh filters before deciding; paged revalidation and insert offset/limit constraints live elsewhere. Concrete asymmetry: insert skips the usesServerOwnedOrdering check its siblings enforce, so under server-owned ordering a new chat is prepended locally (sortedItems deliberately doesn't sort recencyAt plans) — wrong for .forward order until next refresh. The four recent fixes (c58c47b, b141853, f350209, 33cd29e) all patched this guard area.
+Each registration handler re-derives “apply locally or refetch” with a different guard set: insert checks only membershipRequiresServerRefresh; archive/revalidate add usesServerOwnedOrdering; remove special-cases fetchOffset; workspace refresh filters before deciding; paged revalidation and offset/limit constraints live elsewhere. Concrete asymmetry: insert skips the server-owned-ordering check its siblings enforce. Recent commits patched the same responsibility neighborhood—predicate lowering/local semantics (`c58c47b`, `33cd29e`, `f350209`) and sort signatures (`b141853`)—rather than these exact guard lines, which still signals that mutation strategy lacks one owner.
 
-- 証拠: CodexFetchRequest.swift:818-827 insert path, :829-851 archive, :887-911 remove, :913-957 workspace, :1116-1132 paged, :1037-1042 canInsertLiveModel, :1066-1076 two guard properties; CodexModelContext.swift:2442-2446 recencyAt skip.
-- 検証時の訂正: The commit-history claim is imprecise: c58c47b, 33cd29e, f350209 patched predicate lowering/local-semantics in CodexThreadQueryPlan.swift and b141853 patched sort signatures — i.e. the inputs feeding these guards (isComplete -> membershipRequiresServerRefresh, matches()), not the registration-handler guard lines themselves. Same responsibility neighborhood, different layer.
+- 証拠: CodexFetchRequest.swift:818-827,829-851,887-957,1037-1042,1066-1076,1116-1132; CodexModelContext.swift:2442-2446; commit diffs `c58c47b`, `33cd29e`, `f350209`, `b141853`.
 - 修正の方向: CodexThreadQueryPlan exposes a single mutationStrategy(for:) covering membership, ordering, offset and pagination; handlers become thin executors — one place decides when local state can be trusted.
 
 ### `dk-optional-delta-id-workaround-layer` — Fallback agent-message identity machinery in DataKit compensates for AppServerKit's optional delta itemID (upstream requires item_id)
 
 **CONFIRMED / medium / workaround** — `CodexKit:Sources/CodexDataKit/CodexModel.swift:1926`
 
-Upstream AgentMessageDeltaNotification.item_id is required but CodexMessageDelta.itemID is String?, so DataKit maintains a compensation subsystem: scoped fallback IDs, promotedMessageDeltaKeyByFallbackKey, promoteFallbackMessageDeltaItem, text-equality signature matching (CodexFallbackAgentMessageSignature) in three separate places, plus itemsByReplacingFallbackAgentMessageItems. Text-equality matching is semantically unsound (identical messages in one turn alias) and every new merge path must remember it — the drift class that produced 2bfef6e/25c178a/503ec9a. Cross-ref cov-dead-compat-notifications (the dead agent/message path is the only producer of nil IDs).
+Upstream `AgentMessageDeltaNotification.item_id` is required but `CodexMessageDelta.itemID` is optional, so DataKit maintains scoped fallback IDs, promotion maps, and text-signature matching across several merge paths. Nil-ID fallback can be driven both by compatibility `.message` events and by malformed/legacy agent-message deltas whose itemID is absent; the latter is not valid current v2 wire. Text equality can alias identical messages in one turn, and each merge path must remember the promotion rule.
 
 - 証拠: upstream item.rs:1333-1338 item_id: String required; CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:2222-2231 itemID: String?; CodexModel.swift:53-59,967-1012,1427-1447,1926-2005,2280-2303 compensation sites.
 - 修正の方向: AppServerKit decode boundary makes delta item IDs non-optional per the wire contract (fail fast on absent id), then delete the fallback-ID/text-signature layer from DataKit — item identity is assigned once, at the protocol boundary.
@@ -470,12 +465,12 @@ Upstream AgentMessageDeltaNotification.item_id is required but CodexMessageDelta
 
 **CONFIRMED / medium / api-design** — `CodexKit:Sources/CodexDataKit/CodexThreadQueryPlan.swift:831`
 
-The #Predicate/SortDescriptor surface accepts any model key path at compile time, but lowering supports only 5 predicate keys and 5 sort paths; everything else hits preconditionFailure in descriptor init, section descriptors, validation, and lowering. CodexQuery.update() computes querySignature (which lowers the predicate) on every SwiftUI update, so e.g. `#Predicate { $0.createdAt > date }` crashes during render. SwiftData throws for unsupported predicates; here 'compiles so it works' is a crash, there is no throwing validation API, and the supported grammar is undocumented (README understates as 'not silently treated as app-server sorts'). Fail-fast was deliberate (269f0f9) but has no discoverable contract.
+The `#Predicate` / `SortDescriptor` surface accepts any model key path at compile time, but lowering supports only 5 predicate keys and 5 sort paths; unsupported shapes hit `preconditionFailure` in descriptor construction, section descriptors, validation, or lowering. `CodexQuery.update()` computes the signature on SwiftUI update, so a dynamic unsupported descriptor can crash during render. By comparison, SwiftData's explicit `ModelContext.fetch` surface is throwing and its error model includes unsupported predicate/sort failures; this audit does not assert the exact behavior of SwiftData's `@Query.update`. CodexDataKit has no throwing validation surface and does not document its supported grammar.
 
 - 証拠: CodexThreadQueryPlan.swift:831-838,953,973,984,995,1006,1046,1205,1220 preconditions; CodexFetchRequest.swift:43-54,111-118,193-198; CodexQuery.swift:142-152 signature per update(); DataKit README.md:74-79.
 - 修正の方向: Give the contract an owner: document the supported grammar, and expose a throwing validate(descriptor:)/typed filter-sort enums so dynamic construction gets an error path instead of a render-time crash.
 
-### `dk-query-not-live-external` — @CodexQuery/fetchedResults never observe server-side thread-list changes — the SwiftData-style 'live query' expectation does not hold
+### `dk-query-not-live-external` — @CodexQuery/fetchedResults do not automatically ingest external server-side thread-list changes
 
 **CONFIRMED / medium / api-design** — `CodexKit:Sources/CodexDataKit/CodexModelContext.swift:2147`
 
@@ -488,27 +483,25 @@ Fetched-results updates fire only from context-initiated actions; CodexModelCont
 
 **CONFIRMED / medium / usability** — `CodexKit:Sources/CodexDataKit/CodexModelContext.swift:804`
 
-observe() throws chatObservationAlreadyActive if a registration exists; registration is inserted before the async startObservation completes and cancellation is only possible via the handle returned at the end — so cancel-old-then-observe-new (typical view rebinding) races and throws, since 'cancelled' does not synchronously mean 'slot free'. Updates are already multicast, so the single-slot restriction is an internal lifecycle constraint leaking into public API; no NSFetchedResultsController/SwiftData analogue imposes it. Consumer workaround exists (see use-observe-serialization).
+`observe()` throws `chatObservationAlreadyActive` if a registration exists, and registration is inserted before asynchronous `startObservation` completes. Cancellation of that in-flight registration is Task cancellation with no awaitable “slot released” completion, so rapid rebind can race. Once a `CodexChatObservation` handle is fully established, its `cancel()` synchronously calls `releaseChatObservation`; that path is not racy. Updates are multicast, so the in-flight single-slot lifecycle still leaks into UI code (see `use-observe-serialization`).
 
-- 証拠: CodexModelContext.swift:804-810 throw, :812-827 slot registered before await; consumer CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogTarget.swift:157-166.
-- 検証時の訂正: One nuance: 'cancelled does not synchronously mean slot free' is true only for the in-flight-registration case (Task cancellation); cancelling a fully-established CodexChatObservation handle synchronously releases the slot via releaseChatObservation (CodexModelContext.swift:972-981). The consumer workaround targets exactly the in-flight case, so the finding's substance stands.
+- 証拠: CodexModelContext.swift:804-827 registration; :972-981 established-handle release; consumer ReviewMonitorCodexChatLogTarget.swift:157-166.
 - 修正の方向: CodexModelContext owns observation sharing: observe() joins (refcounts) the existing ActiveChatObservation returning a new handle, tearing the pump down when the last handle cancels — or make cancellation synchronously release the slot.
 
 ### `dk-sortdescriptor-mirror-reflection` — Sort signature depends on Mirror reflection into Foundation SortDescriptor internals with silent nil fallback
 
 **CONFIRMED / medium / workaround** — `CodexKit:Sources/CodexDataKit/CodexFetchRequest.swift:78`
 
-comparisonSignature extracts the private 'comparison' child of SortDescriptor via Mirror + String(describing:). If Foundation renames the property or changes the description, it silently returns nil/unstable strings, collapsing comparator distinctions in CodexSortPlanSignature — CodexQuery.update() then reuses the wrong CodexFetchedResults (stale ordering, no error; the failure class b141853 just fixed for key paths). Silent misbehavior contradicts the crash-loudly stance used everywhere else in the file.
+`comparisonSignature` extracts the private `comparison` child of `SortDescriptor` via `Mirror` + `String(describing:)`. Both label and description depend on undocumented layout. On CodexKit's macOS 15.4 floor, Foundation already exposes public `SortDescriptor.keyPath`, `stringComparator`, and `order`; `String.StandardComparator` is Equatable/Hashable/Codable. The current collision risk is therefore specifically standard-string-comparator distinctions that the implementation reads through reflection instead of the public property.
 
-- 証拠: CodexFetchRequest.swift:78-84 Mirror extraction; CodexThreadQueryPlan.swift:174-184 signature includes comparison: String?; commit b141853 precedent.
-- 検証時の訂正: Minor precision: String(describing:) of the comparison child is itself layout-dependent even when the label survives; and the collapse today affects only comparator distinctions (path/order are extracted separately), so blast radius is descriptors that differ only in custom comparators.
-- 修正の方向: Restrict supported SortDescriptor forms to (keyPath, order) and drop the reflection, or fail fast when the 'comparison' child is absent — signature equality must imply query equivalence without depending on undocumented Foundation layout.
+- 証拠: CodexFetchRequest.swift:78-84; CodexThreadQueryPlan.swift:174-184; CodexKit Package.swift macOS 15.4; Xcode 26.6 / macOS 26.5 SDK `Foundation.swiftinterface` exposes `keyPath` and `stringComparator` from macOS 14 and `String.StandardComparator` conformance; commit `b141853`.
+- 修正の方向: Build the signature and validation from public `keyPath`, `stringComparator`, and `order`; delete Mirror. Reject only genuinely unsupported descriptor forms through the documented validation surface.
 
 ### `dk-unserialized-fetch-loads` — Concurrent load() calls on one CodexFetchedResults interleave; pagination window collapses on mutation-triggered reloads
 
 **CONFIRMED / medium / bug** — `CodexKit:Sources/CodexDataKit/CodexFetchRequest.swift:683`
 
-performFetch/refresh/loadNextPage/refreshAfterMutation/backfill all funnel into load() with mid-flight awaits and no serialization or generation token: a registration-triggered refresh can interleave with a suspended loadNextPage, giving last-writer-wins items with a nextCursor from the losing load (items/cursor disagreement, A→B→A-completed sequences). Additionally, any included-chat revalidation while paged (nextCursor != nil or offset > 0) reloads page 1 non-appending, discarding pages the user scrolled through — NSFetchedResultsController never resets its window this way.
+`performFetch` / refresh / loadNextPage / mutation refresh / backfill funnel into `load()` with suspension points and no serialization or generation token. A mutation-triggered refresh can interleave with a suspended page append, producing items and cursor from different generations. Paged revalidation also reloads page 1 non-appending and discards the currently loaded window; whether to preserve or reset that window is an undocumented query contract, not something inferred from another framework.
 
 - 証拠: CodexFetchRequest.swift:661-681 no guards, :683-722 load() assigns cursors/items after suspension (:707), :1116-1132 refreshAfterPagedRevalidationIfNeeded non-appending reload.
 - 失敗トレース: Interleave: 1) Paged results (fetchLimit=50, recencyAt reverse), page 1 loaded, nextCursor=C1 (:707). 2) User scrolls -> loadNextPage() (:671-681) -> load(cursor:C1, appending:true), phase=.loading (:689), suspends at fetchPage (:693). 3) MainActor reentrancy: user archives a chat -> CodexModelContext.archiveChatInRegisteredResults (CodexModelContext.swift:2154-2163) -> CodexFetchedResults.archive (:829-851); requiresServerRefreshAfterMutation is true for recencyAt ordering (:1066-1068; CodexThreadQueryPlan.swift:116-118) -> refreshAfterMutation (:1108-1114) -> load(appending:false) completes: items = fresh page 1, nextCursor = C1' (:707-715). 4) Step-2 load resumes with the stale-C1 response: append(page.items, to: items) (:698, :750, :761-771) welds stale page-2 rows onto the fresh page-1 list, then overwrites nextCursor with the stale response's C2 (:707). Result: items mix two membership generations and nextCursor belongs to the losing load (A->B->A-completed). Collapse: user on page 3 (nextCursor != nil) + any included-chat revalidation -> refreshAfterPagedRevalidationIfNeeded (:1116-1132) -> non-appending page-1 reload -> scrolled pages discarded.
@@ -518,19 +511,10 @@ performFetch/refresh/loadNextPage/refreshAfterMutation/backfill all funnel into 
 
 **CONFIRMED / medium / usability** — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:2002`
 
-Breaking out of iteration (or dropping the sequence) only unsubscribes — server keeps working — documented nowhere on the type; cancelling the task awaiting collect() fires an unstructured detached `Task { try? await turn.interrupt() }` that DOES stop the work, swallows its failure via try?, and can outlive/race server.close(). Since respond(to:) is streamResponse().collect(), plain respond() silently inherits interrupt-on-cancel while iteration does not — the same type answers 'does cancel stop the work' differently per method. Only the README mentions the collect() behavior. Cross-ref ask-cancel-collect-misreported (error type on the same path).
+Breaking out of iteration (or dropping the sequence) only unsubscribes, so server work continues. Cancelling the Task awaiting `collect()` starts an ownerless unstructured `Task { try? await turn.interrupt() }`; it is not `Task.detached`, but no lifecycle owner awaits or observes it. The interrupt failure is swallowed and the Task can race server close. Since `respond(to:)` is `streamResponse().collect()`, aggregate use inherits interrupt-on-cancel while sequence iteration does not.
 
-- 証拠: CodexDomainTypes.swift:1994-2008 detached interrupt, no doc; CodexThreadOperations.swift:23-25,74; router :105-107,138-140 unsubscribe-only; README.md:102-103.
-- 修正の方向: One documented cancellation contract on CodexResponseStream: either task-cancel is pure stop-listening (explicit cancel() to interrupt) or interrupt-on-cancel is structural (withTaskCancellationHandler awaiting the interrupt, surfacing failures) — documented on the type.
-
-### `dx-no-raw-escape-hatch` — No outbound raw JSON-RPC escape hatch: consumers cannot call any upstream method the SDK has not typed yet
-
-**CONFIRMED / medium / api-design** — `CodexKit:Sources/CodexAppServerKit/README.md:486`
-
-JSON-RPC and AppServerAPI DTOs are package-internal by design and there is no public (method, params) send. Inbound forward-compat is good (CodexRawNotification), but outbound is fully closed: upstream ships weekly with methods CodexKit doesn't type, so a consumer needing one new call must fork or wait. There is exactly one send path (retry + serial lanes), so a raw send decorating it would be cheap and could not drift.
-
-- 証拠: README.md:484-487 policy; AppServerClient.swift:6 package actor; CodexAppServer.swift:146-148 package appServerClient; grep public send-like API = none; inbound hatch CodexDomainTypes.swift:2502-2519.
-- 修正の方向: CodexAppServer exposes a public sendRaw(method:params:) → Data routed through AppServerClient.send (same retry/lane/error mapping).
+- 証拠: CodexDomainTypes.swift:1994-2008 unstructured interrupt; CodexThreadOperations.swift:23-25,74; router :105-107,138-140; README.md:102-103.
+- 修正の方向: Choose one documented contract: caller cancellation either stops listening only, or also requests server interrupt. The synchronous `onCancel` handler can only signal a stored cancellation authority; the operation path must await the interrupt Task/completion and arbitrate its failure before returning. Do not attempt to await or throw from `onCancel` itself.
 
 ### `test-fictional-turn-failed-pins-phase-contract` — The only test pinning chat.phase == .failed drives it via a 'turn/failed' notification that does not exist upstream; the production-reachable failure path is unpinned
 
@@ -538,8 +522,7 @@ JSON-RPC and AppServerAPI DTOs are package-internal by design and there is no pu
 
 The test emits method turn/failed with a top-level error object — a wire event no real server sends — exercising the production-unreachable .turnFailed branch, while the reachable path (turn/completed + status failed + turn.error.message → fail(with:)) has no direct phase assertion (the revert-policy test asserts only rollback/read counts). If the fictional routes are removed to match upstream (cross-ref cov-dead-compat-notifications), this test breaks and reveals no pin exists for the real shape.
 
-- 証拠: CodexDataKitTests.swift:8090-8101 emitServerNotificationJSON(method: "turn/failed") + phase assertion; upstream common.rs:1614-1660 TurnCompleted only, turn.rs:30-35; reachable path CodexModel.swift:1142-1151; revert test without phase assertion CodexDataKitTests.swift:6267-6281.
-- 検証時の訂正: Severity adjusted high -> medium: this is a regression-risk test gap (removing the dead routes breaks the only failed-phase pin and leaves the real turn/completed+failed shape unpinned), not wrong behavior a consumer hits today.
+- 証拠: CodexDataKitTests.swift:8090-8101 emits `turn/failed`; upstream server notification enum common.rs:1613-1710 and concrete `TurnCompleted` at :1631; turn.rs:30-35; reachable path CodexModel.swift:1142-1151; revert test without phase assertion CodexDataKitTests.swift:6267-6281.
 - 修正の方向: Pin the failure-phase contract via the upstream-real shape (turn/completed, status failed, turn.error.message) and remove the fictional emission together with the router's dead routes.
 
 ### `test-handrolled-notification-schemas-drift` — Notification wire schemas are hand-rolled in at least three places with visible drift; package-scoped AppServerAPI blocks consumers from typed payloads
@@ -548,18 +531,16 @@ The test emits method turn/failed with a top-level error object — a wire event
 
 Because the Testing target offers only emitServerNotification(method:params:) and raw JSON, every fixture author re-encodes the wire schema: ~15 private param structs in CodexDataKitTests, 6 more in the consumer's preview runtime, and a third private encoder in the Testing target itself; AppServerAPI/AppServerJSONValue are package-scoped so consumers can't reuse the SDK's wire types. Drift is live: the preview runtime emits turn.status "cancelled" (absent from upstream TurnStatus, round-trips only via the invented CodexTurnStatus.cancelled) and a DataKit test emits nonexistent turn/failed. Nothing validates fixtures against the protocol — fixtures define their own dialect and tests pin it.
 
-- 証拠: CodexDataKitTests.swift:10258-10430 param structs; ReviewMonitorPreviewAppServerRuntime.swift:733-815 and :715-724 status "cancelled"; Testing encoder CodexAppServerTestRuntime.swift:767-842; package scope AppServerRequests.swift:3,162; upstream turn.rs:30-35; invented status CodexDomainTypes.swift:1841,1854.
-- 検証時の訂正: Minor: the 'cancelled' status emission is at ReviewMonitorPreviewAppServerRuntime.swift:717-727 (cited :715-724), and the DataKit param structs start at :10204 (cited :10258, which is the first Encodable notification struct). Substance unchanged.
-- 修正の方向: Testing target owns typed notification builders (emitTurnCompleted, emitItemUpdated, emitThreadClosed, ...) built on the same package AppServerAPI types the router decodes — single wire-schema owner, delete every mirror.
+- 証拠: CodexDataKitTests.swift:10204-10430; ReviewMonitorPreviewAppServerRuntime.swift:717-727,733-815; Testing encoder CodexAppServerTestRuntime.swift:767-842; package scope AppServerRequests.swift:3,162; upstream turn.rs:30-35.
+- 修正の方向: Testing target owns method-specific builders for current wire methods (`emitTurnCompleted`, `emitCommandExecutionOutputDelta`, `emitFileChangePatchUpdated`, `emitThreadStatusChanged`, server requests) using the same package DTOs as the router. Do not institutionalize dead `emitItemUpdated` / `emitTurnFailed`; legacy file output delta belongs to explicit compatibility tests.
 
 ### `test-no-server-request-injection` — Testing target cannot inject server-initiated requests, so approval flows (public API) are untestable against the fake
 
 **CONFIRMED / medium / coverage-gap** — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:402`
 
-CodexAppServerRequestHandler is public production API, but JSONRPC.Transport doesn't model server requests (they are internal to AppServerProcessTransport), the fake has zero references to CodexAppServerRequest, and CodexAppServer.testing(transport:) accepts no handler. The only coverage is a shell-script process test at the transport layer; no app developer can deterministically test their approval handler, decision encoding, or UI flow. Cross-ref cov-server-requests-untyped.
+`CodexAppServerRequestHandler` is public, but `JSONRPC.Transport` does not model server requests, the in-memory fake has no `CodexAppServerRequest`, and `CodexAppServer.testing(transport:)` accepts no handler. A shell-backed process test covers the real transport, so the capability is not wholly untestable; it is not deterministically testable through the in-memory fake. CRK currently has no production approval-handler consumer, making this a public-surface coverage gap rather than an observed CRK workaround.
 
 - 証拠: CodexAppServerRequest.swift:74 public typealias; real dispatch AppServerProcessTransport.swift:234-245,289-313; JSONRPC.swift:26-31 protocol without server requests; CodexAppServer.swift:210-214 testing(); only test CodexAppServerKitTests.swift:100-161.
-- 検証時の訂正: One premise weakened: no consumer in CodexReviewKit currently uses the approval-handler API at all, so 'no app developer can deterministically test their approval handler' is a prospective gap for the public API, not an observed consumer workaround in this workspace.
 - 修正の方向: Add server-request delivery to JSONRPC.Transport (or a companion protocol) so the fake exposes emitServerRequest(...) returning the handler's response.
 
 ### `test-process-crash-recovery-untested` — Process crash/EOF recovery and in-flight-cancel response drop are untested anywhere in the SDK
@@ -580,101 +561,98 @@ send falls through to encoding EmptyResponse() when no queued response or handle
 - 証拠: CodexAppServerTestRuntime.swift:1106-1109 fall-through; Thread.Start.Response non-optional threadID (AppServerRequests.swift); store registers only start/list/resume/read/turns-list (:569-585).
 - 修正の方向: Throw a distinct unstubbedMethod(method:) error on fall-through, with an opt-in lenient mode for previews — silent divergence becomes immediate test feedback.
 
+### `test-fake-cancel-in-flight-returns-success` — In-memory fake returns success when an equivalent real in-flight request throws CancellationError
+
+**CONFIRMED / low / protocol-mismatch** — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:1094`
+
+When a Task awaiting fake `send()` is cancelled at a test gate, `cancelWaiter` resumes normally and the queued response is returned as success. The real process transport resumes the pending continuation with `CancellationError` and discards a late response. SDK-internal request sites that use cancellation shielding limit current impact, but a transport contract test written against the fake observes the opposite outcome.
+
+- 証拠: CodexAppServerTestRuntime.swift:1080-1109 fake gate/cancel path; AppServerProcessTransport.swift:113-130,354-356 real pending-response cancellation/drop; shielded SDK request sites use `Task.detached`.
+- 修正の方向: Make fake cancellation resume the waiter with `CancellationError` and discard its queued/late response. Pin the same contract against both in-memory and process transports.
+
 ### `use-dual-thread-identity` — Source-vs-review thread identity is re-mapped independently at three consumer layers
 
 **CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:22`
 
-A review spans two thread IDs; CodexKit exposes associatedThreadIDs/cleanupThreadIDs but no canonical 'which chat does this review belong to'. The backend keeps three dictionaries to route events/cancellations; the store matches run records by comparing both threadID and reviewThreadID strings; the MCP provider picks reviewThreadID ?? threadID. Each layer re-derives the mapping; drift between them is the bug class the prior generation/identity findings predicted.
+CodexKit already defines the canonical pair `CodexReviewIdentity.sourceThreadID` and `activeTurnThreadID`, plus associated/cleanup IDs. The gap is in CRK: its Run/event plane type-erases that identity into optional strings. The backend then keeps routing dictionaries, the store compares both raw IDs, and MCP chooses `reviewThreadID ?? threadID`. Three consumer layers reconstruct a mapping the SDK type already owns.
 
-- 証拠: AppServerCodexReviewBackend.swift:22-28,360-410; CodexReviewStoreOrderQueries.swift:94-108; CodexReviewMCPServer.swift:174; SDK identity CodexDomainTypes.swift:836-870.
-- 検証時の訂正: The claim 'no canonical which-chat mapping' is overstated: CodexReviewIdentity.sourceThreadID/activeTurnThreadID (CodexDomainTypes.swift:639-646) are exactly that accessor pair. The verified gap is narrower — review identity does not flow through the string-typed Run/event plane the consumers operate on, so the three layers re-derive it from raw strings. Also the cited SDK lines 836-870 are CodexReviewSession's mirrors; CodexReviewIdentity itself is at :621-676.
-- 修正の方向: CodexReviewIdentity exposes the canonical presentation thread ID and events carry review identity, so consumers key everything off one value.
+- 証拠: AppServerCodexReviewBackend.swift:22-28,360-410; CodexReviewStoreOrderQueries.swift:94-108; CodexReviewMCPServer.swift:174; SDK `CodexReviewIdentity` CodexDomainTypes.swift:621-676.
+- 修正の方向: Define a CRK domain identity preserving the source/active-turn pair and map `CodexReviewIdentity` into it once at the adapter boundary. Carry that value through Run/event contracts without importing CodexAppServerKit into the core.
 
 ### `use-full-reprojection` — Granular CodexChatUpdate payloads are discarded; every delta triggers full chat re-projection
 
 **CONFIRMED / medium / usability** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogSourceProjection.swift:54`
 
-Typed granular updates are used only as a boolean 'allow incremental render' hint; the consumer re-renders the whole chat.items array through the dedup/projection pipeline on every update, re-deriving diffs via UTF16 text comparison. DX evidence that item identity/ordering in updates isn't trustworthy for targeted apply (consistent with dk-update-id-discontinuity), and a per-delta O(items) cost on hot streaming paths.
+Typed granular updates are used only as a boolean “allow incremental render” hint; the consumer re-renders the whole `chat.items` array through the projection pipeline on every update and re-derives diffs via UTF-16 text comparison. The per-delta O(items) work is confirmed. Current evidence does not establish whether this is forced by an SDK identity/ordering defect or is simply the consumer's conservative implementation; the related update-ID hypothesis remains unverified in Appendix B.
 
 - 証拠: ReviewMonitorCodexChatLogSourceProjection.swift:54-101; downstream diffing ReviewMonitorLogProjection.swift:5-100.
-- 修正の方向: Once CodexDataKit guarantees stable IDs and ordered updates, apply updates targetedly; until then this is the rational consumer response — fix belongs SDK-side.
+- 修正の方向: First identify which current update cases have a sufficient typed identity/order contract, then apply those targetedly in CRK. Escalate to an SDK contract change only for cases where that proof fails.
 
-### `use-highlevel-surface-bypass` — Consumer bypasses every high-level SDK review surface (progress/collect/response) and rebuilds them over raw events
+### `use-highlevel-surface-bypass` — Consumer uses typed events but bypasses terminal aggregate convenience surfaces
 
 **CONFIRMED / medium / api-design** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:752`
 
-CodexReviewSession offers progress, collect(), messages, logEntries — none used by the app. The adapter iterates raw session.events and re-implements terminal classification, transcript-output extraction, and cancel semantics, because the high-level surfaces classify interrupted as failure and end silently on .closed (cross-ref conf-interrupted-is-failure, ask-thread-closed-terminal). When the SDK's flagship consumer cannot use its convenience layer, that layer's contract is wrong — the strongest DX evidence in the repo.
+`CodexReviewSession` offers parallel public consumption styles: typed `events`, `progress`, `collect()`, messages, and log entries. CRK uses typed `session.events` and `cancel()`, not raw JSON-RPC, while implementing its own terminal mapping and output selection instead of using the aggregate surfaces. The confirmed reason is interrupted-vs-failed classification and CRK-specific backend/product policy; `.closed` is only a latent contributor. This is evidence that terminal aggregation needs a clearer contract, not that every high-level review API is unusable.
 
-- 証拠: AppServerCodexReviewBackend.swift:752-756 raw events only, :590-614 own terminalEvents/reviewCompletionText; avoided surfaces CodexDomainTypes.swift:893-900, CodexTurnSequences.swift:303-309,482-484.
-- 修正の方向: Fix the high-level surfaces' semantics (cancelled≠failed, .closed≠silent end) so the convenience layer is adoptable; the adapter then shrinks to a thin mapping.
+- 証拠: AppServerCodexReviewBackend.swift:723-763 typed session events/cancel path, :590-614 terminal/output mapping; CodexDomainTypes.swift:893-900; CodexTurnSequences.swift:303-309,482-484.
+- 修正の方向: Define aggregate outcome semantics and review-output contract, then reevaluate which adapter logic becomes a thin mapping. Keep CRK product cancellation arbitration at its current owner.
 
-### `use-mcp-refresh-fallback` — MCP log provider does a full model refresh per read with silent catch → 'unavailable' fallback
+### `use-mcp-refresh-fallback` — MCP refresh failure and projection absence collapse to the same unavailable result
 
-**CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewMCPServer/CodexReviewMCPServer.swift:167`
+**CONFIRMED / medium / usability** — `CodexReviewKit:Sources/CodexReviewMCPServer/CodexReviewMCPServer.swift:167`
 
-To serve review_read/await the provider must refresh(chat, includeTurns: true) on every call (poll-style refetch because the model context doesn't reflect the live review thread), swallow refresh errors returning nil, and fall back to an empty ReviewMCPLogProjection.unavailable. Every MCP read pays a full thread fetch; failures degrade silently. Cross-ref dk-query-not-live-external.
+The MCP projection intentionally retains no live observation token, so architecture docs make on-demand refresh the snapshot owner. Refreshing on each read is therefore not itself a workaround or owner violation. The defect is error collapse: projection absence and refresh failure both become nil and then `.unavailable`, so a caller cannot distinguish “no log yet” from “snapshot refresh failed.”
 
-- 証拠: CodexReviewMCPServer.swift:178-187 refresh + catch { return nil } + guard; fallback :153; ReviewMCPLogProjection.swift:38-51.
-- 修正の方向: SDK owns freshness: model context guarantees live review turns are reflected (observation-driven) or exposes a direct transcript-snapshot read by CodexReviewIdentity; the silent fallback becomes an explicit error path.
+- 証拠: CodexReviewMCPServer.swift:153,178-187; ReviewMCPLogProjection.swift:38-51; `Docs/architecture.md:177-179` on-demand snapshot contract.
+- 修正の方向: Keep on-demand refresh, but return a typed refresh failure separately from the intentional `.unavailable` projection. A live observation is optional only if the architecture changes its ownership contract.
 
 ### `use-observe-serialization` — Consumer serializes chat rebinds by awaiting previous task teardown to dodge chatObservationAlreadyActive
 
 **CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogTarget.swift:159`
 
-Because observe() enforces one observation per chat with fire-and-forget cancel (cross-ref dk-single-observation-slot), the consumer must keep the cancelled task referenced and `await previousTask?.value` before re-observing the same chat, per its own apologetic comment — single-consumer, non-idempotent observation lifecycle pushed onto UI code.
+Because an in-flight `observe()` registration holds the one-per-chat slot until its Task unwinds, the consumer retains the previous Task, cancels it, and `await`s `previousTask.value` before re-observing the same chat. A fully established observation handle releases synchronously; this workaround targets only the in-flight registration window.
 
 - 証拠: ReviewMonitorCodexChatLogTarget.swift:159-163 comment + await, :91-93 kept reference; SDK CodexModelContext.swift:804-809, CodexChatObservation.swift:22-32.
 - 修正の方向: CodexDataKit owns observation lifecycle: broadcast (multi-observer) updates or an awaitable/idempotent cancel-and-reobserve, removing consumer-side task sequencing.
 
-### `use-resume-to-cancel` — Cancelling a review without a live handle requires resuming the whole session first
+### `use-resume-to-cancel` — A registry-miss fallback resumes a review session solely to cancel, but production reachability is unproven
 
-**CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:466`
+**PLAUSIBLE / low / usability** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:466`
 
-CodexKit exposes cancel only on live handles; turn/interrupt is package-only. When the in-memory registry misses (post-restart/cleanup), the consumer calls appServer.resumeReview(identity) — constructing a full session with event thread — solely to call .cancel(). The adjacent reviewEventSession(for:) fallback even manufactures an empty session whose cancelReview returns nil, silently routing here.
+CodexKit exposes cancel only on live handles and package-scopes direct turn interrupt. The fallback branch in CRK calls `appServer.resumeReview(identity)` solely to obtain `.cancel()`, so the architectural pressure is visible. A production trigger was not established: active runs register a session, restart-wait cancellation can complete locally, and normal cleanup follows terminal completion. The original “post-restart/cleanup” failure story is therefore unsupported.
 
 - 証拠: AppServerCodexReviewBackend.swift:466-470 resume-then-cancel, :349-358 manufactured session; SDK CodexThreadOperations.swift:448-466 package interrupt() only.
-- 修正の方向: CodexAppServerKit exposes public cancel-by-identity (interruptTurn(threadID:turnID:) or cancel(CodexReviewIdentity)); the resume-to-cancel dance and manufactured-session fallback both die.
+- 修正の方向: First add a targeted test or runtime trace that reaches the registry-miss branch. If restoration/cancellation is a real consumer story, expose cancel-by-identity and remove resume-to-cancel; otherwise delete the unreachable fallback instead of expanding SDK API.
 
-### `use-review-output-location` — 'Review completed without review output' failure synthesized at two layers with a triple fallback chain for where the output lives
+### `use-review-output-location` — Consumer duplicates the existing `reviewOutputText` contract with fallback and failure synthesis
 
 **CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:610`
 
-CodexResponse gives no contract for where a review's final output lives. The backend probes transcript.reviewOutputText ?? finalAnswer ?? transcript.finalAnswer and synthesizes a failure when empty; the store repeats the same synthesis independently for stream-finished-without-terminal and empty-finalReview; the MCP projection adds a fourth fallback (finalReview ?? lastAssistantMessageText). 5+ fix commits circle this question (8e3ec41, 6e34054, cf78964, e7eac9e, 1ef636f).
+CodexKit already documents `CodexTranscript.reviewOutputText` as review output derived from `exitedReviewMode`, and `CodexResponseAccumulator.finalized` fills the terminal response accordingly. CRK nevertheless probes `reviewOutputText ?? finalAnswer ?? transcript.finalAnswer`, synthesizes an empty-output failure in backend and store, and MCP adds `finalReview ?? lastAssistantMessageText`. The churn is confirmed consumer-side redundancy, not a missing SDK field contract.
 
-- 証拠: AppServerCodexReviewBackend.swift:610-614 fallback chain, :602-604 synthesized failure; same string CodexReviewStoreReviews.swift:688,709,856-863; MCP ReviewMCPLogProjection.swift:91-94.
-- 修正の方向: CodexAppServerKit guarantees a single review-output field on the terminal CodexResponse for review turns (finalizedTranscript already merges exitedReviewMode text — finish that ownership).
+- 証拠: CodexAppServerKit README:293-299; CodexDomainTypes.swift:1364-1370; response finalization path; CRK AppServerCodexReviewBackend.swift:602-614; CodexReviewStoreReviews.swift:688,709,856-863; ReviewMCPLogProjection.swift:91-94.
+- 修正の方向: At the adapter boundary, treat missing/empty `reviewOutputText` as one typed completion failure and make successful `Completion.finalReview` non-optional. Delete downstream duplicate checks/fallbacks. Keep “stream ended without terminal” as a separate transport/backend failure.
 
 ### `use-runtime-death-side-channel` — App-server death is detected via accountEvents stream error, tearing down the whole runtime from a side channel
 
 **CONFIRMED / medium / workaround** — `CodexReviewKit:Sources/CodexReviewHost/LiveCodexReviewStoreBackend.swift:1186`
 
-CodexAppServer has no lifecycle/health surface, so the host keeps an accountEvents() subscription alive partly so its throw becomes the 'server died' signal, then runs full runtime teardown from that catch block. If account notifications were consumed elsewhere or the stream ended benignly, death detection silently changes behavior.
+CodexAppServer has no explicit lifecycle/termination surface, so the host uses failure of a typed `accountEvents()` notification stream as the runtime-death signal and tears down from that catch. Notification streams are multicast, so another consumer does not steal the signal; graceful shutdown also cancels the auth notification Task before close. The narrow gap is semantic: an account-domain stream failure doubles as connection termination rather than exposing termination directly.
 
 - 証拠: LiveCodexReviewStoreBackend.swift:1184-1188 catch → markRuntimeFailedAfterNotificationStreamError, teardown :1200-1229; SDK public surface (CodexAppServer.swift:220-867) has close() but no state/termination signal.
-- 修正の方向: CodexAppServerKit exposes a lifecycle surface (state AsyncStream or terminated continuation) so hosts subscribe to death explicitly.
-
-### `use-subscription-generation-guards` — Store worker builds its own subscription-ID generations to filter stale backend events across restarts
-
-**PLAUSIBLE / medium / workaround** — `CodexReviewKit:Sources/CodexReviewKit/Store/CodexReviewStoreReviews.swift:582`
-
-Because a superseded attempt's mailbox stream doesn't terminate when a review is restarted after a network outage, the worker maintains monotonic subscription IDs (ReviewWorkerEventSource) and double-guards every input by subscriptionID and attemptID equality. The generation-boundary invariant the prior audit flagged inside CodexKit is reproduced consumer-side: switching generations is again the call-site's cursor dance rather than a producer-owned boundary.
-
-- 証拠: CodexReviewStoreReviews.swift:582-585,596,609 guards, :1027-1029 shouldConsumeEvent, :1176-1280 generation counter.
-- 検証時の訂正: Superseded mailboxes do terminate (abandon()/fail() at CodexReviewBackend.swift:100-115); the actual gap is that supersession is signalled as a plain .finished indistinguishable from normal completion, forcing the worker to pre-emptively unsubscribe and filter by generation instead of reacting to a typed supersede terminal.
-- 修正の方向: Backend attempt streams (ultimately SDK review sessions) terminate deterministically when superseded/abandoned so consumers subscribe to exactly one live generation instead of filtering.
+- 修正の方向: Expose one connection lifecycle/termination completion shared by all retaining handles. Keep notification streams domain-scoped and define whether graceful close finishes or throws independently.
 
 ### `use-review-marker-duplication` — Consumer duplicates the SDK-private 'review-marker:' semantic-ID constants for snapshot items — incompletely
 
 **CONFIRMED / low / workaround** — `CodexReviewKit:Sources/ReviewChatLogUI/ReviewMonitorCodexChatLogProjection.swift:785`
 
-CodexDataKit's private semanticID maps enteredReviewMode/exitedReviewMode to review-marker: constants and prefixes other kinds with kind.rawValue. Snapshot items bypass the model, so the consumer re-implements the marker constants verbatim — but without the kind-prefix branch, so snapshot-derived and model-derived block IDs diverge for non-marker items. Two unversioned copies of one identity invariant across a repo boundary.
+CodexDataKit's private semanticID maps entered/exited review markers to `review-marker:` constants and prefixes other kinds. Snapshot items bypass the model, so CRK re-implements the marker constants without the general kind-prefix branch. No production call site feeds `CodexThreadSnapshotLogItem`; the divergence is currently limited to test/preview snapshot rendering, but two unversioned copies remain a maintenance hazard.
 
 - 証拠: ReviewMonitorCodexChatLogProjection.swift:785-794; SDK private twin CodexModel.swift:512-526 incl. kind-prefix branch.
-- 検証時の訂正: Severity: the incomplete copy is only exercised by test/preview-style snapshot renders today; no production call site feeds CodexThreadSnapshotLogItem, so the ID divergence is latent rather than user-visible. The two-unversioned-copies maintenance hazard stands.
-- 修正の方向: CodexDataKit exposes the semantic/model item ID mapping publicly (or model-normalized projections of CodexThreadSnapshot), making the consumer copy deletable.
+- 修正の方向: Delete the unused snapshot-render overload and duplicated mapping first. Expose a public normalization/mapping API only if a production snapshot consumer is introduced.
 
 
-## Appendix B: 未検証 low findings(36 件)
+## Appendix B: 未検証 low findings(35 件)
 
 - `arch-dead-adapter-branches` [workaround] Dead workaround residue in the review event adapter/session: write-only cancel state, no-op branches, never-incremented metrics, ignored expectedTurnID — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:635`
   - Vestiges of the cancel/terminal workarounds: itemEvents guards `item.kind.rawValue != "enteredReviewMode"` yet both branches return []; unknownStatusEvents/unknownEvents unconditionally return []; activeStreamSubscriptionIDForTesting returns nil and detach(subscriptionID:) is a no-op; cancelReview(expectedTurnID:) ignores its parameter so the caller's expected-turn guard (:459-464) is unenforced; ReviewBackendEventSession.cancellationRequestedMessage is written by requestCancellation/clearCancellationRequest/finish but never read (making the backend's round-trip a no-op ritual); metrics buffered/commandTimeoutWarnings are never incremented yet logged as meaningful. Dead branches conceal where real semantics were meant to live.
@@ -704,18 +682,18 @@ CodexDataKit's private semanticID maps enteredReviewMode/exitedReviewMode to rev
   - events/logEntries/progress filter through reviewEventMatches with terminalTurnID, but messages and transcriptUpdates delegate to eventThread with no turn filter — for inline reviews on a shared thread, concurrent turns' messages/items leak into two of the five sibling sequences. The inconsistency is the trap: consumers assume shared scope.
 - `conf-batchwrite-okoverridden-invisible` [coverage-gap] config write result okOverridden is indistinguishable from ok; overriddenMetadata dropped — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:1704`
   - Upstream ConfigWriteResponse distinguishes ok vs okOverridden (write landed but masked by a higher-precedence layer) with overriddenMetadata.effectiveValue. CodexKit decodes status as a bare String, updateConfiguration discards the response entirely, and config/read decodes only 4 keys with no origins/layers — a consumer writing into a masked layer believes the new value is live and cannot detect masking on read either.
-- `conf-model-service-tier-order` [protocol-mismatch] CodexModel decode sorts service tiers lexicographically and merges the deprecated additionalSpeedTiers field — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:2695`
-  - supportedServiceTiers = Array(Set(additionalSpeedTiers + serviceTiers ids)).sorted() — keeps consuming the deprecated field and destroys server-provided ordering by lexicographic sort (the mistake CodexKit correctly avoids for supportedReasoningEfforts). ModelServiceTier name/description are dropped, so UIs can only show raw ids.
+- `conf-model-service-tier-order` [coverage-gap] CodexModel decode sorts service tiers lexicographically, merges the compatibility field, and drops tier metadata — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:2695`
+  - `supportedServiceTiers = Array(Set(additionalSpeedTiers + serviceTiers ids)).sorted()` keeps consuming the deprecated field and does not preserve wire order. Upstream does not document that wire order as normative UI order, so ordering impact remains unverified. Dropping `ModelServiceTier` name/description is independently observable: UIs can show only raw ids.
 - `conf-permissions-object-shape` [protocol-mismatch] Permissions.profileSelection encodes an object where upstream expects a plain profile-id string — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:387`
-  - Upstream thread/start.permissions (and resume) is Option<String>. CodexKit's Permissions enum can also encode {type:"profile", id} via .profileSelection (reachable through package CodexThreadPermissions.profileSelection), which serde would reject as -32602. The public .profile(id:) path conforms; the object arm is a latent wire break with no public producer.
+  - Upstream thread/start.permissions (and resume) is `Option<String>`. CodexKit can also encode `{type:"profile", id}` via package-scoped `.profileSelection`; pinned app-server maps the serde mismatch to `invalid_request` (-32600). The public `.profile(id:)` path conforms, so this is a latent package-internal wire break.
 - `conf-review-steer-always-rejected` [api-design] CodexReviewSession publicly exposes steer() although upstream categorically rejects steering review turns — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:919`
   - turn/steer on a review turn always fails upstream with activeTurnNotSteerable{turnKind: review}. CodexReviewSession.steer(with:) forwards to turn/steer — an API call that can never succeed, whose doc promises 'sends additional input to the running review turn', and whose typed error info is dropped (cross-ref conf-error-payload-discarded) leaving only an opaque message string.
 - `conf-service-tier-tristate-collapsed` [protocol-mismatch] Double-option serviceTier tri-state is unexpressible (nil always means omit, never clear) — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:1299`
   - Upstream serviceTier on turn/start, thread/start/resume/fork is Option<Option<String>> (omitted = unchanged, explicit null = clear). CodexKit models plain String? with synthesized Codable that omits nil — a consumer can set or leave unchanged but never clear. Other double-option fields upstream are not implemented by CodexKit, so the gap is confined to serviceTier.
 - `cov-experimental-capability-hardcoded` [api-design] experimentalApi capability is hardcoded on with no public control, and public listTurns rides an experimental method — `CodexKit:Sources/CodexAppServerKit/AppServerRequests.swift:233`
-  - Initialize.Capabilities defaults experimentalAPI=true and Params.init uses .init() unconditionally; Configuration exposes no capabilities knob. Every consumer is silently opted into upstream's unstable experimental surface (the flag also changes which server→client requests may arrive). Public stable-looking CodexThread.listTurns() is backed by experimental thread/turns/list — it works only because of the hardcoded flag and can break without semver signal. optOutNotificationMethods is likewise unrepresentable.
+  - Initialize.Capabilities defaults experimentalAPI=true and Params.init uses .init() unconditionally; Configuration exposes no knob. The capability gates experimental client→server methods, filters experimental notifications, and strips some experimental fields from server-request payloads; it does not generally determine which request methods the server may send. Public stable-looking `listTurns()` rides experimental `thread/turns/list`, and `optOutNotificationMethods` is unrepresentable.
 - `cov-invented-turn-status` [api-design] CodexTurnStatus invents a .cancelled case and alias decodings the v2 protocol never emits — `CodexKit:Sources/CodexAppServerKit/CodexDomainTypes.swift:1836`
-  - Upstream TurnStatus is exactly {completed, interrupted, failed, inProgress}; CodexTurnStatus adds .cancelled plus tolerant aliases ('started','succeeded','failure','aborted',...). .cancelled is unreachable from the wire, yet the consumer branches on it, encoding a belief that cancel-vs-interrupt is a server distinction. The alias table is a second protocol-vocabulary source: a future upstream status would be absorbed or misclassified instead of surfacing as .unknown. Smaller instance: CodexThreadItem.Kind invents .diagnostic/.error while upstream's real hookPrompt variant has no typed kind. Cross-ref conf-interrupted-is-failure, test-handrolled-notification-schemas-drift.
+  - Upstream TurnStatus is exactly {completed, interrupted, failed, inProgress}; CodexTurnStatus adds .cancelled plus tolerant aliases ('started','succeeded','failure','aborted',...). `.cancelled` is unreachable from current wire, yet consumer code branches on it. A future status normally becomes `.unknown`; it could be misclassified only if its spelling collides with an alias. Smaller instance: CodexThreadItem.Kind invents .diagnostic/.error while upstream's real hookPrompt variant has no typed kind.
 - `dk-fetchlimit-window-drift` [bug] Live-insert window logic lets items exceed fetchLimit via an unexplained loadedCount>fetchLimit growth branch — `CodexKit:Sources/CodexDataKit/CodexFetchRequest.swift:1044`
   - loadedWindowItems grows the window when `insertedModel && (loadedCount < fetchLimit || loadedCount > fetchLimit)` — `!=` written as two comparisons. Once loadedCount exceeds fetchLimit (reachable via includePendingChanges merges without re-clamping), every further insert grows it again, so fetchLimit is not an upper bound — SwiftData's fetchLimit is a hard cap. The condition's shape suggests the >-branch was not a deliberate contract.
 - `dk-model-field-mutability` [api-design] Server-owned model fields are publicly mutable with no persistence path — mutations are silently clobbered — `CodexKit:Sources/CodexDataKit/CodexModel.swift:393`
@@ -736,10 +714,8 @@ CodexDataKit's private semanticID maps enteredReviewMode/exitedReviewMode to rev
   - Decode tolerance is genuinely strong (.unknown catch-alls, rawPayload retention), but nothing states the rules: no README section on what ships in minors, nothing saying 'new enum cases are non-breaking — handle .unknown', zero @available(deprecated) usages, no runtime-inspectable version. Cheap artifact that converts the .unknown convention into an enforceable contract before a second consumer appears.
 - `dx-request-id-not-exposed` [api-design] JSON-RPC request ids are logged but never attached to errors or results — no correlation handle for app logs — `CodexKit:Sources/CodexAppServerKit/AppServerClient.swift:160`
   - The client allocates monotonically increasing request ids and logs them at debug level, but responseError carries only (code, message), CodexAppServerError carries no id, and typed results carry no envelope — correlating a UI failure with server/SDK log lines requires timestamp reconstruction. Cheap to add since ids already flow through the single send path.
-- `test-fake-cancel-in-flight-returns-success` [protocol-mismatch] Fake send never throws CancellationError for a cancelled in-flight request; the real transport throws and drops the response — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:1094`
-  - When a task awaiting fake send() is cancelled at a gate, cancelWaiter resumes normally and send() returns the queued response as success; the real transport resumes the pending continuation with CancellationError and discards the response. The 'plain unshielded request cancelled in flight throws and its response is never observed' contract cannot be expressed against the fake, which inverts the outcome to success. SDK-internal sites are shielded (Task.detached), limiting current impact.
-- `test-store-invented-error-code` [protocol-mismatch] Test thread store returns invented error code -32004 for missing threads; the real server has no such code — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:126`
-  - resumeThreadResponse/readThreadResponse/listThreadTurnsResponse throw responseError(code: -32004); upstream codes are -32600/-32601/-32602/-32603/-32001 — no -32004. Error-classification logic validated against the fake pins a code the real server never emits.
+- `test-store-invented-error-code` [protocol-mismatch] Test thread store returns -32004 for missing app-server threads, unlike the real missing-thread path — `CodexKit:Sources/CodexAppServerKitTesting/CodexAppServerTestRuntime.swift:126`
+  - `resumeThreadResponse` / `readThreadResponse` / `listThreadTurnsResponse` throw -32004, while the pinned app-server missing-thread path returns -32600. Other Codex components use -32004, so the mismatch is scoped to this fake versus app-server thread lookup; error-classification tests against the fake would still pin the wrong contract.
 - `use-cleanup-nested-array` [api-design] cleanupReview's [[CodexThreadID]] parameter forces awkward array-wrapping at the call site — `CodexKit:Sources/CodexAppServerKit/CodexAppServer.swift:564`
   - The public signature takes additionalCleanupThreadIDs: [[CodexThreadID]] (an internal detail of orderedReviewCleanupThreadIDs leaking into the API). The consumer wraps its flat list in a single-element outer array, which reads like a bug and invites flattening mistakes.
 - `use-empty-turnid-sentinel` [workaround] nilIfEmpty defenses against SDK-synthesized empty-string turn IDs — `CodexReviewKit:Sources/CodexReviewAppServer/AppServerCodexReviewBackend.swift:779`
