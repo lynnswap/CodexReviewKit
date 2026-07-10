@@ -357,7 +357,7 @@ public enum ReviewMonitorPreviewContent {
                 .init(
                     command:
                         "/bin/zsh -lc \"rg -n 'ReviewMonitorLog' Sources/ReviewUI && swift test --filter ReviewUI\"",
-                    status: .running
+                    status: .inProgress
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -383,7 +383,7 @@ public enum ReviewMonitorPreviewContent {
             content: .toolCall(
                 .init(
                     result: "MCP codex_review.review_read started.",
-                    status: .running
+                    status: .inProgress
                 )),
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
@@ -404,7 +404,7 @@ public enum ReviewMonitorPreviewContent {
                 .init(
                     command:
                         "/bin/zsh -lc \"sed -n '1,240p' Sources/ReviewUI/Detail/ReviewMonitorLogScrollView.swift\"",
-                    status: .running
+                    status: .inProgress
                 )),
             mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
@@ -668,8 +668,10 @@ public enum ReviewMonitorPreviewContent {
     ) -> ReviewMonitorPreviewChatLogFixture {
         let turn = CodexTurnSnapshot(
             id: chatFixture.turnID,
-            status: CodexTurnStatus(chatFixture.lifecycle),
-            errorMessage: chatFixture.lifecycle == .failed ? chatFixture.summary : nil,
+            state: CodexTurnSnapshot.State(
+                chatFixture.lifecycle,
+                failureMessage: chatFixture.summary
+            ),
             items: makeInitialChatItems(
                 streamID: chatFixture.id,
                 chatItems: chatFixture.chatItems
@@ -782,7 +784,7 @@ public enum ReviewMonitorPreviewContent {
                 .init(
                     command: command,
                     cwd: cwd,
-                    status: .running
+                    status: .inProgress
                 ))
         )
     }
@@ -970,7 +972,7 @@ public enum ReviewMonitorPreviewContent {
             toolCallItem(
                 "running-tool-\(workspaceName)-\(definition.targetSummary)",
                 result: "MCP codex_review.review_start started.",
-                status: .running
+                status: .inProgress
             ),
             reasoningItem(
                 "preview-initial-summary-\(workspaceName)-\(definition.targetSummary)",
@@ -1062,17 +1064,20 @@ private extension CodexThreadStatus {
     }
 }
 
-private extension CodexTurnStatus {
-    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle) {
+private extension CodexTurnSnapshot.State {
+    init(
+        _ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle,
+        failureMessage: String
+    ) {
         switch lifecycle {
         case .queued, .running:
-            self = .running
+            self = .inProgress
         case .succeeded:
             self = .completed
         case .failed:
-            self = .failed
+            self = .failed(CodexTurnError(message: failureMessage))
         case .cancelled:
-            self = .cancelled
+            self = .interrupted
         }
     }
 }

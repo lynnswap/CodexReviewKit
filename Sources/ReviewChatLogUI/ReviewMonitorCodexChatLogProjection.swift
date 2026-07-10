@@ -593,14 +593,14 @@ struct ReviewMonitorCodexChatLogProjection {
         {
             return turnStatus
         }
-        return itemStatus ?? turnStatus ?? .running
+        return itemStatus ?? turnStatus ?? .inProgress
     }
 
     private func terminalStatus(_ status: CodexTurnStatus) -> Bool {
         switch status {
-        case .running, .unknown:
+        case .inProgress, .unknown:
             return false
-        case .completed, .failed, .interrupted, .cancelled:
+        case .completed, .failed, .interrupted:
             return true
         }
     }

@@ -10,13 +10,67 @@ import Testing
 @Suite("ReviewMonitor selected Codex chat detail", .serialized)
 @MainActor
 struct ReviewMonitorCodexChatDetailTests {
+    @Test func codexChatLogProjectionMapsEveryLegalTurnState() throws {
+        let failedError = CodexTurnError(
+            message: "Turn failed",
+            info: .sandboxError,
+            additionalDetails: "The command was denied."
+        )
+        let unknownError = CodexTurnError(message: "Future status error")
+        let cases:
+            [(
+                name: String,
+                state: CodexTurnSnapshot.State,
+                status: CodexTurnStatus,
+                error: CodexTurnError?
+            )] = [
+                ("in-progress", .inProgress, .inProgress, nil),
+                ("completed", .completed, .completed, nil),
+                ("interrupted", .interrupted, .interrupted, nil),
+                ("failed", .failed(failedError), .failed, failedError),
+                (
+                    "future",
+                    .unknown(rawValue: "future", error: unknownError),
+                    .unknown(rawValue: "future"),
+                    unknownError
+                ),
+            ]
+
+        for testCase in cases {
+            var projection = ReviewMonitorCodexChatLogProjection()
+            let turn = CodexTurnSnapshot(
+                id: CodexTurnID(rawValue: "turn-\(testCase.name)"),
+                state: testCase.state,
+                items: [
+                    .init(
+                        id: "command-\(testCase.name)",
+                        kind: .commandExecution,
+                        content: .command(.init(command: "/bin/echo \(testCase.name)"))
+                    )
+                ]
+            )
+
+            let document = try #require(
+                projection.render(
+                    from: turn,
+                    chatCreatedAt: nil,
+                    chatUpdatedAt: nil
+                ))
+            let command = try #require(document.blocks.first { $0.kind == .command })
+
+            #expect(turn.status == testCase.status)
+            #expect(turn.error == testCase.error)
+            #expect(command.metadata?.status == testCase.status.rawValue)
+        }
+    }
+
     @Test func logResynchronizationCanUpdateAfterInitialBaseline() async throws {
         let turnID = CodexTurnID(rawValue: "turn-1")
         let chat = try await makeProjectionChat(
             turns: [
                 .init(
                     id: turnID,
-                    status: .running,
+                    state: .inProgress,
                     items: [
                         .init(
                             id: "log-1",
@@ -62,7 +116,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 turns: [
                     .init(
                         id: "turn-1",
-                        status: .running,
+                        state: .inProgress,
                         items: [
                             .init(
                                 id: "message-1",
@@ -108,7 +162,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: "turn-first",
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "message-first",
@@ -148,7 +202,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: "turn-second",
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "message-second",
@@ -189,7 +243,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: "turn-first",
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "message-first",
@@ -271,7 +325,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 turns: [
                     .init(
                         id: "turn-1",
-                        status: .running,
+                        state: .inProgress,
                         items: [
                             .init(
                                 id: "message-1",
@@ -323,7 +377,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 turns: [
                     .init(
                         id: "turn-1",
-                        status: .running,
+                        state: .inProgress,
                         items: [
                             .init(
                                 id: "message-1",
@@ -393,7 +447,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 turns: [
                     .init(
                         id: "turn-1",
-                        status: .running,
+                        state: .inProgress,
                         items: [
                             .init(
                                 id: "message-1",
@@ -461,7 +515,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let turnID = CodexTurnID(rawValue: "turn-review")
         let turn = CodexTurnSnapshot(
             id: turnID,
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "user-message",
@@ -497,7 +551,7 @@ struct ReviewMonitorCodexChatDetailTests {
         """
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .completed,
+            state: .completed,
             items: [
                 .init(
                     id: "review-output",
@@ -533,7 +587,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: CodexTurnID(rawValue: "turn-first"),
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "review-output-first",
@@ -553,7 +607,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 ),
                 .init(
                     id: CodexTurnID(rawValue: "turn-second"),
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "review-output-second",
@@ -598,7 +652,7 @@ struct ReviewMonitorCodexChatDetailTests {
         """
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "event-reasoning",
@@ -631,7 +685,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let reasoningText = "Checking diff"
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "reasoning-a",
@@ -664,7 +718,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let reasoningText = "Checking diff"
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "reasoning-a",
@@ -705,7 +759,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: CodexTurnID(rawValue: "turn-first"),
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "reasoning-first",
@@ -716,7 +770,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 ),
                 .init(
                     id: CodexTurnID(rawValue: "turn-second"),
-                    status: .completed,
+                    state: .completed,
                     items: [
                         .init(
                             id: "reasoning-second",
@@ -752,13 +806,13 @@ struct ReviewMonitorCodexChatDetailTests {
             kind: .commandExecution,
             content: .command(.init(
                 command: "/bin/zsh -lc",
-                status: .running,
+                status: .inProgress,
                 startedAt: Date(timeIntervalSince1970: 4_000)
             ))
         )
         let initial = CodexTurnSnapshot(
             id: turnID,
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "event-reasoning",
@@ -771,7 +825,7 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         let mirrored = CodexTurnSnapshot(
             id: turnID,
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "event-reasoning",
@@ -812,7 +866,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let reasoningText = "Inspecting differences"
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "event-reasoning",
@@ -850,7 +904,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let reasoningText = "Inspecting differences"
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "event-reasoning",
@@ -891,7 +945,7 @@ struct ReviewMonitorCodexChatDetailTests {
         }
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-review"),
-            status: .running,
+            state: .inProgress,
             items: [
                 reasoningItem(id: "event-reasoning-1", payloadType: "agent_reasoning"),
                 reasoningItem(id: "response-reasoning-1", payloadType: "reasoning"),
@@ -915,7 +969,7 @@ struct ReviewMonitorCodexChatDetailTests {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-chat"),
-            status: .running,
+            state: .inProgress,
             items: [
                 .init(
                     id: "user-message",
@@ -941,7 +995,7 @@ struct ReviewMonitorCodexChatDetailTests {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-command"),
-            status: .completed,
+            state: .completed,
             items: [
                 .init(
                     id: "command-running",
@@ -949,7 +1003,7 @@ struct ReviewMonitorCodexChatDetailTests {
                     content: .command(.init(
                         command: "/bin/zsh -lc",
                         output: "done",
-                        status: .running,
+                        status: .inProgress,
                         startedAt: Date(timeIntervalSince1970: 4_000)
                     ))
                 ),
@@ -980,7 +1034,7 @@ struct ReviewMonitorCodexChatDetailTests {
         var projection = ReviewMonitorCodexChatLogProjection()
         let turn = CodexTurnSnapshot(
             id: CodexTurnID(rawValue: "turn-command"),
-            status: .completed,
+            state: .completed,
             items: [
                 .init(
                     id: "command-failed",
@@ -989,7 +1043,7 @@ struct ReviewMonitorCodexChatDetailTests {
                         command: "/bin/zsh -lc",
                         output: "error",
                         exitCode: 1,
-                        status: .running,
+                        status: .inProgress,
                         startedAt: Date(timeIntervalSince1970: 4_000)
                     ))
                 ),
@@ -1022,7 +1076,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: turnID,
-                    status: .running,
+                    state: .inProgress,
                     items: [
                         .init(
                             id: "message-review",
@@ -1059,7 +1113,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: firstTurnID,
-                    status: .running,
+                    state: .inProgress,
                     items: [
                         .init(
                             id: "message-review",
@@ -1078,7 +1132,7 @@ struct ReviewMonitorCodexChatDetailTests {
             turns: [
                 .init(
                     id: firstTurnID,
-                    status: .running,
+                    state: .inProgress,
                     items: [
                         .init(
                             id: "message-review",
@@ -1093,7 +1147,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 ),
                 .init(
                     id: secondTurnID,
-                    status: .running,
+                    state: .inProgress,
                     items: [
                         .init(
                             id: "reasoning-empty",
@@ -1136,7 +1190,7 @@ struct ReviewMonitorCodexChatDetailTests {
                 turns: [
                     .init(
                         id: "turn-1",
-                        status: .running,
+                        state: .inProgress,
                         items: [
                             .init(
                                 id: "message-1",

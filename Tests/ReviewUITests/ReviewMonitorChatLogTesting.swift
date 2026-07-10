@@ -201,8 +201,10 @@ func makeReviewChatFixtureForTesting(
     let initialSnapshot = makeCodexThreadSnapshotForTesting(
         chatID: resolvedChatID,
         turnID: resolvedTurnID,
-        turnStatus: CodexTurnStatus(chatFixtureStatusForTesting: status),
-        turnErrorDescription: errorMessage,
+        turnState: CodexTurnSnapshot.State(
+            chatFixtureStatusForTesting: status,
+            errorMessage: errorMessage
+        ),
         items: ReviewChatLogFixtureStore.items(for: resolvedChatID, turnID: resolvedTurnID)
     )
     return ReviewChatFixtureForTesting(
@@ -502,8 +504,7 @@ func codexThreadSnapshotForTesting(_ fixture: ReviewChatFixtureForTesting) -> Co
 func makeCodexThreadSnapshotForTesting(
     chatID: CodexThreadID,
     turnID: CodexTurnID,
-    turnStatus: CodexTurnStatus = .completed,
-    turnErrorDescription: String? = nil,
+    turnState: CodexTurnSnapshot.State = .completed,
     items: [CodexThreadItem] = []
 ) -> CodexThreadSnapshot {
     makeCodexThreadSnapshotForTesting(
@@ -511,8 +512,7 @@ func makeCodexThreadSnapshotForTesting(
         turns: [
             .init(
                 id: turnID,
-                status: turnStatus,
-                errorMessage: turnErrorDescription,
+                state: turnState,
                 items: items
             )
         ]
@@ -528,7 +528,12 @@ func makeCodexThreadSnapshotForTesting(
     var resolvedTurns = turns
     if items.isEmpty == false {
         if resolvedTurns.isEmpty {
-            resolvedTurns = [CodexTurnSnapshot(id: CodexTurnID(rawValue: "\(chatID.rawValue):preview-turn"))]
+            resolvedTurns = [
+                CodexTurnSnapshot(
+                    id: CodexTurnID(rawValue: "\(chatID.rawValue):preview-turn"),
+                    state: .inProgress
+                )
+            ]
         }
         resolvedTurns[resolvedTurns.count - 1].items = items
     }
@@ -847,17 +852,23 @@ private extension CodexThreadStatus {
     }
 }
 
-private extension CodexTurnStatus {
-    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus) {
+private extension CodexTurnSnapshot.State {
+    init(
+        chatFixtureStatusForTesting status: ReviewChatFixtureStatus,
+        errorMessage: String?
+    ) {
         switch status {
         case .queued, .running:
-            self = .running
+            self = .inProgress
         case .succeeded:
             self = .completed
         case .failed:
-            self = .failed
+            guard let errorMessage else {
+                preconditionFailure("A failed review chat fixture requires an explicit error message.")
+            }
+            self = .failed(CodexTurnError(message: errorMessage))
         case .cancelled:
-            self = .cancelled
+            self = .interrupted
         }
     }
 }
@@ -885,7 +896,10 @@ private func chatLogCommandText(for entry: ReviewChatLogEntryForTesting) -> Stri
 
 private func codexTurnStatus(for entry: ReviewChatLogEntryForTesting) -> CodexTurnStatus? {
     guard let rawValue = entry.metadata?.commandStatus ?? entry.metadata?.status else {
-        return entry.kind == .command ? .running : nil
+        return entry.kind == .command ? .inProgress : nil
+    }
+    if rawValue == "running" {
+        return .inProgress
     }
     return CodexTurnStatus(rawValue: rawValue)
 }

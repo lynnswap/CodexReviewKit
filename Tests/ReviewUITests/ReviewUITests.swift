@@ -5635,7 +5635,8 @@ func makeReviewChatFixtureForTesting(
         updatedAt: status.isTerminal ? startedAt.addingTimeInterval(1) : startedAt,
         chatEntries: trimmedLogText.isEmpty
             ? []
-            : [.init(kind: .agentMessage, groupID: "fixture-log-\(id)", text: trimmedLogText)]
+            : [.init(kind: .agentMessage, groupID: "fixture-log-\(id)", text: trimmedLogText)],
+        errorMessage: status == .failed ? summary : nil
     )
 }
 

@@ -351,8 +351,8 @@ final class ReviewMonitorPreviewAppServerRuntime {
         guard let cancelledSnapshot = await updateStoredSnapshot(for: fixture, mutation: { snapshot in
             snapshot.turns = snapshot.turns?.map { turn in
                 var turn = turn
-                if turn.status.isTerminalForPreview == false {
-                    turn.status = .cancelled
+                if turn.state.isTerminalForPreview == false {
+                    turn.state = .interrupted
                 }
                 return turn
             }
@@ -721,7 +721,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
                     threadID: fixture.chatID.rawValue,
                     turn: .init(
                         id: turnID.rawValue,
-                        status: "cancelled",
+                        status: "interrupted",
                         completedAt: Int(Date().timeIntervalSince1970)
                     )
                 )
@@ -802,12 +802,12 @@ private struct PreviewTurnCompletedParams: Encodable, Sendable {
     }
 }
 
-private extension Optional where Wrapped == CodexTurnStatus {
+private extension CodexTurnSnapshot.State {
     var isTerminalForPreview: Bool {
         switch self {
-        case .completed?, .failed?, .interrupted?, .cancelled?:
+        case .completed, .failed, .interrupted:
             true
-        case .running?, .unknown?, nil:
+        case .inProgress, .unknown:
             false
         }
     }
@@ -972,7 +972,7 @@ private extension CodexThreadSnapshot {
         if let existingTurnID = turns?.last?.id {
             return existingTurnID
         }
-        turns = [CodexTurnSnapshot(id: turnID, status: .running)]
+        turns = [CodexTurnSnapshot(id: turnID, state: .inProgress)]
         return turnID
     }
 }

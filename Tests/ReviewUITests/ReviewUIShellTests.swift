@@ -127,7 +127,7 @@ extension ReviewUITests {
         try await withTestTimeout(.seconds(2)) {
             while true {
                 let snapshot = await previewContent.snapshotForTesting(chatID: selectedChatID)
-                if snapshot?.turns?.last?.status == .cancelled {
+                if snapshot?.turns?.last?.state == .interrupted {
                     break
                 }
                 try Task.checkCancellation()
@@ -405,7 +405,7 @@ extension ReviewUITests {
                         updatedAt: Date(timeIntervalSince1970: 5_000),
                         status: .active(activeFlags: []),
                         turns: [
-                            .init(id: turnID, status: .running)
+                            .init(id: turnID, state: .inProgress)
                         ]
                     )
                 ]
@@ -415,7 +415,7 @@ extension ReviewUITests {
                 id: chatID,
                 status: .active(activeFlags: []),
                 turns: [
-                    .init(id: turnID, status: .running)
+                    .init(id: turnID, state: .inProgress)
                 ]
             ))
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
@@ -494,7 +494,7 @@ extension ReviewUITests {
                         updatedAt: Date(timeIntervalSince1970: 5_000),
                         status: .active(activeFlags: []),
                         turns: [
-                            .init(id: turnID, status: .running)
+                            .init(id: turnID, state: .inProgress)
                         ]
                     )
                 ]
@@ -504,7 +504,7 @@ extension ReviewUITests {
                 id: chatID,
                 status: .active(activeFlags: []),
                 turns: [
-                    .init(id: turnID, status: .running)
+                    .init(id: turnID, state: .inProgress)
                 ]
             ))
         try await runtime.transport.enqueueEmpty(for: "turn/interrupt")
