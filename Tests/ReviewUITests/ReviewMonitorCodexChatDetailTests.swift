@@ -50,12 +50,12 @@ struct ReviewMonitorCodexChatDetailTests {
                 ]
             )
 
-            let document = try #require(
-                projection.render(
-                    from: turn,
-                    chatCreatedAt: nil,
-                    chatUpdatedAt: nil
-                ))
+            let rendered = projection.render(
+                from: turn,
+                chatCreatedAt: nil,
+                chatUpdatedAt: nil
+            )
+            let document = try #require(rendered)
             let command = try #require(document.blocks.first { $0.kind == .command })
 
             #expect(turn.status == testCase.status)
