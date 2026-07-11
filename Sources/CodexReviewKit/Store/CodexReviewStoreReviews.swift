@@ -487,14 +487,23 @@ extension CodexReviewStore {
         }
     }
 
-    package func closeActiveReviewSessions(reason: ReviewCancellation) async {
+    @discardableResult
+    package func closeActiveReviewSessions(
+        reason: ReviewCancellation,
+        workerDrainTimeout: Duration
+    ) async -> Bool {
         let runIDs =
             orderedReviewRuns
             .filter { $0.isTerminal == false }
             .map(\.id)
         for runID in runIDs {
-            _ = try? await cancelReview(runID: runID, cancellation: reason)
+            do {
+                _ = try await cancelReview(runID: runID, cancellation: reason)
+            } catch {
+                continue
+            }
         }
+        return await drainReviewWorkersForRuntimeStop(timeout: workerDrainTimeout)
     }
 
     private func requireReviewRun(runID: String) throws -> ReviewRunRecord {

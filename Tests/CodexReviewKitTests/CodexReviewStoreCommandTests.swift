@@ -1655,7 +1655,10 @@ struct CodexReviewStoreCommandTests {
                 reviewRuns: [running]
             )
 
-            await store.closeActiveReviewSessions(reason: .system(message: "Account switched."))
+            await store.closeActiveReviewSessions(
+                reason: .system(message: "Account switched."),
+                workerDrainTimeout: .seconds(1)
+            )
 
             #expect(running.core.lifecycle.status == .cancelled)
             async let result = store.startReview(
@@ -1667,6 +1670,37 @@ struct CodexReviewStoreCommandTests {
 
             #expect(read.runID == "run-1")
             #expect(read.core.lifecycle.status == .succeeded)
+        }
+    }
+
+    @Test func closeActiveReviewSessionsBoundsStuckStartupDrain() async throws {
+        let backend = FakeCodexReviewBackend()
+        let startGate = AsyncGate()
+        await backend.holdStartReview(with: startGate)
+        let store = CodexReviewStore.makeTestingStore(
+            backend: TestingCodexReviewStoreBackend(reviewBackend: backend),
+            idGenerator: .init(next: { "run-1" })
+        )
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
+            let running = Task { @MainActor in
+                try await store.startReview(
+                    sessionID: "session-1",
+                    request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+                )
+            }
+            try await backend.waitForStartReview(timeout: .seconds(2))
+            let startedAt = ContinuousClock.now
+
+            let didDrain = await store.closeActiveReviewSessions(
+                reason: .system(message: "Account switched."),
+                workerDrainTimeout: .milliseconds(20)
+            )
+
+            #expect(didDrain == false)
+            #expect(ContinuousClock.now - startedAt < .seconds(1))
+            await startGate.open()
+            let result = try await running.value
+            #expect(result.core.lifecycle.status == .cancelled)
         }
     }
 

@@ -430,6 +430,115 @@ struct CodexReviewHostTests {
         #expect(message.contains("account registry is inconsistent"))
     }
 
+    @Test func liveStoreMigratesLegacyRegistryToVersionedImmutableRevision() throws {
+        let homeURL = try temporaryHome()
+        let accountKey = "legacy@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: accountKey,
+            accounts: [accountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: accountKey)
+
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+
+        let registry = try accountRegistryObject(homeURL: homeURL)
+        #expect(registry["schemaVersion"] as? Int == 1)
+        #expect((registry["generation"] as? Int) == 1)
+        #expect((registry["contentHash"] as? String)?.isEmpty == false)
+        let records = try #require(registry["accounts"] as? [[String: Any]])
+        let record = try #require(records.first)
+        let revision = try #require(record["immutableRevision"] as? String)
+        let revisionURL = homeURL
+            .appendingPathComponent(".codex_review", isDirectory: true)
+            .appendingPathComponent("accounts", isDirectory: true)
+            .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
+            .appendingPathComponent("revisions", isDirectory: true)
+            .appendingPathComponent("\(revision).json")
+        #expect(try Data(contentsOf: revisionURL) == Data("{\"tokens\":{\"id_token\":\"legacy@example.com\"}}".utf8))
+        let orphanURL = revisionURL.deletingLastPathComponent().appendingPathComponent("orphan.json")
+        try Data(#"{"tokens":{"id_token":"orphan@example.com"}}"#.utf8).write(to: orphanURL)
+
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+
+        #expect(FileManager.default.fileExists(atPath: revisionURL.path))
+        #expect(FileManager.default.fileExists(atPath: orphanURL.path) == false)
+    }
+
+    @Test func liveStoreFailsFastForMissingImmutableAuthRevision() async throws {
+        let homeURL = try temporaryHome()
+        let accountKey = "missing-revision@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: accountKey,
+            accounts: [accountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: accountKey)
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+        let registry = try accountRegistryObject(homeURL: homeURL)
+        let records = try #require(registry["accounts"] as? [[String: Any]])
+        let revision = try #require(records.first?["immutableRevision"] as? String)
+        let revisionURL = homeURL
+            .appendingPathComponent(".codex_review", isDirectory: true)
+            .appendingPathComponent("accounts", isDirectory: true)
+            .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
+            .appendingPathComponent("revisions", isDirectory: true)
+            .appendingPathComponent("\(revision).json")
+        try FileManager.default.removeItem(at: revisionURL)
+        var didLaunchAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { _ in
+                didLaunchAppServer = true
+                return FakeCodexAppServerTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(didLaunchAppServer == false)
+        #expect(store.auth.errorMessage?.contains("account registry is inconsistent") == true)
+    }
+
+    @Test func liveStoreFailsFastForRegistryContentHashMismatch() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            accounts: ["stored@example.com"]
+        )
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+        let registryURL = accountRegistryURL(homeURL: homeURL)
+        var registry = try accountRegistryObject(homeURL: homeURL)
+        registry["activeAccountKey"] = "stored@example.com"
+        try JSONSerialization.data(withJSONObject: registry).write(to: registryURL)
+        var didLaunchAppServer = false
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { _ in
+                didLaunchAppServer = true
+                return FakeCodexAppServerTransport()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(didLaunchAppServer == false)
+        #expect(store.auth.errorMessage?.contains("content hash") == true)
+    }
+
     @Test func liveStoreSkipsRateLimitRefreshForUnsupportedActiveAccount() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -446,7 +555,6 @@ struct CodexReviewHostTests {
             environment: ["HOME": try temporaryHome().path],
             transport: transport
         )
-
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForRequestCount(4)
         await store.refreshAccountRateLimits(accountKey: "api-key")
@@ -462,6 +570,8 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreCompletesStockLoginAfterAccountReadiness() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
@@ -492,7 +602,7 @@ struct CodexReviewHostTests {
         )
         let externalURLOpener = FakeExternalURLOpener()
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
             externalURLOpener: externalURLOpener.open,
             transport: transport
         )
@@ -518,6 +628,10 @@ struct CodexReviewHostTests {
             #expect(failure == .accountMutationBlockedByAuthentication)
         }
         #expect(store.auth.isAuthenticating)
+        try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
         try await transport.emitServerNotificationJSON(
             method: "account/login/completed",
             json: #"{"loginId":"login-1","success":true,"error":null}"#
@@ -594,6 +708,10 @@ struct CodexReviewHostTests {
     @Test func liveStoreAddsAccountWithoutSwitchingExistingActiveAccount() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"id_token":"active@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
         let mainTransport = FakeCodexAppServerTransport()
         try await mainTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await mainTransport.enqueue(
@@ -859,6 +977,13 @@ struct CodexReviewHostTests {
         try await store.addAccount()
         await transport.waitForRequestCount(5)
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
+        try FileManager.default.createDirectory(
+            at: mainCodexHomeURL,
+            withIntermediateDirectories: true
+        )
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
         try await transport.emitServerNotification(
             method: "account/login/completed",
             params: TestLoginCompletedNotification(loginID: "login-new", success: true)
@@ -867,6 +992,7 @@ struct CodexReviewHostTests {
             method: "account/updated",
             json: #"{"authMode":"chatgpt","planType":"plus"}"#
         )
+        await transport.waitForRequestCount(7)
         await waitUntil {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
@@ -971,6 +1097,12 @@ struct CodexReviewHostTests {
     }
 
     @Test func liveStoreIgnoresNonCodexRateLimitNotifications() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"id_token":"active@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
         try await transport.enqueue(
@@ -991,7 +1123,7 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         let store = CodexReviewStore.makeLiveStoreForTesting(
-            environment: ["HOME": try temporaryHome().path],
+            environment: ["HOME": homeURL.path],
             transport: transport
         )
 
@@ -1081,6 +1213,11 @@ struct CodexReviewHostTests {
                 return mainTransports.removeFirst()
             }
         )
+        let legacySecondAuthURL = mainCodexHomeURL
+            .appendingPathComponent("accounts", isDirectory: true)
+            .appendingPathComponent(pathComponent(forAccountKey: "second@example.com"), isDirectory: true)
+            .appendingPathComponent("auth.json")
+        try FileManager.default.removeItem(at: legacySecondAuthURL)
 
         await store.start(forceRestartIfNeeded: true)
         async let reviewRead = store.startReview(
@@ -1514,6 +1651,7 @@ struct CodexReviewHostTests {
             for: "account/rateLimits/read"
         )
         try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
+        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
 
         let secondTransport = FakeCodexAppServerTransport()
         try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
@@ -1542,6 +1680,181 @@ struct CodexReviewHostTests {
         #expect(store.auth.persistedAccounts.isEmpty)
         #expect(await firstTransport.recordedRequests().map(\.method).contains("account/logout"))
         #expect(await secondTransport.recordedRequests().map(\.method).contains("account/read"))
+    }
+
+    @Test func liveStoreFsyncsRemovalJournalBeforeUpstreamLogout() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        try Data("{\"tokens\":{\"id_token\":\"test\"}}".utf8)
+            .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
+        let logoutGate = AsyncGate()
+        let firstTransport = FakeCodexAppServerTransport()
+        try await firstTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await firstTransport.enqueue(
+            AppServerAPI.Account.Read.Response(account: .init(email: "active@example.com", planType: "pro")),
+            for: "account/read"
+        )
+        try await firstTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await firstTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await firstTransport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 10, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        try await firstTransport.enqueue(EmptyResponse(), for: "account/logout")
+        try await firstTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        await firstTransport.holdNext(method: "account/logout", gate: logoutGate)
+        let secondTransport = FakeCodexAppServerTransport()
+        try await secondTransport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await secondTransport.enqueue(AppServerAPI.Account.Read.Response(), for: "account/read")
+        try await secondTransport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await secondTransport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        var transports = [firstTransport, secondTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { _ in transports.removeFirst() }
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        let removal = Task {
+            try await store.removeAccount(accountKey: "active@example.com")
+        }
+        await firstTransport.waitForRequestCount(6)
+        let journalData = try Data(contentsOf: accountMutationJournalURL(homeURL: homeURL))
+        let journal = try #require(JSONSerialization.jsonObject(with: journalData) as? [String: Any])
+        #expect(journal["phase"] as? String == "prepared")
+        #expect(journal["mayApplyIrreversibleLogout"] as? Bool == true)
+        try await firstTransport.emitServerNotification(
+            method: "account/rateLimits/updated",
+            params: TestRateLimitsUpdatedNotification(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 12, windowDurationMins: 300)
+            ))
+        )
+        #expect(await waitUntil(timeout: .seconds(1)) {
+            store.auth.selectedAccount?.rateLimits.first?.usedPercent == 12
+        })
+        #expect(
+            try Data(contentsOf: accountMutationJournalURL(homeURL: homeURL))
+                == journalData
+        )
+
+        let recoveryHomeURL = try temporaryHome()
+        let recoveryAccountsURL = recoveryHomeURL
+            .appendingPathComponent(".codex_review", isDirectory: true)
+            .appendingPathComponent("accounts", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: recoveryAccountsURL,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(
+            at: mainCodexHomeURL
+                .appendingPathComponent("accounts", isDirectory: true)
+                .appendingPathComponent(pathComponent(forAccountKey: "active@example.com"), isDirectory: true),
+            to: recoveryAccountsURL
+                .appendingPathComponent(pathComponent(forAccountKey: "active@example.com"), isDirectory: true)
+        )
+        let beforeRegistry = try #require(journal["beforeRegistry"] as? [String: Any])
+        try JSONSerialization.data(withJSONObject: beforeRegistry).write(
+            to: recoveryAccountsURL.appendingPathComponent("registry.json")
+        )
+        try journalData.write(
+            to: recoveryAccountsURL.appendingPathComponent("mutation-journal.json")
+        )
+        let recoveredStore = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": recoveryHomeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+        #expect(recoveredStore.auth.errorMessage == nil)
+        #expect(recoveredStore.auth.persistedAccounts.isEmpty)
+        #expect(recoveredStore.auth.persistedActiveAccountKey == nil)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: accountMutationJournalURL(homeURL: recoveryHomeURL).path
+            ) == false
+        )
+
+        await logoutGate.open()
+        try await removal.value
+
+        #expect(FileManager.default.fileExists(atPath: accountMutationJournalURL(homeURL: homeURL).path) == false)
+        #expect(try activeAccountKey(homeURL: homeURL) == nil)
+    }
+
+    @Test func liveStoreAbortsPreparedRemovalWhenUpstreamLogoutFails() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let originalAuth = try Data(
+            contentsOf: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueue(AppServerAPI.Initialize.Response(), for: "initialize")
+        try await transport.enqueue(
+            AppServerAPI.Account.Read.Response(
+                account: .init(email: "active@example.com", planType: "pro")
+            ),
+            for: "account/read"
+        )
+        try await transport.enqueue(
+            AppServerAPI.Config.Read.Response(config: .init(model: "gpt-5")),
+            for: "config/read"
+        )
+        try await transport.enqueue(AppServerAPI.Model.List.Response(data: []), for: "model/list")
+        try await transport.enqueue(
+            AppServerAPI.Account.RateLimits.Response(rateLimits: .init(
+                limitID: "codex",
+                primary: .init(usedPercent: 10, windowDurationMins: 300)
+            )),
+            for: "account/rateLimits/read"
+        )
+        await transport.enqueueFailure(
+            code: -32603,
+            message: "logout unavailable",
+            for: "account/logout"
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        do {
+            try await store.signOutActiveAccount()
+            Issue.record("Expected upstream logout failure to abort the prepared account mutation.")
+        } catch {
+            #expect(error.localizedDescription.contains("logout unavailable"))
+        }
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(try activeAccountKey(homeURL: homeURL) == "active@example.com")
+        #expect(
+            try Data(contentsOf: mainCodexHomeURL.appendingPathComponent("auth.json"))
+                == originalAuth
+        )
+        #expect(
+            FileManager.default.fileExists(
+                atPath: accountMutationJournalURL(homeURL: homeURL).path
+            ) == false
+        )
+        await store.stop()
     }
 
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenMainRuntimeIsUnavailable() async throws {
@@ -2167,6 +2480,10 @@ private func writeRegistryRecords(
         "accounts": records,
     ])
     try data.write(to: registryURL)
+    if let activeAccountKey {
+        try Data("{\"tokens\":{\"id_token\":\"\(activeAccountKey)\"}}".utf8)
+            .write(to: codexHomeURL.appendingPathComponent("auth.json"))
+    }
 }
 
 private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
@@ -2183,21 +2500,51 @@ private func writeSavedAccountAuth(homeURL: URL, accountKey: String) throws {
 }
 
 private func savedAccountAuth(homeURL: URL, accountKey: String) throws -> Data {
-    try Data(contentsOf: homeURL
+    let accountDirectoryURL = homeURL
         .appendingPathComponent(".codex_review", isDirectory: true)
         .appendingPathComponent("accounts", isDirectory: true)
         .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
-        .appendingPathComponent("auth.json"))
-}
-
-private func activeAccountKey(homeURL: URL) throws -> String? {
     let registryURL = homeURL
         .appendingPathComponent(".codex_review", isDirectory: true)
         .appendingPathComponent("accounts", isDirectory: true)
         .appendingPathComponent("registry.json")
-    let data = try Data(contentsOf: registryURL)
-    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let registryData = try Data(contentsOf: registryURL)
+    let registry = try #require(JSONSerialization.jsonObject(with: registryData) as? [String: Any])
+    let records = try #require(registry["accounts"] as? [[String: Any]])
+    let normalizedAccountKey = accountKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let record = try #require(records.first { record in
+        (record["accountKey"] as? String)?.lowercased() == normalizedAccountKey
+    })
+    if let revision = record["immutableRevision"] as? String {
+        return try Data(contentsOf: accountDirectoryURL
+            .appendingPathComponent("revisions", isDirectory: true)
+            .appendingPathComponent("\(revision).json"))
+    }
+    return try Data(contentsOf: accountDirectoryURL.appendingPathComponent("auth.json"))
+}
+
+private func activeAccountKey(homeURL: URL) throws -> String? {
+    let object = try accountRegistryObject(homeURL: homeURL)
     return object["activeAccountKey"] as? String
+}
+
+private func accountRegistryURL(homeURL: URL) -> URL {
+    homeURL
+        .appendingPathComponent(".codex_review", isDirectory: true)
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("registry.json")
+}
+
+private func accountMutationJournalURL(homeURL: URL) -> URL {
+    homeURL
+        .appendingPathComponent(".codex_review", isDirectory: true)
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("mutation-journal.json")
+}
+
+private func accountRegistryObject(homeURL: URL) throws -> [String: Any] {
+    let data = try Data(contentsOf: accountRegistryURL(homeURL: homeURL))
+    return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
 }
 
 private func pathComponent(forAccountKey accountKey: String) -> String {
