@@ -261,20 +261,20 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         self.appServerRuntimeFactory = appServerRuntimeFactory ?? Self.makeAppServerRuntimeFactory(
             codexExecutablePath: runtimePreferences.codexExecutablePath
         )
-        let registry: (accounts: [CodexReviewAccount], activeAccountKey: String?)
+        let registry: AccountRegistryStore.Snapshot
         do {
-            registry = try CodexReviewAccountRegistry.load(codexHomeURL: codexHomeURL)
+            registry = try AccountRegistryStore.loadInitialSnapshot(codexHomeURL: codexHomeURL)
             registryLoadFailure = nil
         } catch let failure as CodexReviewAuthenticationFailure {
-            registry = ([], nil)
+            registry = .init(accounts: [], activeAccountKey: nil)
             registryLoadFailure = failure
         } catch {
-            registry = ([], nil)
+            registry = .init(accounts: [], activeAccountKey: nil)
             registryLoadFailure = .persistenceInconsistent(message: error.localizedDescription)
         }
         seed = CodexReviewStoreSeed(
             shouldAutoStartEmbeddedServer: true,
-            initialAccounts: registry.accounts,
+            initialAccounts: registry.accounts.map(makeCodexReviewAccount(from:)),
             initialActiveAccountKey: registry.activeAccountKey
         )
     }
@@ -476,7 +476,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
             let authSnapshot = try await backend.readAuth()
-            applyAuthSnapshot(authSnapshot, to: store.auth)
+            await applyAuthSnapshotSerialized(authSnapshot, to: store.auth)
             await refreshSelectedAccountRateLimits(auth: store.auth)
             logger.info("Review runtime started")
         } catch {
@@ -641,7 +641,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 return
             }
             let snapshot = try await appServerBackend.readAuth()
-            applyAuthSnapshot(snapshot, to: auth)
+            await applyAuthSnapshot(snapshot, to: auth)
         } catch {
             auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
         }
@@ -714,10 +714,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
             return
         }
-        try CodexReviewAccountRegistry.activateAccount(
+        try await accountRegistry.activateAccount(
             accountKey,
-            accounts: auth.persistedAccounts,
-            codexHomeURL: codexHomeURL
+            accounts: auth.persistedAccounts.map(savedAccountPayload(from:))
         )
         auth.applyPersistedAccountStates(
             auth.persistedAccounts.map(savedAccountPayload(from:)),
@@ -745,17 +744,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let activeAccountKey = auth.persistedActiveAccountKey == accountKey
             ? nil
             : auth.persistedActiveAccountKey
-        try CodexReviewAccountRegistry.saveAccounts(
-            remaining,
-            activeAccountKey: activeAccountKey,
-            codexHomeURL: codexHomeURL
+        try await accountRegistry.saveAccounts(
+            remaining.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
         )
-        try CodexReviewAccountRegistry.removeSavedAccountDirectory(
-            accountKey: accountKey,
-            codexHomeURL: codexHomeURL
-        )
+        try await accountRegistry.removeSavedAccountDirectory(accountKey: accountKey)
         if removedActiveAccount {
-            try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+            try? await accountRegistry.removeSharedAuth()
         }
         auth.applyPersistedAccountStates(
             remaining.map(savedAccountPayload(from:)),
@@ -790,10 +785,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         let account = accounts.remove(at: sourceIndex)
         accounts.insert(account, at: destinationIndex)
-        try CodexReviewAccountRegistry.saveAccounts(
-            accounts,
-            activeAccountKey: auth.persistedActiveAccountKey,
-            codexHomeURL: codexHomeURL
+        try await accountRegistry.saveAccounts(
+            accounts.map(savedAccountPayload(from:)),
+            activeAccountKey: auth.persistedActiveAccountKey
         )
         auth.applyPersistedAccountStates(accounts.map(savedAccountPayload(from:)))
         }
@@ -814,16 +808,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             _ = try await appServerBackend.logout(.init(account.accountKey))
         }
         let remaining = auth.persistedAccounts.filter { $0.accountKey != account.accountKey }
-        try CodexReviewAccountRegistry.saveAccounts(
-            remaining,
-            activeAccountKey: nil,
-            codexHomeURL: codexHomeURL
+        try await accountRegistry.saveAccounts(
+            remaining.map(savedAccountPayload(from:)),
+            activeAccountKey: nil
         )
-        try CodexReviewAccountRegistry.removeSavedAccountDirectory(
-            accountKey: account.accountKey,
-            codexHomeURL: codexHomeURL
-        )
-        try? CodexReviewAccountRegistry.removeSharedAuth(codexHomeURL: codexHomeURL)
+        try await accountRegistry.removeSavedAccountDirectory(accountKey: account.accountKey)
+        try? await accountRegistry.removeSharedAuth()
         auth.updatePhase(.signedOut)
         auth.selectPersistedAccount(nil)
         auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
@@ -954,7 +944,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 } else {
                     isolatedRateLimits = nil
                 }
-                let account = applyAuthSnapshot(
+                let account = await applyAuthSnapshot(
                     snapshot,
                     to: auth,
                     activation: session.activation,
@@ -963,9 +953,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 if session.runtime.usesPrimaryRuntime == false {
                     if let account, let isolatedRateLimits {
                         applyRateLimits(isolatedRateLimits, to: account)
-                        try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                            from: account,
-                            codexHomeURL: codexHomeURL
+                        try? await accountRegistry.updateCachedRateLimits(
+                            from: savedAccountPayload(from: account)
                         )
                     }
                     try? FileManager.default.removeItem(at: session.runtime.codexHomeURL)
@@ -1042,7 +1031,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                         message: "Authentication committed, but the replacement runtime did not confirm a ChatGPT account."
                     )
                 }
-                _ = applyAuthSnapshot(snapshot, to: auth)
+                _ = await applyAuthSnapshotSerialized(snapshot, to: auth)
             }
         } catch let failure as CodexReviewAuthenticationFailure {
             auth.updatePhase(.failed(failure))
@@ -1202,7 +1191,24 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         to auth: CodexReviewAuthModel,
         activation: LoginActivation = .activateAuthenticatedAccount,
         authSourceCodexHomeURL: URL? = nil
-    ) -> CodexReviewAccount? {
+    ) async -> CodexReviewAccount? {
+        await accountRuntimeTransitionCoordinator.performInternal {
+            await self.applyAuthSnapshotSerialized(
+                snapshot,
+                to: auth,
+                activation: activation,
+                authSourceCodexHomeURL: authSourceCodexHomeURL
+            )
+        }
+    }
+
+    @discardableResult
+    private func applyAuthSnapshotSerialized(
+        _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
+        to auth: CodexReviewAuthModel,
+        activation: LoginActivation = .activateAuthenticatedAccount,
+        authSourceCodexHomeURL: URL? = nil
+    ) async -> CodexReviewAccount? {
         guard let activeAccountID = snapshot.activeAccountID?.rawValue,
               let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
               let account = Self.monitorAccount(from: backendAccount)
@@ -1230,23 +1236,18 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             authenticatedAccountKey: account.accountKey,
             persistedAccounts: persistedAccounts
         )
-        try? CodexReviewAccountRegistry.saveAccounts(
-            persistedAccounts,
-            activeAccountKey: activeAccountKey,
-            codexHomeURL: codexHomeURL
+        try? await accountRegistry.saveAccounts(
+            persistedAccounts.map(savedAccountPayload(from:)),
+            activeAccountKey: activeAccountKey
         )
         switch activation {
         case .activateAuthenticatedAccount:
-            try? CodexReviewAccountRegistry.saveSharedAuth(
-                for: account,
-                codexHomeURL: codexHomeURL
-            )
+            try? await accountRegistry.saveSharedAuth(for: savedAccountPayload(from: account))
         case .preserveActiveAccount:
             if let authSourceCodexHomeURL {
-                try? CodexReviewAccountRegistry.saveSharedAuth(
+                try? await accountRegistry.saveSharedAuth(
                     from: authSourceCodexHomeURL,
-                    for: account,
-                    codexHomeURL: codexHomeURL
+                    for: savedAccountPayload(from: account)
                 )
             }
         }
@@ -1355,7 +1356,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth: CodexReviewAuthModel
     ) async {
         do {
-            applyAuthSnapshot(try await backend.readAuth(), to: auth)
+            await applyAuthSnapshot(try await backend.readAuth(), to: auth)
             await refreshSelectedAccountRateLimits(auth: auth)
         } catch {
             auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
@@ -1373,9 +1374,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             return
         }
         applyRateLimits(rateLimits, to: selectedAccount)
-        try? CodexReviewAccountRegistry.updateCachedRateLimits(
-            from: selectedAccount,
-            codexHomeURL: codexHomeURL
+        try? await accountRegistry.updateCachedRateLimits(
+            from: savedAccountPayload(from: selectedAccount)
         )
     }
 
@@ -1396,7 +1396,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
         let didRefresh = await refreshRateLimits(for: account, using: appServerBackend, source: "active-runtime")
         if didRefresh {
-            persistRefreshedSharedAuth(
+            await persistRefreshedSharedAuth(
                 from: codexHomeURL,
                 for: account
             )
@@ -1407,18 +1407,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         let temporaryCodexHomeURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-review-rate-limits-\(UUID().uuidString)", isDirectory: true)
         do {
-            guard try CodexReviewAccountRegistry.copySavedAuth(
+            guard try await accountRegistry.copySavedAuth(
                 accountKey: account.accountKey,
-                from: codexHomeURL,
                 to: temporaryCodexHomeURL
             ) else {
                 account.markRateLimitReauthenticationRequired(
                     fetchedAt: Date(),
                     error: "Saved account authentication is not available."
                 )
-                try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                    from: account,
-                    codexHomeURL: codexHomeURL
+                try? await accountRegistry.updateCachedRateLimits(
+                    from: savedAccountPayload(from: account)
                 )
                 return
             }
@@ -1426,10 +1424,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             let didRefresh = await refreshRateLimits(for: account, using: runtime.backend, source: "saved-auth-isolated-runtime")
             do {
                 if didRefresh {
-                    try CodexReviewAccountRegistry.saveSharedAuth(
+                    try await accountRegistry.saveSharedAuth(
                         from: temporaryCodexHomeURL,
-                        for: account,
-                        codexHomeURL: codexHomeURL
+                        for: savedAccountPayload(from: account)
                     )
                 }
             } catch {
@@ -1440,9 +1437,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         } catch {
             try? FileManager.default.removeItem(at: temporaryCodexHomeURL)
             account.updateRateLimitFetchMetadata(fetchedAt: Date(), error: error.localizedDescription)
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: account,
-                codexHomeURL: codexHomeURL
+            try? await accountRegistry.updateCachedRateLimits(
+                from: savedAccountPayload(from: account)
             )
         }
     }
@@ -1464,16 +1460,14 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             }
             let response = try await backend.readRateLimits()
             applyRateLimits(response, to: account)
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: account,
-                codexHomeURL: codexHomeURL
+            try? await accountRegistry.updateCachedRateLimits(
+                from: savedAccountPayload(from: account)
             )
             return true
         } catch {
             recordRateLimitRefreshFailure(error, account: account)
-            try? CodexReviewAccountRegistry.updateCachedRateLimits(
-                from: account,
-                codexHomeURL: codexHomeURL
+            try? await accountRegistry.updateCachedRateLimits(
+                from: savedAccountPayload(from: account)
             )
             return false
         }
@@ -1559,14 +1553,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private func persistRefreshedSharedAuth(
         from sourceCodexHomeURL: URL?,
         for account: CodexReviewAccount
-    ) {
+    ) async {
         guard let sourceCodexHomeURL else {
             return
         }
-        try? CodexReviewAccountRegistry.saveSharedAuth(
+        try? await accountRegistry.saveSharedAuth(
             from: sourceCodexHomeURL,
-            for: account,
-            codexHomeURL: codexHomeURL
+            for: savedAccountPayload(from: account)
         )
     }
 
@@ -1640,6 +1633,11 @@ private struct LoginRuntime: Sendable {
 }
 
 private actor AccountRegistryStore {
+    struct Snapshot: Sendable {
+        let accounts: [CodexSavedAccountPayload]
+        let activeAccountKey: String?
+    }
+
     struct MutationLease: Hashable, Sendable {
         fileprivate let id: UUID
     }
@@ -1654,6 +1652,70 @@ private actor AccountRegistryStore {
 
     init(codexHomeURL: URL) {
         self.codexHomeURL = codexHomeURL
+    }
+
+    nonisolated static func loadInitialSnapshot(codexHomeURL: URL) throws -> Snapshot {
+        try Disk.load(codexHomeURL: codexHomeURL)
+    }
+
+    func load() throws -> Snapshot {
+        try Disk.load(codexHomeURL: codexHomeURL)
+    }
+
+    func saveAccounts(
+        _ accounts: [CodexSavedAccountPayload],
+        activeAccountKey: String?
+    ) throws {
+        try Disk.saveAccounts(
+            accounts,
+            activeAccountKey: activeAccountKey,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    func activateAccount(
+        _ accountKey: String,
+        accounts: [CodexSavedAccountPayload]
+    ) throws {
+        try Disk.activateAccount(
+            accountKey,
+            accounts: accounts,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    func updateCachedRateLimits(from account: CodexSavedAccountPayload) throws {
+        try Disk.updateCachedRateLimits(from: account, codexHomeURL: codexHomeURL)
+    }
+
+    func saveSharedAuth(
+        from sourceCodexHomeURL: URL? = nil,
+        for account: CodexSavedAccountPayload
+    ) throws {
+        try Disk.saveSharedAuth(
+            from: sourceCodexHomeURL ?? codexHomeURL,
+            for: account,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    func removeSharedAuth() throws {
+        try Disk.removeSharedAuth(codexHomeURL: codexHomeURL)
+    }
+
+    func removeSavedAccountDirectory(accountKey: String) throws {
+        try Disk.removeSavedAccountDirectory(
+            accountKey: accountKey,
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    func copySavedAuth(accountKey: String, to destinationCodexHomeURL: URL) throws -> Bool {
+        try Disk.copySavedAuth(
+            accountKey: accountKey,
+            from: codexHomeURL,
+            to: destinationCodexHomeURL
+        )
     }
 
     func beginAuthenticationMutation() throws -> MutationLease {
@@ -1690,14 +1752,36 @@ private actor AccountRegistryStore {
 @MainActor
 private final class AccountRuntimeTransitionCoordinator {
     private var isTransitioning = false
+    private var transitionCompletionWaiters: [CheckedContinuation<Void, Never>] = []
 
     func perform<T>(_ operation: () async throws -> T) async throws -> T {
         guard isTransitioning == false else {
             throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
         }
         isTransitioning = true
-        defer { isTransitioning = false }
+        defer { finishTransition() }
         return try await operation()
+    }
+
+    func performInternal<T>(_ operation: () async -> T) async -> T {
+        while isTransitioning {
+            await withCheckedContinuation { continuation in
+                transitionCompletionWaiters.append(continuation)
+            }
+        }
+        isTransitioning = true
+        defer { finishTransition() }
+        return await operation()
+    }
+
+    private func finishTransition() {
+        precondition(isTransitioning)
+        isTransitioning = false
+        let waiters = transitionCompletionWaiters
+        transitionCompletionWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 
@@ -1791,8 +1875,8 @@ private enum LoginActivation: Equatable, Sendable {
 
 private typealias AppServerRuntimeFactory = @MainActor @Sendable (URL) async throws -> AppServerRuntime
 
-@MainActor
-private enum CodexReviewAccountRegistry {
+private extension AccountRegistryStore {
+enum Disk {
     private struct Registry: Codable {
         var activeAccountKey: String?
         var accounts: [Entry]
@@ -1911,20 +1995,20 @@ private enum CodexReviewAccountRegistry {
         }
     }
 
-    static func load(codexHomeURL: URL) throws -> (accounts: [CodexReviewAccount], activeAccountKey: String?) {
+    static func load(codexHomeURL: URL) throws -> AccountRegistryStore.Snapshot {
         let registry = try loadRegistry(codexHomeURL: codexHomeURL)
-        let accounts = registry.accounts.compactMap(makeAccount(from:))
+        let accounts = registry.accounts.compactMap(makePayload(from:))
         let activeAccountKey = registry.activeAccountKey
             .map(CodexReviewAccount.normalizedEmail)
             .flatMap { activeAccountKey in
                 accounts.contains(where: { $0.accountKey == activeAccountKey }) ? activeAccountKey : nil
             }
         logger.info("Loaded \(accounts.count, privacy: .public) persisted Codex review account(s)")
-        return (accounts, activeAccountKey)
+        return .init(accounts: accounts, activeAccountKey: activeAccountKey)
     }
 
     static func saveAccounts(
-        _ accounts: [CodexReviewAccount],
+        _ accounts: [CodexSavedAccountPayload],
         activeAccountKey: String?,
         codexHomeURL: URL
     ) throws {
@@ -1974,7 +2058,7 @@ private enum CodexReviewAccountRegistry {
 
     static func activateAccount(
         _ accountKey: String,
-        accounts: [CodexReviewAccount],
+        accounts: [CodexSavedAccountPayload],
         codexHomeURL: URL
     ) throws {
         let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
@@ -1994,7 +2078,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     static func updateCachedRateLimits(
-        from account: CodexReviewAccount,
+        from account: CodexSavedAccountPayload,
         codexHomeURL: URL
     ) throws {
         var registry = try loadRegistry(codexHomeURL: codexHomeURL)
@@ -2017,7 +2101,7 @@ private enum CodexReviewAccountRegistry {
     }
 
     static func saveSharedAuth(
-        for account: CodexReviewAccount,
+        for account: CodexSavedAccountPayload,
         codexHomeURL: URL
     ) throws {
         try saveSharedAuth(
@@ -2029,7 +2113,7 @@ private enum CodexReviewAccountRegistry {
 
     static func saveSharedAuth(
         from sourceCodexHomeURL: URL,
-        for account: CodexReviewAccount,
+        for account: CodexSavedAccountPayload,
         codexHomeURL: URL
     ) throws {
         let sourceURL = sharedAuthURL(codexHomeURL: sourceCodexHomeURL)
@@ -2081,7 +2165,7 @@ private enum CodexReviewAccountRegistry {
         return true
     }
 
-    private static func makeAccount(from entry: Entry) -> CodexReviewAccount? {
+    private static func makePayload(from entry: Entry) -> CodexSavedAccountPayload? {
         let email = entry.email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard email.isEmpty == false else {
             return nil
@@ -2091,18 +2175,16 @@ private enum CodexReviewAccountRegistry {
             .map(CodexReviewAccount.normalizedEmail)
             .flatMap { $0.isEmpty ? nil : $0 }
             ?? normalizedEmail
-        let account = CodexReviewAccount(
+        return CodexSavedAccountPayload(
             accountKey: accountKey,
             email: email,
+            kind: entry.kind.accountKind,
             planType: entry.planType,
-            kind: entry.kind.accountKind
+            capabilities: entry.kind.accountKind.capabilities,
+            rateLimits: entry.cachedRateLimits?.map(\.tuple) ?? [],
+            lastRateLimitFetchAt: entry.lastRateLimitFetchAt,
+            lastRateLimitError: entry.lastRateLimitError
         )
-        account.updateRateLimits(entry.cachedRateLimits?.map(\.tuple) ?? [])
-        account.updateRateLimitFetchMetadata(
-            fetchedAt: entry.lastRateLimitFetchAt,
-            error: entry.lastRateLimitError
-        )
-        return account
     }
 
     private static func loadRegistry(codexHomeURL: URL) throws -> Registry {
@@ -2209,4 +2291,5 @@ private enum CodexReviewAccountRegistry {
 
     private static let accountDirectoryNameAllowedCharacters =
         CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+}
 }
