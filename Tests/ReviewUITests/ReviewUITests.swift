@@ -1148,7 +1148,7 @@ struct ReviewUITests {
         )
     }
 
-    @Test func contextCompactionMarkerRendersAsVisibleLogTextWithoutCommandPanel() async throws {
+    @Test func contextCompactionMarkerRendersCanonicalVisibleTextWithoutCommandPanel() async throws {
         let chat = makeReviewChatFixtureForTesting(
             id: "chat-context-compaction-marker",
             cwd: "/tmp/workspace-alpha",
@@ -1190,30 +1190,8 @@ struct ReviewUITests {
             in: transport,
             allowIncrementalUpdate: false
         )
-        #expect(transport.displayedLogForTesting == "Automatically compacting context")
-        #expect(transport.logFindStringForTesting.contains("Automatically compacting context"))
-        #expect(transport.logCommandOutputPanelCountForTesting == 0)
-
-        await appendChatLogEntryForTesting(
-            .init(
-                kind: .contextCompaction,
-                groupID: "compact_1",
-                replacesGroup: true,
-                text: "Context automatically compacted",
-                metadata: .init(
-                    sourceType: "contextCompaction",
-                    status: "completed",
-                    itemID: "compact_1"
-                )
-            ),
-            to: chat.chatID,
-            turnID: chat.turnID
-        )
-        _ = try await awaitChatRenderForTesting(chat, in: transport)
-
-        #expect(transport.displayedLogForTesting == "Context automatically compacted")
-        #expect(transport.displayedLogForTesting.contains("Automatically compacting context") == false)
-        #expect(transport.logFindStringForTesting.contains("Context automatically compacted"))
+        #expect(transport.displayedLogForTesting == "Context compaction")
+        #expect(transport.logFindStringForTesting.contains("Context compaction"))
         #expect(transport.logCommandOutputPanelCountForTesting == 0)
     }
 
@@ -1481,7 +1459,8 @@ struct ReviewUITests {
         viewController.sidebarViewControllerForTesting.selectReviewChatForTesting(id: chat.chatID)
 
         _ = try await awaitChatRenderForTesting(
-            chat,
+            chatID: chat.chatID,
+            expectedLog: "Running swift test",
             in: transport,
             allowIncrementalUpdate: false
         )
@@ -1506,7 +1485,11 @@ struct ReviewUITests {
             to: chat.chatID,
             turnID: chat.turnID
         )
-        _ = try await awaitChatRenderForTesting(chat, in: transport)
+        _ = try await awaitChatRenderForTesting(
+            chatID: chat.chatID,
+            expectedLog: "Ran swift test",
+            in: transport
+        )
         #expect(transport.logCommandOutputPanelCountForTesting == 1)
         #expect(transport.displayedLogForTesting.contains("Ran swift test"))
         #expect(transport.displayedLogForTesting.contains("$ swift test") == false)
@@ -2366,9 +2349,10 @@ struct ReviewUITests {
         ) { $0.log == "Initial" }
         let wordGlowCount = transport.logWordGlowCountForTesting
         await previewRuntime.upsertPreviewItem(
-            id: "progress_1",
-            kind: CodexThreadItem.Kind(rawValue: "progress"),
-            content: .diagnostic("stream.tick 001"),
+            try CodexAppServerTestItem.agentMessage(
+                id: "progress_1",
+                text: "stream.tick 001"
+            ),
             to: chatID
         )
 
@@ -2687,14 +2671,14 @@ struct ReviewUITests {
             expectedLog: """
             Need to inspect files.
 
-            Ran git diff
+            Ran git diff for 0s
 
             Inspecting details after the command starts.
             """,
             in: transport
         )
         #expect(snapshot.log.contains("Need to inspect files."))
-        #expect(snapshot.log.contains("Ran git diff"))
+        #expect(snapshot.log.contains("Ran git diff for 0s"))
         #expect(snapshot.log.contains("Inspecting details after the command starts."))
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
@@ -3227,11 +3211,11 @@ struct ReviewUITests {
         )
 
         let snapshot = try await awaitChatRenderForTesting(chat, in: transport) {
-            $0.log.contains("Ran git diff\n\nReviewing JSONRPC requests")
+            $0.log.contains("Ran git diff for 0s\n\nReviewing JSONRPC requests")
         }
-        #expect(snapshot.log.contains("Ran git diff\n\nReviewing JSONRPC requests"))
+        #expect(snapshot.log.contains("Ran git diff for 0s\n\nReviewing JSONRPC requests"))
         #expect(snapshot.log.contains("git diffReviewing JSONRPC requests") == false)
-        #expect(transport.displayedLogForTesting.contains("Ran git diff\n\nReviewing JSONRPC requests"))
+        #expect(transport.displayedLogForTesting.contains("Ran git diff for 0s\n\nReviewing JSONRPC requests"))
         #expect(transport.displayedLogForTesting.contains("git diffReviewing JSONRPC requests") == false)
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReloadCountForTesting == reloadCount)
@@ -3386,12 +3370,12 @@ struct ReviewUITests {
             turnID: chat.turnID
         )
         _ = try await awaitChatRenderForTesting(chat, in: transport) { snapshot in
-            snapshot.log.contains("Command output")
+            snapshot.log.contains("Running Command")
         }
 
         #expect(transport.displayedLogForTesting.contains("- updated with longer replacement text"))
-        #expect(transport.displayedLogForTesting.contains("Command output"))
-        #expect(transport.displayedLogForTesting.contains("Command output - 1 line") == false)
+        #expect(transport.displayedLogForTesting.contains("Running Command"))
+        #expect(transport.displayedLogForTesting.contains("Running Command - 1 line") == false)
         #expect(transport.displayedLogForTesting.contains("hidden output") == false)
         #expect(transport.logAppendCountForTesting == appendCount + 1)
         #expect(transport.logReplaceCountForTesting == replaceCount)
@@ -3426,9 +3410,10 @@ struct ReviewUITests {
         let appendCount = transport.logAppendCountForTesting
         let reloadCount = transport.logReloadCountForTesting
         await previewRuntime.upsertPreviewItem(
-            id: "fixture-log-\(chat.id)",
-            kind: .agentMessage,
-            content: .message(.init(id: "fixture-log-\(chat.id)", role: .assistant, text: "Initial log")),
+            try CodexAppServerTestItem.agentMessage(
+                id: "fixture-log-\(chat.id)",
+                text: "Initial log"
+            ),
             to: chat.chatID
         )
 

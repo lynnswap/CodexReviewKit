@@ -790,7 +790,7 @@ private struct CodexThreadSnapshotLogItem: CodexChatLogProjectionItem {
         case .exitedReviewMode:
             "review-marker:exitedReviewMode"
         default:
-            item.id
+            "\(item.kind.rawValue):\(item.id)"
         }
     }
 }

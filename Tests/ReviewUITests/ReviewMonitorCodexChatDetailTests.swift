@@ -1110,6 +1110,100 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(statusChange?.sourceDocument?.text == "Running review")
     }
 
+    @Test func codexChatTurnUpdatesIgnoreNonSemanticRawPayloadEncodingChanges() async throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-raw-payload")
+        let item = CodexThreadItem(
+            id: "message-raw-payload",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "message-raw-payload",
+                role: .assistant,
+                text: "Stable message"
+            )),
+            rawPayload: Data(#"{"type":"agentMessage","text":"Stable message"}"#.utf8)
+        )
+        let initialTurn = CodexTurnSnapshot(
+            id: turnID,
+            state: .inProgress,
+            items: [item]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(id: "thread-raw-payload", turns: [initialTurn]),
+                phase: .running(turnID: turnID)
+            ), reason: .initial)
+        ))
+
+        var reencodedItem = item
+        reencodedItem.rawPayload = Data(
+            #"{"text":"Stable message","type":"agentMessage"}"#.utf8
+        )
+        let updatedTurn = CodexTurnSnapshot(
+            id: turnID,
+            state: .completed,
+            items: [reencodedItem]
+        )
+        let update = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnUpdated(updatedTurn, index: 0))
+        ))
+
+        #expect(update?.allowsIncrementalRender == true)
+        #expect(update?.sourceDocument?.text == "Stable message")
+    }
+
+    @Test func codexChatTurnUpdatesIgnoreReasoningFragmentBoundaryChanges() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-reasoning-fragments")
+        let item = CodexThreadItem(
+            id: "reasoning-fragments",
+            kind: .reasoning,
+            content: .reasoning(.init(summary: ["First"], content: []))
+        )
+        let initialTurn = CodexTurnSnapshot(
+            id: turnID,
+            state: .inProgress,
+            items: [item]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(id: "thread-reasoning-fragments", turns: [initialTurn]),
+                phase: .running(turnID: turnID)
+            ), reason: .initial)
+        ))
+
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemTextAppended(
+                .init(item: item, turnID: turnID),
+                delta: "\n\nSecond"
+            ))
+        ))
+
+        var canonicalItem = item
+        canonicalItem.content = .reasoning(.init(summary: ["First", "Second"], content: []))
+        let canonicalTurn = CodexTurnSnapshot(
+            id: turnID,
+            state: .completed,
+            items: [canonicalItem]
+        )
+        let update = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.turnUpdated(canonicalTurn, index: 0))
+        ))
+
+        #expect(update?.allowsIncrementalRender == true)
+        #expect(update?.sourceDocument?.text == "First\n\nSecond")
+    }
+
     @Test func codexChatSourceProjectionKeepsTranscriptWhenNewTurnStartsWithoutRenderableText() async throws {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let firstTurnID = CodexTurnID(rawValue: "turn-review")

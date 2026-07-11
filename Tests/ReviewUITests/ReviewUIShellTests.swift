@@ -135,6 +135,10 @@ extension ReviewUITests {
             }
         }
         try await waitForCondition {
+            previewContent.observedTurnStateForTesting(chatID: selectedChatID) == .interrupted
+                && previewContent.turnCompletionNotificationCountForTesting() == 1
+        }
+        try await waitForCondition {
             sidebar.codexSidebarSectionsForTesting.chat(id: selectedChatID)?.status == .idle
                 && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) == nil
                 && sidebar.selectedReviewChatIDForTesting == selectedChatID
@@ -2130,8 +2134,8 @@ extension ReviewUITests {
         #expect(appendedText.contains("delta/") == false)
         #expect(appendedText.count < 160)
         #expect(appendedItems.count == 1)
-        #expect(appendedItems.first?.kind.rawValue == "event")
-        #expect(appendedItems.first.map(diagnosticMessage)?.contains("preview-turn") == true)
+        #expect(appendedItems.first?.kind == .agentMessage)
+        #expect(appendedItems.first?.text?.contains("preview-turn") == true)
     }
 
     @Test func previewChatStreamUsesMixedLogKinds() async throws {
@@ -2148,21 +2152,19 @@ extension ReviewUITests {
         let updatedSnapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         let appendedItems = Array(updatedSnapshot.items.dropFirst(initialItemCount))
         let appendedKinds = appendedItems.map { $0.kind.rawValue }
-        #expect(appendedKinds.contains("event"))
         #expect(appendedKinds.contains("commandExecution"))
         #expect(appendedKinds.contains("mcpToolCall"))
         #expect(appendedKinds.contains("plan"))
-        #expect(appendedKinds.contains("contextCompaction"))
         #expect(appendedKinds.contains("reasoning"))
         #expect(appendedKinds.contains("agentMessage"))
-        #expect(Set(appendedKinds).count >= 6)
+        #expect(Set(appendedKinds).count >= 5)
         #expect(Set(appendedItems.map { $0.id }).count == appendedItems.count)
 
         let compactionItems = updatedSnapshot.items
             .dropFirst(initialItemCount)
-            .filter { $0.kind.rawValue == "contextCompaction" }
+            .filter { $0.id.contains("context-compaction") }
         let compactionItem = try #require(compactionItems.last)
-        #expect(contextCompactionTitle(compactionItem) == "Context automatically compacted")
+        #expect(compactionItem.text == "Context automatically compacted")
         let renderedLog = updatedSnapshot.items.compactMap { $0.text }.joined(separator: "\n")
         #expect(renderedLog.contains("Context automatically compacted"))
         #expect(renderedLog.contains("Automatically compacting context") == false)
@@ -2178,7 +2180,7 @@ extension ReviewUITests {
         tick = await source.appendPreviewChatLogStreamTick(after: tick)
         var snapshot = try #require(await source.snapshotForTesting(chatID: runningChatID))
         #expect(snapshot.items.count == initialItemCount + 1)
-        #expect(snapshot.items.last?.kind.rawValue == "event")
+        #expect(snapshot.items.last?.kind == .agentMessage)
 
         for _ in 0..<38 {
             tick = await source.appendPreviewChatLogStreamTick(after: tick)

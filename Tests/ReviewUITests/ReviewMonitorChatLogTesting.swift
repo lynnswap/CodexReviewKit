@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import CodexAppServerKitTesting
 import CodexAppServerKit
 import CodexDataKit
 @_spi(Testing) @testable import CodexReviewKit
@@ -252,7 +253,7 @@ func installPreviewChatLogSourceForTesting(
     let retainer = ReviewChatLogFixtureRetainer(
         store: store,
         runtime: runtime,
-        chatIDs: Set(fixtures.map(\.chatID))
+        cwdByChatID: Dictionary(uniqueKeysWithValues: fixtures.map { ($0.chatID, $0.cwd) })
     )
     runStorePreviewSupportRetainers.append(retainer)
     previewSupportRetainersByStore[ObjectIdentifier(store)] = retainer
@@ -619,25 +620,35 @@ private enum ReviewChatLogFixtureStore {
 private final class ReviewChatLogFixtureRetainer {
     weak var store: CodexReviewStore?
     let runtime: ReviewMonitorPreviewAppServerRuntime
-    private var chatIDs: Set<CodexThreadID>
+    private var cwdByChatID: [CodexThreadID: String]
 
-    init(store: CodexReviewStore, runtime: ReviewMonitorPreviewAppServerRuntime, chatIDs: Set<CodexThreadID>) {
+    init(
+        store: CodexReviewStore,
+        runtime: ReviewMonitorPreviewAppServerRuntime,
+        cwdByChatID: [CodexThreadID: String]
+    ) {
         self.store = store
         self.runtime = runtime
-        self.chatIDs = chatIDs
+        self.cwdByChatID = cwdByChatID
     }
 
     func contains(chatID: CodexThreadID) -> Bool {
-        chatIDs.contains(chatID)
+        cwdByChatID[chatID] != nil
     }
 
     func upsert(chatID: CodexThreadID, items: [CodexThreadItem]) async {
+        guard let cwd = cwdByChatID[chatID] else {
+            preconditionFailure("Missing preview fixture workspace for \(chatID.rawValue).")
+        }
         let previousItemsByID = Dictionary(
             uniqueKeysWithValues: await runtime.snapshotForTesting(chatID: chatID)?.items.map { ($0.id, $0) } ?? []
         )
         for item in items {
             guard let previousItem = previousItemsByID[item.id] else {
-                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                await runtime.upsertPreviewItem(
+                    makeAppServerTestItemForTesting(item, cwd: cwd),
+                    to: chatID
+                )
                 continue
             }
             guard previousItem != item else {
@@ -660,8 +671,107 @@ private final class ReviewChatLogFixtureRetainer {
                     content: previousItem.content
                 )
             } else {
-                await runtime.upsertPreviewItem(id: item.id, kind: item.kind, content: item.content, to: chatID)
+                await runtime.upsertPreviewItem(
+                    makeAppServerTestItemForTesting(item, cwd: cwd),
+                    to: chatID
+                )
             }
+        }
+    }
+}
+
+private func makeAppServerTestItemForTesting(
+    _ item: CodexThreadItem,
+    cwd: String
+) -> CodexAppServerTestItem {
+    do {
+        switch item.content {
+        case .message(let message):
+            return try .agentMessage(id: item.id, text: message.text, phase: message.phase)
+        case .plan(let text):
+            return try .plan(id: item.id, text: text)
+        case .reasoning(let reasoning):
+            guard item.kind == .reasoning else {
+                preconditionFailure("Legacy reasoning fixture kinds cannot emit current-v2 notifications.")
+            }
+            return try .reasoning(
+                id: item.id,
+                summary: reasoning.summary,
+                content: reasoning.content
+            )
+        case .command(let command):
+            return try .commandExecution(
+                id: item.id,
+                command: command.command,
+                cwd: URL(fileURLWithPath: command.cwd ?? cwd, isDirectory: true),
+                status: command.status.appServerTestCommandStatus,
+                aggregatedOutput: command.output,
+                exitCode: command.exitCode.flatMap(Int32.init(exactly:)),
+                duration: command.duration
+            )
+        case .fileChange(let fileChange):
+            return try .fileChange(
+                id: item.id,
+                changes: [
+                    CodexFileUpdateChange(
+                        path: fileChange.path ?? URL(fileURLWithPath: cwd)
+                            .appendingPathComponent("Preview.patch").path,
+                        kind: .update(movePath: nil),
+                        diff: fileChange.output ?? ""
+                    )
+                ],
+                status: fileChange.status.appServerTestPatchStatus
+            )
+        case .toolCall(let toolCall):
+            guard let server = toolCall.server, let name = toolCall.name else {
+                preconditionFailure("MCP preview fixtures require server and tool names.")
+            }
+            let result = previewMCPResultComponents(toolCall.result)
+            return try .mcpToolCall(
+                id: item.id,
+                server: server,
+                tool: name,
+                status: toolCall.status.appServerTestMCPStatus,
+                resultContent: result.content,
+                structuredContent: result.structuredContent,
+                resultMetadata: result.metadata,
+                errorMessage: toolCall.error
+            )
+        case .contextCompaction(let text):
+            guard text?.isEmpty != false else {
+                preconditionFailure("Current-v2 context compaction has no text payload.")
+            }
+            return try .contextCompaction(id: item.id)
+        case .diagnostic, .log, .unknown:
+            preconditionFailure("Unsupported current-v2 preview item kind \(item.kind.rawValue).")
+        }
+    } catch {
+        preconditionFailure("Invalid current-v2 preview fixture: \(error)")
+    }
+}
+
+private extension Optional where Wrapped == CodexTurnStatus {
+    var appServerTestCommandStatus: CodexAppServerTestItem.CommandStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var appServerTestPatchStatus: CodexAppServerTestItem.PatchStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
+        }
+    }
+
+    var appServerTestMCPStatus: CodexAppServerTestItem.MCPStatus {
+        switch self {
+        case .some(.completed): .completed
+        case .some(.failed), .some(.interrupted): .failed
+        case .some(.inProgress), .some(.unknown), .none: .inProgress
         }
     }
 }
@@ -754,7 +864,7 @@ private struct ReviewChatLogAccumulatedItem {
                         status: status
                     ))
             )
-        case .agentMessage:
+        case .agentMessage, .progress:
             snapshot = .init(
                 id: itemID,
                 kind: .agentMessage,
@@ -774,20 +884,20 @@ private struct ReviewChatLogAccumulatedItem {
         case .reasoning, .rawReasoning:
             snapshot = .init(
                 id: itemID,
-                kind: entry.kind == .rawReasoning ? .init(rawValue: "rawReasoning") : .reasoning,
+                kind: .reasoning,
                 content: .reasoning(.init(content: (existing?.reasoningText ?? "") + entry.text))
             )
         case .reasoningSummary:
             snapshot = .init(
                 id: itemID,
-                kind: .init(rawValue: "reasoningSummary"),
+                kind: .reasoning,
                 content: .reasoning(.init(summary: (existing?.reasoningText ?? "") + entry.text))
             )
         case .contextCompaction:
             snapshot = .init(
                 id: itemID,
                 kind: .contextCompaction,
-                content: .contextCompaction(entry.text)
+                content: .contextCompaction(nil)
             )
         case .toolCall:
             snapshot = .init(
@@ -795,7 +905,7 @@ private struct ReviewChatLogAccumulatedItem {
                 kind: .mcpToolCall,
                 content: .toolCall(.init(result: (existing?.toolResult ?? "") + entry.text, status: status))
             )
-        case .diagnostic, .error, .progress, .event:
+        case .diagnostic, .error, .event:
             snapshot = .init(
                 id: itemID,
                 kind: .init(rawValue: entry.kind.rawValue),

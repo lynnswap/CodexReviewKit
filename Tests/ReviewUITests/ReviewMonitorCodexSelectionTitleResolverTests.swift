@@ -152,7 +152,9 @@ private func loadReviewChats(in context: CodexModelContext) async throws {
 
 private func sourceKindChatPredicate(_ sourceKinds: [CodexThreadSourceKind]) -> Predicate<CodexChat> {
     #Predicate<CodexChat> { chat in
-        chat.sourceKind != nil && sourceKinds.contains(chat.sourceKind!)
+        chat.isArchived == false
+            && chat.sourceKind != nil
+            && sourceKinds.contains(chat.sourceKind!)
     }
 }
 

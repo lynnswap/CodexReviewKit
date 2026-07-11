@@ -99,9 +99,13 @@ struct ReviewMonitorCodexChatLogSourceProjection {
             precondition(turns.contains { $0.id == turn.id } == false)
             precondition(turns.indices.contains(index) || index == turns.endIndex)
             turns.insert(turn, at: index)
-        case .turnUpdated(let turn, let index):
+        case .turnUpdated(var turn, let index):
             let previousIndex = requiredTurnIndex(turn.id, in: turns)
-            precondition(turns[previousIndex].items == turn.items)
+            precondition(
+                itemsAreSemanticallyEqual(turns[previousIndex].items, turn.items),
+                "A turnUpdated event changed semantic item ownership."
+            )
+            turn.items = turns[previousIndex].items
             turns.remove(at: previousIndex)
             precondition(turns.indices.contains(index) || index == turns.endIndex)
             turns.insert(turn, at: index)
@@ -172,6 +176,31 @@ struct ReviewMonitorCodexChatLogSourceProjection {
         kind: CodexThreadItem.Kind
     ) -> Bool {
         item.id == id && item.kind == kind
+    }
+
+    private func itemsAreSemanticallyEqual(
+        _ lhs: [CodexThreadItem],
+        _ rhs: [CodexThreadItem]
+    ) -> Bool {
+        guard lhs.count == rhs.count else {
+            return false
+        }
+        return zip(lhs, rhs).allSatisfy { lhs, rhs in
+            lhs.id == rhs.id
+                && lhs.kind == rhs.kind
+                && contentsAreSemanticallyEqual(lhs.content, rhs.content)
+        }
+    }
+
+    private func contentsAreSemanticallyEqual(
+        _ lhs: CodexThreadItem.Content,
+        _ rhs: CodexThreadItem.Content
+    ) -> Bool {
+        if case .reasoning(let lhsReasoning) = lhs,
+           case .reasoning(let rhsReasoning) = rhs {
+            return lhsReasoning.text == rhsReasoning.text
+        }
+        return lhs == rhs
     }
 
     private func append(_ delta: String, to item: inout CodexThreadItem) {
