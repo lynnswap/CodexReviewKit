@@ -872,7 +872,8 @@ final class ReviewMonitorSidebarViewController: NSViewController, NSOutlineViewD
         else {
             return nil
         }
-        return displayedCodexChat(id: id)
+        return codexSidebarModelContext?.registeredModel(for: id)
+            ?? currentChatSelection(id: id)
     }
 
     private func dragPayload(for item: Any) -> SidebarDragPayload? {
