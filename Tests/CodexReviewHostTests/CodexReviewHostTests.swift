@@ -1196,28 +1196,27 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForNotificationStreamCount(1)
-        await waitUntil {
+        #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 10
-        }
+        })
         try await transport.emitServerNotification(
             method: "account/rateLimits/updated",
             params: TestRateLimitsUpdatedNotification(rateLimits: .init(
                 limitID: "openai",
                 primary: .init(usedPercent: 99, windowDurationMins: 300),
-                planType: "other"
+                planType: "pro"
             ))
         )
         try await transport.emitServerNotification(
             method: "account/rateLimits/updated",
             params: TestRateLimitsUpdatedNotification(rateLimits: .init(
-                limitID: "codex_bengalfox",
+                limitID: "codex",
                 primary: .init(usedPercent: 11, windowDurationMins: 300)
             ))
         )
-        await waitUntil {
+        #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 11
-        }
-
+        })
         #expect(store.auth.selectedAccount?.planType == "pro")
         #expect(store.auth.selectedAccount?.rateLimits.map(\.usedPercent) == [11])
     }

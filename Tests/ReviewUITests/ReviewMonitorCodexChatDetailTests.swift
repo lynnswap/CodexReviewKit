@@ -414,7 +414,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(initialSnapshot.log.contains("Legacy fallback") == false)
 
         try await runtime.transport.emitServerNotification(
-            method: "item/updated",
+            method: "item/completed",
             params: ThreadItemParams(
                 threadID: "review-thread",
                 turnID: "turn-1",
@@ -486,7 +486,7 @@ struct ReviewMonitorCodexChatDetailTests {
         let reloadCount = transport.logReloadCountForTesting
 
         try await runtime.transport.emitServerNotification(
-            method: "item/updated",
+            method: "item/completed",
             params: ThreadItemParams(
                 threadID: "review-thread",
                 turnID: "turn-1",
@@ -1227,7 +1227,7 @@ struct ReviewMonitorCodexChatDetailTests {
         #expect(transport.renderedStateForTesting.selection == .chat("chat-thread"))
 
         try await runtime.transport.emitServerNotification(
-            method: "item/updated",
+            method: "item/completed",
             params: ThreadItemParams(
                 threadID: "chat-thread",
                 turnID: "turn-1",
@@ -1284,11 +1284,13 @@ private struct ThreadItemParams: Encodable, Sendable {
     var threadID: String
     var turnID: String
     var item: Item
+    var completedAtMs: Int64 = 0
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case item
+        case completedAtMs
     }
 
     struct Item: Encodable, Sendable {

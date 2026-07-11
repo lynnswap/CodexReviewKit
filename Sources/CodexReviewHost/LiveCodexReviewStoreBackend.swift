@@ -467,7 +467,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             self.appServerModelContainer = modelContainer
             self.appServerBackend = backend
             appServerLifecycleHandler?(modelContainer)
-            observeAuthNotifications(appServer: appServer, backend: backend, store: store)
+            await observeAuthNotifications(appServer: appServer, backend: backend, store: store)
             if let mcpHTTPServerFactory {
                 let logProjectionProvider = CodexReviewMCPServer.chatLogProjectionProvider(
                     modelContext: modelContainer.mainContext
@@ -1166,13 +1166,13 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         appServer: CodexAppServer,
         backend: AppServerCodexReviewBackend,
         store: CodexReviewStore
-    ) {
+    ) async {
         authNotificationTask?.cancel()
+        let stream = await appServer.accountEvents()
         authNotificationTask = Task { @MainActor [weak self, weak store] in
             guard let self, let store else {
                 return
             }
-            let stream = await appServer.accountEvents()
             do {
                 for try await event in stream {
                     await self.handleAuthNotification(

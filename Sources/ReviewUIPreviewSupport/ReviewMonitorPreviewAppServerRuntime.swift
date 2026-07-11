@@ -159,17 +159,17 @@ final class ReviewMonitorPreviewAppServerRuntime {
         guard let fixture = fixturesByChatID[chatID] else {
             return
         }
-        guard let item = await upsertStoredItem(
+        guard await upsertStoredItem(
             id: id,
             kind: kind,
             content: content,
             in: fixture
-        ) else {
+        ) != nil else {
             return
         }
         start()
         enqueueNotification { [weak self] in
-            await self?.emitItem(item, for: fixture)
+            await self?.refreshStoredChat(fixture.chatID)
         }
     }
 
@@ -385,7 +385,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
                     runtime: runtime
                 )
             case .update, .complete:
-                await emitItem(storedItem, for: fixture)
+                await refreshStoredChat(fixture.chatID)
             }
         } catch {
         }
@@ -549,29 +549,14 @@ final class ReviewMonitorPreviewAppServerRuntime {
         }
     }
 
-    private func emitItem(
-        _ storedItem: ReviewMonitorPreviewStoredThreadItem,
-        for fixture: ReviewMonitorPreviewChatLogFixture
-    ) async {
+    private func refreshStoredChat(_ chatID: CodexThreadID) async {
         do {
             try await ensureStarted()
-            guard let runtime else {
+            guard let container else {
                 return
             }
-            await runtime.transport.waitForNotificationStreamCount(1)
-            await runtime.transport.waitForRequest(method: "thread/read")
-            try await runtime.transport.emitServerNotification(
-                method: "item/updated",
-                params: PreviewThreadItemParams(
-                    threadID: fixture.chatID.rawValue,
-                    turnID: storedItem.turnID.rawValue,
-                    item: makePreviewNotificationItem(
-                        id: storedItem.item.id,
-                        kind: storedItem.item.kind,
-                        content: storedItem.item.content
-                    )
-                )
-            )
+            let context = container.mainContext
+            try await context.refresh(context.model(for: chatID))
         } catch {
         }
     }
@@ -739,31 +724,6 @@ private struct PreviewTurnInterruptParams: Decodable, Sendable {
     }
 }
 
-private struct PreviewThreadItemParams: Encodable, Sendable {
-    var threadID: String
-    var turnID: String
-    var item: Item
-
-    enum CodingKeys: String, CodingKey {
-        case threadID = "threadId"
-        case turnID = "turnId"
-        case item
-    }
-
-    struct Item: Encodable, Sendable {
-        var id: String
-        var type: String
-        var text: String?
-        var phase: String?
-        var command: String?
-        var cwd: String?
-        var output: String?
-        var exitCode: Int?
-        var status: String?
-        var path: String?
-    }
-}
-
 private struct PreviewThreadArchiveParams: Decodable, Sendable {
     var threadID: String
 
@@ -799,6 +759,7 @@ private struct PreviewTurnCompletedParams: Encodable, Sendable {
         var id: String
         var status: String?
         var completedAt: Int?
+        var items: [String] = []
     }
 }
 
@@ -831,113 +792,6 @@ private struct PreviewTurnDeltaParams: Encodable, Sendable {
         case summaryIndex
         case contentIndex
     }
-}
-
-private func makePreviewNotificationItem(
-    id: String,
-    kind: CodexThreadItem.Kind,
-    content: CodexThreadItem.Content
-) -> PreviewThreadItemParams.Item {
-    PreviewThreadItemParams.Item(
-        id: id,
-        type: previewNotificationItemType(kind: kind, content: content),
-        text: previewNotificationText(content),
-        phase: previewNotificationPhase(content),
-        command: previewNotificationCommand(content),
-        cwd: previewNotificationCWD(content),
-        output: previewNotificationOutput(content),
-        exitCode: previewNotificationExitCode(content),
-        status: previewNotificationStatus(content),
-        path: previewNotificationPath(content)
-    )
-}
-
-private func previewNotificationItemType(
-    kind: CodexThreadItem.Kind,
-    content: CodexThreadItem.Content
-) -> String {
-    switch content {
-    case .diagnostic:
-        "diagnostic"
-    default:
-        kind.rawValue
-    }
-}
-
-private func previewNotificationText(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .message(let message):
-        message.text
-    case .plan(let text), .diagnostic(let text), .log(let text):
-        text
-    case .reasoning(let reasoning):
-        reasoning.text
-    case .toolCall(let toolCall):
-        toolCall.result ?? toolCall.error ?? toolCall.name
-    case .contextCompaction(let text):
-        text
-    case .command, .fileChange, .unknown:
-        nil
-    }
-}
-
-private func previewNotificationPhase(_ content: CodexThreadItem.Content) -> String? {
-    if case .message(let message) = content {
-        return message.phase?.rawValue
-    }
-    return nil
-}
-
-private func previewNotificationCommand(_ content: CodexThreadItem.Content) -> String? {
-    if case .command(let command) = content {
-        return command.command
-    }
-    return nil
-}
-
-private func previewNotificationCWD(_ content: CodexThreadItem.Content) -> String? {
-    if case .command(let command) = content {
-        return command.cwd
-    }
-    return nil
-}
-
-private func previewNotificationOutput(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .command(let command):
-        return command.output
-    case .fileChange(let fileChange):
-        return fileChange.output
-    default:
-        return nil
-    }
-}
-
-private func previewNotificationExitCode(_ content: CodexThreadItem.Content) -> Int? {
-    if case .command(let command) = content {
-        return command.exitCode
-    }
-    return nil
-}
-
-private func previewNotificationStatus(_ content: CodexThreadItem.Content) -> String? {
-    switch content {
-    case .command(let command):
-        command.status?.rawValue
-    case .fileChange(let fileChange):
-        fileChange.status?.rawValue
-    case .toolCall(let toolCall):
-        toolCall.status?.rawValue
-    default:
-        nil
-    }
-}
-
-private func previewNotificationPath(_ content: CodexThreadItem.Content) -> String? {
-    if case .fileChange(let fileChange) = content {
-        return fileChange.path
-    }
-    return nil
 }
 
 private extension ReviewMonitorPreviewChatLogFixture {

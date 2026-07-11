@@ -162,7 +162,7 @@ struct AppServerClientTests {
         } catch {
             #expect(
                 error.localizedDescription.contains(
-                    "Current-v2 item notification is missing required turnId."
+                    "Current-v2 notification is missing required field turnId."
                 )
             )
         }
@@ -842,13 +842,13 @@ private struct TestTurnNotification: Encodable, Sendable {
 private struct TestTurn: Encodable, Sendable {
     var id: String
     var status: String
-    var items: [TestItem]?
+    var items: [TestItem]
     var error: TestTurnError?
 
     init(
         id: String,
         status: String,
-        items: [TestItem]? = nil,
+        items: [TestItem] = [],
         error: TestTurnError? = nil
     ) {
         self.id = id
@@ -903,11 +903,15 @@ private struct TestItemNotification: Encodable, Sendable {
     var threadID: String
     var turnID: String
     var item: TestItem
+    var startedAtMs: Int64 = 0
+    var completedAtMs: Int64 = 0
 
     enum CodingKeys: String, CodingKey {
         case threadID = "threadId"
         case turnID = "turnId"
         case item
+        case startedAtMs
+        case completedAtMs
     }
 }
 
@@ -918,6 +922,7 @@ private struct TestItem: Encodable, Sendable {
     var text: String?
     var phase: String?
     var command: String?
+    var commandActions: [String]
     var cwd: String?
     var aggregatedOutput: String?
     var exitCode: Int?
@@ -941,7 +946,8 @@ private struct TestItem: Encodable, Sendable {
         self.text = text
         self.phase = phase
         self.command = command
-        self.cwd = cwd
+        self.commandActions = []
+        self.cwd = type == "commandExecution" ? (cwd ?? "/tmp/project") : cwd
         self.aggregatedOutput = aggregatedOutput
         self.exitCode = exitCode
         self.status = status

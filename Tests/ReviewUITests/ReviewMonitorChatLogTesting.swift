@@ -687,7 +687,23 @@ private func makeChatItems(
             orderedIDs.append(itemID)
         }
     }
-    return orderedIDs.compactMap { accumulated[$0]?.snapshot }
+    var items = orderedIDs.compactMap { accumulated[$0]?.snapshot }
+    for index in items.indices.dropLast() {
+        switch items[index].content {
+        case .command(var command) where command.status == .inProgress:
+            command.status = .completed
+            items[index].content = .command(command)
+        case .fileChange(var fileChange) where fileChange.status == .inProgress:
+            fileChange.status = .completed
+            items[index].content = .fileChange(fileChange)
+        case .toolCall(var toolCall) where toolCall.status == .inProgress:
+            toolCall.status = .completed
+            items[index].content = .toolCall(toolCall)
+        default:
+            break
+        }
+    }
+    return items
 }
 
 private struct ReviewChatLogAccumulatedItem {
