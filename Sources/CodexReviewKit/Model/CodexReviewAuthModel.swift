@@ -1,6 +1,40 @@
 import Foundation
 import Observation
 
+public enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
+    case alreadyInProgress
+    case accountMutationBlockedByAuthentication
+    case runtime(message: String)
+    case urlOpen(URL)
+    case login(message: String?)
+    case nonExportableCredentialStore
+    case persistenceInconsistent(message: String)
+    case accountCommit(message: String)
+    case protocolViolation(message: String)
+}
+
+extension CodexReviewAuthenticationFailure: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyInProgress:
+            "Authentication is already in progress."
+        case .accountMutationBlockedByAuthentication:
+            "The account cannot be changed while authentication is in progress."
+        case .runtime(let message),
+             .persistenceInconsistent(let message),
+             .accountCommit(let message),
+             .protocolViolation(let message):
+            message
+        case .urlOpen(let url):
+            "Failed to open the authentication URL: \(url.absoluteString)"
+        case .login(let message):
+            message ?? "Authentication failed."
+        case .nonExportableCredentialStore:
+            "The authenticated credentials cannot be imported into the account registry."
+        }
+    }
+}
+
 @MainActor
 @Observable
 public final class CodexReviewAuthModel {
@@ -74,7 +108,7 @@ public final class CodexReviewAuthModel {
     public enum Phase: Sendable, Equatable {
         case signedOut
         case signingIn(Progress)
-        case failed(message: String)
+        case failed(CodexReviewAuthenticationFailure)
     }
 
     public package(set) var phase: Phase = .signedOut
@@ -83,8 +117,6 @@ public final class CodexReviewAuthModel {
     package private(set) var detachedAccount: CodexReviewAccount?
     public private(set) var selectedAccount: CodexReviewAccount?
 
-    public package(set) var authenticationFailureCount = 0
-    public package(set) var warningMessage: String?
     package private(set) var pendingAccountAction: PendingAccountAction?
     package private(set) var accountActionAlert: AccountActionAlert?
 
@@ -115,10 +147,10 @@ public final class CodexReviewAuthModel {
     }
 
     public var errorMessage: String? {
-        guard case .failed(let message) = phase else {
+        guard case .failed(let failure) = phase else {
             return nil
         }
-        return message
+        return failure.localizedDescription
     }
 
     package static func makePreview() -> CodexReviewAuthModel {
@@ -193,16 +225,6 @@ public final class CodexReviewAuthModel {
 
     package func updatePhase(_ phase: Phase) {
         self.phase = phase
-    }
-
-    package func recordAuthenticationFailure(message: String) {
-        authenticationFailureCount += 1
-        warningMessage = nil
-        phase = .failed(message: message)
-    }
-
-    package func updateWarning(message: String?) {
-        warningMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
 
     package func selectPersistedAccount(_ persistedAccountID: CodexReviewAccount.ID?) {

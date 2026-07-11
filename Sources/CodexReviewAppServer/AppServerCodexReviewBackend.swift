@@ -87,35 +87,6 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         try await appServer.rateLimits()
     }
 
-    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws
-        -> CodexReviewBackendModel.Login.Challenge
-    {
-        if let callbackScheme = request.nativeWebAuthenticationCallbackScheme {
-            let login = try await appServer.loginChatGPT(
-                nativeWebAuthentication: .init(callbackURLScheme: callbackScheme)
-            )
-            return login.backendChallenge()
-        }
-        let handle = try await appServer.loginChatGPT()
-        return try handle.backendChallenge(
-            nativeWebAuthenticationCallbackScheme: nil
-        )
-    }
-
-    package func completeLogin(
-        _ challenge: CodexReviewBackendModel.Login.Challenge,
-        callbackURL: URL
-    ) async throws {
-        try await appServer.completeLogin(
-            id: .init(rawValue: challenge.id),
-            callbackURL: callbackURL
-        )
-    }
-
-    package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
-        try await appServer.cancelLogin(id: .init(rawValue: challenge.id))
-    }
-
     package func logout(_: CodexReviewBackendModel.Account.ID) async throws -> CodexReviewBackendModel.Auth.Snapshot {
         try await appServer.logout()
         return try await readAuth()
@@ -764,38 +735,5 @@ private extension CodexModel {
             supportedServiceTiers: serviceTiers,
             isDefault: isDefault
         )
-    }
-}
-
-private extension CodexChatGPTLogin {
-    func backendChallenge() -> CodexReviewBackendModel.Login.Challenge {
-        .init(
-            id: id.rawValue,
-            verificationURL: authenticationURL,
-            nativeWebAuthenticationCallbackScheme: nativeWebAuthentication?.callbackURLScheme
-        )
-    }
-}
-
-private extension CodexLoginHandle {
-    func backendChallenge(
-        nativeWebAuthenticationCallbackScheme: String?
-    ) throws -> CodexReviewBackendModel.Login.Challenge {
-        switch self {
-        case .apiKey:
-            return .init(id: "api-key")
-        case .chatGPT(let loginID, let authenticationURL):
-            return .init(
-                id: loginID.rawValue,
-                verificationURL: authenticationURL,
-                nativeWebAuthenticationCallbackScheme: nativeWebAuthenticationCallbackScheme
-            )
-        case .chatGPTDeviceCode(let loginID, let verificationURL, let userCode):
-            return .init(
-                id: loginID.rawValue,
-                verificationURL: verificationURL,
-                userCode: userCode
-            )
-        }
     }
 }

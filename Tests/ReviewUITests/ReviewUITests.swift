@@ -5763,7 +5763,7 @@ struct TestAuthState: Equatable {
         if let progress {
             phase = .signingIn(progress)
         } else if let errorMessage {
-            phase = .failed(message: errorMessage)
+            phase = .failed(.runtime(message: errorMessage))
         } else {
             phase = .signedOut
         }
@@ -5808,10 +5808,10 @@ struct TestAuthState: Equatable {
     }
 
     var errorMessage: String? {
-        guard case .failed(let message) = phase else {
+        guard case .failed(let failure) = phase else {
             return nil
         }
-        return message
+        return failure.localizedDescription
     }
 }
 

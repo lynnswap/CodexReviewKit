@@ -4,7 +4,6 @@ package enum CodexReviewBackendModel {
     package enum Settings {}
     package enum Account {}
     package enum Auth {}
-    package enum Login {}
     package enum Review {}
 }
 
@@ -155,42 +154,6 @@ package extension CodexReviewBackendModel.Auth {
         case authenticated
         case authenticating(challengeID: String)
         case failed(message: String)
-    }
-}
-
-package extension CodexReviewBackendModel.Login {
-    struct Request: Codable, Equatable, Sendable {
-        package var preferredAccountID: CodexReviewBackendModel.Account.ID?
-        package var nativeWebAuthenticationCallbackScheme: String?
-
-        package init(
-            preferredAccountID: CodexReviewBackendModel.Account.ID? = nil,
-            nativeWebAuthenticationCallbackScheme: String? = nil
-        ) {
-            self.preferredAccountID = preferredAccountID
-            self.nativeWebAuthenticationCallbackScheme = nativeWebAuthenticationCallbackScheme
-        }
-    }
-}
-
-package extension CodexReviewBackendModel.Login {
-    struct Challenge: Codable, Equatable, Sendable {
-        package var id: String
-        package var verificationURL: URL?
-        package var userCode: String?
-        package var nativeWebAuthenticationCallbackScheme: String?
-
-        package init(
-            id: String,
-            verificationURL: URL? = nil,
-            userCode: String? = nil,
-            nativeWebAuthenticationCallbackScheme: String? = nil
-        ) {
-            self.id = id
-            self.verificationURL = verificationURL
-            self.userCode = userCode
-            self.nativeWebAuthenticationCallbackScheme = nativeWebAuthenticationCallbackScheme
-        }
     }
 }
 

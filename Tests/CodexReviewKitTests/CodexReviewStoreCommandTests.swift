@@ -1623,7 +1623,7 @@ struct CodexReviewStoreCommandTests {
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        await withStoreCommandTestCleanup(backend: backend, store: store) {
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
             await store.closeSession("session-1")
 
             await #expect(throws: (any Error).self) {
@@ -1789,26 +1789,18 @@ struct CodexReviewStoreCommandTests {
         #expect(store.canPerformPrimaryAuthenticationAction)
     }
 
-    @Test func primaryAuthenticationActionRestartsRecoverableRuntimeBeforeLogin() async {
+    @Test func primaryAuthenticationActionRestartsRecoverableRuntimeBeforeLogin() async throws {
         let backend = FakeCodexReviewBackend()
         let store = CodexReviewStore.makeTestingStore(
             backend: TestingCodexReviewStoreBackend(reviewBackend: backend)
         )
-        await withStoreCommandTestCleanup(backend: backend, store: store) {
+        try await withStoreCommandTestCleanup(backend: backend, store: store) {
             store.loadForTesting(serverState: .failed("Runtime failed."), authPhase: .signedOut)
 
-            await store.performPrimaryAuthenticationAction()
+            try await store.performPrimaryAuthenticationAction()
 
             #expect(store.serverState == .running)
             #expect(store.auth.isAuthenticating)
-            let commands = await backend.recordedCommands()
-            #expect(
-                commands.contains { command in
-                    if case .startLogin = command {
-                        return true
-                    }
-                    return false
-                })
         }
     }
 }

@@ -3,6 +3,7 @@ import CodexReviewKit
 
 struct SignInView: View {
     let store: CodexReviewStore
+    @State private var authenticationFailureMessage: String?
 
     var body: some View {
         ContentUnavailableView {
@@ -15,7 +16,13 @@ struct SignInView: View {
             
             Button(role: store.auth.isAuthenticating ? .cancel : .confirm) {
                 Task { @MainActor in
-                    await store.performPrimaryAuthenticationAction()
+                    do {
+                        try await store.performPrimaryAuthenticationAction()
+                    } catch let failure as CodexReviewAuthenticationFailure {
+                        authenticationFailureMessage = failure.localizedDescription
+                    } catch {
+                        preconditionFailure("Unexpected authentication error: \(error)")
+                    }
                 }
             } label: {
                 LabeledContent {
@@ -43,6 +50,19 @@ struct SignInView: View {
         }
         .animation(.default, value: store.auth.isAuthenticating)
         .scenePadding()
+        .alert(
+            "Authentication Request Failed",
+            isPresented: Binding(
+                get: { authenticationFailureMessage != nil },
+                set: { if $0 == false { authenticationFailureMessage = nil } }
+            )
+        ) {
+            Button("OK") {
+                authenticationFailureMessage = nil
+            }
+        } message: {
+            Text(authenticationFailureMessage ?? "Authentication request failed.")
+        }
     }
 
     private var descriptionText: String? {

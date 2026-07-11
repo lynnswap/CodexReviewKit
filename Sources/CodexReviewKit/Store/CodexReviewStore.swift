@@ -147,19 +147,19 @@ public final class CodexReviewStore {
         await backend.refreshAuth(auth: auth)
     }
 
-    public func signIn() async {
-        await backend.signIn(auth: auth)
+    public func signIn() async throws {
+        try await backend.signIn(auth: auth)
     }
 
-    public func addAccount() async {
-        await backend.addAccount(auth: auth)
+    public func addAccount() async throws {
+        try await backend.addAccount(auth: auth)
     }
 
     public func cancelAuthentication() async {
         await backend.cancelAuthentication(auth: auth)
     }
 
-    package func performPrimaryAuthenticationAction() async {
+    package func performPrimaryAuthenticationAction() async throws {
         if auth.isAuthenticating {
             await cancelAuthentication()
             return
@@ -175,7 +175,7 @@ public final class CodexReviewStore {
         else {
             return
         }
-        await signIn()
+        try await signIn()
     }
 
     public func logout() async {
@@ -187,7 +187,7 @@ public final class CodexReviewStore {
             try await signOutActiveAccount()
         } catch {
             if auth.errorMessage == nil, auth.isAuthenticated {
-                auth.updatePhase(.failed(message: error.localizedDescription))
+                auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
             }
         }
     }
@@ -253,12 +253,6 @@ public final class CodexReviewStore {
             }
             do {
                 try await self.executePendingAccountAction(action)
-                if let warningMessage = self.auth.warningMessage {
-                    self.auth.presentAccountActionAlert(
-                        title: "Account Updated With Warning",
-                        message: warningMessage
-                    )
-                }
             } catch {
                 self.auth.presentAccountActionAlert(
                     title: action.failureTitle,

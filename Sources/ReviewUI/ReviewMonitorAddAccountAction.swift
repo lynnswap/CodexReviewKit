@@ -5,24 +5,15 @@ import CodexReviewKit
 enum ReviewMonitorAddAccountAction {
     static func perform(store: CodexReviewStore) {
         Task {
-            let auth = store.auth
-            let previousFailureCount = auth.authenticationFailureCount
-            let previousWarningMessage = auth.warningMessage
-            await store.addAccount()
-            if auth.authenticationFailureCount != previousFailureCount,
-               let message = auth.errorMessage
-            {
+            do {
+                try await store.addAccount()
+            } catch let failure as CodexReviewAuthenticationFailure {
                 await presentFailureAlert(
                     title: "Failed to Add Account",
-                    message: message
+                    message: failure.localizedDescription
                 )
-            } else if let warningMessage = auth.warningMessage,
-                      warningMessage != previousWarningMessage
-            {
-                await presentFailureAlert(
-                    title: "Account Updated With Warning",
-                    message: warningMessage
-                )
+            } catch {
+                preconditionFailure("Unexpected authentication error: \(error)")
             }
         }
     }

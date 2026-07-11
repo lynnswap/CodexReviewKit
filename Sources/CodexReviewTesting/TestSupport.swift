@@ -117,8 +117,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
         case readSettings
         case applySettings(CodexReviewBackendModel.Settings.Change)
         case readAuth
-        case startLogin(CodexReviewBackendModel.Login.Request)
-        case cancelLogin(CodexReviewBackendModel.Login.Challenge)
         case logout(CodexReviewBackendModel.Account.ID)
         case startReview(CodexReviewBackendModel.Review.Start)
         case interruptReview(CodexReviewBackendModel.Review.Run, CodexReviewBackendModel.CancellationReason)
@@ -372,17 +370,6 @@ package actor FakeCodexReviewBackend: CodexReviewBackend {
     package func readAuth() async throws -> CodexReviewBackendModel.Auth.Snapshot {
         commands.append(.readAuth)
         return auth
-    }
-
-    package func startLogin(_ request: CodexReviewBackendModel.Login.Request) async throws
-        -> CodexReviewBackendModel.Login.Challenge
-    {
-        commands.append(.startLogin(request))
-        return .init(id: "challenge-1")
-    }
-
-    package func cancelLogin(_ challenge: CodexReviewBackendModel.Login.Challenge) async throws {
-        commands.append(.cancelLogin(challenge))
     }
 
     package func logout(_ account: CodexReviewBackendModel.Account.ID) async throws
@@ -669,28 +656,21 @@ package final class TestingCodexReviewStoreBackend: CodexReviewStoreBackend {
             auth.selectPersistedAccount(snapshot.activeAccountID?.rawValue)
             auth.updatePhase(auth.selectedAccount == nil ? .signedOut : .signedOut)
         } catch {
-            auth.updatePhase(.failed(message: error.localizedDescription))
+            auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
         }
     }
 
-    package func signIn(auth: CodexReviewAuthModel) async {
-        do {
-            let challenge = try await reviewBackend.startLogin(.init())
-            auth.updatePhase(
-                .signingIn(
-                    .init(
-                        title: "Sign in to Codex",
-                        detail: "Complete sign in in your browser, then return to ReviewMonitor.",
-                        browserURL: challenge.verificationURL?.absoluteString,
-                        userCode: challenge.userCode
-                    )))
-        } catch {
-            auth.updatePhase(.failed(message: error.localizedDescription))
-        }
+    package func signIn(auth: CodexReviewAuthModel) async throws {
+        auth.updatePhase(.signingIn(.init(
+            title: "Sign in to Codex",
+            detail: "Complete sign in in your browser, then return to ReviewMonitor.",
+            browserURL: nil,
+            userCode: nil
+        )))
     }
 
-    package func addAccount(auth: CodexReviewAuthModel) async {
-        await signIn(auth: auth)
+    package func addAccount(auth: CodexReviewAuthModel) async throws {
+        try await signIn(auth: auth)
     }
 
     package func cancelAuthentication(auth: CodexReviewAuthModel) async {
