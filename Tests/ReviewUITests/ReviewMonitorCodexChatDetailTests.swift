@@ -64,9 +64,10 @@ struct ReviewMonitorCodexChatDetailTests {
         }
     }
 
-    @Test func logResynchronizationCanUpdateAfterInitialBaseline() async throws {
+    @Test func logSnapshotBarrierReplacesAfterInitialBaseline() async throws {
         let turnID = CodexTurnID(rawValue: "turn-1")
-        let chat = try await makeProjectionChat(
+        let thread = CodexThreadSnapshot(
+            id: "thread-1",
             turns: [
                 .init(
                     id: turnID,
@@ -83,27 +84,26 @@ struct ReviewMonitorCodexChatDetailTests {
         )
         var projection = ReviewMonitorCodexChatLogSourceProjection()
 
-        let initialChange = projection.applyBaseline(
-            from: chat,
-            chatCreatedAt: nil,
-            chatUpdatedAt: nil
-        )
+        let initialChange = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(thread: thread, phase: .running(turnID: turnID)), reason: .initial)
+        ))
         guard case .replaceAll = initialChange else {
             Issue.record("Expected initial snapshot to replace the empty log")
             return
         }
 
-        let resynchronizedChange = projection.apply(
-            .resynchronized(reason: .refresh),
-            in: chat,
-            chatCreatedAt: nil,
-            chatUpdatedAt: nil
-        )
-        guard case .update = resynchronizedChange else {
-            Issue.record("Expected resynchronization to update the existing log incrementally")
+        let refreshedChange = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .snapshot(.init(thread: thread, phase: .running(turnID: turnID)), reason: .refresh)
+        ))
+        guard case .replaceAll = refreshedChange else {
+            Issue.record("Expected a snapshot barrier to replace the existing projection")
             return
         }
-        #expect(resynchronizedChange?.allowsIncrementalRender == true)
+        #expect(refreshedChange?.allowsIncrementalRender == false)
     }
 
     @Test func selectedReviewChatRendersInitialSnapshot() async throws {
@@ -1072,9 +1072,7 @@ struct ReviewMonitorCodexChatDetailTests {
     @Test func codexChatStatusOnlyChangesKeepIncrementalLogUpdates() async throws {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let turnID = CodexTurnID(rawValue: "turn-review")
-        let chat = try await makeProjectionChat(
-            turns: [
-                .init(
+        let initialTurn = CodexTurnSnapshot(
                     id: turnID,
                     state: .inProgress,
                     items: [
@@ -1088,17 +1086,24 @@ struct ReviewMonitorCodexChatDetailTests {
                             ))
                         ),
                     ]
-                ),
-            ]
+        )
+        let thread = CodexThreadSnapshot(
+            id: "thread-review",
+            turns: [initialTurn]
         )
 
-        let initialChange = projection.applyBaseline(from: chat, chatCreatedAt: nil, chatUpdatedAt: nil)
-        let statusChange = projection.apply(
-            .turnUpdated(id: turnID),
-            in: chat,
-            chatCreatedAt: nil,
-            chatUpdatedAt: nil
-        )
+        let initialChange = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(thread: thread, phase: .running(turnID: turnID)), reason: .initial)
+        ))
+        var completedTurn = initialTurn
+        completedTurn.state = .completed
+        let statusChange = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnUpdated(completedTurn, index: 0))
+        ))
 
         #expect(initialChange?.allowsIncrementalRender == false)
         #expect(statusChange?.allowsIncrementalRender == true)
@@ -1109,7 +1114,8 @@ struct ReviewMonitorCodexChatDetailTests {
         var projection = ReviewMonitorCodexChatLogSourceProjection()
         let firstTurnID = CodexTurnID(rawValue: "turn-review")
         let secondTurnID = CodexTurnID(rawValue: "turn-reasoning")
-        let initialChat = try await makeProjectionChat(
+        let initialThread = CodexThreadSnapshot(
+            id: "thread-review",
             turns: [
                 .init(
                     id: firstTurnID,
@@ -1128,48 +1134,31 @@ struct ReviewMonitorCodexChatDetailTests {
                 ),
             ]
         )
-        let updatedChat = try await makeProjectionChat(
-            turns: [
+        let insertedTurn = CodexTurnSnapshot(
+            id: secondTurnID,
+            state: .inProgress,
+            items: [
                 .init(
-                    id: firstTurnID,
-                    state: .inProgress,
-                    items: [
-                        .init(
-                            id: "message-review",
-                            kind: .agentMessage,
-                            content: .message(.init(
-                                id: "message-review",
-                                role: .assistant,
-                                text: "Existing review log"
-                            ))
-                        ),
-                    ]
-                ),
-                .init(
-                    id: secondTurnID,
-                    state: .inProgress,
-                    items: [
-                        .init(
-                            id: "reasoning-empty",
-                            kind: .reasoning,
-                            content: .reasoning(.empty)
-                        ),
-                    ]
+                    id: "reasoning-empty",
+                    kind: .reasoning,
+                    content: .reasoning(.empty)
                 ),
             ]
         )
 
-        let initialChange = projection.applyBaseline(
-            from: initialChat,
-            chatCreatedAt: nil,
-            chatUpdatedAt: nil
-        )
-        let updatedChange = projection.apply(
-            .itemInserted(id: "reasoning-empty", turnID: secondTurnID),
-            in: updatedChat,
-            chatCreatedAt: nil,
-            chatUpdatedAt: nil
-        )
+        let initialChange = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(
+                .init(thread: initialThread, phase: .running(turnID: firstTurnID)),
+                reason: .initial
+            )
+        ))
+        let updatedChange = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.turnInserted(insertedTurn, index: 1))
+        ))
 
         #expect(initialChange?.sourceDocument?.text == "Existing review log")
         guard case .update(let document) = updatedChange else {
@@ -1178,6 +1167,166 @@ struct ReviewMonitorCodexChatDetailTests {
         }
         #expect(document.text == "Existing review log")
         #expect(updatedChange?.allowsIncrementalRender == true)
+    }
+
+    @Test func codexChatSourceProjectionAppliesTextDeltaWithoutReadingLiveGraph() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-delta")
+        let item = CodexThreadItem(
+            id: "message-delta",
+            kind: .agentMessage,
+            content: .message(.init(
+                id: "message-delta",
+                role: .assistant,
+                text: "Initial"
+            ))
+        )
+        let thread = CodexThreadSnapshot(
+            id: "thread-delta",
+            turns: [.init(id: turnID, state: .inProgress, items: [item])]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(
+                .init(thread: thread, phase: .running(turnID: turnID)),
+                reason: .initial
+            )
+        ))
+
+        let change = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemTextAppended(
+                .init(item: item, turnID: turnID),
+                delta: " log"
+            ))
+        ))
+
+        #expect(change?.sourceDocument?.text == "Initial log")
+        #expect(change?.allowsIncrementalRender == true)
+    }
+
+    @Test func codexChatItemLocatorDistinguishesReviewMarkersWithSameRawID() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let turnID = CodexTurnID(rawValue: "turn-marker-locator")
+        let userItem = CodexThreadItem(
+            id: "user",
+            kind: .userMessage,
+            content: .message(.init(id: "user", role: .user, text: "User prompt"))
+        )
+        let entered = CodexThreadItem(
+            id: "shared-marker",
+            kind: .enteredReviewMode,
+            content: .log("Entered")
+        )
+        let exited = CodexThreadItem(
+            id: "shared-marker",
+            kind: .exitedReviewMode,
+            content: .log("Exited")
+        )
+        let thread = CodexThreadSnapshot(
+            id: "thread-marker-locator",
+            turns: [.init(
+                id: turnID,
+                state: .completed,
+                items: [userItem, entered, exited]
+            )]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: thread,
+                phase: .terminal(turnID: turnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+
+        let afterEnteredRemoval = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemRemoved(.init(item: entered, turnID: turnID)))
+        ))
+        #expect(afterEnteredRemoval?.sourceDocument?.text.contains("Exited") == true)
+        #expect(afterEnteredRemoval?.sourceDocument?.text.contains("User prompt") == false)
+
+        let afterExitedRemoval = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.itemRemoved(.init(item: exited, turnID: turnID)))
+        ))
+        #expect(afterExitedRemoval?.sourceDocument?.text == "User prompt")
+    }
+
+    @Test func codexChatSourceProjectionAppliesAfterIndexesForUpdatedItemsAndTurns() throws {
+        var projection = ReviewMonitorCodexChatLogSourceProjection()
+        let firstTurnID = CodexTurnID(rawValue: "turn-first")
+        let secondTurnID = CodexTurnID(rawValue: "turn-second")
+        let firstItem = CodexThreadItem(
+            id: "message-first",
+            kind: .agentMessage,
+            content: .message(.init(id: "message-first", role: .assistant, text: "First"))
+        )
+        let secondItem = CodexThreadItem(
+            id: "message-second",
+            kind: .agentMessage,
+            content: .message(.init(id: "message-second", role: .assistant, text: "Second"))
+        )
+        let thirdItem = CodexThreadItem(
+            id: "message-third",
+            kind: .agentMessage,
+            content: .message(.init(id: "message-third", role: .assistant, text: "Third"))
+        )
+        let firstTurn = CodexTurnSnapshot(
+            id: firstTurnID,
+            state: .completed,
+            items: [firstItem, secondItem]
+        )
+        let secondTurn = CodexTurnSnapshot(
+            id: secondTurnID,
+            state: .completed,
+            items: [thirdItem]
+        )
+        _ = projection.apply(.init(
+            generation: 1,
+            sequence: 0,
+            payload: .snapshot(.init(
+                thread: .init(id: "thread-reorder", turns: [firstTurn, secondTurn]),
+                phase: .terminal(turnID: secondTurnID, disposition: .completed)
+            ), reason: .initial)
+        ))
+
+        var updatedFirstItem = firstItem
+        updatedFirstItem.content = .message(.init(
+            id: "message-first",
+            role: .assistant,
+            text: "First updated"
+        ))
+        let itemMove = projection.apply(.init(
+            generation: 1,
+            sequence: 1,
+            payload: .update(.itemUpdated(
+                item: updatedFirstItem,
+                turnID: firstTurnID,
+                index: 1
+            ))
+        ))
+        let itemMoveText = try #require(itemMove?.sourceDocument?.text)
+        let secondRange = try #require(itemMoveText.range(of: "Second"))
+        let updatedFirstRange = try #require(itemMoveText.range(of: "First updated"))
+        #expect(secondRange.lowerBound < updatedFirstRange.lowerBound)
+
+        var updatedFirstTurn = firstTurn
+        updatedFirstTurn.items = [secondItem, updatedFirstItem]
+        let turnMove = projection.apply(.init(
+            generation: 1,
+            sequence: 2,
+            payload: .update(.turnUpdated(updatedFirstTurn, index: 1))
+        ))
+        let turnMoveText = try #require(turnMove?.sourceDocument?.text)
+        let thirdRange = try #require(turnMoveText.range(of: "Third"))
+        let movedSecondRange = try #require(turnMoveText.range(of: "Second"))
+        #expect(thirdRange.lowerBound < movedSecondRange.lowerBound)
     }
 
     @Test func codexChatRendersThreadAndLiveUpdates() async throws {

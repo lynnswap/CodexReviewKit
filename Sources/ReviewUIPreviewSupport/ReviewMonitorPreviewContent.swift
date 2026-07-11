@@ -1081,14 +1081,3 @@ private extension CodexTurnSnapshot.State {
         }
     }
 }
-
-private extension CodexDataPhase {
-    init(_ lifecycle: ReviewMonitorPreviewContent.PreviewChatLifecycle, errorMessage: String?) {
-        switch lifecycle {
-        case .queued, .running, .succeeded, .cancelled:
-            self = .loaded
-        case .failed:
-            self = .failed(errorMessage ?? "Review failed")
-        }
-    }
-}

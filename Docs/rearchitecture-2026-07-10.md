@@ -1629,10 +1629,16 @@ public enum CodexChatUpdate: Equatable, Sendable {
     case turnRemoved(id: CodexTurnID)
     case itemInserted(item: CodexThreadItem, turnID: CodexTurnID, index: Int)
     case itemUpdated(item: CodexThreadItem, turnID: CodexTurnID, index: Int)
-    case itemRemoved(id: String, turnID: CodexTurnID)
-    case itemTextAppended(id: String, turnID: CodexTurnID, delta: String)
+    case itemRemoved(CodexChatItemLocator)
+    case itemTextAppended(CodexChatItemLocator, delta: String)
     case statusChanged(CodexThreadStatus?)
     case phaseChanged(CodexChatPhase)
+}
+
+public struct CodexChatItemLocator: Equatable, Hashable, Sendable {
+    public let id: String
+    public let kind: CodexThreadItem.Kind
+    public let turnID: CodexTurnID
 }
 ```
 
@@ -1658,7 +1664,7 @@ public enum CodexChatUpdate: Equatable, Sendable {
 - `includeTurns` はsubscriber visibility filterではなくupstream hydrationのminimum hintである。false subscriberも同じchat graphを観測し、別subscriberがtrueへupgradeした後はturn snapshot/updateを受け取り得る。turn非表示はpresentation consumerが選び、owner内でsubscriber別のsemantic graphを作らない。
 - `observe` はmodel-context isolation上でsubscriber queueを登録し、現在のimmutable full projectionをcaptureして`.snapshot(..., reason: .initial)`をenqueueするまでsuspensionしない。その後にだけdelta fan-outを許す。handle returnからiterator開始までのupdateも同queueへ溜まる。`observation.chat` はsemantic action/identity ownerへのhandleでありpresentation baselineではない。consumerは最初のsnapshot eventからrenderし、続くupdateをそのimmutable baselineへ順に適用するため、live graphの先行mutationとdeltaの二重適用を起こさない。1 observationは1 subscriber / 1 iteratorで、2回目のiterator生成はfail-fastする。複数consumerは`observe`を別々に呼ぶ。
 - generationはupstream pumpのstart/rebindごとに増え、新generationはsequence 0の`.generationRestart` snapshotから始まる。sequenceはgeneration内のmodel mutation / global barrier revisionとしてstrictly increaseする。通常updateは直前event + 1でなければならず、snapshotだけが未消費rangeを飛び越えられ、そのsequenceまでのcomplete stateを含む。join時initial snapshotとslow-subscriber overflow snapshotはcurrent revisionをmaterializeするだけでglobal sequenceを進めない。explicit refresh / include-turns upgradeはowner revisionを1進め、既存全subscriberへそれぞれ`.refresh` / `.includeTurnsUpgrade` snapshotを送る。
-- update payloadはその`(generation, sequence)`時点のafter-valueだけでimmutable baselineへ適用できるself-contained domain valueにする。turn insert/updateはfull `CodexTurnSnapshot` + after-index、item insert/updateはtyped `CodexThreadItem` + after-index、status/phaseはnew valueを持ち、text appendだけは直前sequenceのtextへのdeltaである。current-v2 item updateのturn IDはrequiredとし、item indexはそのturn snapshotのitems内after-indexである。removeはIDを直前baselineから削除し、consumerがlive `observation.chat`を再読しないと適用できないID-only insert/updateは削除する。insert先に同IDが存在する、update/remove/text targetが直前baselineにない、indexが範囲外、turnがない場合はすべてcontract violationとする。snapshot compactionはそのcursor以下のupdatesを破棄するため、正当なduplicate removeは生じない。
+- update payloadはその`(generation, sequence)`時点のafter-valueだけでimmutable baselineへ適用できるself-contained domain valueにする。turn insert/updateはfull `CodexTurnSnapshot` + after-index、item insert/updateはtyped `CodexThreadItem` + after-index、status/phaseはnew valueを持ち、text appendだけは直前sequenceのtextへのdeltaである。current-v2 item updateのturn IDはrequiredとし、item indexはそのturn snapshotのitems内after-indexである。remove/text appendは`CodexChatItemLocator`のturn ID + kind + raw item IDで直前baselineのtargetを一意に特定する。同turnでentered/exited review markerが同じraw IDを持てるためraw ID単独には戻さない。consumerがlive `observation.chat`を再読しないと適用できないID-only insert/updateは削除する。insert先に同locatorが存在する、update/remove/text targetが直前baselineにない、indexが範囲外、turnがない場合はすべてcontract violationとする。snapshot compactionはそのcursor以下のupdatesを破棄するため、正当なduplicate removeは生じない。
 - subscriber leaseごとにcapacity 256のbounded queueを作り、`includeTurns` はfalse→trueへ単調upgradeする。257件目ではそのsubscriberのpending eventsをatomicに最新graph + current `(generation, sequence)`の`.snapshot(..., reason: .bufferOverflow)` 1件へcompactし、以後はそのcursorより後だけを後置する。同generation snapshotはpending eventのうち`sequence <= snapshot.sequence`を破棄し、新generation sequence 0 snapshotは全旧generation eventを破棄して、snapshotを必ず次deliveryにする。snapshot + suffixが再度fullなら、より新しいcomplete snapshotで古いsnapshotとsuffixをsupersedeする。別subscriberとupstream pumpは遅いconsumerにblockされず、overflow rangeはdiagnosticへ記録する。
 - 各leaseは`ChatObservationReleaseSignal`の同期sender endpointとownerが発行したnonempty lease IDだけをhandleへ渡す。明示 `close()` はendpointへ`.release(leaseID, acknowledgement)`を同期sendして、そのlease queue finishとrelease acknowledgementをawaitする。last leaseだけがgeneration pump cancel + completion awaitも所有し、残る全relayはpump終了後にfinishする。generation pumpはstructured task group内でupstream childとsingle release-receiver childを同時に待ち、release childがowner isolation上でlease removalをcommitする。receiver handleはownerが保持してclose時にterminate + joinし、stream callback/deinitから`Task { ... }`を生成しない。close中の新規observeはshared close completion後に新generationを開始する。`chatObservationAlreadyActive` とconsumer側のprevious-task awaitを削除する。
 - `CodexChatUpdates` のfailure typeは`Never`である。upstream/connection failureはowner revisionを1進め、typed `.failed(.appServer(...))` phaseを含むcomplete `.snapshot(..., reason: .upstreamFailure)` を各queueの次deliveryへatomic compactしてからnormal finishする。failure-before-first-renderでも`.initial`ではなくこのself-contained failure snapshotを1件受け取る。explicit lease close/caller cancellationはfailure phaseをmodelへ保存せず当該queueだけfinishする。finished generationへの追加eventはproducer contract violationで、新しいretry/rebindは新generation sequence 0から始める。
@@ -3507,7 +3513,7 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
 - `rawPayload` はdiagnostic/future-schema保存用に残すが、ReviewChatLogUIはdecodeしない。DataKitの `CodexItem` / turn snapshot / live mergeはoriginとrelationをlosslessに保持する。
 - このassignmentのevidenceはpinned upstream `core/src/tasks/review.rs`（review exit pair生成）、`core/src/event_mapping.rs`（fixed ID保持）、`app-server-protocol/src/protocol/v2/item.rs`（AgentMessage変換）、`app-server/src/bespoke_event_handling.rs`（canonical v2 item lifecycle）である。
 - `ReviewTurnPresentationPolicy` はturn内の `.enteredReviewMode/.exitedReviewMode` marker countを所有し、1件以上なら同turnのuser-message blocksを非表示にする。first marker insertでは既存user blocksだけをremove、last marker removalでは保持済みtyped user itemsだけを元の位置へreinsertする。suppression中にuser itemがinsert/updateされてもmodel/indexは更新しblockは作らない。item kind replacementでmarker membershipが変わる場合も同じtransitionを適用し、turn document全体はrebuildしない。
-- presentation ownerはimmutable observation snapshotとitemID/turnID→projected block IDsのindexを持ち、次の表どおりevent payloadだけをexact cursor順に適用する。target IDが直前baselineに見つからない場合はinvariant failureとしてtest/logで表面化し、live graphの再読、silent full reprojection、text-searchを行わない。全置換を許すのは全`CodexChatObservationEvent.Payload.snapshot` reasonだけである。
+- presentation ownerはimmutable observation snapshotと`CodexChatItemLocator`→projected block IDsのindexを持ち、次の表どおりevent payloadだけをexact cursor順に適用する。target locatorが直前baselineに見つからない場合はinvariant failureとしてtest/logで表面化し、live graphの再読、silent full reprojection、text-searchを行わない。全置換を許すのは全`CodexChatObservationEvent.Payload.snapshot` reasonだけである。
 
 | Observation payload | Projection operation |
 |---|---|
@@ -3517,8 +3523,8 @@ public struct CodexThreadItem: Identifiable, Equatable, Sendable {
 | `.update(.turnRemoved(id:))` | indexed turnと全blocksをremove |
 | `.update(.itemInserted(item:turnID:index:))` | payload itemのblocksをturn内after-indexへinsert。first review markerなら同turnのuser blocksだけremove |
 | `.update(.itemUpdated(item:turnID:index:))` | payload item blocksをreplaceし、index変化なら同turn内move。marker membership変化時は同turn user blocksだけremove/reinsert |
-| `.update(.itemRemoved(id:turnID:))` | indexed item blocksをremove。last review markerなら同turnのretained user itemsだけreinsert |
-| `.update(.itemTextAppended(id:turnID:delta:))` | exact prior cursorのaffected text blockへdeltaをappend |
+| `.update(.itemRemoved(locator))` | locatorでindexed item blocksをremove。last review markerなら同turnのretained user itemsだけreinsert |
+| `.update(.itemTextAppended(locator,delta:))` | exact prior cursorのlocator対象text blockへdeltaをappend |
 | `.update(.phaseChanged(phase))` | `phase.turnID` があればindexed turnのstatus-dependent blocks/metadataだけupdate。nilならthread-level chromeだけupdate |
 | `.update(.statusChanged(status))` | thread-level chromeだけupdateし、transcript documentはrebuildしない |
 
@@ -3898,7 +3904,7 @@ Phase 4ではこのinventoryを作るのではなく、recursive `public/open` s
 | `NEW` | `CodexFetchValidationError`, `CodexFetchFailure`, `CodexFetchPhase` | validation/app-server failureの唯一owner | ReviewUI, MCP projection |
 | `KEEP` | `CodexFetchSectionID`, `CodexFetchSection`; `CodexFetchedResultsIndexPath`, `CodexFetchedResultsSnapshot`/`Section`, `CodexFetchedResultsSectionChange`, `CodexFetchedResultsItemChange`, `CodexFetchedResultsTransactionReason`, `CodexFetchedResultsTransaction` | current full identity/value transaction interfaceを維持 | ReviewUI and package UI tests |
 | `CHANGE` | `CodexFetchedResults`, `CodexFetchedResultsController` | typed phase、newest-1 relay lifecycle。String error fieldなし | ReviewUI and package UI tests |
-| `NEW` | `CodexTurnTerminalDisposition`, `CodexChatPhase`, `CodexChatSnapshotReason`, `CodexChatObservationSnapshot`, `CodexChatObservationEvent`/`Payload` | immutable terminal/failure/snapshot/cursor facts | ReviewChatLogUI |
+| `NEW` | `CodexTurnTerminalDisposition`, `CodexChatPhase`, `CodexChatSnapshotReason`, `CodexChatObservationSnapshot`, `CodexChatObservationEvent`/`Payload`, `CodexChatItemLocator` | immutable terminal/failure/snapshot/cursor facts and unique item targets | ReviewChatLogUI |
 | `CHANGE` | `CodexChatUpdates` concrete sequence/iterator, `CodexChatObservation`, `CodexChatUpdate`, `CodexChat.observe` | §5.6のself-contained sequenced updates、single iterator、explicit close | ReviewChatLogUI |
 | `PACKAGE` | `CodexFetchPlanResult`, `CodexThreadQueryPlan`, predicate/sort lowering, mutation strategy, `FetchedResultsLoadCoordinator`, transaction relay, `ChatObservationOwner`, waiter tokens | validation/load/observation owner implementation | CodexDataKit implementation |
 | `DELETE` | `CodexDataPhase`, `CodexChatResynchronizationReason`, old existential `CodexChatUpdates` typealias shape、`chatObservationAlreadyActive`, Foundation `SortDescriptor` public lowering/Mirror helpers、`lastErrorDescription`/duplicate failure properties | typed descriptor/phase/observation contractへ置換 | replacement above |

@@ -889,17 +889,6 @@ private extension CodexTurnSnapshot.State {
     }
 }
 
-private extension CodexDataPhase {
-    init(chatFixtureStatusForTesting status: ReviewChatFixtureStatus, errorMessage: String?) {
-        switch status {
-        case .queued, .running, .succeeded, .cancelled:
-            self = .loaded
-        case .failed:
-            self = .failed(errorMessage ?? "Review failed")
-        }
-    }
-}
-
 private func chatLogCommandText(for entry: ReviewChatLogEntryForTesting) -> String {
     if let command = entry.metadata?.command, command.isEmpty == false {
         return command
