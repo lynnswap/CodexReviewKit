@@ -637,6 +637,24 @@ package struct CodexDeadlineClock: Sendable {
     package static var continuous: Self { get }
 }
 
+public struct CodexReviewCleanupFailure: Equatable, Sendable {
+    public var threadID: CodexThreadID
+    public var message: String
+
+    public init(threadID: CodexThreadID, message: String)
+}
+
+public struct CodexReviewCleanupResult: Equatable, Sendable {
+    public var attemptedThreadIDs: [CodexThreadID]
+    public var failures: [CodexReviewCleanupFailure]
+    public var succeeded: Bool { get }
+
+    public init(
+        attemptedThreadIDs: [CodexThreadID],
+        failures: [CodexReviewCleanupFailure]
+    )
+}
+
 public actor CodexAppServer {
     public struct Configuration: Sendable {
         public struct Deadlines: Equatable, Sendable {
@@ -709,10 +727,11 @@ public actor CodexAppServer {
     ) async -> [CodexReviewIdentity]
     public func discardAllPreparedReviewRestarts()
         async -> [CodexThreadID: [CodexReviewIdentity]]
+    @discardableResult
     public func cleanupReview(
         _ identity: CodexReviewIdentity,
         additionalCleanupThreadIDs: [[CodexThreadID]] = []
-    ) async
+    ) async -> CodexReviewCleanupResult
     public func forkThread(
         _ id: CodexThreadID,
         options: CodexThread.Options = .init()
@@ -731,6 +750,8 @@ public actor CodexAppServer {
     public func logout() async throws
 }
 ```
+
+`cleanupReview` は review lifecycle cleanup の唯一の public authority である。attempt順・source-last順と各delete failureをtyped resultで返し、failureが1件でもある場合はrestart coordinatorのretained identityを保持してdurable callerの再試行を可能にする。resultを使わないbest-effort callerは`@discardableResult`で同じcontractを呼ぶ。failureを捨ててretained identityも破棄するvoid overloadや、別名の`cleanupReviewReportingFailures`は置かない。
 
 `prepareReviewRestart` / `restartPreparedReview` / `discardPreparedReviewRestart` / `discardAllPreparedReviewRestarts`は`ReviewRestartCoordinator`へ委譲し、tokenごとのstateを次に固定する。後二者は別packageのCRK adapterとHost runtimeがinvalidation完了とretained identity移譲をawaitするためのpublic close authorityであり、coordinator stateやHost固有型は公開しない。
 
@@ -3825,6 +3846,7 @@ Phase 4ではこのinventoryを作るのではなく、recursive `public/open` s
 | `CHANGE` | `CodexThread`; nested `Options`, `ResumeOptions` | ID/workspace/model、`respond`→`CodexTurnOutcome`、review start、read/listTurns、rename/compact/archive/unarchive/delete、`cancelActiveTurn`、`closeConnection`。`streamResponse`、public event/message/transcript/log accessors、public rollbackは除く | `CodexReviewAppServer`, `CodexDataKit` |
 | `CHANGE` | `CodexReviewSession` | review/source/turn identity、`collect(timeout:)`, nonwaiting `terminalOutcomeIfKnown()`, `cancel()`, `closeConnection()`だけ。public `AsyncSequence`/progress streamを公開しない | CRK adapter |
 | `KEEP` | `CodexReviewTarget`, `CodexReviewDelivery`, `CodexReviewIdentity`, `CodexReviewRestartToken`, `CodexTurnCancellation` | value semanticsと現行public construction/read surfaceを維持 | CRK adapter/restart/cancel path |
+| `NEW` | `CodexReviewCleanupFailure`, `CodexReviewCleanupResult` | source-last cleanupのattempt順とfailed deletionをlosslessに返し、failure時のretained identity再試行を可能にする | CRK retention/final-stop cleanup |
 | `NEW` | `CodexTurnOutcome`, `CodexFailedTurn` | §5.1のexhaustive terminal value。failed turn initializerはpackage | CRK adapter, DataKit |
 | `CHANGE` | `CodexResponse` | responseはidentity/transcript/usage + `startedAt/completedAt/duration` timing。`finalAnswer`, `errorMessage`, status-derived predicatesを削除し、typed failureはoutcomeに置く | CRK adapter, DataKit, ReviewChatLogUI |
 | `NEW` | `CodexTurnError`, `CodexErrorInfo` | current-v2 turn failureをlosslessに保持する§5.1 value | CRK adapter, DataKit, ReviewChatLogUI |
@@ -3850,7 +3872,7 @@ Phase 4ではこのinventoryを作るのではなく、recursive `public/open` s
 | `PACKAGE` | `CodexAppServerRequest`, `CodexAppServerRequestResolution`, `CodexAppServerRequestHandler`, `CodexServerRequestID` and all method-specific request/resolution payloads | built-in current-v2 policyとCodexKit package contract testsだけ。新しい実在interactive hostが現れた時に別design gateでpublic化を検討 | AppServerKit + Testing package tests |
 | `PACKAGE` | `JSONRPCTransport`, client/router/serializer/replay/registry/lease/supervisor/wire DTO/reducer owners | §4 owner implementation。public transport seamなし | AppServerKit/Testing implementation |
 | `DELETE` | raw public `CodexAppServerRequest`/`CodexAppServerResponse` factories and `decodeParams`; obsolete `CodexAppServerError.response`; `CodexNativeWebAuthentication`, `CodexChatGPTLogin`, old `CodexLoginCompletion` | package typed request familyまたはstock login handleへ置換。compat shimなし | replacement above |
-| `DELETE` | `CodexReviewResumeOptions`, `CodexTranscriptErrorHandlingPolicy`, API-key/device-code/native-callback login entrypoints、root `cancelLogin/completeLogin`、old terminal aliases/predicates/response `status/finalAnswer/errorMessage` | current-v2/stock-login/typed-outcome contractへ全面移行 | replacement above |
+| `DELETE` | `CodexReviewResumeOptions`, `CodexTranscriptErrorHandlingPolicy`, API-key/device-code/native-callback login entrypoints、root `cancelLogin/completeLogin`、old terminal aliases/predicates/response `status/finalAnswer/errorMessage`、`cleanupReviewReportingFailures` | current-v2/stock-login/typed-outcome contractとtyped-result `cleanupReview`へ全面移行 | replacement above |
 
 ### 7.2 `CodexDataKit`
 
@@ -4132,7 +4154,7 @@ pinned upstreamは `review_rollout_assistant` が同一review-exit operationのc
 
 - `CodexKit` products 4→3、`@_exported import` 2→0。全 consumerが必要 productをdirect importする。
 - MCP Swift SDKはexact fork commitへpinされ、fork diffはrequest-child structured ownership/awaitable stopに限定される。`Server.stop()` return時のreceive/request/pending task count 0をdependency package testとCRK integration testの両方で証明し、`.build/checkouts` local patchは0件である。
-- public/open inventoryが§7と一致し、CodexKit external fixtureが`@testable`なしで3 productsをbuild/linkし、in-memoryでrunする。internal 4 targetsはpublic 0、TextTransitionsはDebug/Release別のfrozen interfaceと一致する。`CodexReviewMCPServer`の未使用library productを追加しない。default acceptanceはlive binary/auth/networkへ依存しない。
+- public/open inventoryが§7と一致し、CodexKit external fixtureが`@testable`なしで3 productsをbuild/linkし、in-memoryでrunする。review cleanupはtyped-result `cleanupReview` 1経路で、`cleanupReviewReportingFailures`とfailureを捨てるvoid overloadは0件。internal 4 targetsはpublic 0、TextTransitionsはDebug/Release別のfrozen interfaceと一致する。`CodexReviewMCPServer`の未使用library productを追加しない。default acceptanceはlive binary/auth/networkへ依存しない。
 - `isFailure`/historical aliasによるterminal分類、synthetic outcome、current `turnFailed` fixture、String-only request/turn/backend failure、`"attempt-1"` 3件、login reset cluster 8件、output fallback chain、resume-to-cancel、account-stream death side-channelが0件。
 - `JSONRPCTransport`、router/replay/serializer、全9 server requests、load coordinator、chat observation/release signal、LoginSession/AccountRegistryStore/AccountRuntimeTransitionCoordinator、phase-scoped review worker、`ReviewRestartCoordinator`、MCP session/HTTP lifetime、`InterruptRaceResolver`の各 ownerにstart/cancel/close/completionまたはdecision contract testがある。root drop中のlive child、terminal replay、deprecated rollback単一路、terminal-known no-request、raw unsatisfied/requiresConnection normalization、outage epoch/retry disposition、DELETE/timeout/global stop共通per-session close順も固定される。
 - `LiveCodexReviewStoreBackend` からlogin 9 state valuesとnative WebSession/auth composition surfaceが消える。`.signIn`はborrowed primary runtimeでpost-success `.chatGPT` readinessを待ちno-auth→B/A→Bをrequired Bへ収束、unconfirmed commitはlease/final resolverをcoordinatorへhandoffしてold stop→new runtime validation→forward repair後にだけresultをresolveする。`.addAccountPreservingActive`はfile-backed isolated runtimeをclose/reap後にunique immutable byte revisionをimportし、current active keyをstore isolation内で保持したregistry atomic replaceだけでcommitする。load/switch/remove/sign-out/reorder/refreshもAccountRegistryStore/journal ownerを通り、active logout/revokeより前にprepared journalをfsyncし、corrupt/missing revisionをemptyへfallbackしない。`ReviewRunCore` からidentity optional群、finalReview、`lifecycleMessage/errorMessage` storageが消え、validated IDs/output、typed failure/phaseだけが残る。
