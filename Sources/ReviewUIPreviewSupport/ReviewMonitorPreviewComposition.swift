@@ -64,18 +64,6 @@ func makeReviewMonitorPreviewContentViewControllerForPreview(
 
 public extension ReviewMonitorWindowController {
     convenience init(
-        appStore store: CodexReviewStore,
-        codexModelSource: ReviewMonitorCodexModelSource,
-        showSettings: @escaping @MainActor () -> Void
-    ) {
-        self.init(
-            store: store,
-            codexModelSource: codexModelSource,
-            showSettings: showSettings
-        )
-    }
-
-    convenience init(
         previewContent: ReviewMonitorPreviewContentSource,
         showSettings: @escaping @MainActor () -> Void
     ) {

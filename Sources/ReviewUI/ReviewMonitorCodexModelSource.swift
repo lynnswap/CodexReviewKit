@@ -4,12 +4,16 @@ import Observation
 @MainActor
 @Observable
 public final class ReviewMonitorCodexModelSource {
-    public private(set) var modelContext: CodexModelContext?
+    package private(set) var modelContext: CodexModelContext?
 
     @ObservationIgnored
     private var container: CodexModelContainer?
 
-    public init(modelContext: CodexModelContext? = nil) {
+    public init() {
+        modelContext = nil
+    }
+
+    package init(modelContext: CodexModelContext) {
         self.modelContext = modelContext
     }
 

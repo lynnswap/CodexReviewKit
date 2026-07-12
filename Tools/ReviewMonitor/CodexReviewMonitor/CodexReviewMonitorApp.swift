@@ -300,7 +300,7 @@ struct ReviewMonitorAppComposition {
                     )
                 }
                 return ReviewMonitorWindowController(
-                    appStore: dependencies.store,
+                    store: dependencies.store,
                     codexModelSource: codexModelSource,
                     showSettings: showSettings
                 )

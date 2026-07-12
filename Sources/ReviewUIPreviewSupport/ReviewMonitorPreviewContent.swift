@@ -2,7 +2,7 @@ import Foundation
 import CodexAppServerKit
 import CodexAppServerKitTesting
 import CodexDataKit
-@_spi(Testing) import CodexReviewKit
+import CodexReviewKit
 import ReviewUI
 
 @MainActor
@@ -10,7 +10,7 @@ public final class ReviewMonitorPreviewContentSource {
     public let store: CodexReviewStore
     private weak var lifetime: PreviewRuntimeLifetime?
 
-    public var codexModelSource: ReviewMonitorCodexModelSource {
+    package var codexModelSource: ReviewMonitorCodexModelSource {
         requireLifetime().modelSource
     }
 
@@ -51,7 +51,7 @@ public final class ReviewMonitorPreviewContentSource {
     }
 
     @discardableResult
-    public func appendPreviewChatLogStreamTick(
+    package func appendPreviewChatLogStreamTick(
         after tick: Int = 0,
         emitsNotifications: Bool = false
     ) async -> Int {
@@ -61,25 +61,25 @@ public final class ReviewMonitorPreviewContentSource {
         )
     }
 
-    public func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
+    package func snapshotForTesting(chatID: CodexThreadID) async -> CodexThreadSnapshot? {
         await requireLifetime().snapshotForTesting(chatID: chatID)
     }
 
-    public func observedTurnStateForTesting(
+    package func observedTurnStateForTesting(
         chatID: CodexThreadID
     ) -> CodexTurnSnapshot.State? {
         requireLifetime().observedTurnStateForTesting(chatID: chatID)
     }
 
-    public func interruptRequestCountForTesting() async -> Int {
+    package func interruptRequestCountForTesting() async -> Int {
         await requireLifetime().interruptRequestCountForTesting()
     }
 
-    public func turnCompletionNotificationCountForTesting() -> Int {
+    package func turnCompletionNotificationCountForTesting() -> Int {
         requireLifetime().turnCompletionNotificationCountForTesting()
     }
 
-    public func archiveRequestCountForTesting() async -> Int {
+    package func archiveRequestCountForTesting() async -> Int {
         await requireLifetime().archiveRequestCountForTesting()
     }
 
@@ -237,7 +237,7 @@ public enum ReviewMonitorPreviewContent {
         let cycle: Int
     }
 
-    public static func makeStore() -> CodexReviewStore {
+    package static func makeStore() -> CodexReviewStore {
         makeStore(runtimeLifetime: nil)
     }
 
@@ -269,11 +269,11 @@ public enum ReviewMonitorPreviewContent {
         )
     }
 
-    public static func makeCommandOutputStore() -> CodexReviewStore {
+    package static func makeCommandOutputStore() -> CodexReviewStore {
         makeCommandOutputContentSource().store
     }
 
-    public static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
+    package static func makeCommandOutputContentSource() -> ReviewMonitorPreviewContentSource {
         let cwd = "/path/to/workspace-alpha"
         let now = Date()
         let chatItems = makeCommandOutputPreviewChatLogItems(cwd: cwd)
@@ -631,7 +631,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    public static func makePreviewAccounts() -> [CodexReviewAccount] {
+    package static func makePreviewAccounts() -> [CodexReviewAccount] {
         [
             makePreviewAccount(
                 email: "workspace@example.com",
@@ -648,7 +648,7 @@ public enum ReviewMonitorPreviewContent {
         ]
     }
 
-    public static func makePreviewAccount(
+    package static func makePreviewAccount(
         email: String = "review@example.com",
         usedPercents: (short: Int, long: Int) = (short: 34, long: 61)
     ) -> CodexReviewAccount {
