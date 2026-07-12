@@ -282,7 +282,7 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
             attempts.allSatisfy { $0.threadIdentity.sourceThreadID == sourceThreadID },
             "One retained review cleanup must contain a single source thread lifecycle."
         )
-        let result = await appServer.cleanupReviewReportingFailures(
+        let result = await appServer.cleanupReview(
             firstAttempt.appServerReviewIdentity,
             additionalCleanupThreadIDs: attempts.dropFirst().map { attempt in
                 attempt.appServerReviewIdentity.cleanupThreadIDs
