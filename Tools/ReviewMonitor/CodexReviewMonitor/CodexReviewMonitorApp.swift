@@ -47,20 +47,20 @@ struct ReviewMonitorLaunchContext: Sendable {
 }
 
 enum ReviewMonitorLaunchEnvironment {
-    static let reviewModeKey = CodexReviewStoreTestEnvironment.reviewModeKey
+    static let reviewModeKey = "REVIEW_MONITOR_REVIEW_MODE"
     static let xctestConfigurationKey = "XCTestConfigurationFilePath"
     static let xctestBundlePathKey = "XCTestBundlePath"
     static let xcInjectBundleIntoKey = "XCInjectBundleInto"
     static let xctestSessionIdentifierKey = "XCTestSessionIdentifier"
     static let xcodeRunningForPlaygroundsKey = "XCODE_RUNNING_FOR_PLAYGROUNDS"
     static let xcodeRunningForPreviewsKey = "XCODE_RUNNING_FOR_PREVIEWS"
-    static let testPortKey = CodexReviewStoreTestEnvironment.portKey
-    static let testCodexCommandKey = CodexReviewStoreTestEnvironment.codexCommandKey
-    static let testDiagnosticsPathKey = CodexReviewStoreTestEnvironment.diagnosticsPathKey
-    static let reviewModeArgument = CodexReviewStoreTestEnvironment.reviewModeArgument
-    static let testPortArgument = CodexReviewStoreTestEnvironment.portArgument
-    static let testCodexCommandArgument = CodexReviewStoreTestEnvironment.codexCommandArgument
-    static let testDiagnosticsPathArgument = CodexReviewStoreTestEnvironment.diagnosticsPathArgument
+    static let testPortKey = "REVIEW_MONITOR_TEST_PORT"
+    static let testCodexCommandKey = "REVIEW_MONITOR_TEST_CODEX_COMMAND"
+    static let testDiagnosticsPathKey = "REVIEW_MONITOR_TEST_DIAGNOSTICS_PATH"
+    static let reviewModeArgument = "--review-monitor-review-mode"
+    static let testPortArgument = "--review-monitor-test-port"
+    static let testCodexCommandArgument = "--review-monitor-test-codex-command"
+    static let testDiagnosticsPathArgument = "--review-monitor-test-diagnostics-path"
 
     static func launchMode(
         environment: [String: String] = ProcessInfo.processInfo.environment,

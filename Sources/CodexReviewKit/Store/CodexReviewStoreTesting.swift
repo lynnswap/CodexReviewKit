@@ -1,18 +1,6 @@
 import Foundation
 
 extension CodexReviewStore {
-    nonisolated(unsafe) private static var requestCancellationDelayForTestingStorage: TimeInterval = 0
-    nonisolated(unsafe) package static var requestCancellationDelay: TimeInterval {
-        get { requestCancellationDelayForTestingStorage }
-        set { requestCancellationDelayForTestingStorage = max(0, newValue) }
-    }
-
-    @_spi(Testing)
-    public static var requestCancellationDelayForTesting: TimeInterval {
-        get { requestCancellationDelay }
-        set { requestCancellationDelay = newValue }
-    }
-
     package func loadForTesting(
         serverState: CodexReviewServerState,
         authPhase: CodexReviewAuthModel.Phase = .signedOut,

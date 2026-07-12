@@ -4,10 +4,10 @@ import Observation
 @MainActor
 @Observable
 public final class CodexReviewStore {
-    public package(set) var serverState: CodexReviewServerState = .stopped
-    public let auth: CodexReviewAuthModel
+    package var serverState: CodexReviewServerState = .stopped
+    package let auth: CodexReviewAuthModel
     package let settings: SettingsStore
-    public package(set) var serverURL: URL?
+    package var serverURL: URL?
     package var reviewRuns: Set<ReviewRunRecord> = []
     package var shouldAutoStartEmbeddedServer: Bool {
         backend.seed.shouldAutoStartEmbeddedServer
@@ -78,7 +78,7 @@ public final class CodexReviewStore {
         runtimeState.signalCancellation()
     }
 
-    public static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
+    package static func makePreviewStore(diagnosticsURL: URL? = nil) -> CodexReviewStore {
         makePreviewStore(seed: .init(), diagnosticsURL: diagnosticsURL)
     }
 
@@ -167,28 +167,28 @@ public final class CodexReviewStore {
         transitionToStopped()
     }
 
-    public func restart() async {
+    package func restart() async {
         await stop(purpose: .runtimeRestartPreservingRuns)
         await start(forceRestartIfNeeded: true)
     }
 
-    public func waitUntilStopped() async {
+    package func waitUntilStopped() async {
         await backend.waitUntilStopped()
     }
 
-    public func refreshAuthentication() async {
+    package func refreshAuthentication() async {
         await backend.refreshAuth(auth: auth)
     }
 
-    public func signIn() async throws {
+    package func signIn() async throws {
         try await backend.signIn(auth: auth)
     }
 
-    public func addAccount() async throws {
+    package func addAccount() async throws {
         try await backend.addAccount(auth: auth)
     }
 
-    public func cancelAuthentication() async {
+    package func cancelAuthentication() async {
         await backend.cancelAuthentication(auth: auth)
     }
 
@@ -211,7 +211,7 @@ public final class CodexReviewStore {
         try await signIn()
     }
 
-    public func logout() async {
+    package func logout() async {
         if auth.isAuthenticating, auth.selectedAccount == nil {
             await cancelAuthentication()
             return
@@ -225,7 +225,7 @@ public final class CodexReviewStore {
         }
     }
 
-    public func signOutActiveAccount() async throws {
+    package func signOutActiveAccount() async throws {
         try await backend.signOutActiveAccount(auth: auth)
     }
 
@@ -417,15 +417,15 @@ public final class CodexReviewStore {
         writeDiagnosticsIfNeeded()
     }
 
-    public var hasRunningReviewRuns: Bool {
+    package var hasRunningReviewRuns: Bool {
         reviewRuns.contains(where: { $0.isTerminal == false })
     }
 
-    public var runningReviewRunCount: Int {
+    package var runningReviewRunCount: Int {
         reviewRuns.filter { $0.isTerminal == false }.count
     }
 
-    public var canPerformPrimaryAuthenticationAction: Bool {
+    package var canPerformPrimaryAuthenticationAction: Bool {
         if auth.isAuthenticating {
             return true
         }

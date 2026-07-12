@@ -110,7 +110,7 @@ extension CodexReviewStore {
         )
     }
 
-    public func cancelAllRunningReviewRuns(
+    package func cancelAllRunningReviewRuns(
         reason: String = "Cancellation requested."
     ) async throws {
         let cancellation = ReviewCancellation.system(

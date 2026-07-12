@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-public enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
+package enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
     case alreadyInProgress
     case accountMutationBlockedByAuthentication
     case runtime(message: String)
@@ -14,7 +14,7 @@ public enum CodexReviewAuthenticationFailure: Error, Equatable, Sendable {
 }
 
 extension CodexReviewAuthenticationFailure: LocalizedError {
-    public var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .alreadyInProgress:
             "Authentication is already in progress."
@@ -37,7 +37,7 @@ extension CodexReviewAuthenticationFailure: LocalizedError {
 
 @MainActor
 @Observable
-public final class CodexReviewAuthModel {
+package final class CodexReviewAuthModel {
     package enum PendingAccountAction: Equatable, Sendable {
         case switchAccount(accountKey: String)
         case signOutActiveAccount
@@ -86,13 +86,13 @@ public final class CodexReviewAuthModel {
         package let message: String
     }
 
-    public struct Progress: Sendable, Equatable {
-        public var title: String
-        public var detail: String
-        public var browserURL: String?
-        public var userCode: String?
+    package struct Progress: Sendable, Equatable {
+        package var title: String
+        package var detail: String
+        package var browserURL: String?
+        package var userCode: String?
 
-        public init(
+        package init(
             title: String,
             detail: String,
             browserURL: String? = nil,
@@ -105,48 +105,48 @@ public final class CodexReviewAuthModel {
         }
     }
 
-    public enum Phase: Sendable, Equatable {
+    package enum Phase: Sendable, Equatable {
         case signedOut
         case signingIn(Progress)
         case failed(CodexReviewAuthenticationFailure)
     }
 
-    public package(set) var phase: Phase = .signedOut
-    public package(set) var persistedAccounts: [CodexReviewAccount] = []
-    public package(set) var persistedActiveAccountKey: String?
+    package var phase: Phase = .signedOut
+    package var persistedAccounts: [CodexReviewAccount] = []
+    package var persistedActiveAccountKey: String?
     package private(set) var detachedAccount: CodexReviewAccount?
-    public private(set) var selectedAccount: CodexReviewAccount?
+    package private(set) var selectedAccount: CodexReviewAccount?
 
     package private(set) var pendingAccountAction: PendingAccountAction?
     package private(set) var accountActionAlert: AccountActionAlert?
 
-    public var progress: Progress? {
+    package var progress: Progress? {
         guard case .signingIn(let progress) = phase else {
             return nil
         }
         return progress
     }
 
-    public var isAuthenticating: Bool {
+    package var isAuthenticating: Bool {
         progress != nil
     }
 
-    public var isAuthenticated: Bool {
+    package var isAuthenticated: Bool {
         selectedAccount != nil
     }
 
-    public var accounts: [CodexReviewAccount] {
+    package var accounts: [CodexReviewAccount] {
         guard let detachedAccount else {
             return persistedAccounts
         }
         return persistedAccounts + [detachedAccount]
     }
 
-    public var hasAccounts: Bool {
+    package var hasAccounts: Bool {
         accounts.isEmpty == false
     }
 
-    public var errorMessage: String? {
+    package var errorMessage: String? {
         guard case .failed(let failure) = phase else {
             return nil
         }
