@@ -71,6 +71,9 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
+      - name: Verify TextTransitions public API
+        run: scripts/verify-text-transitions-api.sh
+
       - name: Run Swift package tests
         run: swift test --build-system swiftbuild --no-parallel
 
