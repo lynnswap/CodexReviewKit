@@ -656,6 +656,124 @@ struct CodexReviewHostTests {
         #expect(providerAccount.capabilities.supportsRateLimitRefresh == false)
     }
 
+    @Test func liveStoreBuildsSwitchPlanFromDiskWhenAuthModelIsStale() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "first@example.com")
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+        let staleSecondAccount = CodexReviewAccount(email: "second@example.com")
+        store.auth.applyPersistedAccountStates(
+            [savedAccountPayload(from: staleSecondAccount)],
+            activeAccountKey: nil
+        )
+        store.auth.selectPersistedAccount(nil)
+
+        try await store.switchAccount(staleSecondAccount)
+
+        #expect(try activeAccountKey(homeURL: homeURL) == "second@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [
+            "first@example.com",
+            "second@example.com",
+        ])
+        #expect(store.auth.selectedAccount?.accountKey == "second@example.com")
+    }
+
+    @Test func liveStoreChoosesAddAccountRuntimeFromLeasedDiskSnapshot() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await mainTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+        try await mainTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await mainTransport.enqueueModels(.init(models: []))
+        let isolatedTransport = FakeCodexAppServerTransport()
+        try await isolatedTransport.enqueueChatGPTLogin(
+            loginID: "isolated-login",
+            authenticationURL: testAuthenticationURL
+        )
+        try await isolatedTransport.enqueueChatGPTLoginCancellation(.canceled)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+                return isolatedTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        store.auth.applyPersistedAccountStates([], activeAccountKey: nil)
+        store.auth.selectPersistedAccount(nil)
+        try await store.addAccount()
+
+        await isolatedTransport.waitForRequest(.accountLoginStart)
+        #expect(await mainTransport.recordedRequests(for: .accountLoginStart).isEmpty)
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreCollectsPostCommitAccountDirectoryDebtOnNextLoad() async throws {
+        let homeURL = try temporaryHome()
+        let accountKey = "removed@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            accounts: [accountKey]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: accountKey)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+        try await store.removeAccount(accountKey: accountKey)
+
+        let orphanedAccountURL = homeURL
+            .appendingPathComponent(".codex_review", isDirectory: true)
+            .appendingPathComponent("accounts", isDirectory: true)
+            .appendingPathComponent(pathComponent(forAccountKey: accountKey), isDirectory: true)
+        let orphanedRevisionURL = orphanedAccountURL
+            .appendingPathComponent("revisions", isDirectory: true)
+            .appendingPathComponent("post-commit-orphan.json")
+        try FileManager.default.createDirectory(
+            at: orphanedRevisionURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(#"{"tokens":{"id_token":"orphan"}}"#.utf8).write(to: orphanedRevisionURL)
+
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+
+        #expect(FileManager.default.fileExists(atPath: orphanedAccountURL.path) == false)
+        #expect(try activeAccountKey(homeURL: homeURL) == nil)
+    }
+
     @Test func liveStoreFailsFastForCorruptAccountRegistry() async throws {
         let homeURL = try temporaryHome()
         let registryURL = homeURL
@@ -2558,14 +2676,18 @@ struct CodexReviewHostTests {
         let dotDotDirectoryURL = accountsURL.appendingPathComponent("%2E%2E", isDirectory: true)
         try FileManager.default.createDirectory(at: dotDirectoryURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: dotDotDirectoryURL, withIntermediateDirectories: true)
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            records: [
+                ["accountKey": dotAccount.accountKey, "email": dotAccount.email],
+                ["accountKey": dotDotAccount.accountKey, "email": dotDotAccount.email],
+            ]
+        )
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             transport: FakeCodexAppServerTransport()
         )
-        store.auth.applyPersistedAccountStates([
-            savedAccountPayload(from: dotAccount),
-            savedAccountPayload(from: dotDotAccount),
-        ])
 
         try await store.removeAccount(accountKey: dotAccount.accountKey)
         try await store.removeAccount(accountKey: dotDotAccount.accountKey)

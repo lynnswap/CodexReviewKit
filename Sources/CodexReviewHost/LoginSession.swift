@@ -10,39 +10,28 @@ struct LoginRuntime: Sendable {
     let usesPrimaryRuntime: Bool
 }
 
+enum LoginRequest: Sendable {
+    case signIn
+    case addAccount
+}
+
 enum LoginPurpose: Equatable, Sendable {
     case signIn
-    case addAccountPreservingActive(String?)
+    case addAccountPreservingActive
 
     var activation: LoginActivation {
         switch self {
         case .signIn:
             return .activateAuthenticatedAccount
-        case .addAccountPreservingActive(let activeAccountKey):
-            return .preserveActiveAccount(activeAccountKey)
+        case .addAccountPreservingActive:
+            return .preserveActiveAccount
         }
     }
 }
 
 enum LoginActivation: Equatable, Sendable {
     case activateAuthenticatedAccount
-    case preserveActiveAccount(String?)
-
-    func resolvedActiveAccountKey(
-        authenticatedAccountKey: String,
-        persistedAccounts: [CodexReviewAccount]
-    ) -> String? {
-        switch self {
-        case .activateAuthenticatedAccount:
-            return authenticatedAccountKey
-        case .preserveActiveAccount(let activeAccountKey):
-            return activeAccountKey.flatMap { activeAccountKey in
-                persistedAccounts.contains(where: { $0.accountKey == activeAccountKey })
-                    ? activeAccountKey
-                    : nil
-            }
-        }
-    }
+    case preserveActiveAccount
 }
 
 enum LoginRootObservation: Sendable {

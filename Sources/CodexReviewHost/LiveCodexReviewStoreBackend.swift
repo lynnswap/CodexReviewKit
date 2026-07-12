@@ -736,18 +736,12 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     func signIn(auth: CodexReviewAuthModel) async throws {
         try await attachedStore?.requireReviewThreadRetentionAcceptance()
-        try await beginStockLogin(auth: auth, purpose: .signIn)
+        try await beginStockLogin(auth: auth, request: .signIn)
     }
 
     func addAccount(auth: CodexReviewAuthModel) async throws {
         try await attachedStore?.requireReviewThreadRetentionAcceptance()
-        let activeAccountKey = auth.persistedActiveAccountKey ?? auth.selectedAccount?.accountKey
-        try await beginStockLogin(
-            auth: auth,
-            purpose: activeAccountKey != nil
-                ? .addAccountPreservingActive(activeAccountKey)
-                : .signIn
-        )
+        try await beginStockLogin(auth: auth, request: .addAccount)
     }
 
     func cancelAuthentication(auth: CodexReviewAuthModel) async {
@@ -763,18 +757,8 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
         try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
-        guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
-            return
-        }
-        try await accountRegistry.activateAccount(
-            accountKey,
-            accounts: auth.persistedAccounts.map(savedAccountPayload(from:))
-        )
-        auth.applyPersistedAccountStates(
-            auth.persistedAccounts.map(savedAccountPayload(from:)),
-            activeAccountKey: accountKey
-        )
-        auth.selectPersistedAccount(auth.persistedAccounts.first(where: { $0.accountKey == accountKey })?.id)
+        let persisted = try await accountRegistry.activateAccount(accountKey)
+        applyAccountRegistrySnapshot(persisted, to: auth)
         auth.updatePhase(.signedOut)
         guard let attachedStore, appServerBackend != nil else {
             return
@@ -790,38 +774,33 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func removeAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
         try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
-        let removedActiveAccount = auth.selectedAccount?.accountKey == accountKey
-            || auth.persistedActiveAccountKey == accountKey
-        let remaining = auth.persistedAccounts.filter { $0.accountKey != accountKey }
-        let activeAccountKey = auth.persistedActiveAccountKey == accountKey
-            ? nil
-            : auth.persistedActiveAccountKey
+        let before = try await accountRegistry.load()
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
+        guard before.accounts.contains(where: { $0.accountKey == normalizedAccountKey }) else {
+            return
+        }
+        let removedActiveAccount = before.activeAccountKey == normalizedAccountKey
+        let persisted: AccountRegistryStore.Snapshot
         if removedActiveAccount {
             let prepared = try await accountRegistry.prepareIrreversibleRemoval(
-                accounts: remaining.map(savedAccountPayload(from:)),
-                activeAccountKey: activeAccountKey
+                accountKey: normalizedAccountKey
             )
             do {
                 if let appServerBackend {
-                    _ = try await appServerBackend.logout(.init(accountKey))
+                    _ = try await appServerBackend.logout(.init(normalizedAccountKey))
                 }
-                try await accountRegistry.commitPreparedMutation(prepared)
+                persisted = try await accountRegistry.commitPreparedMutation(prepared)
             } catch {
                 try await abortPreparedAccountMutation(prepared, after: error)
             }
         } else {
-            try await accountRegistry.saveAccounts(
-                remaining.map(savedAccountPayload(from:)),
-                activeAccountKey: activeAccountKey
+            persisted = try await accountRegistry.removeInactiveAccount(
+                accountKey: normalizedAccountKey
             )
         }
-        try await accountRegistry.removeSavedAccountDirectory(accountKey: accountKey)
-        auth.applyPersistedAccountStates(
-            remaining.map(savedAccountPayload(from:)),
-            activeAccountKey: activeAccountKey
-        )
+        await accountRegistry.cleanupRemovedAccountDirectory(accountKey: normalizedAccountKey)
+        applyAccountRegistrySnapshot(persisted, to: auth)
         if removedActiveAccount {
-            auth.selectPersistedAccount(nil)
             auth.updatePhase(.signedOut)
             guard let attachedStore, appServerBackend != nil else {
                 return
@@ -841,28 +820,19 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         toIndex: Int
     ) async throws {
         try await withAccountMutation {
-        var accounts = auth.persistedAccounts
-        guard let sourceIndex = accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
-            return
-        }
-        let destinationIndex = max(0, min(toIndex, accounts.count - 1))
-        guard sourceIndex != destinationIndex else {
-            return
-        }
-        let account = accounts.remove(at: sourceIndex)
-        accounts.insert(account, at: destinationIndex)
-        try await accountRegistry.saveAccounts(
-            accounts.map(savedAccountPayload(from:)),
-            activeAccountKey: auth.persistedActiveAccountKey
+        let persisted = try await accountRegistry.reorderAccount(
+            accountKey: accountKey,
+            toIndex: toIndex
         )
-        auth.applyPersistedAccountStates(accounts.map(savedAccountPayload(from:)))
+        applyAccountRegistrySnapshot(persisted, to: auth)
         }
     }
 
     func signOutActiveAccount(auth: CodexReviewAuthModel) async throws {
         try await attachedStore?.requireReviewThreadRetentionAcceptance()
         try await withAccountMutation {
-        guard let account = auth.selectedAccount else {
+        let before = try await accountRegistry.load()
+        guard let accountKey = before.activeAccountKey else {
             auth.updatePhase(.signedOut)
             auth.selectPersistedAccount(nil)
             return
@@ -873,23 +843,21 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                 reason: .system(message: "Signed out.")
             )
         }
-        let remaining = auth.persistedAccounts.filter { $0.accountKey != account.accountKey }
         let prepared = try await accountRegistry.prepareIrreversibleRemoval(
-            accounts: remaining.map(savedAccountPayload(from:)),
-            activeAccountKey: nil
+            accountKey: accountKey
         )
+        let persisted: AccountRegistryStore.Snapshot
         do {
             if let appServerBackend {
-                _ = try await appServerBackend.logout(.init(account.accountKey))
+                _ = try await appServerBackend.logout(.init(accountKey))
             }
-            try await accountRegistry.commitPreparedMutation(prepared)
+            persisted = try await accountRegistry.commitPreparedMutation(prepared)
         } catch {
             try await abortPreparedAccountMutation(prepared, after: error)
         }
-        try await accountRegistry.removeSavedAccountDirectory(accountKey: account.accountKey)
+        await accountRegistry.cleanupRemovedAccountDirectory(accountKey: accountKey)
+        applyAccountRegistrySnapshot(persisted, to: auth)
         auth.updatePhase(.signedOut)
-        auth.selectPersistedAccount(nil)
-        auth.applyPersistedAccountStates(remaining.map(savedAccountPayload(from:)), activeAccountKey: nil)
         if shouldRecycleRuntime, let attachedStore {
             await stop(store: attachedStore, purpose: .accountTransitionPreservingRuns)
             await start(store: attachedStore, forceRestartIfNeeded: true)
@@ -942,12 +910,16 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     private func beginStockLogin(
         auth: CodexReviewAuthModel,
-        purpose: LoginPurpose
+        request: LoginRequest
     ) async throws {
         guard loginSession == nil else {
             throw CodexReviewAuthenticationFailure.alreadyInProgress
         }
-        let mutationLease = try await accountRegistry.beginAuthenticationMutation()
+        let authenticationMutation = try await accountRegistry.beginAuthenticationMutation(
+            request: request
+        )
+        let mutationLease = authenticationMutation.lease
+        let purpose = authenticationMutation.purpose
         let generationID = UUID()
         let runtimeProvider: @MainActor @Sendable (LoginPurpose) async throws -> LoginRuntime = {
             [weak self] purpose in
@@ -1534,6 +1506,17 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         }
     }
 
+    private func applyAccountRegistrySnapshot(
+        _ snapshot: AccountRegistryStore.Snapshot,
+        to auth: CodexReviewAuthModel
+    ) {
+        auth.applyPersistedAccountStates(
+            snapshot.accounts,
+            activeAccountKey: snapshot.activeAccountKey
+        )
+        auth.selectPersistedAccount(snapshot.activeAccountKey)
+    }
+
     @discardableResult
     private func applyAuthSnapshotSerialized(
         _ snapshot: CodexReviewBackendModel.Auth.Snapshot,
@@ -1545,65 +1528,41 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
               let backendAccount = snapshot.accounts.first(where: { $0.id.rawValue == activeAccountID }),
               let account = Self.monitorAccount(from: backendAccount)
         else {
-            if case .activateAuthenticatedAccount = activation {
-                try await accountRegistry.saveAccounts(
-                    auth.persistedAccounts.map(savedAccountPayload(from:)),
-                    activeAccountKey: nil
+            guard case .activateAuthenticatedAccount = activation else {
+                throw CodexReviewAuthenticationFailure.protocolViolation(
+                    message: "An isolated successful login did not expose its authenticated account."
                 )
-                auth.selectPersistedAccount(nil)
-                auth.updatePhase(.signedOut)
-            } else {
-                auth.updatePhase(.signedOut)
             }
+            let persisted = try await accountRegistry.deactivateAccount()
+            auth.applyPersistedAccountStates(
+                persisted.accounts,
+                activeAccountKey: persisted.activeAccountKey
+            )
+            auth.selectPersistedAccount(nil)
+            auth.updatePhase(.signedOut)
             return nil
         }
-        var persistedAccountPayloads = auth.persistedAccounts.map(savedAccountPayload(from:))
-        let existingAccount = auth.persistedAccounts.first(where: { $0.accountKey == account.accountKey })
-        var authenticatedAccountPayload = savedAccountPayload(from: account)
-        if let existingAccount {
-            let existingPayload = savedAccountPayload(from: existingAccount)
-            authenticatedAccountPayload.rateLimits = existingPayload.rateLimits
-            authenticatedAccountPayload.lastRateLimitFetchAt = existingPayload.lastRateLimitFetchAt
-            authenticatedAccountPayload.lastRateLimitError = existingPayload.lastRateLimitError
-        }
-        if let index = persistedAccountPayloads.firstIndex(where: { $0.accountKey == account.accountKey }) {
-            persistedAccountPayloads[index] = authenticatedAccountPayload
-        } else {
-            persistedAccountPayloads.insert(authenticatedAccountPayload, at: 0)
-        }
-        let activeAccountKey = activation.resolvedActiveAccountKey(
-            authenticatedAccountKey: account.accountKey,
-            persistedAccounts: auth.persistedAccounts + (existingAccount == nil ? [account] : [])
-        )
-        if authenticatedAccountPayload.kind == .chatGPT {
-            try await accountRegistry.commitAuthenticatedAccount(
-                authenticatedAccountPayload,
-                accounts: persistedAccountPayloads,
-                activeAccountKey: activeAccountKey,
+        let accountPayload = savedAccountPayload(from: account)
+        let persisted: AccountRegistryStore.Snapshot
+        if accountPayload.kind == .chatGPT {
+            persisted = try await accountRegistry.commitAuthenticatedAccount(
+                accountPayload,
+                activation: activation,
                 authSourceCodexHomeURL: authSourceCodexHomeURL
             )
         } else {
-            try await accountRegistry.saveAccounts(
-                persistedAccountPayloads,
-                activeAccountKey: activeAccountKey
+            persisted = try await accountRegistry.upsertAccount(
+                accountPayload,
+                activation: activation
             )
         }
-        let persistedAccount: CodexReviewAccount
-        if let existingAccount {
-            existingAccount.updateEmail(account.email)
-            existingAccount.updateKind(account.kind, capabilities: account.capabilities)
-            existingAccount.updatePlanType(account.planType)
-            persistedAccount = existingAccount
-        } else {
-            persistedAccount = account
-        }
         auth.applyPersistedAccountStates(
-            persistedAccountPayloads,
-            activeAccountKey: activeAccountKey
+            persisted.accounts,
+            activeAccountKey: persisted.activeAccountKey
         )
-        auth.selectPersistedAccount(activeAccountKey)
-        auth.updatePhase(auth.selectedAccount == nil ? .signedOut : .signedOut)
-        return auth.persistedAccounts.first(where: { $0.accountKey == persistedAccount.accountKey })
+        auth.selectPersistedAccount(persisted.activeAccountKey)
+        auth.updatePhase(.signedOut)
+        return auth.persistedAccounts.first(where: { $0.accountKey == account.accountKey })
     }
 
     private func installRuntimeConsumers(
@@ -2289,6 +2248,11 @@ actor AccountRegistryStore {
         fileprivate let id: UUID
     }
 
+    struct AuthenticationMutation: Sendable {
+        let lease: MutationLease
+        let purpose: LoginPurpose
+    }
+
     private enum MutationKind {
         case authentication
         case account
@@ -2309,26 +2273,14 @@ actor AccountRegistryStore {
         try Disk.load(codexHomeURL: codexHomeURL)
     }
 
-    func saveAccounts(
-        _ accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?
-    ) throws {
-        try Disk.saveAccounts(
-            accounts,
-            activeAccountKey: activeAccountKey,
-            codexHomeURL: codexHomeURL
-        )
+    func deactivateAccount() throws -> Snapshot {
+        try Disk.deactivateAccount(codexHomeURL: codexHomeURL)
+        return try Disk.load(codexHomeURL: codexHomeURL)
     }
 
-    func activateAccount(
-        _ accountKey: String,
-        accounts: [CodexSavedAccountPayload]
-    ) throws {
-        try Disk.activateAccount(
-            accountKey,
-            accounts: accounts,
-            codexHomeURL: codexHomeURL
-        )
+    func activateAccount(_ accountKey: String) throws -> Snapshot {
+        try Disk.activateAccount(accountKey, codexHomeURL: codexHomeURL)
+        return try Disk.load(codexHomeURL: codexHomeURL)
     }
 
     func updateCachedRateLimits(from account: CodexSavedAccountPayload) throws {
@@ -2350,43 +2302,76 @@ actor AccountRegistryStore {
 
     func commitAuthenticatedAccount(
         _ authenticatedAccount: CodexSavedAccountPayload,
-        accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?,
+        activation: LoginActivation,
         authSourceCodexHomeURL: URL?
-    ) throws {
+    ) throws -> Snapshot {
         try Disk.commitAuthenticatedAccount(
             authenticatedAccount,
-            accounts: accounts,
-            activeAccountKey: activeAccountKey,
+            activation: activation,
             authSourceCodexHomeURL: authSourceCodexHomeURL ?? codexHomeURL,
             codexHomeURL: codexHomeURL
         )
+        return try Disk.load(codexHomeURL: codexHomeURL)
+    }
+
+    func upsertAccount(
+        _ account: CodexSavedAccountPayload,
+        activation: LoginActivation
+    ) throws -> Snapshot {
+        try Disk.upsertAccount(
+            account,
+            activation: activation,
+            codexHomeURL: codexHomeURL
+        )
+        return try Disk.load(codexHomeURL: codexHomeURL)
     }
 
     func prepareIrreversibleRemoval(
-        accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?
+        accountKey: String
     ) throws -> PreparedMutation {
         try Disk.prepareIrreversibleRemoval(
-            accounts: accounts,
-            activeAccountKey: activeAccountKey,
+            accountKey: accountKey,
             codexHomeURL: codexHomeURL
         )
     }
 
-    func commitPreparedMutation(_ mutation: PreparedMutation) throws {
+    func commitPreparedMutation(_ mutation: PreparedMutation) throws -> Snapshot {
         try Disk.commitPreparedMutation(mutation, codexHomeURL: codexHomeURL)
+        return try Disk.load(codexHomeURL: codexHomeURL)
     }
 
     func abortPreparedMutation(_ mutation: PreparedMutation) throws {
         try Disk.abortPreparedMutation(mutation, codexHomeURL: codexHomeURL)
     }
 
-    func removeSavedAccountDirectory(accountKey: String) throws {
-        try Disk.removeSavedAccountDirectory(
+    func removeInactiveAccount(accountKey: String) throws -> Snapshot {
+        try Disk.removeInactiveAccount(accountKey: accountKey, codexHomeURL: codexHomeURL)
+        return try Disk.load(codexHomeURL: codexHomeURL)
+    }
+
+    func reorderAccount(accountKey: String, toIndex: Int) throws -> Snapshot {
+        try Disk.reorderAccount(
             accountKey: accountKey,
+            toIndex: toIndex,
             codexHomeURL: codexHomeURL
         )
+        return try Disk.load(codexHomeURL: codexHomeURL)
+    }
+
+    func cleanupRemovedAccountDirectory(accountKey: String) {
+        do {
+            try Disk.removeSavedAccountDirectory(
+                accountKey: accountKey,
+                codexHomeURL: codexHomeURL
+            )
+        } catch {
+            // The registry replace is the product commit. A stale account directory
+            // is unreferenced data and is collected by the next load; it cannot roll
+            // a committed account selection back into the UI.
+            logger.error(
+                "Committed account removal left cleanup debt for \(accountKey, privacy: .private(mask: .hash)): \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     func copySavedAuth(accountKey: String, to destinationCodexHomeURL: URL) throws -> Bool {
@@ -2398,7 +2383,7 @@ actor AccountRegistryStore {
         )
     }
 
-    func beginAuthenticationMutation() throws -> MutationLease {
+    func beginAuthenticationMutation(request: LoginRequest) throws -> AuthenticationMutation {
         if let activeMutation {
             switch activeMutation.kind {
             case .authentication:
@@ -2407,7 +2392,17 @@ actor AccountRegistryStore {
                 throw CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication
             }
         }
-        return installMutation(kind: .authentication)
+        let snapshot = try Disk.load(codexHomeURL: codexHomeURL)
+        let purpose: LoginPurpose = switch request {
+        case .signIn:
+            .signIn
+        case .addAccount:
+            snapshot.activeAccountKey == nil ? .signIn : .addAccountPreservingActive
+        }
+        return .init(
+            lease: installMutation(kind: .authentication),
+            purpose: purpose
+        )
     }
 
     func beginAccountMutation() throws -> MutationLease {
@@ -2429,9 +2424,9 @@ actor AccountRegistryStore {
     }
 
     private func requireNoAccountMutationForBackgroundPersistence() throws {
-        guard activeMutation?.kind != .account else {
+        guard activeMutation == nil else {
             throw CodexReviewAuthenticationFailure.accountCommit(
-                message: "Background account persistence is blocked while an account mutation is in progress."
+                message: "Background account metadata persistence is blocked while an account mutation or authentication is in progress."
             )
         }
     }
@@ -2676,31 +2671,13 @@ enum Disk {
         return .init(accounts: accounts, activeAccountKey: activeAccountKey)
     }
 
-    static func saveAccounts(
-        _ accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?,
-        codexHomeURL: URL
-    ) throws {
-        let existing = try loadRegistry(codexHomeURL: codexHomeURL)
-        let normalizedActiveAccountKey = activeAccountKey
-            .map(CodexReviewAccount.normalizedEmail)
-            .flatMap { accountKey in
-                accounts.contains(where: { $0.accountKey == accountKey }) ? accountKey : nil
-            }
-        try saveRegistry(
-            .init(
-                schemaVersion: existing.schemaVersion,
-                generation: existing.generation,
-                contentHash: existing.contentHash,
-                activeAccountKey: normalizedActiveAccountKey,
-                accounts: mergedEntries(
-                    accounts,
-                    activeAccountKey: normalizedActiveAccountKey,
-                    existing: existing.accounts
-                )
-            ),
-            codexHomeURL: codexHomeURL
-        )
+    static func deactivateAccount(codexHomeURL: URL) throws {
+        var registry = try loadRegistry(codexHomeURL: codexHomeURL)
+        guard registry.activeAccountKey != nil else {
+            return
+        }
+        registry.activeAccountKey = nil
+        try saveRegistry(registry, codexHomeURL: codexHomeURL)
     }
 
     private static func mergedEntries(
@@ -2744,7 +2721,6 @@ enum Disk {
 
     static func activateAccount(
         _ accountKey: String,
-        accounts: [CodexSavedAccountPayload],
         codexHomeURL: URL
     ) throws {
         let targetAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
@@ -2762,11 +2738,11 @@ enum Disk {
         let desiredAuthData = try validatedAuthData(at: savedAuthURL)
         var desiredRegistry = beforeRegistry
         desiredRegistry.activeAccountKey = targetAccountKey
-        desiredRegistry.accounts = mergedEntries(
-            accounts,
-            activeAccountKey: targetAccountKey,
-            existing: beforeRegistry.accounts
-        )
+        if let index = desiredRegistry.accounts.firstIndex(where: {
+            normalizedAccountKey(from: $0) == targetAccountKey
+        }) {
+            desiredRegistry.accounts[index].lastActivatedAt = Date()
+        }
         desiredRegistry = try nextRegistry(from: desiredRegistry)
         var journal = MutationJournal(
             id: UUID(),
@@ -2791,21 +2767,25 @@ enum Disk {
     }
 
     static func prepareIrreversibleRemoval(
-        accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?,
+        accountKey: String,
         codexHomeURL: URL
     ) throws -> AccountRegistryStore.PreparedMutation {
         let beforeRegistry = try loadRegistry(codexHomeURL: codexHomeURL)
-        let normalizedActiveAccountKey = activeAccountKey
-            .map(CodexReviewAccount.normalizedEmail)
-            .flatMap { key in accounts.contains(where: { $0.accountKey == key }) ? key : nil }
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
+        guard beforeRegistry.accounts.contains(where: {
+            self.normalizedAccountKey(from: $0) == normalizedAccountKey
+        }) else {
+            throw CodexReviewAuthenticationFailure.persistenceInconsistent(
+                message: "Cannot prepare removal for missing account \(normalizedAccountKey)."
+            )
+        }
         var desiredRegistry = beforeRegistry
-        desiredRegistry.activeAccountKey = normalizedActiveAccountKey
-        desiredRegistry.accounts = mergedEntries(
-            accounts,
-            activeAccountKey: normalizedActiveAccountKey,
-            existing: beforeRegistry.accounts
-        )
+        desiredRegistry.accounts.removeAll {
+            self.normalizedAccountKey(from: $0) == normalizedAccountKey
+        }
+        if desiredRegistry.activeAccountKey.map(CodexReviewAccount.normalizedEmail) == normalizedAccountKey {
+            desiredRegistry.activeAccountKey = nil
+        }
         desiredRegistry = try nextRegistry(from: desiredRegistry)
         let id = UUID()
         try writeJournal(
@@ -2901,8 +2881,7 @@ enum Disk {
 
     static func commitAuthenticatedAccount(
         _ authenticatedAccount: CodexSavedAccountPayload,
-        accounts: [CodexSavedAccountPayload],
-        activeAccountKey: String?,
+        activation: LoginActivation,
         authSourceCodexHomeURL: URL,
         codexHomeURL: URL
     ) throws {
@@ -2935,9 +2914,24 @@ enum Disk {
             )
             createdRevision = revision
         }
-        let normalizedActiveAccountKey = activeAccountKey
-            .map(CodexReviewAccount.normalizedEmail)
-            .flatMap { key in accounts.contains(where: { $0.accountKey == key }) ? key : nil }
+        var authenticatedAccount = authenticatedAccount
+        if let existingPayload = existingEntry.flatMap(makePayload(from:)) {
+            authenticatedAccount.rateLimits = existingPayload.rateLimits
+            authenticatedAccount.lastRateLimitFetchAt = existingPayload.lastRateLimitFetchAt
+            authenticatedAccount.lastRateLimitError = existingPayload.lastRateLimitError
+        }
+        var accounts = existing.accounts.compactMap(makePayload(from:))
+        if let index = accounts.firstIndex(where: { $0.accountKey == authenticatedAccount.accountKey }) {
+            accounts[index] = authenticatedAccount
+        } else {
+            accounts.insert(authenticatedAccount, at: 0)
+        }
+        let normalizedActiveAccountKey: String? = switch activation {
+        case .activateAuthenticatedAccount:
+            authenticatedAccount.accountKey
+        case .preserveActiveAccount:
+            existing.activeAccountKey
+        }
         var desired = existing
         desired.activeAccountKey = normalizedActiveAccountKey
         desired.accounts = mergedEntries(
@@ -2967,6 +2961,86 @@ enum Disk {
             }
             throw error
         }
+    }
+
+    static func upsertAccount(
+        _ account: CodexSavedAccountPayload,
+        activation: LoginActivation,
+        codexHomeURL: URL
+    ) throws {
+        let existing = try loadRegistry(codexHomeURL: codexHomeURL)
+        var account = account
+        if let existingEntry = existing.accounts.first(where: {
+            normalizedAccountKey(from: $0) == account.accountKey
+        }), let existingPayload = makePayload(from: existingEntry) {
+            account.rateLimits = existingPayload.rateLimits
+            account.lastRateLimitFetchAt = existingPayload.lastRateLimitFetchAt
+            account.lastRateLimitError = existingPayload.lastRateLimitError
+        }
+        var accounts = existing.accounts.compactMap(makePayload(from:))
+        if let index = accounts.firstIndex(where: { $0.accountKey == account.accountKey }) {
+            accounts[index] = account
+        } else {
+            accounts.insert(account, at: 0)
+        }
+        let activeAccountKey: String? = switch activation {
+        case .activateAuthenticatedAccount:
+            account.accountKey
+        case .preserveActiveAccount:
+            existing.activeAccountKey
+        }
+        try saveRegistry(
+            .init(
+                schemaVersion: existing.schemaVersion,
+                generation: existing.generation,
+                contentHash: existing.contentHash,
+                activeAccountKey: activeAccountKey,
+                accounts: mergedEntries(
+                    accounts,
+                    activeAccountKey: activeAccountKey,
+                    existing: existing.accounts
+                )
+            ),
+            codexHomeURL: codexHomeURL
+        )
+    }
+
+    static func removeInactiveAccount(
+        accountKey: String,
+        codexHomeURL: URL
+    ) throws {
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
+        let existing = try loadRegistry(codexHomeURL: codexHomeURL)
+        precondition(
+            existing.activeAccountKey.map(CodexReviewAccount.normalizedEmail) != normalizedAccountKey,
+            "An active account removal requires the irreversible mutation journal."
+        )
+        var desired = existing
+        desired.accounts.removeAll {
+            self.normalizedAccountKey(from: $0) == normalizedAccountKey
+        }
+        try saveRegistry(desired, codexHomeURL: codexHomeURL)
+    }
+
+    static func reorderAccount(
+        accountKey: String,
+        toIndex: Int,
+        codexHomeURL: URL
+    ) throws {
+        let normalizedAccountKey = CodexReviewAccount.normalizedEmail(accountKey)
+        var registry = try loadRegistry(codexHomeURL: codexHomeURL)
+        guard let sourceIndex = registry.accounts.firstIndex(where: {
+            self.normalizedAccountKey(from: $0) == normalizedAccountKey
+        }), registry.accounts.count > 1 else {
+            return
+        }
+        let destinationIndex = max(0, min(toIndex, registry.accounts.count - 1))
+        guard sourceIndex != destinationIndex else {
+            return
+        }
+        let entry = registry.accounts.remove(at: sourceIndex)
+        registry.accounts.insert(entry, at: destinationIndex)
+        try saveRegistry(registry, codexHomeURL: codexHomeURL)
     }
 
     static func saveSharedAuth(
@@ -3290,6 +3364,19 @@ enum Disk {
             }
             if removedRevision {
                 try synchronizeDirectory(at: revisionsURL)
+            }
+            let remainingRevisionURLs = try FileManager.default.contentsOfDirectory(
+                at: revisionsURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ).filter { $0.pathExtension == "json" }
+            let accountDirectoryPrefix = accountDirectory.standardizedFileURL.path + "/"
+            let isReferencedAccountDirectory = referencedPaths.contains {
+                $0.hasPrefix(accountDirectoryPrefix)
+            }
+            if remainingRevisionURLs.isEmpty, isReferencedAccountDirectory == false {
+                try FileManager.default.removeItem(at: accountDirectory)
+                try synchronizeDirectory(at: accountsURL)
             }
         }
     }
