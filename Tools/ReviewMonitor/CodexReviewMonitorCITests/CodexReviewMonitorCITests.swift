@@ -107,7 +107,7 @@ struct CodexReviewMonitorCITests {
             NSApp.windowsMenu = previousWindowsMenu
         }
 
-        let expectedStore = CodexReviewStore.makePreviewStore()
+        let expectedStore = ReviewMonitorPreviewContent.makeContentSource().store
         var capturedContext: ReviewMonitorLaunchContext?
         var capturedShowSettings: (@MainActor () -> Void)?
         let recorder = WindowControllerFactoryRecorder()
@@ -172,7 +172,9 @@ struct CodexReviewMonitorCITests {
 
         let composition = ReviewMonitorAppComposition(
             makeDependencies: { _ in
-                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
+                ReviewMonitorAppDependencies(
+                    store: ReviewMonitorPreviewContent.makeContentSource().store
+                )
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -219,7 +221,9 @@ struct CodexReviewMonitorCITests {
         let settingsWindowController = CountingWindowController()
         let composition = ReviewMonitorAppComposition(
             makeDependencies: { _ in
-                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
+                ReviewMonitorAppDependencies(
+                    store: ReviewMonitorPreviewContent.makeContentSource().store
+                )
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
@@ -253,7 +257,7 @@ struct CodexReviewMonitorCITests {
             makeLiveStore: { _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview store creation should not build a live store.")
-                return CodexReviewStore.makePreviewStore()
+                return ReviewMonitorPreviewContent.makeContentSource().store
             }
         )
         let context = ReviewMonitorLaunchContext(
@@ -279,7 +283,7 @@ struct CodexReviewMonitorCITests {
             makeLiveStore: { _, _ in
                 didCallLiveStoreFactory = true
                 Issue.record("Preview window creation should not build a live store.")
-                return CodexReviewStore.makePreviewStore()
+                return ReviewMonitorPreviewContent.makeContentSource().store
             }
         )
         let context = ReviewMonitorLaunchContext(
@@ -340,7 +344,7 @@ struct CodexReviewMonitorCITests {
         let runtimePreferencesStore = RuntimePreferencesStoreStub(
             preferences: expectedRuntimePreferences
         )
-        let expectedStore = CodexReviewStore.makePreviewStore()
+        let expectedStore = ReviewMonitorPreviewContent.makeContentSource().store
         var capturedRuntimePreferences: CodexReviewRuntime.Preferences?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
@@ -364,7 +368,7 @@ struct CodexReviewMonitorCITests {
 
     @Test func liveCompositionPassesAppServerLifecycleHandlerToLiveStoreFactory() {
         let runtimePreferencesStore = RuntimePreferencesStoreStub()
-        let expectedStore = CodexReviewStore.makePreviewStore()
+        let expectedStore = ReviewMonitorPreviewContent.makeContentSource().store
         var capturedLifecycleHandler: CodexReviewAppServerLifecycleHandler?
         let composition = ReviewMonitorAppComposition.live(
             runtimePreferencesStore: runtimePreferencesStore,
@@ -619,7 +623,9 @@ struct CodexReviewMonitorCITests {
 
         let composition = ReviewMonitorAppComposition(
             makeDependencies: { _ in
-                ReviewMonitorAppDependencies(store: CodexReviewStore.makePreviewStore())
+                ReviewMonitorAppDependencies(
+                    store: ReviewMonitorPreviewContent.makeContentSource().store
+                )
             },
             makeWindowController: { _, _ in
                 CountingWindowController()
