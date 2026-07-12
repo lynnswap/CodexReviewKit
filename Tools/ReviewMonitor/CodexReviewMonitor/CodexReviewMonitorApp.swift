@@ -188,9 +188,6 @@ final class ReviewMonitorLifecycleController {
     func applicationShouldTerminate(
         replyingTo application: any ReviewMonitorTerminationReplying
     ) -> NSApplication.TerminateReply {
-        guard shouldManageEmbeddedServer else {
-            return .terminateNow
-        }
         guard terminationTask == nil else {
             return .terminateLater
         }

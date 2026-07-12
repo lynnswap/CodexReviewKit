@@ -72,6 +72,31 @@ struct CodexReviewMonitorCITests {
         #expect(responder.replies == [true])
     }
 
+    @Test func lifecycleStopsPreviewStoreWithoutStartingEmbeddedServer() async {
+        let store = FakeLifecycleStore()
+        let lifecycle = ReviewMonitorLifecycleController(
+            store: store,
+            shouldManageEmbeddedServer: false
+        )
+        let responder = TerminationReplyRecorder()
+
+        lifecycle.applicationDidFinishLaunching(launchMode: .application)
+        #expect(store.startArguments.isEmpty)
+
+        let terminationReply = lifecycle.applicationShouldTerminate(replyingTo: responder)
+        #expect(terminationReply == .terminateLater)
+
+        await store.stopStartedSignal.wait()
+        #expect(store.stopCallCount == 1)
+        #expect(responder.replies.isEmpty)
+
+        await store.stopGate.open()
+        let reply = await responder.waitForReply()
+
+        #expect(reply == true)
+        #expect(responder.replies == [true])
+    }
+
     @Test func appDelegateUsesInjectedCompositionForStartupDependencies() {
         let previousMainMenu = NSApp.mainMenu
         let previousServicesMenu = NSApp.servicesMenu
