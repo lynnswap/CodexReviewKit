@@ -232,6 +232,11 @@ package actor AppServerCodexReviewBackend: CodexReviewBackend, CodexModelActor {
         )
 
         return retainedIdentities.map { identity in
+            // Do not turn this into a recoverable cross-source cleanup path. CodexKit
+            // keys token-owned retention by the token's source thread and constructs
+            // restarted identities from that same source handle. If this invariant is
+            // broken, assigning the identity to this run would transfer deletion
+            // authority across review lifecycles with no valid quarantine owner.
             precondition(
                 identity.sourceThreadID.rawValue
                     == interruptedAttempt.threadIdentity.sourceThreadID.rawValue,
