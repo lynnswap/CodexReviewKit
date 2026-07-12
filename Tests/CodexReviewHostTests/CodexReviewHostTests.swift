@@ -5,7 +5,7 @@ import CodexAppServerKit
 import CodexAppServerKitTesting
 import CodexReviewKit
 import CodexReviewAppServer
-import CodexReviewHost
+@testable import CodexReviewHost
 import CodexReviewMCPServer
 import CodexReviewTesting
 
@@ -23,6 +23,16 @@ private extension CodexReviewStore {
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
+        authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
+        authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
+        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
+        finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
+        finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
+        reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear? = nil,
+        registryDestinationDidReplace: CodexReviewRegistryDestinationDidReplace? = nil,
+        appServerCloser: @escaping CodexReviewAppServerCloser = { await $0.close() },
         transport: FakeCodexAppServerTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -34,6 +44,16 @@ private extension CodexReviewStore {
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
+            authenticationMutationDidBegin: authenticationMutationDidBegin,
+            authenticationCancellationDidRequest: authenticationCancellationDidRequest,
+            authenticationProductCommitDidApply: authenticationProductCommitDidApply,
+            authenticationHandleDidBind: authenticationHandleDidBind,
+            accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
+            finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
+            finalShutdownDidRequest: finalShutdownDidRequest,
+            reconciliationDebtDidClear: reconciliationDebtDidClear,
+            registryDestinationDidReplace: registryDestinationDidReplace,
+            appServerCloser: appServerCloser,
             appServerFactory: { codexHomeURL in
                 try await CodexAppServerTestRuntime.start(
                     transport: transport,
@@ -62,6 +82,16 @@ private extension CodexReviewStore {
         networkMonitor: any CodexReviewNetworkMonitoring = SystemCodexReviewNetworkMonitor(),
         networkRecoveryPolicy: CodexReviewNetworkRecoveryPolicy = .default,
         appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler? = nil,
+        authenticationMutationDidBegin: CodexReviewAuthenticationMutationDidBegin? = nil,
+        authenticationCancellationDidRequest: CodexReviewAuthenticationCancellationDidRequest? = nil,
+        authenticationProductCommitDidApply: CodexReviewAuthenticationProductCommitDidApply? = nil,
+        authenticationHandleDidBind: CodexReviewAuthenticationHandleDidBind? = nil,
+        accountRegistryLoadDidBegin: CodexReviewAccountRegistryLoadDidBegin? = nil,
+        finalRuntimeRetirementDidClaim: CodexReviewFinalRuntimeRetirementDidClaim? = nil,
+        finalShutdownDidRequest: CodexReviewFinalShutdownDidRequest? = nil,
+        reconciliationDebtDidClear: CodexReviewReconciliationDebtDidClear? = nil,
+        registryDestinationDidReplace: CodexReviewRegistryDestinationDidReplace? = nil,
+        appServerCloser: @escaping CodexReviewAppServerCloser = { await $0.close() },
         transportFactory: @escaping @MainActor @Sendable (URL) async throws -> FakeCodexAppServerTransport
     ) -> CodexReviewStore {
         makeLiveStoreForTesting(
@@ -74,6 +104,16 @@ private extension CodexReviewStore {
             networkMonitor: networkMonitor,
             networkRecoveryPolicy: networkRecoveryPolicy,
             appServerLifecycleHandler: appServerLifecycleHandler,
+            authenticationMutationDidBegin: authenticationMutationDidBegin,
+            authenticationCancellationDidRequest: authenticationCancellationDidRequest,
+            authenticationProductCommitDidApply: authenticationProductCommitDidApply,
+            authenticationHandleDidBind: authenticationHandleDidBind,
+            accountRegistryLoadDidBegin: accountRegistryLoadDidBegin,
+            finalRuntimeRetirementDidClaim: finalRuntimeRetirementDidClaim,
+            finalShutdownDidRequest: finalShutdownDidRequest,
+            reconciliationDebtDidClear: reconciliationDebtDidClear,
+            registryDestinationDidReplace: registryDestinationDidReplace,
+            appServerCloser: appServerCloser,
             appServerFactory: { codexHomeURL in
                 let transport = try await transportFactory(codexHomeURL)
                 return try await CodexAppServerTestRuntime.start(
@@ -91,6 +131,30 @@ private extension CodexReviewStore {
 @Suite("host composition")
 @MainActor
 struct CodexReviewHostTests {
+    @Test func stoppedPrimaryReconciliationWaitsOnlyForItsReservedTransition() async throws {
+        let coordinator = AccountRuntimeTransitionCoordinator()
+        var admittedLogin: AccountRuntimeTransitionCoordinator.LoginAdmission?
+        var didAdmitLogin = false
+        coordinator.installDidBecomeIdle {
+            guard didAdmitLogin == false else { return }
+            didAdmitLogin = true
+            admittedLogin = try! coordinator.reserveLoginAdmission()
+        }
+        let reconciliationCompleted = CompletionFlag()
+        let reconciliation = Task { @MainActor in
+            await coordinator.performStoppedPrimaryReconciliation { _ in }
+            await reconciliationCompleted.complete()
+        }
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await reconciliationCompleted.isCompleted()
+        })
+        #expect(coordinator.hasActiveLoginTransition)
+
+        coordinator.finishLoginAdmission(try #require(admittedLogin))
+        await reconciliation.value
+    }
+
     @Test func runtimePreferencesNormalizeInvalidValues() {
         let preferences = CodexReviewRuntime.Preferences(
             codexHomePath: "  ",
@@ -492,6 +556,133 @@ struct CodexReviewHostTests {
         #expect(observedLifecycleStates == [true, false])
     }
 
+    @Test func liveStoreFinalStopRetiresRunsWhenRequestedDuringPreservingAppServerClose() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeCodexAppServerTransport()
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueThreadStart(threadID: "thread-close-race", model: "gpt-5")
+        try await firstTransport.enqueueReviewStart(
+            turnID: "turn-close-race",
+            reviewThreadID: "thread-close-race"
+        )
+        let cleanupTransport = FakeCodexAppServerTransport()
+        try await cleanupTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await cleanupTransport.enqueueSuccess(for: .threadDelete)
+        var transports = [firstTransport, cleanupTransport]
+        let firstCloseStarted = OneShotSignal()
+        let firstCloseGate = CodexAppServerTestGate()
+        let finalRetirementClaimed = OneShotSignal()
+        var closeCount = 0
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            finalRuntimeRetirementDidClaim: {
+                await finalRetirementClaimed.signal()
+            },
+            appServerCloser: { appServer in
+                closeCount += 1
+                if closeCount == 1 {
+                    await firstCloseStarted.signal()
+                    await firstCloseGate.waitIgnoringCancellation()
+                }
+                await appServer.close()
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-close-race",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-close-race"
+        })
+        let reviewOutput = try CodexAppServerTestItem.exitedReviewMode(
+            id: "review-output-close-race",
+            review: "No issues found."
+        )
+        let completedTurn = try CodexAppServerTestTurn(
+            snapshot: .init(
+                id: "turn-close-race",
+                state: .completed,
+                items: [reviewOutput.domainProjection]
+            ),
+            items: [reviewOutput]
+        )
+        try await firstTransport.enqueueThreadRead(
+            makeHostStoredThread(id: "thread-close-race", turns: [completedTurn])
+        )
+        try await firstTransport.notificationEmitter.emitTurnCompleted(
+            threadID: "thread-close-race",
+            turn: completedTurn
+        )
+        #expect(try await review.value.presentation.status == .succeeded)
+
+        await firstTransport.failConnection(.closed)
+        await firstCloseStarted.wait()
+        #expect(store.reviewRuns.count == 1)
+        #expect(observedLifecycleStates == [true, false])
+
+        let finalStop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalRetirementClaimed.wait()
+        await firstCloseGate.open()
+        await finalStop.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.reviewRuns.isEmpty)
+        #expect(closeCount == 2)
+        #expect(await cleanupTransport.recordedRequests(for: .threadDelete).count == 1)
+        #expect(observedLifecycleStates == [true, false])
+        #expect(store.auth.selectedAccount == nil)
+    }
+
+    @Test func liveStoreWaitUntilStoppedJoinsFinalCoordinatorBeforeRuntimeStopStarts() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let finalRequestGate = CodexAppServerTestGate()
+        let waiterStarted = OneShotSignal()
+        let waiterCompleted = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            finalShutdownDidRequest: {
+                await finalRequestGate.waitIgnoringCancellation()
+            },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let finalStop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalRequestGate.waitUntilBlocked()
+        let waiter = Task { @MainActor in
+            await waiterStarted.signal()
+            await store.waitUntilStopped()
+            await waiterCompleted.signal()
+        }
+        await waiterStarted.wait()
+        #expect(await waiterCompleted.snapshot() == false)
+
+        await finalRequestGate.open()
+        await finalStop.value
+        await waiter.value
+        #expect(await waiterCompleted.snapshot())
+        #expect(store.serverState == .stopped)
+    }
+
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeCodexAppServerTransport()
@@ -737,6 +928,117 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveStoreRejectsLoginWhoseLeaseReturnsAfterFinalAdmissionCloses() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let accountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: accountKey,
+            accounts: [accountKey]
+        )
+        let firstMainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: firstMainTransport, email: accountKey)
+        let secondMainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: secondMainTransport, email: accountKey)
+        var mainTransports = [firstMainTransport, secondMainTransport]
+        let isolatedTransport = FakeCodexAppServerTransport()
+        try await isolatedTransport.enqueueChatGPTLogin(
+            loginID: "post-final-login",
+            authenticationURL: testAuthenticationURL
+        )
+        try await isolatedTransport.enqueueChatGPTLoginCancellation(.canceled)
+        let leasedMutationGate = CodexAppServerTestGate()
+        let finalShutdownRequested = OneShotSignal()
+        var isolatedFactoryCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationMutationDidBegin: {
+                await leasedMutationGate.waitIgnoringCancellation()
+            },
+            finalShutdownDidRequest: {
+                await finalShutdownRequested.signal()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransports.removeFirst()
+                }
+                isolatedFactoryCount += 1
+                return isolatedTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let lateLogin = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await leasedMutationGate.waitUntilBlocked()
+
+        let finalStop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalShutdownRequested.wait()
+        await leasedMutationGate.open()
+        await finalStop.value
+        #expect(isolatedFactoryCount == 0)
+        #expect(await firstMainTransport.recordedRequests(for: .accountLoginStart).isEmpty)
+
+        do {
+            try await lateLogin.value
+            Issue.record("Expected final shutdown to reject the login before session installation.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+        #expect(isolatedFactoryCount == 0)
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await isolatedTransport.waitForRequest(.accountLoginStart)
+        #expect(isolatedFactoryCount == 1)
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreClassifiesConcurrentLoginBeforeSessionInstallation() async throws {
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "pre-session-concurrent-login",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let mutationGate = CodexAppServerTestGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": try temporaryHome().path],
+            authenticationMutationDidBegin: {
+                await mutationGate.waitIgnoringCancellation()
+            },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let firstLogin = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await mutationGate.waitUntilBlocked()
+
+        do {
+            try await store.addAccount()
+            Issue.record("Expected the reserved pre-session login to reject a concurrent command.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .alreadyInProgress)
+        }
+
+        await mutationGate.open()
+        try await firstLogin.value
+        await transport.waitForRequest(.accountLoginStart)
+        #expect(await transport.recordedRequests(for: .accountLoginStart).count == 1)
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
     @Test func liveStoreCollectsPostCommitAccountDirectoryDebtOnNextLoad() async throws {
         let homeURL = try temporaryHome()
         let accountKey = "removed@example.com"
@@ -772,6 +1074,102 @@ struct CodexReviewHostTests {
 
         #expect(FileManager.default.fileExists(atPath: orphanedAccountURL.path) == false)
         #expect(try activeAccountKey(homeURL: homeURL) == nil)
+    }
+
+    @Test func liveStoreRetriesCredentialTemporaryHomeCleanupDebtOnLoad() throws {
+        let homeURL = try temporaryHome()
+        let credentialHomeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-review-auth-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: credentialHomeURL,
+            withIntermediateDirectories: false
+        )
+        try Data(#"{"tokens":{"id_token":"pending-cleanup"}}"#.utf8).write(
+            to: credentialHomeURL.appendingPathComponent("auth.json")
+        )
+        let debtURL = temporaryHomeCleanupDebtURL(homeURL: homeURL)
+        try FileManager.default.createDirectory(
+            at: debtURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONSerialization.data(withJSONObject: ["paths": [credentialHomeURL.path]])
+            .write(to: debtURL)
+
+        _ = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: FakeCodexAppServerTransport()
+        )
+
+        #expect(FileManager.default.fileExists(atPath: credentialHomeURL.path) == false)
+        #expect(FileManager.default.fileExists(atPath: debtURL.path) == false)
+    }
+
+    @Test func accountRegistryKeepsTemporaryHomeDebtUntilParentRemovalIsDurable() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let temporaryParentURL = FileManager.default.temporaryDirectory.standardizedFileURL
+        let synchronization = PathSynchronizationFailureProbe(
+            path: temporaryParentURL.path,
+            failureCount: 0
+        )
+        let registry = AccountRegistryStore(
+            codexHomeURL: codexHomeURL,
+            directoryDurabilityDidSynchronize: synchronization.failIfNeeded
+        )
+        let temporaryHomeURL = try await registry.reserveTemporaryCodexHome(
+            kind: .authentication
+        )
+        try Data(#"{"tokens":{"id_token":"pending-cleanup"}}"#.utf8).write(
+            to: temporaryHomeURL.appendingPathComponent("auth.json")
+        )
+        synchronization.arm(failureCount: 2)
+
+        await registry.finishTemporaryCodexHome(temporaryHomeURL)
+
+        #expect(FileManager.default.fileExists(atPath: temporaryHomeURL.path) == false)
+        let debtURL = temporaryHomeCleanupDebtURL(homeURL: homeURL)
+        #expect(FileManager.default.fileExists(atPath: debtURL.path))
+        let debt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: debtURL)) as? [String: Any]
+        )
+        #expect((debt["paths"] as? [String])?.contains(temporaryHomeURL.path) == true)
+        #expect(synchronization.recordedFailureCount == 2)
+
+        await registry.finishTemporaryCodexHome(temporaryHomeURL)
+
+        #expect(FileManager.default.fileExists(atPath: debtURL.path) == false)
+        #expect(synchronization.recordedInvocationCount == 3)
+    }
+
+    @Test func accountRegistryRejectsLateRuntimeWriteAfterGenerationAdmissionCloses() async throws {
+        let homeURL = try temporaryHome()
+        let accountKey = "active@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: accountKey,
+            accounts: [accountKey]
+        )
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let registry = AccountRegistryStore(codexHomeURL: codexHomeURL)
+        let snapshot = try await registry.load()
+        var payload = try #require(snapshot.accounts.first)
+        payload.rateLimits = [(windowDurationMinutes: 300, usedPercent: 99, resetsAt: nil)]
+        payload.lastRateLimitFetchAt = Date(timeIntervalSince1970: 123)
+
+        await registry.openRuntimeAdmission(generation: 7)
+        await registry.closeRuntimeAdmission(generation: 7)
+        let before = try Data(contentsOf: accountRegistryURL(homeURL: homeURL))
+        do {
+            try await registry.updateCachedRateLimits(
+                from: payload,
+                runtimeAuthorization: .init(generation: 7)
+            )
+            Issue.record("Expected a closed runtime generation to reject its late disk commit.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+
+        #expect(try Data(contentsOf: accountRegistryURL(homeURL: homeURL)) == before)
     }
 
     @Test func liveStoreFailsFastForCorruptAccountRegistry() async throws {
@@ -948,13 +1346,13 @@ struct CodexReviewHostTests {
         try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
         try await transport.enqueueModels(.init(models: []))
         try await transport.enqueueChatGPTLogin(loginID: "login-1", authenticationURL: testAuthenticationURL)
-        try await transport.enqueueAccount(
-            try CodexAppServerTestAccount(kind: .chatGPT(
-                email: "new@example.com",
-                planType: .plus
-            )),
-            requiresOpenAIAuth: false
-        )
+        let newAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "new@example.com",
+            planType: .plus
+        ))
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueRateLimits(try makeHostRateLimits(
             planType: nil,
             windowDurationMinutes: 300,
@@ -1003,7 +1401,7 @@ struct CodexReviewHostTests {
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
         })
-        await transport.waitForRequestCount(7)
+        await transport.waitForRequestCount(9)
         #expect(await transport.recordedRequests().map(\.request.operation) == [
             .initialize,
             .accountRead,
@@ -1011,7 +1409,9 @@ struct CodexReviewHostTests {
             .modelList,
             .accountLoginStart,
             .accountRead,
+            .accountRead,
             .accountRateLimitsRead,
+            .accountRead,
         ])
         await store.stop()
     }
@@ -1049,6 +1449,89 @@ struct CodexReviewHostTests {
             .accountLoginStart,
             .accountLoginCancel,
         ])
+        await store.stop()
+    }
+
+    @Test func liveStoreRejectsForcedRuntimeStartWhileLoginOwnsPrimaryRuntime() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "login-runtime-start-admission",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        var factoryCount = 0
+        var closeCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerCloser: { appServer in
+                closeCount += 1
+                await appServer.close()
+            },
+            transportFactory: { _ in
+                factoryCount += 1
+                return transport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.isAuthenticating)
+        #expect(factoryCount == 1)
+        #expect(closeCount == 0)
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).isEmpty)
+
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreLetsCancellationWinBeforeURLPresentationClaim() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "login-presentation-claim",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueChatGPTLoginCancellation(.canceled)
+        let presentationClaimGate = CodexAppServerTestGate()
+        let externalURLOpener = FakeExternalURLOpener()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            externalURLOpener: externalURLOpener.open,
+            authenticationHandleDidBind: {
+                await presentationClaimGate.waitIgnoringCancellation()
+            },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let login = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await presentationClaimGate.waitUntilBlocked()
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await transport.waitForRequest(.accountLoginCancel)
+        await presentationClaimGate.open()
+        try await login.value
+        await cancellation.value
+
+        #expect(externalURLOpener.openedURLs.isEmpty)
+        #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(store.auth.isAuthenticating == false)
+        try await store.reorderPersistedAccount(accountKey: "missing@example.com", toIndex: 0)
         await store.stop()
     }
 
@@ -1092,6 +1575,887 @@ struct CodexReviewHostTests {
         #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
         #expect(store.auth.isAuthenticating == false)
         #expect(store.serverURL == nil)
+    }
+
+    @Test func liveStoreDefersSupersededPrimaryLoginHandoffToRuntimeStop() async throws {
+        let homeURL = try temporaryHome()
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "final-primary-handoff",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        let reconciliationTransport = FakeCodexAppServerTransport()
+        try await reconciliationTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await reconciliationTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await reconciliationTransport.enqueueModels(.init(models: []))
+        let cancellationGate = CodexAppServerTestGate()
+        let finalShutdownRequested = OneShotSignal()
+        var transports = [initialTransport, reconciliationTransport]
+        var appServerCloseCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            finalShutdownDidRequest: { await finalShutdownRequested.signal() },
+            appServerCloser: { appServer in
+                appServerCloseCount += 1
+                await appServer.close()
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+        await initialTransport.holdNextIgnoringCancellation(
+            .accountLoginCancel,
+            gate: cancellationGate
+        )
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationGate.waitUntilBlocked()
+        let stop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalShutdownRequested.wait()
+        await cancellationGate.open()
+        await cancellation.value
+        await stop.value
+        await store.waitUntilStopped()
+
+        #expect(transports.isEmpty)
+        #expect(appServerCloseCount == 2)
+        #expect(store.serverState == .stopped)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+    }
+
+    @Test func liveStoreRoutesExplicitClosingHandoffOnceWhenRuntimeFails() async throws {
+        let homeURL = try temporaryHome()
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "explicit-closing-runtime-failure",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        let cancelGate = CodexAppServerTestGate()
+        await initialTransport.holdNextIgnoringCancellation(
+            .accountLoginCancel,
+            gate: cancelGate
+        )
+        let replacementTransport = FakeCodexAppServerTransport()
+        try await replacementTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await replacementTransport.enqueueModels(.init(models: []))
+        var transports = [initialTransport, replacementTransport]
+        var lifecycleStates: [Bool] = []
+        let firstRuntimeClosed = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerLifecycleHandler: { container in
+                lifecycleStates.append(container != nil)
+                if container == nil {
+                    Task { await firstRuntimeClosed.signal() }
+                }
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await initialTransport.waitForRequest(.accountLoginCancel)
+        await cancelGate.waitUntilBlocked()
+
+        await initialTransport.failConnection(.closed)
+        await firstRuntimeClosed.wait()
+        await cancelGate.open()
+        await cancellation.value
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.serverState == .running
+        })
+
+        #expect(await initialTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(transports.isEmpty)
+        #expect(lifecycleStates == [true, false, true])
+        await store.stop()
+    }
+
+    @Test func liveStoreRetainsPrimaryAuthenticationHandoffAcrossIncompleteStopRetry() async throws {
+        let homeURL = try temporaryHome()
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "stop-incomplete-primary-handoff",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        let replacementTransport = FakeCodexAppServerTransport()
+        try await replacementTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await replacementTransport.enqueueModels(.init(models: []))
+        try await replacementTransport.enqueueSuccess(for: .threadDelete)
+        try await replacementTransport.enqueueSuccess(for: .threadDelete)
+        var transports = [initialTransport, replacementTransport]
+        var factoryCount = 0
+        var closeCount = 0
+        let liveStore = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerCloser: { appServer in
+                closeCount += 1
+                await appServer.close()
+            },
+            transportFactory: { _ in
+                factoryCount += 1
+                return transports.removeFirst()
+            }
+        )
+        let journal = ControlledHostRetentionJournal()
+        let store = CodexReviewStore.makeTestingStore(
+            backend: liveStore.backend,
+            reviewThreadRetentionJournal: journal
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let retainedRunID = try ReviewRunID(validating: "retained-run")
+        let retainedAttempt = makeReviewAttemptForTesting(
+            attemptID: "retained-attempt",
+            sourceThreadID: "retained-source",
+            activeTurnThreadID: "retained-review",
+            turnID: "retained-turn"
+        )
+        try await store.reviewThreadRetentionRegistry.claim(
+            retainedAttempt,
+            for: retainedRunID,
+            scope: store.currentReviewThreadRetentionScope
+        )
+        await journal.failReplacements("injected retention write failure")
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+
+        await store.stop()
+
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(factoryCount == 1)
+        #expect(closeCount == 0)
+        #expect(await initialTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(await store.reviewThreadRetentionRegistry.acceptance().isAccepting == false)
+        let lateCancellationCompleted = CompletionFlag()
+        let lateCancellationStarted = OneShotSignal()
+        let lateCancellation = Task { @MainActor in
+            await lateCancellationStarted.signal()
+            await store.cancelAuthentication()
+            await lateCancellationCompleted.complete()
+        }
+        await lateCancellationStarted.wait()
+        #expect(await lateCancellationCompleted.isCompleted() == false)
+
+        await journal.failReplacements(nil)
+        await store.stop()
+        await lateCancellation.value
+
+        #expect(store.serverState == .stopped)
+        #expect(factoryCount == 2)
+        #expect(closeCount == 2)
+        #expect(await lateCancellationCompleted.isCompleted())
+        #expect(await initialTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(try await journal.load().entries.isEmpty)
+        #expect(await store.reviewThreadRetentionRegistry.acceptance().isAccepting)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        #expect(transports.isEmpty)
+        _ = liveStore
+    }
+
+    @Test func liveStoreKeepsEmptyRegistryWhenUnknownPrimaryCancellationIsSignedOut() async throws {
+        try await exerciseUnknownPrimaryCancellation(
+            previousAccountKey: nil,
+            observedAccountKey: nil,
+            expectedActiveAccountKey: nil
+        )
+    }
+
+    @Test func liveStoreDeactivatesPreviousAccountWhenUnknownPrimaryCancellationIsSignedOut() async throws {
+        try await exerciseUnknownPrimaryCancellation(
+            previousAccountKey: "previous@example.com",
+            observedAccountKey: nil,
+            expectedActiveAccountKey: nil
+        )
+    }
+
+    @Test func liveStoreKeepsPreviousAccountWhenUnknownPrimaryCancellationObservesSameAccount() async throws {
+        try await exerciseUnknownPrimaryCancellation(
+            previousAccountKey: "previous@example.com",
+            observedAccountKey: "previous@example.com",
+            expectedActiveAccountKey: "previous@example.com"
+        )
+    }
+
+    @Test func liveStoreCommitsNewAccountWhenUnknownPrimaryCancellationObservesNewAccount() async throws {
+        try await exerciseUnknownPrimaryCancellation(
+            previousAccountKey: "previous@example.com",
+            observedAccountKey: "new@example.com",
+            expectedActiveAccountKey: "new@example.com"
+        )
+    }
+
+    @Test func liveStoreJoinsLateCancellationToActivePrimaryReconciliationResult() async throws {
+        let homeURL = try temporaryHome()
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "unknown-primary-cancel-join",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        let replacementTransport = FakeCodexAppServerTransport()
+        try await replacementTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await replacementTransport.enqueueModels(.init(models: []))
+        let replacementStageGate = CodexAppServerTestGate()
+        let replacementMCPServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stageGate: replacementStageGate
+        )
+        var transports = [initialTransport, replacementTransport]
+        var mcpFactoryCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, configuration, _ in
+                mcpFactoryCount += 1
+                return mcpFactoryCount == 1
+                    ? NoopMCPHTTPServer(endpoint: configuration.url())
+                    : replacementMCPServer
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+        let firstCompleted = CompletionFlag()
+        let firstCancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+            await firstCompleted.complete()
+        }
+        await replacementStageGate.waitUntilBlocked()
+        let secondCompleted = CompletionFlag()
+        let secondCancellationStarted = OneShotSignal()
+        let secondCancellation = Task { @MainActor in
+            await secondCancellationStarted.signal()
+            await store.cancelAuthentication()
+            await secondCompleted.complete()
+        }
+        await secondCancellationStarted.wait()
+
+        #expect(await firstCompleted.isCompleted() == false)
+        #expect(await secondCompleted.isCompleted() == false)
+        #expect(await initialTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(mcpFactoryCount == 2)
+
+        await replacementStageGate.open()
+        await firstCancellation.value
+        await secondCancellation.value
+
+        #expect(await firstCompleted.isCompleted())
+        #expect(await secondCompleted.isCompleted())
+        #expect(store.serverState == .running)
+        #expect(await initialTransport.recordedRequests(for: .accountLoginCancel).count == 1)
+        #expect(transports.isEmpty)
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsPrimaryReconciliationFailureStickyUntilExplicitRepairCommits() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "primary-unknown-cancel",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        let repairTransport = FakeCodexAppServerTransport()
+        try await repairTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await repairTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await repairTransport.enqueueModels(.init(models: []))
+        try await repairTransport.enqueueChatGPTLogin(
+            loginID: "post-repair-login",
+            authenticationURL: testAuthenticationURL
+        )
+        try await repairTransport.enqueueChatGPTLoginCancellation(.canceled)
+        var mainFactoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { codexHomeURL in
+                #expect(codexHomeURL == mainCodexHomeURL)
+                mainFactoryCallCount += 1
+                switch mainFactoryCallCount {
+                case 1:
+                    return initialTransport
+                case 2:
+                    throw CodexReviewAPI.Error.io("replacement validation runtime unavailable")
+                case 3:
+                    return repairTransport
+                default:
+                    Issue.record("Unexpected primary runtime factory invocation.")
+                    return repairTransport
+                }
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+        await store.cancelAuthentication()
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState {
+                return true
+            }
+            return false
+        })
+        #expect(mainFactoryCallCount == 2)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+
+        let reviewRunCount = store.reviewRuns.count
+        do {
+            _ = try await store.startReview(
+                sessionID: "sticky-failure-review",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected sticky reconciliation failure to reject review admission.")
+        } catch {}
+        #expect(store.reviewRuns.count == reviewRunCount)
+        do {
+            try await store.addAccount()
+            Issue.record("Expected sticky reconciliation failure to reject account admission.")
+        } catch {}
+        #expect(await initialTransport.recordedRequests(for: .accountLoginStart).count == 1)
+        do {
+            try await store.reorderPersistedAccount(
+                accountKey: "second@example.com",
+                toIndex: 0
+            )
+            Issue.record("Expected sticky reconciliation failure to reject a runtime-independent account mutation.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+
+        await store.start(forceRestartIfNeeded: true)
+
+        #expect(store.serverState == .running)
+        #expect(mainFactoryCallCount == 3)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        try await store.reorderPersistedAccount(
+            accountKey: "second@example.com",
+            toIndex: 0
+        )
+        #expect(store.auth.persistedAccounts.map(\.accountKey).first == "second@example.com")
+        try await store.addAccount()
+        await repairTransport.waitForRequest(.accountLoginStart)
+        await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreRecordsReconciliationDebtAsFirstAccountArtifact() async throws {
+        let homeURL = try temporaryHome()
+        let initialTransport = FakeCodexAppServerTransport()
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await initialTransport.enqueueModels(.init(models: []))
+        try await initialTransport.enqueueChatGPTLogin(
+            loginID: "first-account-artifact-debt",
+            authenticationURL: testAuthenticationURL
+        )
+        try await initialTransport.enqueueFailure(
+            .response(code: -32_000, message: "cancel response lost"),
+            for: .accountLoginCancel
+        )
+        var factoryCallCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 1 {
+                    return initialTransport
+                }
+                throw CodexReviewAPI.Error.io("replacement runtime unavailable")
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let accountsURL = accountReconciliationDebtURL(homeURL: homeURL)
+            .deletingLastPathComponent()
+        #expect(FileManager.default.fileExists(atPath: accountsURL.path) == false)
+        try await store.addAccount()
+        await initialTransport.waitForRequest(.accountLoginStart)
+
+        await store.cancelAuthentication()
+
+        #expect(factoryCallCount == 2)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+        #expect(FileManager.default.fileExists(atPath: accountsURL.path))
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        await store.stop()
+    }
+
+    @Test func accountRegistryRetriesAncestorDurabilityAfterVisibleDirectoryFailure() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL
+            .appendingPathComponent("missing-parent", isDirectory: true)
+            .appendingPathComponent("custom-codex-home", isDirectory: true)
+        let synchronization = DirectorySynchronizationFailureProbe()
+        let registry = AccountRegistryStore(
+            codexHomeURL: codexHomeURL,
+            directoryDurabilityDidSynchronize: synchronization.failFirstSynchronization
+        )
+
+        do {
+            try await registry.recordReconciliationDebt(
+                expectedAccount: .signedOut,
+                message: "first attempt"
+            )
+            Issue.record("Expected the first directory durability confirmation to fail.")
+        } catch {}
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURLForCodexHome(codexHomeURL).path
+        ) == false)
+
+        try await registry.recordReconciliationDebt(
+            expectedAccount: .signedOut,
+            message: "retry"
+        )
+
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURLForCodexHome(codexHomeURL).path
+        ))
+        #expect(synchronization.failureCount == 1)
+        #expect(synchronization.synchronizedPaths.last == "/")
+        #expect(synchronization.synchronizedPaths.filter { $0 == "/" }.count == 1)
+    }
+
+    @Test func liveStoreFailsClosedWhenDirectRegistryMutationDurabilityIsUnresolved() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: transport,
+            email: "first@example.com"
+        )
+        let corruption = RegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: corruption.corruptIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        corruption.arm()
+        await #expect(throws: CodexReviewAuthenticationFailure.self) {
+            try await store.reorderPersistedAccount(
+                accountKey: "second@example.com",
+                toIndex: 0
+            )
+        }
+
+        #expect(corruption.corruptionCount == 1)
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(store.auth.errorMessage?.contains("unresolved durable outcome") == true)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+        let debtData = try Data(contentsOf: accountReconciliationDebtURL(homeURL: homeURL))
+        let debt = try #require(JSONSerialization.jsonObject(with: debtData) as? [String: Any])
+        #expect(debt["expectation"] as? String == "observedAccount")
+        #expect(debt["accountKey"] as? String == "first@example.com")
+        #expect(debt["provider"] as? String == "chatGPT")
+        do {
+            try await store.reorderPersistedAccount(
+                accountKey: "first@example.com",
+                toIndex: 0
+            )
+            Issue.record("Expected unresolved registry durability to keep account admission closed.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+        await store.stop()
+    }
+
+    @Test func liveStoreRecordsExactProviderForUnresolvedDirectRegistryMutation() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistryRecords(
+            homeURL: homeURL,
+            activeAccountKey: "api-key",
+            records: [
+                [
+                    "accountKey": "api-key",
+                    "kind": "apiKey",
+                    "email": "API Key",
+                    "planType": "pro",
+                ],
+                [
+                    "accountKey": "second@example.com",
+                    "kind": "chatgpt",
+                    "email": "second@example.com",
+                    "planType": "pro",
+                ],
+            ]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .apiKey),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let corruption = RegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: corruption.corruptIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        corruption.arm()
+        await #expect(throws: CodexReviewAuthenticationFailure.self) {
+            try await store.reorderPersistedAccount(
+                accountKey: "second@example.com",
+                toIndex: 0
+            )
+        }
+
+        let debtData = try Data(contentsOf: accountReconciliationDebtURL(homeURL: homeURL))
+        let debt = try #require(JSONSerialization.jsonObject(with: debtData) as? [String: Any])
+        #expect(debt["expectation"] as? String == "observedAccount")
+        #expect(debt["accountKey"] as? String == "api-key")
+        #expect(debt["provider"] as? String == "apiKey")
+        await store.stop()
+    }
+
+    @Test func liveStoreUsesCurrentRuntimeRecoveryWhenDirectMutationObservationAdvances() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        let loadGate = ArmableAsyncHookGate()
+        let corruption = RegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            accountRegistryLoadDidBegin: { await loadGate.waitIfArmed() },
+            registryDestinationDidReplace: corruption.corruptIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await loadGate.arm()
+        corruption.arm()
+        let mutation = Task { @MainActor in
+            try await store.reorderPersistedAccount(
+                accountKey: "second@example.com",
+                toIndex: 0
+            )
+        }
+        await loadGate.waitUntilBlocked()
+        try Data(#"{"tokens":{"id_token":"third@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await loadGate.open()
+        await #expect(throws: CodexReviewAuthenticationFailure.self) {
+            try await mutation.value
+        }
+
+        let debtData = try Data(contentsOf: accountReconciliationDebtURL(homeURL: homeURL))
+        let debt = try #require(JSONSerialization.jsonObject(with: debtData) as? [String: Any])
+        #expect(debt["expectation"] as? String == "reconcileCurrentRuntime")
+        #expect({ if case .failed = store.serverState { return true }; return false }())
+        await store.stop()
+    }
+
+    @Test func liveStoreRestoresDebtWhenStagingConsumerFailsAfterDebtClear() async throws {
+        let homeURL = try temporaryHome()
+        let expectedAccountKey = "expected@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: expectedAccountKey,
+            accounts: [expectedAccountKey]
+        )
+        try writeReconciliationDebt(
+            homeURL: homeURL,
+            expectedAccountKey: expectedAccountKey
+        )
+
+        let interruptedRepair = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: interruptedRepair,
+            email: expectedAccountKey,
+            planType: .pro,
+            usedPercent: 10
+        )
+        let wrongAccountRepair = FakeCodexAppServerTransport()
+        try await wrongAccountRepair.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "wrong@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await wrongAccountRepair.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await wrongAccountRepair.enqueueModels(.init(models: []))
+        let successfulRepair = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: successfulRepair,
+            email: expectedAccountKey,
+            planType: .pro,
+            usedPercent: 20
+        )
+        var transports = [interruptedRepair, wrongAccountRepair, successfulRepair]
+        var injectConsumerFailure = true
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            reconciliationDebtDidClear: { appServer in
+                guard injectConsumerFailure else {
+                    return
+                }
+                injectConsumerFailure = false
+                await appServer.close()
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+
+        await store.start(forceRestartIfNeeded: true)
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+
+        await store.start(forceRestartIfNeeded: true)
+        #expect(store.serverState == .running)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreFailsClosedWhenKnownPrimaryAccountCannotCommitRegistry() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: nil,
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "known-primary-commit-failure",
+            authenticationURL: testAuthenticationURL
+        )
+        let newAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "new@example.com",
+            planType: .plus
+        ))
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        let accountReadGate = CodexAppServerTestGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+        try FileManager.default.createDirectory(
+            at: mainCodexHomeURL,
+            withIntermediateDirectories: true
+        )
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: accountReadGate)
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "known-primary-commit-failure",
+            completion: .succeeded
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await accountReadGate.waitUntilBlocked()
+        try FileManager.default.removeItem(
+            at: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        await accountReadGate.open()
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        #expect(store.auth.errorMessage?.contains("reconciliation remains pending") == true)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+        do {
+            try await store.reorderPersistedAccount(accountKey: "second@example.com", toIndex: 0)
+            Issue.record("Expected committed primary reconciliation debt to close account admission.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+        await store.stop()
+    }
+
+    @Test func liveStoreCommitsPrimaryAccountAfterPostReplaceSyncFailure() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "post-replace-primary",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "new@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
+        let replaceFailure = RegistryReplaceFailureProbe()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: replaceFailure.failIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+        try FileManager.default.createDirectory(
+            at: mainCodexHomeURL,
+            withIntermediateDirectories: true
+        )
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        replaceFailure.arm()
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "post-replace-primary",
+            completion: .succeeded
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.accountKey == "new@example.com"
+        })
+        #expect(store.serverState == .running)
+        #expect(replaceFailure.failureCount == 1)
+        #expect(try activeAccountKey(homeURL: homeURL) == "new@example.com")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        #expect(try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "new@example.com"
+        ) == Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8))
+        await store.stop()
     }
 
     @Test func liveStoreCancelsLoginBeforeIsolatedRuntimeFactoryReturns() async throws {
@@ -1152,6 +2516,13 @@ struct CodexReviewHostTests {
             try await store.addAccount()
         }
         await lateRuntimeGate.waitUntilBlocked()
+        let reservedTemporaryHome = try #require(lateCodexHomeURL)
+        let cleanupDebt = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: temporaryHomeCleanupDebtURL(homeURL: homeURL))
+            ) as? [String: Any]
+        )
+        #expect((cleanupDebt["paths"] as? [String])?.contains(reservedTemporaryHome.path) == true)
         async let cancel: Void = store.cancelAuthentication()
         await lateRuntimeGate.open()
         try await add.value
@@ -1166,6 +2537,54 @@ struct CodexReviewHostTests {
         await nextTransport.waitForRequest(.accountLoginStart)
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
         await store.cancelAuthentication()
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsPreBindCancellationWhenIsolatedRuntimeFactoryFailsLate() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: mainTransport,
+            email: "active@example.com"
+        )
+        let factoryGate = CodexAppServerTestGate()
+        let cancellationRequested = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                await factoryGate.waitIgnoringCancellation()
+                throw CodexReviewAPI.Error.io("late isolated factory failure")
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await factoryGate.waitUntilBlocked()
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await factoryGate.open()
+        try await add.value
+        await cancellation.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.errorMessage == nil)
+        #expect(store.auth.isAuthenticating == false)
         await store.stop()
     }
 
@@ -1236,6 +2655,378 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
+    @Test func liveStoreKeepsPreBindCancellationWhenLoginStartFailsLate() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: mainTransport,
+            email: "active@example.com"
+        )
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueFailure(
+            .response(code: -32603, message: "late login-start failure"),
+            for: .accountLoginStart
+        )
+        let loginStartGate = CodexAppServerTestGate()
+        await loginTransport.holdNextIgnoringCancellation(
+            .accountLoginStart,
+            gate: loginStartGate
+        )
+        let cancellationRequested = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { codexHomeURL in
+                codexHomeURL == mainCodexHomeURL ? mainTransport : loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let add = Task { @MainActor in
+            try await store.addAccount()
+        }
+        await loginStartGate.waitUntilBlocked()
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await loginStartGate.open()
+        try await add.value
+        await cancellation.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.errorMessage == nil)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(await loginTransport.recordedRequests(for: .accountLoginCancel).isEmpty)
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsCancellationWhenIsolatedAccountReadFailsAfterSDKSuccess() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: mainTransport,
+            email: "active@example.com"
+        )
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "login-read-failure",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueFailure(
+            .response(code: -32603, message: "late isolated account read failure"),
+            for: .accountRead
+        )
+        let accountReadGate = CodexAppServerTestGate()
+        await loginTransport.holdNextIgnoringCancellation(
+            .accountRead,
+            gate: accountReadGate
+        )
+        let cancellationRequested = OneShotSignal()
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        try await loginTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "login-read-failure",
+            completion: .succeeded
+        )
+        try await loginTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await accountReadGate.waitUntilBlocked()
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await accountReadGate.open()
+        await cancellation.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == ["active@example.com"])
+        #expect(store.auth.errorMessage == nil)
+        #expect(FileManager.default.fileExists(atPath: try #require(isolatedCodexHomeURL).path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreLetsIsolatedCancellationWinBeforeRegistryProductCommit() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let oldAccountKey = "active@example.com"
+        let newAccountKey = "new@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: oldAccountKey,
+            accounts: [oldAccountKey]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: oldAccountKey)
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "isolated-before-commit",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: newAccountKey,
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await loginTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 25
+        ))
+        let accountReadGate = CodexAppServerTestGate()
+        await loginTransport.holdNextIgnoringCancellation(.accountRead, gate: accountReadGate)
+        let cancellationRequested = OneShotSignal()
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: resolvedIsolatedCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await loginTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "isolated-before-commit",
+            completion: .succeeded
+        )
+        try await loginTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await accountReadGate.waitUntilBlocked()
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await accountReadGate.open()
+        await cancellation.value
+
+        #expect(try activeAccountKey(homeURL: homeURL) == oldAccountKey)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [oldAccountKey])
+        #expect(store.auth.selectedAccount?.accountKey == oldAccountKey)
+        #expect(store.auth.errorMessage == nil)
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsIsolatedSuccessWhenCancellationArrivesAfterRegistryProductCommit() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let oldAccountKey = "active@example.com"
+        let newAccountKey = "new@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: oldAccountKey,
+            accounts: [oldAccountKey]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: oldAccountKey)
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "isolated-after-commit",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: newAccountKey,
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await loginTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 25
+        ))
+        let productCommitApplied = OneShotSignal()
+        let productCommitReleaseGate = CodexAppServerTestGate()
+        let cancellationRequested = OneShotSignal()
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            authenticationProductCommitDidApply: {
+                await productCommitApplied.signal()
+                await productCommitReleaseGate.waitIgnoringCancellation()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: resolvedIsolatedCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await loginTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "isolated-after-commit",
+            completion: .succeeded
+        )
+        try await loginTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await productCommitApplied.wait()
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        await productCommitReleaseGate.open()
+        await cancellation.value
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.persistedAccounts.contains { $0.accountKey == newAccountKey }
+                && store.auth.isAuthenticating == false
+        })
+
+        #expect(try activeAccountKey(homeURL: homeURL) == oldAccountKey)
+        #expect(store.auth.persistedAccounts.map(\.accountKey).contains(newAccountKey))
+        #expect(store.auth.selectedAccount?.accountKey == oldAccountKey)
+        #expect(store.auth.errorMessage == nil)
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsPostProductCommitFailureWhenCancellationArrivesDuringFinalLoad() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let oldAccountKey = "active@example.com"
+        let newAccountKey = "new@example.com"
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: oldAccountKey,
+            accounts: [oldAccountKey]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: oldAccountKey)
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "isolated-post-commit-failure",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: newAccountKey,
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await loginTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 25
+        ))
+        let productCommitApplied = OneShotSignal()
+        let productCommitReleaseGate = CodexAppServerTestGate()
+        let cancellationRequested = OneShotSignal()
+        var isolatedCodexHomeURL: URL?
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            authenticationCancellationDidRequest: {
+                await cancellationRequested.signal()
+            },
+            authenticationProductCommitDidApply: {
+                await productCommitApplied.signal()
+                await productCommitReleaseGate.waitIgnoringCancellation()
+            },
+            transportFactory: { codexHomeURL in
+                if codexHomeURL == mainCodexHomeURL {
+                    return mainTransport
+                }
+                isolatedCodexHomeURL = codexHomeURL
+                return loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
+        try Data(#"{"tokens":{"id_token":"new@example.com"}}"#.utf8).write(
+            to: resolvedIsolatedCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await loginTransport.notificationEmitter.emitLoginCompleted(
+            loginID: "isolated-post-commit-failure",
+            completion: .succeeded
+        )
+        try await loginTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await productCommitApplied.wait()
+
+        let cancellation = Task { @MainActor in
+            await store.cancelAuthentication()
+        }
+        await cancellationRequested.wait()
+        try Data("invalid registry".utf8).write(
+            to: accountRegistryURL(homeURL: homeURL)
+        )
+        await productCommitReleaseGate.open()
+        await cancellation.value
+
+        #expect(store.auth.selectedAccount?.accountKey == oldAccountKey)
+        #expect(store.auth.persistedAccounts.map(\.accountKey) == [oldAccountKey])
+        #expect(store.auth.errorMessage?.contains("account registry") == true)
+        #expect(store.auth.isAuthenticating == false)
+        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        #expect(await loginTransport.recordedRequests(for: .accountLoginCancel).isEmpty)
+        await store.stop()
+    }
+
     @Test func liveStoreUsesInjectedMonotonicDeadlineForLoginCancellationAcknowledgement() async throws {
         let transport = FakeCodexAppServerTransport()
         try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
@@ -1245,11 +3036,16 @@ struct CodexReviewHostTests {
             loginID: "login-deadline",
             authenticationURL: testAuthenticationURL
         )
+        let replacementTransport = FakeCodexAppServerTransport()
+        try await replacementTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await replacementTransport.enqueueModels(.init(models: []))
+        var transports = [transport, replacementTransport]
         let deadlineClock = CodexAppServerTestDeadlineClock()
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": try temporaryHome().path],
             deadlineClock: deadlineClock,
-            transport: transport
+            transportFactory: { _ in transports.removeFirst() }
         )
 
         await store.start(forceRestartIfNeeded: true)
@@ -1262,7 +3058,9 @@ struct CodexReviewHostTests {
         deadlineClock.advance(by: .seconds(5))
         await cancel.value
 
-        #expect(store.auth.isAuthenticating == false)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.isAuthenticating == false && store.serverState == .running
+        })
         #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
         await store.stop()
     }
@@ -1577,13 +3375,13 @@ struct CodexReviewHostTests {
         try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
         try await transport.enqueueModels(.init(models: []))
         try await transport.enqueueChatGPTLogin(loginID: "login-new", authenticationURL: testAuthenticationURL)
-        try await transport.enqueueAccount(
-            try CodexAppServerTestAccount(kind: .chatGPT(
-                email: "new@example.com",
-                planType: .plus
-            )),
-            requiresOpenAIAuth: false
-        )
+        let newAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "new@example.com",
+            planType: .plus
+        ))
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(newAccount, requiresOpenAIAuth: false)
         try await transport.enqueueRateLimits(try makeHostRateLimits(
             planType: nil,
             windowDurationMinutes: 300,
@@ -1621,7 +3419,7 @@ struct CodexReviewHostTests {
             authMode: .chatGPT,
             planType: .plus
         ))
-        await transport.waitForRequestCount(7)
+        await transport.waitForRequestCount(9)
         try #require(await waitUntil(timeout: .seconds(2)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
@@ -1640,7 +3438,9 @@ struct CodexReviewHostTests {
             .modelList,
             .accountLoginStart,
             .accountRead,
+            .accountRead,
             .accountRateLimitsRead,
+            .accountRead,
         ])
     }
 
@@ -1714,26 +3514,24 @@ struct CodexReviewHostTests {
 
     @Test func liveStoreIgnoresNonCodexRateLimitNotifications() async throws {
         let homeURL = try temporaryHome()
-        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
-        try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
-        try Data(#"{"tokens":{"id_token":"active@example.com"}}"#.utf8).write(
-            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "active@example.com",
+            accounts: ["active@example.com"]
         )
         let transport = FakeCodexAppServerTransport()
-        try await transport.enqueueAccount(
-            try CodexAppServerTestAccount(kind: .chatGPT(
-                email: "active@example.com",
-                planType: .pro
-            )),
-            requiresOpenAIAuth: false
-        )
-        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
-        try await transport.enqueueModels(.init(models: []))
-        try await transport.enqueueRateLimits(try makeHostRateLimits(
+        try await enqueueActiveAccountBootstrap(
+            on: transport,
+            email: "active@example.com",
             planType: .pro,
-            windowDurationMinutes: 300,
             usedPercent: 10
+        )
+        let activeAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "active@example.com",
+            planType: .pro
         ))
+        try await transport.enqueueAccount(activeAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(activeAccount, requiresOpenAIAuth: false)
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             transport: transport
@@ -1741,6 +3539,7 @@ struct CodexReviewHostTests {
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForNotificationStreamCount(1)
+        await store.refreshAccountRateLimits(accountKey: "active@example.com")
         #expect(await waitUntil(timeout: .seconds(1)) {
             store.auth.selectedAccount?.rateLimits.first?.usedPercent == 10
         })
@@ -1777,6 +3576,902 @@ struct CodexReviewHostTests {
         })
         #expect(store.auth.selectedAccount?.planType == "pro")
         #expect(store.auth.selectedAccount?.rateLimits.map(\.usedPercent) == [11])
+    }
+
+    @Test func liveStoreDropsActiveRateRefreshAfterAccountGenerationQuiesces() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com", "second@example.com"]
+        )
+        try writeSavedAccountAuth(homeURL: homeURL, accountKey: "second@example.com")
+        let firstTransport = FakeCodexAppServerTransport()
+        let firstAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "first@example.com",
+            planType: .pro
+        ))
+        try await firstTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 99
+        ))
+        try await firstTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        let secondTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: secondTransport,
+            email: "second@example.com",
+            planType: .plus,
+            usedPercent: 20
+        )
+        let rateReadGate = CodexAppServerTestGate()
+        let oldGenerationQuiesced = OneShotSignal()
+        var didPublishRuntime = false
+        var transports = [firstTransport, secondTransport]
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerLifecycleHandler: { container in
+                if container != nil {
+                    didPublishRuntime = true
+                } else if didPublishRuntime {
+                    Task { await oldGenerationQuiesced.signal() }
+                }
+            },
+            transportFactory: { codexHomeURL in
+                #expect(codexHomeURL == mainCodexHomeURL)
+                return transports.removeFirst()
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let firstAuthBeforeRefresh = try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "first@example.com"
+        )
+        await firstTransport.holdNextIgnoringCancellation(
+            .accountRateLimitsRead,
+            gate: rateReadGate
+        )
+        let refresh = Task { @MainActor in
+            await store.refreshAccountRateLimits(accountKey: "first@example.com")
+        }
+        await rateReadGate.waitUntilBlocked()
+        let accountSwitch = Task { @MainActor in
+            try await store.switchAccount(
+                CodexReviewKit.CodexReviewAccount(email: "second@example.com")
+            )
+        }
+        await oldGenerationQuiesced.wait()
+        await rateReadGate.open()
+        await refresh.value
+        try await accountSwitch.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "second@example.com")
+        #expect(try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "first@example.com"
+        ) == firstAuthBeforeRefresh)
+        #expect(store.auth.persistedAccounts.first(where: {
+            $0.accountKey == "first@example.com"
+        })?.rateLimits.first?.usedPercent != 99)
+        await store.stop()
+    }
+
+    @Test func liveStoreClosesAdmissionWhileRuntimeAuthenticationReconciles() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        let secondAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "second@example.com",
+            planType: .plus
+        ))
+        try await transport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
+        let accountReadGate = CodexAppServerTestGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: accountReadGate)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await accountReadGate.waitUntilBlocked()
+
+        do {
+            _ = try await store.beginReview(
+                sessionID: "runtime-auth-reservation",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected runtime authentication reconciliation to close review admission.")
+        } catch {}
+        do {
+            try await store.reorderPersistedAccount(accountKey: "first@example.com", toIndex: 0)
+            Issue.record("Expected runtime authentication reconciliation to close account admission.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+
+        await accountReadGate.open()
+        await refresh.value
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "second@example.com")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        try await store.reorderPersistedAccount(accountKey: "first@example.com", toIndex: 0)
+        await store.stop()
+    }
+
+    @Test func liveStoreDrainsAccountInvalidationAfterIsolatedLoginReleasesOwnership() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let mainTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: mainTransport, email: "first@example.com")
+        let secondAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "second@example.com",
+            planType: .plus
+        ))
+        let loginTransport = FakeCodexAppServerTransport()
+        try await loginTransport.enqueueChatGPTLogin(
+            loginID: "isolated-pending-drain",
+            authenticationURL: testAuthenticationURL
+        )
+        try await loginTransport.enqueueChatGPTLoginCancellation(.canceled)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transportFactory: { codexHomeURL in
+                codexHomeURL == mainCodexHomeURL ? mainTransport : loginTransport
+            }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await loginTransport.waitForRequest(.accountLoginStart)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await mainTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.backend.acceptsNewReviewOperations == false
+        })
+        try await mainTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await mainTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await mainTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await mainTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
+
+        do {
+            _ = try await store.beginReview(
+                sessionID: "isolated-pending-drain",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected an accepted account invalidation to close review admission immediately.")
+        } catch {}
+        do {
+            try await store.reorderPersistedAccount(accountKey: "first@example.com", toIndex: 0)
+            Issue.record("Expected an accepted account invalidation to close account admission immediately.")
+        } catch let failure as CodexReviewAuthenticationFailure {
+            #expect(failure == .accountMutationBlockedByAuthentication)
+        }
+
+        await store.cancelAuthentication()
+
+        #expect(store.serverState == .running)
+        #expect(await mainTransport.recordedRequests(for: .accountRead).count >= 4)
+        #expect(store.backend.acceptsNewReviewOperations)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.accountKey == "second@example.com"
+        })
+        #expect(await mainTransport.recordedRequests(for: .accountRead).count >= 2)
+        await store.stop()
+    }
+
+    @Test func liveStoreRedrainsNewGenerationAfterSupersededDrainCompletes() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let oldTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: oldTransport, email: "first@example.com")
+        let firstAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "first@example.com",
+            planType: .pro
+        ))
+        try await oldTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        try await oldTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        try await oldTransport.enqueueAccount(firstAccount, requiresOpenAIAuth: false)
+        let oldReadGate = CodexAppServerTestGate()
+
+        let newTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: newTransport, email: "first@example.com")
+        let secondAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "second@example.com",
+            planType: .plus
+        ))
+        try await newTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await newTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await newTransport.enqueueAccount(secondAccount, requiresOpenAIAuth: false)
+        try await newTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 30
+        ))
+        let oldActivationGate = CodexAppServerTestGate()
+        let oldMCPHTTPServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:0/mcp")!,
+            activationGate: oldActivationGate
+        )
+        let newActivationGate = CodexAppServerTestGate()
+        let newMCPHTTPServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:0/mcp")!,
+            activationGate: newActivationGate
+        )
+        var transports = [oldTransport, newTransport]
+        var mcpHTTPServerCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, configuration, _ in
+                defer { mcpHTTPServerCount += 1 }
+                if mcpHTTPServerCount == 0 {
+                    _ = configuration
+                    return oldMCPHTTPServer
+                }
+                return newMCPHTTPServer
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerCloser: { _ in },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        let initialStart = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await oldMCPHTTPServer.snapshot().activateCount == 1
+        })
+        let oldAccountReadCount = await oldTransport.recordedRequests(for: .accountRead).count
+        await oldTransport.holdNextIgnoringCancellation(.accountRead, gate: oldReadGate)
+        try await oldTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.backend.acceptsNewReviewOperations == false
+        })
+        await oldActivationGate.open()
+        await initialStart.value
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await oldTransport.recordedRequests(for: .accountRead).count
+                >= oldAccountReadCount + 1
+        })
+
+        await store.stop()
+        let restart = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            await newMCPHTTPServer.snapshot().activateCount == 1
+        })
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await newTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await newActivationGate.open()
+        await restart.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
+        await oldReadGate.open()
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.accountKey == "second@example.com"
+        })
+
+        #expect(store.serverState == .running)
+        #expect(await newTransport.recordedRequests(for: .accountRead).count >= 4)
+        await store.stop()
+    }
+
+    @Test func liveStoreFailsClosedWhenRuntimeAuthenticationRegistryCommitIsUnresolved() async throws {
+        let homeURL = try temporaryHome()
+        let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let corruption = RegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: corruption.corruptIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+        corruption.arm()
+        await store.refreshAuthentication()
+
+        #expect(corruption.corruptionCount == 1)
+        #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
+        #expect(store.auth.errorMessage?.contains("reconciliation remains pending") == true)
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ))
+        do {
+            _ = try await store.beginReview(
+                sessionID: "runtime-auth-sticky-failure",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected unresolved runtime authentication reconciliation to keep review admission closed.")
+        } catch {}
+        await store.stop()
+    }
+
+    @Test func liveStoreDoesNotRecordStaleRuntimeAccountAfterAClaimedEffectFails() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let replacement = BlockingRegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: replacement.blockCorruptAndFailIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        replacement.arm()
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await replacement.waitUntilBlocked()
+        try Data(#"{"tokens":{"id_token":"third@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        replacement.open()
+        await refresh.value
+
+        let debtData = try Data(contentsOf: accountReconciliationDebtURL(homeURL: homeURL))
+        let debt = try #require(JSONSerialization.jsonObject(with: debtData) as? [String: Any])
+        #expect(debt["expectation"] as? String == "reconcileCurrentRuntime")
+        #expect({ if case .failed = store.serverState { return true }; return false }())
+        await store.stop()
+    }
+
+    @Test func liveStoreFinalShutdownSupersedesRuntimeAuthenticationRead() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let readGate = CodexAppServerTestGate()
+        let stopCompletion = CompletionFlag()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerCloser: { _ in },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: readGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await readGate.waitUntilBlocked()
+        let stop = Task { @MainActor in
+            await store.stop()
+            await stopCompletion.complete()
+        }
+
+        #expect(await waitUntil(timeout: .seconds(1)) {
+            await stopCompletion.isCompleted()
+        })
+        #expect(store.serverState == .stopped)
+        await readGate.open()
+        await refresh.value
+        await stop.value
+        #expect(try activeAccountKey(homeURL: homeURL) == "first@example.com")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+    }
+
+    @Test func liveStoreFinalShutdownWaitsForClaimedRuntimeAuthenticationEffect() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let replacement = BlockingRegistryReplacementProbe()
+        let stopCompletion = CompletionFlag()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: replacement.blockIfArmed,
+            appServerCloser: { _ in },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        replacement.arm()
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await replacement.waitUntilBlocked()
+        let stop = Task { @MainActor in
+            await store.stop()
+            await stopCompletion.complete()
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await stopCompletion.isCompleted() == false)
+
+        replacement.open()
+        await refresh.value
+        await stop.value
+        #expect(await stopCompletion.isCompleted())
+        #expect(try activeAccountKey(homeURL: homeURL) == "second@example.com")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+    }
+
+    @Test func liveStoreFailsClosedWhenCausalRuntimeAuthRefreshCannotRefetch() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "first@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueFailure(
+            .response(code: -32_000, message: "authoritative auth read failed"),
+            for: .accountRead
+        )
+        let readGate = CodexAppServerTestGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: readGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await readGate.waitUntilBlocked()
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        await readGate.open()
+        await refresh.value
+
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+        #expect(store.auth.errorMessage?.contains("authoritative auth read failed") == true)
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreStopsOnceWhenConnectionFailsDuringRuntimeAuthRead() async throws {
+        let homeURL = try temporaryHome()
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let readGate = CodexAppServerTestGate()
+        var closeCount = 0
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            appServerCloser: { _ in closeCount += 1 },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: readGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAuthentication()
+        }
+        await readGate.waitUntilBlocked()
+        await transport.failConnection(.closed)
+        try #require(await waitUntil(timeout: .seconds(1)) {
+            closeCount == 1
+        })
+        #expect({
+            if case .failed = store.serverState { return true }
+            return false
+        }())
+
+        await readGate.open()
+        await refresh.value
+        #expect(closeCount == 1)
+        #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
+    }
+
+    @Test func liveStoreRefetchesStagingAuthAfterSubscribedInvalidation() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "first@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let readGate = CodexAppServerTestGate()
+        await transport.holdNextIgnoringCancellation(.accountRead, gate: readGate)
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        let start = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        await readGate.waitUntilBlocked()
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await readGate.open()
+        await start.value
+
+        #expect(store.serverState == .running)
+        #expect(store.auth.selectedAccount?.accountKey == "second@example.com")
+        #expect(await transport.recordedRequests(for: .accountRead).count == 2)
+        await store.stop()
+    }
+
+    @Test func liveStoreDropsActiveRateLimitsWhenBackendAccountChanges() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: "first@example.com",
+            accounts: ["first@example.com"]
+        )
+        let transport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(on: transport, email: "first@example.com")
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "first@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let rateGate = CodexAppServerTestGate()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let savedAuthBefore = try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "first@example.com"
+        )
+        await transport.holdNextIgnoringCancellation(.accountRateLimitsRead, gate: rateGate)
+        let refresh = Task { @MainActor in
+            await store.refreshAccountRateLimits(accountKey: "first@example.com")
+        }
+        await rateGate.waitUntilBlocked()
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        await rateGate.open()
+        await refresh.value
+
+        #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
+        #expect(store.auth.selectedAccount?.rateLimits.isEmpty == true)
+        #expect(try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: "first@example.com"
+        ) == savedAuthBefore)
+        await store.stop()
+    }
+
+    @Test func liveStoreKeepsPrimaryLoginAdmissionUntilStablePublication() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "primary-admission",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let finalAccount = try CodexAppServerTestAccount(kind: .chatGPT(
+            email: "third@example.com",
+            planType: .pro
+        ))
+        try await transport.enqueueAccount(finalAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(finalAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueAccount(finalAccount, requiresOpenAIAuth: false)
+        try await transport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 15
+        ))
+        let replacement = BlockingRegistryReplacementProbe()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: replacement.blockIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        replacement.arm()
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "primary-admission",
+            completion: .succeeded
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        await replacement.waitUntilBlocked()
+        let accountReadCount = await transport.recordedRequests(for: .accountRead).count
+        await store.refreshAuthentication()
+        #expect(await transport.recordedRequests(for: .accountRead).count == accountReadCount)
+        do {
+            _ = try await store.beginReview(
+                sessionID: "primary-login-admission",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected primary login ownership to reject review admission.")
+        } catch {}
+
+        try Data(#"{"tokens":{"id_token":"third@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        replacement.open()
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.auth.selectedAccount?.accountKey == "third@example.com"
+        })
+
+        #expect(try activeAccountKey(homeURL: homeURL) == "third@example.com")
+        #expect(FileManager.default.fileExists(
+            atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+        ) == false)
+        await store.stop()
+    }
+
+    @Test func liveStoreFailsPrimaryLoginClosedWithoutRecordingAnInvalidatedAccount() async throws {
+        let homeURL = try temporaryHome()
+        let codexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+        try writeRegistry(homeURL: homeURL, activeAccountKey: nil, accounts: [])
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        try await transport.enqueueChatGPTLogin(
+            loginID: "primary-invalidated-commit",
+            authenticationURL: testAuthenticationURL
+        )
+        try await transport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "second@example.com",
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+        let replacement = BlockingRegistryReplacementCorruptingProbe(
+            registryURL: accountRegistryURL(homeURL: homeURL)
+        )
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            registryDestinationDidReplace: replacement.blockCorruptAndFailIfArmed,
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        try await store.addAccount()
+        await transport.waitForRequest(.accountLoginStart)
+        try Data(#"{"tokens":{"id_token":"second@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        replacement.arm()
+        try await transport.notificationEmitter.emitLoginCompleted(
+            loginID: "primary-invalidated-commit",
+            completion: .succeeded
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .plus
+        ))
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            replacement.hasBlocked
+        })
+        try Data(#"{"tokens":{"id_token":"third@example.com"}}"#.utf8).write(
+            to: codexHomeURL.appendingPathComponent("auth.json")
+        )
+        try await transport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        replacement.open()
+
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            if case .failed = store.serverState { return true }
+            return false
+        })
+        let debtData = try Data(contentsOf: accountReconciliationDebtURL(homeURL: homeURL))
+        let debt = try #require(JSONSerialization.jsonObject(with: debtData) as? [String: Any])
+        #expect(debt["expectation"] as? String == "reconcileCurrentRuntime")
+        do {
+            _ = try await store.beginReview(
+                sessionID: "primary-invalidated-commit",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected unresolved primary login reconciliation to stay fail-closed.")
+        } catch {}
+        await store.stop()
     }
 
     @Test func liveStoreSwitchingAccountRestartsRuntimeAndCancelsRunningReviews() async throws {
@@ -1850,7 +4545,7 @@ struct CodexReviewHostTests {
         try await store.switchAccount(CodexReviewKit.CodexReviewAccount(email: "second@example.com"))
         let result = try await reviewRead
         await secondTransport.waitForRequestCount(2)
-        await firstTransport.waitForRequestCount(8)
+        await firstTransport.waitForRequestCount(7)
 
         #expect(result.presentation.status == .cancelled)
         #expect(result.core.cancellation?.message == "Account switched.")
@@ -1927,6 +4622,46 @@ struct CodexReviewHostTests {
         #expect(await secondTransport.recordedRequests().map(\.request.operation).contains(.accountRead))
     }
 
+    @Test func liveStoreDoesNotPublishNoopSignOutAfterFinalShutdownRequest() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let loadGate = ArmableAsyncHookGate()
+        let finalShutdownRequested = OneShotSignal()
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            accountRegistryLoadDidBegin: {
+                await loadGate.waitIfArmed()
+            },
+            finalShutdownDidRequest: {
+                await finalShutdownRequested.signal()
+            },
+            transport: transport
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        store.auth.updatePhase(.failed(.runtime(message: "preserved failure")))
+        await loadGate.arm()
+        let signOut = Task { @MainActor in
+            try await store.signOutActiveAccount()
+        }
+        await loadGate.waitUntilBlocked()
+        let finalStop = Task { @MainActor in
+            await store.stop()
+        }
+        await finalShutdownRequested.wait()
+
+        await loadGate.open()
+        try await signOut.value
+        await finalStop.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.auth.errorMessage == "preserved failure")
+        #expect(store.auth.selectedAccount == nil)
+    }
+
     @Test func liveStoreSwitchAccountFailsWhenSavedAuthIsMissing() async throws {
         let homeURL = try temporaryHome()
         let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
@@ -1939,24 +4674,30 @@ struct CodexReviewHostTests {
         try FileManager.default.createDirectory(at: mainCodexHomeURL, withIntermediateDirectories: true)
         try originalAuth.write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
 
-        let transport = FakeCodexAppServerTransport()
-        try await transport.enqueueAccount(
+        let firstTransport = FakeCodexAppServerTransport()
+        try await firstTransport.enqueueAccount(
             try CodexAppServerTestAccount(kind: .chatGPT(
                 email: "first@example.com",
                 planType: .pro
             )),
             requiresOpenAIAuth: false
         )
-        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
-        try await transport.enqueueModels(.init(models: []))
-        try await transport.enqueueRateLimits(try makeHostRateLimits(
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueRateLimits(try makeHostRateLimits(
             planType: nil,
             windowDurationMinutes: 300,
             usedPercent: 10
         ))
+        let recoveryTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: recoveryTransport,
+            email: "first@example.com"
+        )
+        var transports = [firstTransport, recoveryTransport]
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            transport: transport
+            transportFactory: { _ in transports.removeFirst() }
         )
 
         await store.start(forceRestartIfNeeded: true)
@@ -1967,6 +4708,7 @@ struct CodexReviewHostTests {
         #expect(store.auth.selectedAccount?.accountKey == "first@example.com")
         #expect(try activeAccountKey(homeURL: homeURL) == "first@example.com")
         #expect(try Data(contentsOf: mainCodexHomeURL.appendingPathComponent("auth.json")) == originalAuth)
+        await store.stop()
     }
 
     @Test func liveStoreStopLetsHTTPServerCancelSessionsBeforeDroppingBackend() async throws {
@@ -2343,6 +5085,11 @@ struct CodexReviewHostTests {
         try Data("{\"tokens\":{\"id_token\":\"test\"}}".utf8)
             .write(to: mainCodexHomeURL.appendingPathComponent("auth.json"))
         let logoutGate = AsyncGate()
+        let mcpStopGate = CodexAppServerTestGate()
+        let firstMCPServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stopGate: mcpStopGate
+        )
         let firstTransport = FakeCodexAppServerTransport()
         try await firstTransport.enqueueAccount(
             try CodexAppServerTestAccount(kind: .chatGPT(
@@ -2367,20 +5114,71 @@ struct CodexReviewHostTests {
         try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
         try await secondTransport.enqueueModels(.init(models: []))
         var transports = [firstTransport, secondTransport]
+        var mcpFactoryCallCount = 0
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, configuration, _ in
+                mcpFactoryCallCount += 1
+                if mcpFactoryCallCount == 1 {
+                    return firstMCPServer
+                }
+                return NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpHTTPServerBindChecker: { _ in },
             transportFactory: { _ in transports.removeFirst() }
         )
         await store.start(forceRestartIfNeeded: true)
+        try await firstTransport.notificationEmitter.emitRateLimitsUpdated(.init(snapshot: try .init(
+            limitID: "codex",
+            limitName: nil,
+            primary: .init(
+                usedPercent: 10,
+                windowDurationMinutes: 300,
+                resetsAtUnixSeconds: nil
+            ),
+            secondary: nil,
+            credits: nil,
+            individualLimit: nil,
+            planType: nil,
+            reachedType: nil
+        )))
+        try #require(await waitUntil(timeout: .seconds(1)) {
+            store.auth.selectedAccount?.rateLimits.first?.usedPercent == 10
+        })
 
         let removal = Task {
             try await store.removeAccount(accountKey: "active@example.com")
         }
-        await firstTransport.waitForRequestCount(6)
+        await mcpStopGate.waitUntilBlocked()
+        #expect(await firstMCPServer.snapshot().stopCount == 1)
+        #expect(
+            FileManager.default.fileExists(
+                atPath: accountMutationJournalURL(homeURL: homeURL).path
+            ) == false
+        )
+        #expect(await firstTransport.recordedRequests(for: .accountLogout).isEmpty)
+        await mcpStopGate.open()
+        await firstTransport.waitForRequestCount(5)
         let journalData = try Data(contentsOf: accountMutationJournalURL(homeURL: homeURL))
         let journal = try #require(JSONSerialization.jsonObject(with: journalData) as? [String: Any])
         #expect(journal["phase"] as? String == "prepared")
         #expect(journal["mayApplyIrreversibleLogout"] as? Bool == true)
+        let reviewRunCountBeforeRejectedAdmission = store.reviewRuns.count
+        do {
+            _ = try await store.beginReview(
+                sessionID: "transition-rejected-session",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+            Issue.record("Expected account-transition admission to reject a new review before run publication.")
+        } catch {
+            #expect(error.localizedDescription.contains("changing accounts or stopping"))
+        }
+        #expect(store.reviewRuns.count == reviewRunCountBeforeRejectedAdmission)
+        let selectedAccountBeforeDroppedRefresh = store.auth.selectedAccount?.accountKey
+        let transitionedAccountProjection = try #require(store.auth.selectedAccount)
+        await store.refreshAuthentication()
+        #expect(store.auth.selectedAccount?.accountKey == selectedAccountBeforeDroppedRefresh)
+        #expect(store.auth.errorMessage == nil)
         try await firstTransport.notificationEmitter.emitRateLimitsUpdated(.init(snapshot: try .init(
                 limitID: "codex",
                 limitName: nil,
@@ -2395,9 +5193,6 @@ struct CodexReviewHostTests {
                 planType: nil,
                 reachedType: nil
             )))
-        #expect(await waitUntil(timeout: .seconds(1)) {
-            store.auth.selectedAccount?.rateLimits.first?.usedPercent == 12
-        })
         #expect(
             try Data(contentsOf: accountMutationJournalURL(homeURL: homeURL))
                 == journalData
@@ -2406,7 +5201,6 @@ struct CodexReviewHostTests {
             authMode: .chatGPT,
             planType: .pro
         ))
-        await firstTransport.waitForRequest(.accountRead, count: 2)
 
         let recoveryHomeURL = try temporaryHome()
         let recoveryAccountsURL = recoveryHomeURL
@@ -2446,6 +5240,9 @@ struct CodexReviewHostTests {
         await logoutGate.open()
         try await removal.value
 
+        #expect(transitionedAccountProjection.rateLimits.first?.usedPercent == 10)
+        let firstRuntimeAccountReadCount = await firstTransport.recordedRequests(for: .accountRead).count
+        #expect(firstRuntimeAccountReadCount == 2)
         #expect(FileManager.default.fileExists(atPath: accountMutationJournalURL(homeURL: homeURL).path) == false)
         #expect(try activeAccountKey(homeURL: homeURL) == nil)
     }
@@ -2480,9 +5277,24 @@ struct CodexReviewHostTests {
             .response(code: -32603, message: "logout unavailable"),
             for: .accountLogout
         )
+        let replacementTransport = FakeCodexAppServerTransport()
+        try await replacementTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: "active@example.com",
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+        try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await replacementTransport.enqueueModels(.init(models: []))
+        var transports = [transport, replacementTransport]
+        var lifecycleStates: [Bool] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            transport: transport
+            appServerLifecycleHandler: { container in
+                lifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in transports.removeFirst() }
         )
         await store.start(forceRestartIfNeeded: true)
 
@@ -2504,22 +5316,22 @@ struct CodexReviewHostTests {
                 atPath: accountMutationJournalURL(homeURL: homeURL).path
             ) == false
         )
+        #expect(lifecycleStates == [true, false, true])
         await store.stop()
     }
 
-    @Test func liveStoreClosesIsolatedLoginRuntimeWhenMainRuntimeIsUnavailable() async throws {
+    @Test func liveStoreRejectsAddAccountBeforeCreatingIsolatedRuntimeWhenMainRuntimeIsUnavailable() async throws {
         let homeURL = try temporaryHome()
         try writeRegistry(
             homeURL: homeURL,
             activeAccountKey: "active@example.com",
             accounts: ["active@example.com"]
         )
-        var isolatedCodexHomeURL: URL?
+        var runtimeFactoryCallCount = 0
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
-            transportFactory: { codexHomeURL in
-                isolatedCodexHomeURL = codexHomeURL
-                try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+            transportFactory: { _ in
+                runtimeFactoryCallCount += 1
                 return FakeCodexAppServerTransport()
             }
         )
@@ -2527,13 +5339,13 @@ struct CodexReviewHostTests {
         do {
             try await store.addAccount()
             Issue.record("Expected unavailable main runtime to propagate to the add-account command.")
-        } catch let failure as CodexReviewAuthenticationFailure {
-            #expect(failure == .runtime(message: "Review runtime is not running."))
+        } catch {
+            #expect(error.localizedDescription == "The review runtime is changing accounts or stopping.")
         }
 
-        let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
-        #expect(failedMessage(from: store.auth.phase) == "Review runtime is not running.")
-        #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
+        #expect(runtimeFactoryCallCount == 0)
+        #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
+        #expect(store.auth.errorMessage == nil)
     }
 
     @Test func liveStoreClosesIsolatedLoginRuntimeWhenLoginStartFails() async throws {
@@ -2706,6 +5518,164 @@ struct CodexReviewHostTests {
     }
 }
 
+@MainActor
+private func exerciseUnknownPrimaryCancellation(
+    previousAccountKey: String?,
+    observedAccountKey: String?,
+    expectedActiveAccountKey: String?
+) async throws {
+    let homeURL = try temporaryHome()
+    let mainCodexHomeURL = homeURL.appendingPathComponent(".codex_review", isDirectory: true)
+    if let previousAccountKey {
+        let includesSwitchProbe = observedAccountKey == previousAccountKey
+        try writeRegistry(
+            homeURL: homeURL,
+            activeAccountKey: previousAccountKey,
+            accounts: includesSwitchProbe
+                ? [previousAccountKey, "other@example.com"]
+                : [previousAccountKey]
+        )
+        if includesSwitchProbe {
+            try writeSavedAccountAuth(
+                homeURL: homeURL,
+                accountKey: "other@example.com"
+            )
+        }
+    }
+
+    let initialTransport = FakeCodexAppServerTransport()
+    if let previousAccountKey {
+        try await initialTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: previousAccountKey,
+                planType: .pro
+            )),
+            requiresOpenAIAuth: false
+        )
+    } else {
+        try await initialTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+    }
+    try await initialTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await initialTransport.enqueueModels(.init(models: []))
+    if previousAccountKey != nil {
+        try await initialTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 10
+        ))
+    }
+    try await initialTransport.enqueueChatGPTLogin(
+        loginID: "unknown-primary-cancel",
+        authenticationURL: testAuthenticationURL
+    )
+    try await initialTransport.enqueueFailure(
+        .response(code: -32_000, message: "cancel response lost"),
+        for: .accountLoginCancel
+    )
+
+    let replacementTransport = FakeCodexAppServerTransport()
+    if let observedAccountKey {
+        try await replacementTransport.enqueueAccount(
+            try CodexAppServerTestAccount(kind: .chatGPT(
+                email: observedAccountKey,
+                planType: .plus
+            )),
+            requiresOpenAIAuth: false
+        )
+    } else {
+        try await replacementTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+    }
+    try await replacementTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await replacementTransport.enqueueModels(.init(models: []))
+    if observedAccountKey != nil {
+        try await replacementTransport.enqueueRateLimits(try makeHostRateLimits(
+            planType: nil,
+            windowDurationMinutes: 300,
+            usedPercent: 20
+        ))
+    }
+    var transports = [initialTransport, replacementTransport]
+    if observedAccountKey == previousAccountKey,
+       let previousAccountKey {
+        let switchAwayTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: switchAwayTransport,
+            email: "other@example.com",
+            planType: .plus,
+            usedPercent: 25
+        )
+        let switchBackTransport = FakeCodexAppServerTransport()
+        try await enqueueActiveAccountBootstrap(
+            on: switchBackTransport,
+            email: previousAccountKey,
+            planType: .pro,
+            usedPercent: 30
+        )
+        transports.append(switchAwayTransport)
+        transports.append(switchBackTransport)
+    }
+    let store = CodexReviewStore.makeLiveStoreForTesting(
+        environment: ["HOME": homeURL.path],
+        transportFactory: { codexHomeURL in
+            #expect(codexHomeURL == mainCodexHomeURL)
+            return transports.removeFirst()
+        }
+    )
+
+    await store.start(forceRestartIfNeeded: true)
+    if previousAccountKey == nil {
+        try await store.addAccount()
+    } else {
+        try await store.signIn()
+    }
+    await initialTransport.waitForRequest(.accountLoginStart)
+    let replacementAuthData = observedAccountKey.map { observedAccountKey in
+        Data(#"{"tokens":{"id_token":"\#(observedAccountKey)-rotated"}}"#.utf8)
+    }
+    if let replacementAuthData {
+        try replacementAuthData.write(
+            to: mainCodexHomeURL.appendingPathComponent("auth.json")
+        )
+    }
+
+    await store.cancelAuthentication()
+
+    #expect(store.serverState == .running)
+    #expect(store.auth.selectedAccount?.accountKey == expectedActiveAccountKey)
+    let persistedActiveAccountKey = FileManager.default.fileExists(
+        atPath: accountRegistryURL(homeURL: homeURL).path
+    ) ? try activeAccountKey(homeURL: homeURL) : nil
+    #expect(persistedActiveAccountKey == expectedActiveAccountKey)
+    #expect(FileManager.default.fileExists(
+        atPath: accountReconciliationDebtURL(homeURL: homeURL).path
+    ) == false)
+    if let mutationProbeAccountKey = expectedActiveAccountKey ?? previousAccountKey {
+        try await store.reorderPersistedAccount(
+            accountKey: mutationProbeAccountKey,
+            toIndex: 0
+        )
+    }
+    if observedAccountKey == previousAccountKey,
+       let previousAccountKey,
+       let replacementAuthData {
+        #expect(try savedAccountAuth(
+            homeURL: homeURL,
+            accountKey: previousAccountKey
+        ) == replacementAuthData)
+        try await store.switchAccount(
+            CodexReviewKit.CodexReviewAccount(email: "other@example.com")
+        )
+        try await store.switchAccount(
+            CodexReviewKit.CodexReviewAccount(email: previousAccountKey)
+        )
+        #expect(try Data(
+            contentsOf: mainCodexHomeURL.appendingPathComponent("auth.json")
+        ) == replacementAuthData)
+    }
+    #expect(transports.isEmpty)
+    await store.stop()
+}
+
 private extension CodexAppServerTestTransport {
     nonisolated var notificationEmitter: CodexAppServerTestNotificationEmitter {
         CodexAppServerTestNotificationEmitter(transport: self)
@@ -2770,6 +5740,26 @@ private func makeHostRateLimits(
     )
 }
 
+private func enqueueActiveAccountBootstrap(
+    on transport: FakeCodexAppServerTransport,
+    email: String,
+    planType: CodexAppServerTestPlanType = .pro,
+    usedPercent: Int32 = 10
+) async throws {
+    let account = try CodexAppServerTestAccount(kind: .chatGPT(
+        email: email,
+        planType: planType
+    ))
+    try await transport.enqueueAccount(account, requiresOpenAIAuth: false)
+    try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+    try await transport.enqueueModels(.init(models: []))
+    try await transport.enqueueRateLimits(try makeHostRateLimits(
+        planType: nil,
+        windowDurationMinutes: 300,
+        usedPercent: usedPercent
+    ))
+}
+
 private func makeHostStoredThread(
     id: CodexThreadID,
     model: String = "gpt-5",
@@ -2822,11 +5812,67 @@ private final class FakeExternalURLOpener {
         self.failure = failure
     }
 
-    func open(_ url: URL) async throws {
+    func open(_ url: URL) throws {
         openedURLs.append(url)
         if let failure {
             throw failure
         }
+    }
+}
+
+private actor OneShotSignal {
+    private var isSignaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        guard isSignaled == false else {
+            return
+        }
+        isSignaled = true
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func wait() async {
+        guard isSignaled == false else {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            if isSignaled {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func snapshot() -> Bool {
+        isSignaled
+    }
+}
+
+private actor ArmableAsyncHookGate {
+    private var armed = false
+    private let gate = CodexAppServerTestGate()
+
+    func arm() {
+        armed = true
+    }
+
+    func waitIfArmed() async {
+        guard armed else { return }
+        await gate.waitIgnoringCancellation()
+    }
+
+    func waitUntilBlocked() async {
+        await gate.waitUntilBlocked()
+    }
+
+    func open() async {
+        await gate.open()
     }
 }
 
@@ -2936,6 +5982,44 @@ private func accountMutationJournalURL(homeURL: URL) -> URL {
         .appendingPathComponent("mutation-journal.json")
 }
 
+private func accountReconciliationDebtURL(homeURL: URL) -> URL {
+    homeURL
+        .appendingPathComponent(".codex_review", isDirectory: true)
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("reconciliation-debt.json")
+}
+
+private func accountReconciliationDebtURLForCodexHome(_ codexHomeURL: URL) -> URL {
+    codexHomeURL
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("reconciliation-debt.json")
+}
+
+private func writeReconciliationDebt(
+    homeURL: URL,
+    expectedAccountKey: String
+) throws {
+    let url = accountReconciliationDebtURL(homeURL: homeURL)
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    let data = try JSONSerialization.data(withJSONObject: [
+        "expectation": "account",
+        "accountKey": expectedAccountKey,
+        "message": "test reconciliation debt",
+        "recordedAt": 0,
+    ])
+    try data.write(to: url)
+}
+
+private func temporaryHomeCleanupDebtURL(homeURL: URL) -> URL {
+    homeURL
+        .appendingPathComponent(".codex_review", isDirectory: true)
+        .appendingPathComponent("accounts", isDirectory: true)
+        .appendingPathComponent("temporary-home-cleanup-debt.json")
+}
+
 private func accountRegistryObject(homeURL: URL) throws -> [String: Any] {
     let data = try Data(contentsOf: accountRegistryURL(homeURL: homeURL))
     return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -2984,6 +6068,237 @@ private enum MCPHTTPServerProbeError: Error, Sendable {
     case stagingFailed
 }
 
+private struct InjectedRegistryReplaceFailure: Error, Sendable {}
+
+private final class RegistryReplaceFailureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isArmed = false
+    private var recordedFailureCount = 0
+
+    var failureCount: Int {
+        lock.withLock { recordedFailureCount }
+    }
+
+    func arm() {
+        lock.withLock { isArmed = true }
+    }
+
+    func failIfArmed() throws {
+        let shouldFail = lock.withLock {
+            guard isArmed else { return false }
+            isArmed = false
+            recordedFailureCount += 1
+            return true
+        }
+        if shouldFail {
+            throw InjectedRegistryReplaceFailure()
+        }
+    }
+}
+
+private final class RegistryReplacementCorruptingProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let registryURL: URL
+    private var isArmed = false
+    private var recordedCorruptionCount = 0
+
+    init(registryURL: URL) {
+        self.registryURL = registryURL
+    }
+
+    var corruptionCount: Int {
+        lock.withLock { recordedCorruptionCount }
+    }
+
+    func arm() {
+        lock.withLock { isArmed = true }
+    }
+
+    func corruptIfArmed() throws {
+        let shouldCorrupt = lock.withLock {
+            guard isArmed else { return false }
+            isArmed = false
+            recordedCorruptionCount += 1
+            return true
+        }
+        guard shouldCorrupt else { return }
+        try Data("invalid registry".utf8).write(to: registryURL)
+        throw InjectedRegistryReplaceFailure()
+    }
+}
+
+private final class BlockingRegistryReplacementProbe: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isArmed = false
+    private var isBlocked = false
+    private var isOpen = false
+
+    func arm() {
+        condition.withLock {
+            isArmed = true
+            isBlocked = false
+            isOpen = false
+        }
+    }
+
+    func blockIfArmed() {
+        condition.lock()
+        guard isArmed else {
+            condition.unlock()
+            return
+        }
+        isArmed = false
+        isBlocked = true
+        condition.broadcast()
+        while isOpen == false {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func waitUntilBlocked() async {
+        while condition.withLock({ isBlocked }) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func open() {
+        condition.withLock {
+            isOpen = true
+            condition.broadcast()
+        }
+    }
+}
+
+private final class BlockingRegistryReplacementCorruptingProbe: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let registryURL: URL
+    private var isArmed = false
+    private var isBlocked = false
+    private var isOpen = false
+
+    init(registryURL: URL) {
+        self.registryURL = registryURL
+    }
+
+    var hasBlocked: Bool {
+        condition.withLock { isBlocked }
+    }
+
+    func arm() {
+        condition.withLock {
+            isArmed = true
+            isBlocked = false
+            isOpen = false
+        }
+    }
+
+    func blockCorruptAndFailIfArmed() throws {
+        condition.lock()
+        guard isArmed else {
+            condition.unlock()
+            return
+        }
+        isArmed = false
+        isBlocked = true
+        condition.broadcast()
+        while isOpen == false {
+            condition.wait()
+        }
+        condition.unlock()
+        try Data("invalid registry".utf8).write(to: registryURL)
+        throw InjectedRegistryReplaceFailure()
+    }
+
+    func waitUntilBlocked() async {
+        while condition.withLock({ isBlocked }) == false {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    func open() {
+        condition.withLock {
+            isOpen = true
+            condition.broadcast()
+        }
+    }
+}
+
+private final class PathSynchronizationFailureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let path: String
+    private var remainingFailures: Int
+    private var failures = 0
+    private var invocations = 0
+
+    init(path: String, failureCount: Int) {
+        self.path = path
+        remainingFailures = failureCount
+    }
+
+    var recordedFailureCount: Int {
+        lock.withLock { failures }
+    }
+
+    var recordedInvocationCount: Int {
+        lock.withLock { invocations }
+    }
+
+    func arm(failureCount: Int) {
+        lock.withLock {
+            remainingFailures = failureCount
+            failures = 0
+            invocations = 0
+        }
+    }
+
+    func failIfNeeded(_ url: URL) throws {
+        let shouldFail = lock.withLock {
+            guard url.standardizedFileURL.path == path else {
+                return false
+            }
+            invocations += 1
+            guard remainingFailures > 0 else { return false }
+            remainingFailures -= 1
+            failures += 1
+            return true
+        }
+        if shouldFail {
+            throw InjectedRegistryReplaceFailure()
+        }
+    }
+}
+
+private final class DirectorySynchronizationFailureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var shouldFail = true
+    private var recordedFailureCount = 0
+    private var recordedSynchronizedPaths: [String] = []
+
+    var failureCount: Int {
+        lock.withLock { recordedFailureCount }
+    }
+
+    var synchronizedPaths: [String] {
+        lock.withLock { recordedSynchronizedPaths }
+    }
+
+    func failFirstSynchronization(_ url: URL) throws {
+        let shouldThrow = lock.withLock {
+            recordedSynchronizedPaths.append(url.path)
+            guard shouldFail else { return false }
+            shouldFail = false
+            recordedFailureCount += 1
+            return true
+        }
+        if shouldThrow {
+            throw InjectedDirectorySynchronizationFailure()
+        }
+    }
+}
+
+private struct InjectedDirectorySynchronizationFailure: Error, Sendable {}
+
 private actor MCPHTTPServerProbeState {
     private(set) var stageCount = 0
     private(set) var activateCount = 0
@@ -3020,6 +6335,7 @@ private final class MCPHTTPServerProbe: CodexReviewMCPHTTPServing, @unchecked Se
     private let endpoint: URL
     private let stageFailure: MCPHTTPServerProbeError?
     private let stageGate: CodexAppServerTestGate?
+    private let activationGate: CodexAppServerTestGate?
     private let stopGate: CodexAppServerTestGate?
     private let state = MCPHTTPServerProbeState()
 
@@ -3027,11 +6343,13 @@ private final class MCPHTTPServerProbe: CodexReviewMCPHTTPServing, @unchecked Se
         endpoint: URL,
         stageFailure: MCPHTTPServerProbeError? = nil,
         stageGate: CodexAppServerTestGate? = nil,
+        activationGate: CodexAppServerTestGate? = nil,
         stopGate: CodexAppServerTestGate? = nil
     ) {
         self.endpoint = endpoint
         self.stageFailure = stageFailure
         self.stageGate = stageGate
+        self.activationGate = activationGate
         self.stopGate = stopGate
     }
 
@@ -3055,6 +6373,7 @@ private final class MCPHTTPServerProbe: CodexReviewMCPHTTPServing, @unchecked Se
 
     func activate() async {
         await state.recordActivation()
+        await activationGate?.waitIgnoringCancellation()
     }
 
     func stop() async {
@@ -3129,4 +6448,30 @@ private actor CompletionFlag {
     func isCompleted() -> Bool {
         completed
     }
+}
+
+private actor ControlledHostRetentionJournal: ReviewThreadRetentionJournaling {
+    private var snapshot = ReviewThreadRetentionJournalSnapshot()
+    private var replacementFailure: String?
+
+    func failReplacements(_ message: String?) {
+        replacementFailure = message
+    }
+
+    func load() throws -> ReviewThreadRetentionJournalSnapshot {
+        snapshot
+    }
+
+    func replace(with snapshot: ReviewThreadRetentionJournalSnapshot) throws {
+        if let replacementFailure {
+            throw ControlledHostRetentionJournalError(message: replacementFailure)
+        }
+        self.snapshot = snapshot
+    }
+}
+
+private struct ControlledHostRetentionJournalError: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? { message }
 }

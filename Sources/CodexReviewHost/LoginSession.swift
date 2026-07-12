@@ -57,11 +57,60 @@ enum LoginTerminationReason: Equatable, Sendable {
     }
 }
 
-enum LoginSessionTerminal: Equatable, Sendable {
+enum PrimaryAuthenticationReconciliationResult: Equatable, Sendable {
+    case authenticated(accountKey: String)
+    case cancelled
+    case committedNeedsRuntimeReconciliation(message: String)
+}
+
+enum PrimaryAuthenticationReconciliationCause: Sendable {
+    case committed(CodexLoginReconciliationReason)
+    case cancelOutcomeUnknown(previousActiveAccountKey: String?)
+}
+
+@MainActor
+final class LoginFinalResultCompletion: Sendable {
+    private var result: PrimaryAuthenticationReconciliationResult?
+    private var waiters: [CheckedContinuation<PrimaryAuthenticationReconciliationResult, Never>] = []
+
+    func wait() async -> PrimaryAuthenticationReconciliationResult {
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    @discardableResult
+    func resolve(_ result: PrimaryAuthenticationReconciliationResult) -> Bool {
+        guard self.result == nil else {
+            return false
+        }
+        self.result = result
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume(returning: result)
+        }
+        return true
+    }
+}
+
+struct PrimaryAuthenticationReconciliationHandoff: Sendable {
+    let loginGenerationID: UUID
+    let mutationLease: AccountRegistryStore.MutationLease
+    let cause: PrimaryAuthenticationReconciliationCause
+    let finalResult: LoginFinalResultCompletion
+}
+
+enum LoginSessionTerminal: Sendable {
     case succeeded
     case failed(CodexReviewAuthenticationFailure)
     case cancelled
     case stopped
+    case committedNeedsRuntimeReconciliation(message: String)
+    case primaryRuntimeReconciliation(PrimaryAuthenticationReconciliationHandoff)
 }
 
 actor LoginStartCompletion {
@@ -96,6 +145,11 @@ actor LoginOperationState {
         case cancel
     }
 
+    enum PreCommitFailureDisposition: Sendable {
+        case fail
+        case cancel
+    }
+
     private enum Phase {
         case acquiringRuntime
         case runtimeBound(LoginRuntime)
@@ -106,9 +160,16 @@ actor LoginOperationState {
     private var phase: Phase = .acquiringRuntime
     private var cancellationRequested = false
     private var cancellationClaimed = false
+    private var preCommitFailureClaimed = false
+    private var urlPresentationClaimed = false
 
     func requestCancellation() -> CodexLoginHandle? {
-        cancellationRequested = true
+        if preCommitFailureClaimed == false {
+            cancellationRequested = true
+        }
+        guard preCommitFailureClaimed == false else {
+            return nil
+        }
         guard cancellationClaimed == false else {
             return nil
         }
@@ -117,6 +178,24 @@ actor LoginOperationState {
         }
         cancellationClaimed = true
         return handle
+    }
+
+    func recordCancellationIntent() {
+        guard preCommitFailureClaimed == false else {
+            return
+        }
+        cancellationRequested = true
+    }
+
+    func claimPreCommitFailure() -> PreCommitFailureDisposition {
+        guard preCommitFailureClaimed == false else {
+            preconditionFailure("A login pre-commit failure can be claimed only once.")
+        }
+        guard cancellationRequested == false else {
+            return .cancel
+        }
+        preCommitFailureClaimed = true
+        return .fail
     }
 
     func bind(runtime: LoginRuntime) -> BindDisposition {
@@ -138,6 +217,19 @@ actor LoginOperationState {
         }
         cancellationClaimed = true
         return .cancel
+    }
+
+    func claimURLPresentation(handle: CodexLoginHandle) -> BindDisposition {
+        guard case .loginPending(_, let boundHandle) = phase,
+              boundHandle == handle else {
+            preconditionFailure("A login URL can be presented only for the bound login handle.")
+        }
+        precondition(urlPresentationClaimed == false, "A login URL can be claimed for presentation only once.")
+        guard cancellationRequested == false else {
+            return .cancel
+        }
+        urlPresentationClaimed = true
+        return .proceed
     }
 
     func runtime() -> LoginRuntime? {
@@ -194,6 +286,7 @@ final class LoginSession {
 
     let generationID: UUID
     let purpose: LoginPurpose
+    let previousActiveAccountKey: String?
     private let mutationLease: AccountRegistryStore.MutationLease
     private let operationState = LoginOperationState()
     private let startCompletion = LoginStartCompletion()
@@ -203,10 +296,13 @@ final class LoginSession {
     private var rootTask: Task<LoginRootObservation, Never>?
     private var state: State = .initialized
     private var didReleaseMutationLease = false
+    private var primaryAuthenticationFinalResult: LoginFinalResultCompletion?
+    private var didRoutePrimaryAuthenticationHandoff = false
 
     init(
         generationID: UUID,
         purpose: LoginPurpose,
+        previousActiveAccountKey: String?,
         mutationLease: AccountRegistryStore.MutationLease,
         cancellationTimeout: Duration = .seconds(5),
         rootOperation: @escaping RootOperation,
@@ -214,6 +310,7 @@ final class LoginSession {
     ) {
         self.generationID = generationID
         self.purpose = purpose
+        self.previousActiveAccountKey = previousActiveAccountKey
         self.mutationLease = mutationLease
         self.cancellationTimeout = cancellationTimeout
         self.rootOperation = rootOperation
@@ -248,6 +345,9 @@ final class LoginSession {
         case .active:
             return await beginClosing(reason: reason).value
         case .closing(_, let completion):
+            if reason.requestsSDKCancellation {
+                await operationState.recordCancellationIntent()
+            }
             return await completion.value
         case .closed(let terminal):
             return terminal
@@ -272,6 +372,77 @@ final class LoginSession {
         }
         didReleaseMutationLease = true
         return mutationLease
+    }
+
+    func mutationLeaseForOwnedOperation() -> AccountRegistryStore.MutationLease {
+        precondition(
+            didReleaseMutationLease == false,
+            "A login session cannot authorize registry work after releasing its mutation lease."
+        )
+        return mutationLease
+    }
+
+    func mutationLeaseForCancellation() -> AccountRegistryStore.MutationLease? {
+        didReleaseMutationLease ? nil : mutationLease
+    }
+
+    func recordCancellationIntent() async {
+        await operationState.recordCancellationIntent()
+    }
+
+    func claimPreCommitFailure() async -> LoginOperationState.PreCommitFailureDisposition {
+        await operationState.claimPreCommitFailure()
+    }
+
+    func waitForPrimaryAuthenticationFinalResult() async -> PrimaryAuthenticationReconciliationResult {
+        guard let primaryAuthenticationFinalResult else {
+            preconditionFailure("Only a handed-off primary authentication can expose a deferred final result.")
+        }
+        return await primaryAuthenticationFinalResult.wait()
+    }
+
+    func takePrimaryAuthenticationReconciliationHandoff(
+        cause: PrimaryAuthenticationReconciliationCause
+    ) -> PrimaryAuthenticationReconciliationHandoff {
+        guard let mutationLease = takeMutationLeaseForRelease() else {
+            preconditionFailure("A primary authentication reconciliation lease can be handed off only once.")
+        }
+        precondition(
+            primaryAuthenticationFinalResult == nil,
+            "A login session can install its primary authentication final-result completion only once."
+        )
+        let finalResult = LoginFinalResultCompletion()
+        primaryAuthenticationFinalResult = finalResult
+        return .init(
+            loginGenerationID: generationID,
+            mutationLease: mutationLease,
+            cause: cause,
+            finalResult: finalResult
+        )
+    }
+
+    func claimPrimaryAuthenticationHandoffForDirectReconciliation(
+        _ handoff: PrimaryAuthenticationReconciliationHandoff
+    ) {
+        precondition(handoff.loginGenerationID == generationID)
+        precondition(
+            didRoutePrimaryAuthenticationHandoff == false,
+            "A primary authentication handoff can have only one reconciliation route."
+        )
+        didRoutePrimaryAuthenticationHandoff = true
+    }
+
+    func takePrimaryAuthenticationHandoffForRuntimeStop(
+        from terminal: LoginSessionTerminal
+    ) -> PrimaryAuthenticationReconciliationHandoff? {
+        guard case .primaryRuntimeReconciliation(let handoff) = terminal else {
+            return nil
+        }
+        guard didRoutePrimaryAuthenticationHandoff == false else {
+            return nil
+        }
+        didRoutePrimaryAuthenticationHandoff = true
+        return handoff
     }
 
     private func beginClosing(

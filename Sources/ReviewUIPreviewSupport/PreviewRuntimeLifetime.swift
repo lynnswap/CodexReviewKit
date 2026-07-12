@@ -444,7 +444,17 @@ final class PreviewRuntimeLifetime: CodexReviewPreviewRuntimeLifetime {
                 guard Task.isCancelled == false else {
                     break
                 }
-                await eventSink.emit(work.notification, using: runtime)
+                do {
+                    try await eventSink.emit(work.notification, using: runtime)
+                } catch is CancellationError {
+                    precondition(
+                        Task.isCancelled,
+                        "A Preview notification emission can be cancelled only by runtime shutdown."
+                    )
+                    break
+                } catch {
+                    preconditionFailure("Failed to emit a Preview runtime notification: \(error)")
+                }
                 lifecycleState.recordNotificationEmission()
                 await notificationDrain.complete(work.sequence)
             }

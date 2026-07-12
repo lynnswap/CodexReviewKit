@@ -297,28 +297,24 @@ final class ReviewMonitorPreviewRuntimeEventSink {
     func emit(
         _ notification: ReviewMonitorPreviewRuntimeNotification,
         using runtime: CodexAppServerTestRuntime
-    ) async {
+    ) async throws {
         switch notification {
         case .itemLifecycle(let storedItem, let fixture):
-            await emitItemLifecycle(storedItem, for: fixture, using: runtime)
+            try await emitItemLifecycle(storedItem, for: fixture, using: runtime)
         case .textDelta(let delta, let itemID, let turnID, let chatID, let kind, let content):
-            do {
-                try await emitTextDelta(
-                    delta,
-                    itemID: itemID,
-                    turnID: turnID,
-                    chatID: chatID,
-                    kind: kind,
-                    content: content,
-                    runtime: runtime
-                )
-            } catch {
-                preconditionFailure("Failed to append Preview text: \(error)")
-            }
+            try await emitTextDelta(
+                delta,
+                itemID: itemID,
+                turnID: turnID,
+                chatID: chatID,
+                kind: kind,
+                content: content,
+                runtime: runtime
+            )
         case .stream(let step, let storedItem, let fixture):
-            await emit(step, storedItem: storedItem, for: fixture, using: runtime)
+            try await emit(step, storedItem: storedItem, for: fixture, using: runtime)
         case .cancelled(let storedThread, let fixture):
-            await emitCancelledState(storedThread, for: fixture, using: runtime)
+            try await emitCancelledState(storedThread, for: fixture, using: runtime)
         }
     }
 
@@ -327,42 +323,38 @@ final class ReviewMonitorPreviewRuntimeEventSink {
         storedItem: ReviewMonitorPreviewStoredThreadItem,
         for fixture: ReviewMonitorPreviewChatLogFixture,
         using runtime: CodexAppServerTestRuntime
-    ) async {
-        do {
-            switch step.mode {
-            case .textDelta:
-                try await emitTextDelta(
-                    step.deltaText ?? "",
-                    itemID: storedItem.item.id,
-                    turnID: storedItem.turnID,
-                    chatID: fixture.chatID,
-                    kind: storedItem.item.kind,
-                    content: storedItem.item.content,
-                    runtime: runtime
-                )
-            case .update, .complete:
-                guard let fixtureItem = storedItem.fixtureItem else {
-                    preconditionFailure("A preview item lifecycle event requires its canonical fixture item.")
-                }
-                switch step.mode {
-                case .update:
-                    try await runtime.notificationEmitter.emitItemStarted(
-                        threadID: fixture.chatID,
-                        turnID: storedItem.turnID,
-                        item: fixtureItem
-                    )
-                case .complete:
-                    try await runtime.notificationEmitter.emitItemCompleted(
-                        threadID: fixture.chatID,
-                        turnID: storedItem.turnID,
-                        item: fixtureItem
-                    )
-                case .textDelta:
-                    preconditionFailure("Text deltas are handled above.")
-                }
+    ) async throws {
+        switch step.mode {
+        case .textDelta:
+            try await emitTextDelta(
+                step.deltaText ?? "",
+                itemID: storedItem.item.id,
+                turnID: storedItem.turnID,
+                chatID: fixture.chatID,
+                kind: storedItem.item.kind,
+                content: storedItem.item.content,
+                runtime: runtime
+            )
+        case .update, .complete:
+            guard let fixtureItem = storedItem.fixtureItem else {
+                preconditionFailure("A preview item lifecycle event requires its canonical fixture item.")
             }
-        } catch {
-            preconditionFailure("Failed to emit a Preview stream item: \(error)")
+            switch step.mode {
+            case .update:
+                try await runtime.notificationEmitter.emitItemStarted(
+                    threadID: fixture.chatID,
+                    turnID: storedItem.turnID,
+                    item: fixtureItem
+                )
+            case .complete:
+                try await runtime.notificationEmitter.emitItemCompleted(
+                    threadID: fixture.chatID,
+                    turnID: storedItem.turnID,
+                    item: fixtureItem
+                )
+            case .textDelta:
+                preconditionFailure("Text deltas are handled above.")
+            }
         }
     }
 
@@ -486,26 +478,22 @@ final class ReviewMonitorPreviewRuntimeEventSink {
         _ storedItem: ReviewMonitorPreviewStoredThreadItem,
         for fixture: ReviewMonitorPreviewChatLogFixture,
         using runtime: CodexAppServerTestRuntime
-    ) async {
+    ) async throws {
         guard let fixtureItem = storedItem.fixtureItem else {
             preconditionFailure("A preview item lifecycle event requires its canonical fixture item.")
         }
-        do {
-            if storedItem.item.isTerminalPreviewItem {
-                try await runtime.notificationEmitter.emitItemCompleted(
-                    threadID: fixture.chatID,
-                    turnID: storedItem.turnID,
-                    item: fixtureItem
-                )
-            } else {
-                try await runtime.notificationEmitter.emitItemStarted(
-                    threadID: fixture.chatID,
-                    turnID: storedItem.turnID,
-                    item: fixtureItem
-                )
-            }
-        } catch {
-            preconditionFailure("Failed to emit preview item lifecycle: \(error)")
+        if storedItem.item.isTerminalPreviewItem {
+            try await runtime.notificationEmitter.emitItemCompleted(
+                threadID: fixture.chatID,
+                turnID: storedItem.turnID,
+                item: fixtureItem
+            )
+        } else {
+            try await runtime.notificationEmitter.emitItemStarted(
+                threadID: fixture.chatID,
+                turnID: storedItem.turnID,
+                item: fixtureItem
+            )
         }
     }
 
@@ -615,23 +603,19 @@ final class ReviewMonitorPreviewRuntimeEventSink {
         _ storedThread: CodexAppServerTestStoredThread,
         for fixture: ReviewMonitorPreviewChatLogFixture,
         using runtime: CodexAppServerTestRuntime
-    ) async {
-        do {
-            try await runtime.notificationEmitter.emitThreadStatusChanged(
-                threadID: fixture.chatID,
-                status: .idle
-            )
-            guard let turn = storedThread.turns.last else {
-                preconditionFailure("A cancelled Preview thread must own its interrupted turn.")
-            }
-            try await runtime.notificationEmitter.emitTurnCompleted(
-                threadID: fixture.chatID,
-                turn: turn
-            )
-            turnCompletionNotificationCount += 1
-        } catch {
-            preconditionFailure("Failed to emit a cancelled Preview turn: \(error)")
+    ) async throws {
+        try await runtime.notificationEmitter.emitThreadStatusChanged(
+            threadID: fixture.chatID,
+            status: .idle
+        )
+        guard let turn = storedThread.turns.last else {
+            preconditionFailure("A cancelled Preview thread must own its interrupted turn.")
         }
+        try await runtime.notificationEmitter.emitTurnCompleted(
+            threadID: fixture.chatID,
+            turn: turn
+        )
+        turnCompletionNotificationCount += 1
     }
 }
 

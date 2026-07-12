@@ -118,6 +118,16 @@ public final class CodexReviewStore {
     }
 
     public func start(forceRestartIfNeeded: Bool = false) async {
+        await start(
+            forceRestartIfNeeded: forceRestartIfNeeded,
+            restartAdmission: nil
+        )
+    }
+
+    private func start(
+        forceRestartIfNeeded: Bool,
+        restartAdmission: CodexReviewRuntimeRestartAdmission?
+    ) async {
         switch serverState {
         case .stopped, .failed:
             break
@@ -131,7 +141,14 @@ public final class CodexReviewStore {
         serverState = .starting
         serverURL = nil
         writeDiagnosticsIfNeeded()
-        await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
+        if let restartAdmission {
+            await backend.resumeRuntimeRestart(
+                store: self,
+                admission: restartAdmission
+            )
+        } else {
+            await backend.start(store: self, forceRestartIfNeeded: forceRestartIfNeeded)
+        }
         await settingsService.refreshIfRunning(serverState: serverState)
         startAccountRateLimitAutoRefresh()
     }
@@ -168,8 +185,17 @@ public final class CodexReviewStore {
     }
 
     package func restart() async {
+        guard let admission = backend.beginRuntimeRestart() else {
+            return
+        }
         await stop(purpose: .runtimeRestartPreservingRuns)
-        await start(forceRestartIfNeeded: true)
+        guard backend.claimRuntimeRestart(admission) else {
+            return
+        }
+        await start(
+            forceRestartIfNeeded: true,
+            restartAdmission: admission
+        )
     }
 
     package func waitUntilStopped() async {

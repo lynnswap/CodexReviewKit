@@ -27,11 +27,18 @@ package struct CodexReviewStoreSeed {
 package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
     var seed: CodexReviewStoreSeed { get }
     var isActive: Bool { get }
+    var acceptsNewReviewOperations: Bool { get }
     var invokesRuntimeStopReviewCleanupDuringStop: Bool { get }
     var reviewThreadRetentionCodexHomePath: String { get }
     var reviewThreadRetentionJournalURL: URL? { get }
 
     func attachStore(_ store: CodexReviewStore)
+    func beginRuntimeRestart() -> CodexReviewRuntimeRestartAdmission?
+    func claimRuntimeRestart(_ admission: CodexReviewRuntimeRestartAdmission) -> Bool
+    func resumeRuntimeRestart(
+        store: CodexReviewStore,
+        admission: CodexReviewRuntimeRestartAdmission
+    ) async
     func start(store: CodexReviewStore, forceRestartIfNeeded: Bool) async
     func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async
     func waitUntilStopped() async
@@ -61,6 +68,14 @@ package protocol CodexReviewStoreBackend: CodexReviewSettingsBackend {
         _ attempts: [ReviewAttempt],
         additionalThreadIDs: [ReviewThreadID]
     ) async -> ReviewRetainedThreadCleanupResult
+}
+
+package struct CodexReviewRuntimeRestartAdmission: Hashable, Sendable {
+    package let id: UUID
+
+    package init(id: UUID = UUID()) {
+        self.id = id
+    }
 }
 
 package enum CodexReviewRuntimeStopPurpose: Sendable {
@@ -108,6 +123,25 @@ package struct CodexReviewRuntimeStopReviewCleanupResult: Sendable {
 }
 
 extension CodexReviewStoreBackend {
+    package func beginRuntimeRestart() -> CodexReviewRuntimeRestartAdmission? {
+        .init()
+    }
+
+    package func claimRuntimeRestart(_: CodexReviewRuntimeRestartAdmission) -> Bool {
+        true
+    }
+
+    package func resumeRuntimeRestart(
+        store: CodexReviewStore,
+        admission _: CodexReviewRuntimeRestartAdmission
+    ) async {
+        await start(store: store, forceRestartIfNeeded: true)
+    }
+
+    package var acceptsNewReviewOperations: Bool {
+        true
+    }
+
     package var invokesRuntimeStopReviewCleanupDuringStop: Bool {
         false
     }

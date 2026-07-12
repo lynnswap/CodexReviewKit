@@ -70,7 +70,13 @@ extension CodexReviewStore {
         sessionID: String,
         request: CodexReviewAPI.Start.Request
     ) async throws -> ReviewRunID {
+        guard backend.acceptsNewReviewOperations else {
+            throw CodexReviewAPI.Error.io("The review runtime is changing accounts or stopping.")
+        }
         try await requireReviewThreadRetentionAcceptance()
+        guard backend.acceptsNewReviewOperations else {
+            throw CodexReviewAPI.Error.io("The review runtime is changing accounts or stopping.")
+        }
         guard closedSessions.contains(sessionID) == false else {
             throw CodexReviewAPI.Error.invalidArguments("Review session \(sessionID) is closed.")
         }

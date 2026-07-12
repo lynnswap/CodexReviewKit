@@ -93,11 +93,7 @@ package class PreviewCodexReviewStoreBackend: CodexReviewStoreBackend {
         auth.updatePhase(.failed(.runtime(message: Self.previewAuthenticationFailureMessage)))
     }
 
-    package func cancelAuthentication(auth: CodexReviewAuthModel) async {
-        if auth.selectedAccount == nil {
-            auth.updatePhase(.signedOut)
-        }
-    }
+    package func cancelAuthentication(auth _: CodexReviewAuthModel) async {}
 
     package func switchAccount(auth: CodexReviewAuthModel, accountKey: String) async throws {
         guard auth.persistedAccounts.contains(where: { $0.accountKey == accountKey }) else {
