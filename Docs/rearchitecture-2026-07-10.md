@@ -209,11 +209,11 @@ CodexAppServer facade
 | `ConnectionEventHub` / `ConnectionTerminationArbiter` | supervisor isolation内のbounded diagnostics、subscribers、first terminal reason | routerにhistoryを持たせず、late subscriberへcompact terminal 1件だけreplay。arbiterは`ConnectionSupervisor` actor-confined valueとして最初のsignalをawaitなしでclaimし、別actorへのhopで受理順を変えない |
 | `LoginRegistry` / `LoginHandleState` | active login ID + weak state registration、ID-correlated winner、post-success account-readiness barrier、cancel/lease | login winner/readinessの唯一owner。registry→state cycleを作らず、broad account streamへcompletionを流さない |
 | `CodexItemReducer` | current item snapshot + typed delta/snapshot | command append、patch snapshot、metadata preservationを1 ownerで実行 |
-| `CodexThreadQueryPlan` | validation、archive scope、server/local filter、mutation strategy | query/mutationの意味論を call site に漏らさない |
-| `CodexModelContainer` | app server とeager MainActor context composition | checked `Sendable`。main context生成/transaction deliveryにfire-and-forget Taskやpending replay bufferを作らない |
+| `CodexThreadQueryPlan` | validation、archive scope、server/local filter、effective sort + stable typed-ID tie-break、mutation strategy | query/mutation/orderの意味論を call site に漏らさない。created/updatedはstable recency cursorで全件列挙後にlocal sort |
+| `CodexModelContainer` / package `CodexModelContextCoordinator` | borrowed app server、eager MainActor context、context-family association | facadeは`Equatable` + checked `Sendable`でserver close authorityを持たない。contextは内部coordinatorを保持し、facade lifetimeへmulticastを依存させない |
 | `CodexDefaultSerialModelExecutor` | private model context とserial job queue | `@unchecked Sendable`をこの型に限定し、contextをpublic getterからescapeさせず全accessを同executor jobへ閉じる |
 | `FetchedResultsLoadCoordinator` | queued intent、cursor/window、in-flight completion | load intentを直列化し、stale completionをcommitしない |
-| `CodexFetchedResults` transaction relay | current items/sections/phase、newest full old/new snapshot transaction、subscribers | relayはbuffer newest 1、consumer mismatchはnew snapshot replace、owner deinitでfinish |
+| `CodexFetchedResults` | descriptor/context、current items/sections/phase、newest full old/new snapshot transaction、subscribers | query/current value/observationの単一owner。relayはbuffer newest 1、consumer mismatchはnew snapshot replace、owner deinitでfinish |
 | `ChatObservationOwner` | one upstream pump、subscriber leases、upgrade-to-include-turns、close task | multi-subscriber、last closeでpump cancel + await |
 | `ChatObservationReleaseSignal` | lock-protected lease-ID event queue、receiver waiter、terminate bit | `CodexChatObservation.close/deinit`からactor hopなしで同期sendできるchecked `Sendable` endpoint。ownerだけがreceiverをdrainする |
 | `CodexAppServerTestThreadStore` | snapshots、archived membership、order、mutations、explicit planned start/fork fixtures | list/read/resume/archive/deleteが同じ fake stateを見る。requestからrequired ID/clock/runtime metadataをfabricateしない |
@@ -267,10 +267,10 @@ CodexAppServer facade
 | `ConnectionEventHub` / `ConnectionTerminationArbiter` | `ConnectionSupervisor` actor-confined package value。subscriber cancellation endpointだけ`Synchronization.Mutex` checked `Sendable` | Taskを作らない | bounded diagnostic subscriber、terminal replay、first-terminal-wins reasonを所有。supervisorのstored `firstTermination` / `firstDomainError`はarbiterへ置換し、独立actorを追加しない |
 | `LoginRegistry` | package actor | cancel requestはcaller/LoginSessionのstructured Taskだけ | active ID + weak stateだけを保持し、routerが一時strong化してmatching IDへresolve |
 | `LoginHandleState` | `Synchronization.Mutex` stateを持つchecked `Sendable` final class | Taskを作らない | pending/bound/successAwaitingAccountUpdate/terminal、result waiter collection、connection leaseをmutex内に閉じる。success winnerは後続account updateまでwaiterを保持し、各caller cancellation/terminalがexactly once resumeする |
-| `CodexModelContainer` | checked `Sendable` class。mutable contextは`@MainActor` | Taskを作らない | main contextをeager生成し、transaction deliveryはMainActor structured callをcallerがawait。lazy pending replay Taskを削除 |
+| `CodexModelContainer` / package `CodexModelContextCoordinator` | containerは`Equatable` + checked `Sendable`、coordinatorは`@MainActor`。mutable main contextも`@MainActor` | Taskを作らない | containerはborrowed app serverとmain contextをeager保持。各contextはcoordinatorをstrong保持し、coordinatorはmain contextをweak登録するためcycleを作らず、facade deallocation後もlive context familyのassociationを失わない |
 | `CodexDefaultSerialModelExecutor` | `final class: @unchecked Sendable, SerialExecutor` | callerが渡すexecutor jobだけをprivate serial queueへenqueue | private `CodexModelContext` + queueのowner。context getterをpublicにせず、jobだけが同unowned executor上でaccess |
 | `FetchedResultsLoadCoordinator` | model-context isolationへcaller-confined、`Sendable`にしない | queued load Taskをcontext isolation上で生成 | intent、in-flight handle、caller continuation、atomic commitの唯一owner |
-| `CodexFetchedResults` transaction relay | model-context isolationへcaller-confined | Taskを作らない | full old/new snapshot transactionとbuffer-newest-1 subscribersを所有し、owner deinitでfinish |
+| `CodexFetchedResults` | model-context isolationへcaller-confined | Taskを作らない | descriptor/current values/full old/new snapshot transactionとbuffer-newest-1 subscribersを単独所有し、owner deinitでfinish |
 | `ChatObservationOwner` | model-context isolationへcaller-confined、`Sendable`にしない | generation pumpとlease relayを生成 | pump handle、relay、upgrade/close completionを所有。`CodexChatObservation`はhandleだけを持つ |
 | `ChatObservationReleaseSignal` | `Synchronization.Mutex` checked `Sendable` final class | Taskを作らない | lease IDのsync sendとsingle async receiveを線形化。generation pumpのstructured release childだけがreceiveし、owner closeでterminate + joinする |
 | Testing store/transport/emitter/injector | public/package actor | transportだけがin-memory I/O childを生成 | 各actorが自身のrecord/channelをexplicit runtime/transport closeまでにfinish |
@@ -480,6 +480,7 @@ public struct CodexReviewSession: Identifiable, Sendable {
     public var cleanupThreadIDs: [CodexThreadID] { get }
 
     public func collect(timeout: Duration? = nil) async throws -> CodexTurnOutcome
+    public func terminalOutcomeIfKnown() async throws -> CodexTurnOutcome?
     public func cancel() async throws -> CodexTurnCancellation
     public func closeConnection() async
 }
@@ -703,6 +704,11 @@ public actor CodexAppServer {
         delivery: CodexReviewDelivery = .inline,
         threadOptions: CodexThread.ResumeOptions = .init()
     ) async throws -> CodexReviewSession
+    public func discardPreparedReviewRestart(
+        _ token: CodexReviewRestartToken
+    ) async -> [CodexReviewIdentity]
+    public func discardAllPreparedReviewRestarts()
+        async -> [CodexThreadID: [CodexReviewIdentity]]
     public func cleanupReview(
         _ identity: CodexReviewIdentity,
         additionalCleanupThreadIDs: [[CodexThreadID]] = []
@@ -726,7 +732,7 @@ public actor CodexAppServer {
 }
 ```
 
-`prepareReviewRestart` / `restartPreparedReview`は`ReviewRestartCoordinator`へ委譲し、tokenごとのstateを次に固定する。
+`prepareReviewRestart` / `restartPreparedReview` / `discardPreparedReviewRestart` / `discardAllPreparedReviewRestarts`は`ReviewRestartCoordinator`へ委譲し、tokenごとのstateを次に固定する。後二者は別packageのCRK adapterとHost runtimeがinvalidation完了とretained identity移譲をawaitするためのpublic close authorityであり、coordinator stateやHost固有型は公開しない。
 
 ```swift
 package actor ReviewRestartCoordinator {
@@ -989,7 +995,7 @@ public struct CodexReviewSession {
 - response/review/per-turn handleの全value copyは同じpackage actor `TurnGenerationHandleState`をstrong retainする。stateは`.live(AppServerConnectionLease)`から`.terminal(CompactTurnSnapshot)`または`.terminated(CodexConnectionTermination)`へ一度だけ遷移し、terminal transitionと同じactor transactionでstrong connection leaseをreleaseする。`TurnReplayStore`はstateをweak registrationだけで参照し、terminal snapshot valueを渡してstate transitionをawaitした後にraw generationを削除するためcycleを作らない。strong graphはlive時`handle → generation state → lease → supervisor → connection → replay store ⇢ weak state`、terminal時`handle → generation state → compact snapshot`である。
 - TTL/LRU は採用しない。consumer がterminal handleを保持する限り repeated late `collect()` / `result()` を保証し、最後の handle/state解放でsnapshotも解放する。reusable `CodexThread` はID + connection leaseだけを保持しgeneration stateをretainしない。requestのstructured local scopeから返却されたresponse/review handleへgeneration stateを移譲し、`TurnReplayStore`はraw routing中もweak registrationだけを持つため、connection→state→lease cycleと過去snapshot蓄積を作らない。
 - terminalへ切り替わったper-turn handleの `closeConnection()` はidempotent no-opである。再利用可能なthread/rootは引き続きshared authorityを閉じられる。
-- package review-event/response/progress iteratorはsubscriberごとにcapacity 256のbounded relayを `TurnReplayStore` へ登録する。incremental event overflow時はそのsubscriberのpending incremental eventsをcurrent accumulated `CodexTurnSnapshot` 1件へatomic compactし、snapshot以後のeventsだけを後置する。terminalはreserved non-droppable control slotを使い、必要ならfinal snapshot→terminalの順でdeliveryしてfinishする。slow subscriberはrouterや別subscriberをblockせず、overflowはdiagnosticへ記録する。public `CodexReviewSession`はincremental sequenceを公開せず、cached `collect/cancel/closeConnection`だけを提供する。
+- package review-event/response/progress iteratorはsubscriberごとにcapacity 256のbounded relayを `TurnReplayStore` へ登録する。incremental event overflow時はそのsubscriberのpending incremental eventsをcurrent accumulated `CodexTurnSnapshot` 1件へatomic compactし、snapshot以後のeventsだけを後置する。terminalはreserved non-droppable control slotを使い、必要ならfinal snapshot→terminalの順でdeliveryしてfinishする。slow subscriberはrouterや別subscriberをblockせず、overflowはdiagnosticへ記録する。public `CodexReviewSession`はincremental sequenceを公開せず、cached `collect/cancel/closeConnection`と、wire request・waiter・別cacheを作らず同じgeneration stateを読む`terminalOutcomeIfKnown()`だけを提供する。
 - late review/response iteratorはraw historyをreplayせず、compact terminal snapshot→terminal eventの最大2件をyieldしてfinishする。package progress projectionはcumulative snapshotなのでbuffer newest 1 + reserved terminalとし、incremental item/delta projectionへ使わない。
 - reusable threadのpackage event sequenceは `ThreadEventHub` が所有する。`withThreadEventGeneration` はrequest送信前にopaque `ThreadEventGenerationCheckpoint`を登録し、request中のearly eventをそのcheckpointのbounded compact stateへroutingする。response successはcheckpointをcurrent generationへatomic commitし、failure/cancellationはexplicit discardする。`Int` history cursor、post-response global-history slicing、detached bridge Taskは残さない。detached reviewだけはresponseで確定したturn IDを `beginGeneration(including:)` へ渡し、hub内の同turn compact stateを採用する。
 - `ThreadEventHub` はthreadごとにcurrent generationを最大1件だけ保持し、subscriberごとにcapacity 256のbounded channelを持つ。257件目ではknown incremental eventsをcurrent `CodexTurnSnapshot` + newest token usage/statusへatomic compactし、unknown diagnosticsはbounded newest slotsだけを残す。terminal/closedは**current generation内**のnon-droppable control eventで、`final snapshot → terminal → post-terminal status/unknown → closed`の因果順を保つ。同一turnの同値terminalはexactly-once、異なるterminalはcontract violationである。新generationのcommit/resetは、bounded/nonblockingを維持するため未消費controlを含む旧generation queue全体をnew compact generationでatomic supersedeする。generation resetまたはconnection closeで旧stateを解放する。
@@ -1111,6 +1117,17 @@ legacy `applyPatchApproval` / `execCommandApproval` requestはcurrent-v2 invento
 
 ### 5.6 DataKit query/load/observation
 
+#### Apple API evidence and adaptation rule
+
+Xcode 26.6 DocumentationSearch、macOS 26.5 SDK interface、Swift 6 strict-concurrency probeを照合した。`ResultsObserver` / `HistoryObserver`を含むApple APIは、CodexDataKitで同名・同形の型を実装するためではなく、owner、identity、isolation、更新契約を評価するための設計資料として扱う。DocumentationSearchに存在してinstalled SDKに未収録のAPIも設計資料としては参照する一方、実装availabilityの根拠にはしない。
+
+- `ModelContext: Equatable, SendableMetatype`とunavailable `Sendable`から、context instanceは1 isolation domainに閉じ、metatypeだけを境界越しに使える契約を採る。`CodexModelContext`も同じconformanceとidentity equalityを持ち、model instanceをactor間へ渡さずtyped ID / immutable snapshotを渡す。
+- `ModelContainer: Equatable, @unchecked Sendable`の表面形はコピーしない。Codex containerはcompilerがchecked `Sendable`を証明できるため、`CodexModelContainer: Equatable, Sendable`を維持する。`Sendable`は`SendableMetatype`を含むので重複conformanceを足さない。
+- Core Dataの`NSManagedObjectContext: Sendable`は`perform`へ仕事を投入するqueue-scheduling handleの契約であり、同期的にcontext-local graphを操作するCodex contextへ転用しない。Core Data/SwiftDataのsave、rollback、fault、persistent-history tokenも、remote app-server authorityに対応する実契約がないため模倣しない。
+- `ResultsObserver`から採るのは、query criteria・context・current results・更新通知を1 ownerへ閉じること、差分計算へstable identity orderingを要求すること、typed section identityを使うこと、caller isolationを明示することだけである。型名、section-key primary sort、cross-process automatic history ingestionは採らない。
+- Codexのsection contractは、global query order/offset/limitを先に確定し、そのwindowをsectionへgroupするprojectionである。section順は最初のmemberの出現順、section内はglobal relative orderを維持する。workspace section keyをprimary sortへ暗黙追加してglobal recency semanticsを変えない。
+- app-serverにdurable history tokenがないため、同一contextのmutationだけをlive反映し、別process/clientの変更はexplicit `refresh()`で取得する。network streamのgeneration/sequence、snapshot barrier、bounded delta、明示closeは`CodexChatObservation`固有の契約として維持する。
+
 ```swift
 public enum CodexFetchValidationError: Error, Hashable, LocalizedError, Sendable {
     case unsupportedModel(String)
@@ -1173,14 +1190,11 @@ public enum CodexChatPhase: Equatable, Sendable {
     public var turnID: CodexTurnID? { get }
 }
 
-public final class CodexModelContainer: Sendable {
+public final class CodexModelContainer: Equatable, Sendable {
     public let appServer: CodexAppServer
     @MainActor public let mainContext: CodexModelContext
 
     @MainActor public init(appServer: CodexAppServer)
-    @MainActor public convenience init(
-        configuration: CodexAppServer.Configuration = .init()
-    ) async throws
 }
 
 public protocol CodexModelActor: Actor {
@@ -1202,31 +1216,16 @@ public extension CodexModelActor {
     var modelContext: CodexModelContext { get }
 }
 
-public final class CodexModelContext {
+public final class CodexModelContext: Equatable, SendableMetatype {
     public init(_ container: CodexModelContainer)
 
     public nonisolated(nonsending) func fetch<Model: CodexPersistentModel>(
         _ descriptor: CodexFetchDescriptor<Model>
     ) async throws -> [Model]
-    public nonisolated(nonsending) func fetch<Model: CodexPersistentModel>(
-        _ request: CodexFetchRequest<Model>
-    ) async throws -> [Model]
     public func fetchedResults<Model: CodexPersistentModel>(
         for descriptor: CodexFetchDescriptor<Model>,
         sectionedBy: CodexSectionDescriptor<Model>? = nil
     ) -> CodexFetchedResults<Model>
-    public func fetchedResults<Model: CodexPersistentModel>(
-        for request: CodexFetchRequest<Model>,
-        sectionedBy: CodexSectionDescriptor<Model>? = nil
-    ) -> CodexFetchedResults<Model>
-    public func fetchedResultsController<Model: CodexPersistentModel>(
-        for descriptor: CodexFetchDescriptor<Model>,
-        sectionedBy: CodexSectionDescriptor<Model>? = nil
-    ) -> CodexFetchedResultsController<Model>
-    public func fetchedResultsController<Model: CodexPersistentModel>(
-        for request: CodexFetchRequest<Model>,
-        sectionedBy: CodexSectionDescriptor<Model>? = nil
-    ) -> CodexFetchedResultsController<Model>
 
     public func model(for id: CodexThreadID) -> CodexChat
     public func registeredModel(for id: CodexThreadID) -> CodexChat?
@@ -1278,6 +1277,9 @@ public final class CodexModelContext {
     public nonisolated(nonsending) func delete(_ chat: CodexChat) async throws
 }
 
+@available(*, unavailable, message: "CodexModelContext instances cannot be shared across concurrency domains. Use CodexModelActor or typed model IDs.")
+extension CodexModelContext: Sendable {}
+
 // CodexDataKit model (not the package-only live AppServerKit handle)
 public final class CodexTurn: CodexPersistentModel {
     public private(set) var error: CodexTurnError?
@@ -1292,6 +1294,7 @@ public final class CodexItem: CodexPersistentModel {
 public final class CodexChat: CodexPersistentModel {
     // All baseline identity/metadata/relationship/query accessors remain public.
     public private(set) var phase: CodexChatPhase
+    public func transcript(in turnID: CodexTurnID) -> CodexTranscript
     // lastErrorDescription is deleted; phase is the only failure owner.
 }
 
@@ -1342,33 +1345,15 @@ public struct CodexFetchDescriptor<Model: CodexPersistentModel>: Sendable {
     public var sortBy: [CodexSortDescriptor<Model>]
     public var fetchLimit: Int?
     public var fetchOffset: Int?
-    public var includePendingChanges: Bool
+    public var includeContextChanges: Bool
 
     public init(
         predicate: Predicate<Model>? = nil,
         sortBy: [CodexSortDescriptor<Model>] = [],
         fetchLimit: Int? = nil,
         fetchOffset: Int? = nil,
-        includePendingChanges: Bool = true
+        includeContextChanges: Bool = true
     )
-}
-
-public final class CodexFetchRequest<Model: CodexPersistentModel> {
-    public var predicate: Predicate<Model>?
-    public var sortDescriptors: [CodexSortDescriptor<Model>]
-    public var fetchLimit: Int?
-    public var fetchOffset: Int?
-    public var includePendingChanges: Bool
-    public var fetchDescriptor: CodexFetchDescriptor<Model> { get set }
-
-    public init(
-        predicate: Predicate<Model>? = nil,
-        sortDescriptors: [CodexSortDescriptor<Model>] = [],
-        fetchLimit: Int? = nil,
-        fetchOffset: Int? = nil,
-        includePendingChanges: Bool = true
-    )
-    public init(_ descriptor: CodexFetchDescriptor<Model>)
 }
 
 package enum CodexFetchPlanResult<Model: CodexPersistentModel> {
@@ -1406,32 +1391,23 @@ public struct CodexQuery<Model: CodexPersistentModel>: DynamicProperty {
 
     public init(
         _ descriptor: CodexFetchDescriptor<Model> = .init(),
-        animation: Animation? = nil,
-        sectionBy: CodexSectionDescriptor<Model>? = nil
-    )
-    public init(
-        _ request: CodexFetchRequest<Model>,
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public init(
         filter: Predicate<Model>? = nil,
         sort: [CodexSortDescriptor<Model>] = [],
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public init<Value: Comparable>(
         filter: Predicate<Model>? = nil,
         sort keyPath: any KeyPath<Model, Value> & Sendable,
         order: SortOrder = .forward,
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public init<Value: Comparable>(
         filter: Predicate<Model>? = nil,
         sort keyPath: any KeyPath<Model, Value?> & Sendable,
         order: SortOrder = .forward,
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public init(
@@ -1439,7 +1415,6 @@ public struct CodexQuery<Model: CodexPersistentModel>: DynamicProperty {
         sort keyPath: any KeyPath<Model, String> & Sendable,
         comparator: String.StandardComparator = .localizedStandard,
         order: SortOrder = .forward,
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public init(
@@ -1447,7 +1422,6 @@ public struct CodexQuery<Model: CodexPersistentModel>: DynamicProperty {
         sort keyPath: any KeyPath<Model, String?> & Sendable,
         comparator: String.StandardComparator = .localizedStandard,
         order: SortOrder = .forward,
-        animation: Animation? = nil,
         sectionBy: CodexSectionDescriptor<Model>? = nil
     )
     public mutating func update()
@@ -1549,26 +1523,9 @@ public final class CodexFetchedResults<Model: CodexPersistentModel> {
     public private(set) var nextCursor: String?
     public private(set) var backwardsCursor: String?
     public private(set) var phase: CodexFetchPhase
-
-    public nonisolated(nonsending) func performFetch() async throws
-    public nonisolated(nonsending) func refresh() async throws
-    public nonisolated(nonsending) func loadNextPage() async throws
-}
-
-public final class CodexFetchedResultsController<Model: CodexPersistentModel> {
-    public let fetchedResults: CodexFetchedResults<Model>
-    public var modelContext: CodexModelContext { get }
-    public var fetchDescriptor: CodexFetchDescriptor<Model> { get }
-    public var sectionBy: CodexSectionDescriptor<Model>? { get }
-    public var items: [Model] { get }
-    public var sections: [CodexFetchSection<Model>] { get }
     public var snapshot: CodexFetchedResultsSnapshot<Model.ID> { get }
-    public var nextCursor: String? { get }
-    public var backwardsCursor: String? { get }
-    public var phase: CodexFetchPhase { get }
     public var transactions: AsyncStream<CodexFetchedResultsTransaction<Model>> { get }
 
-    public init(fetchedResults: CodexFetchedResults<Model>)
     public nonisolated(nonsending) func performFetch() async throws
     public nonisolated(nonsending) func refresh() async throws
     public nonisolated(nonsending) func loadNextPage() async throws
@@ -1643,11 +1600,13 @@ public struct CodexChatItemLocator: Equatable, Hashable, Sendable {
 ```
 
 - Foundation `Predicate` surfaceは維持する。Foundation `SortDescriptor` のprivate layoutを `Mirror` で読む実装は削除し、CodexDataKitが意味論を所有する `CodexSortDescriptor` へsource-breaking移行する。Xcode Documentationの `SortDescriptor.keyPath` は `PartialKeyPath<Compared>?` で、`Compared` がNSObjectでない場合はnilと明記されるため、pure Swift Codex modelのstable lowering keyにはできない。
-- `CodexModelContainer` はMainActor compositionでmain contextをeager生成し、baselineのlazy getter / pending transaction buffer / fire-and-forget delivery Taskを削除する。HostとfixtureはMainActorでcontainerを作り、`AppServerCodexReviewBackend`はcontainerとconcrete executorをrequired注入してactor内部default生成をしない。
+- `CodexModelContainer` はMainActor compositionでmain contextをeager生成し、baselineのlazy getter / pending transaction buffer / fire-and-forget delivery Taskを削除する。HostとfixtureはMainActorでcontainerを作り、`AppServerCodexReviewBackend`はcontainerとconcrete executorをrequired注入してactor内部default生成をしない。containerはborrowed `CodexAppServer`だけを受け取り、serverを内部生成するconvenience initializerは削除する。process/runtimeのclose authorityはserver ownerに残し、containerから`appServer.close()`を要求する二重owner APIを作らない。
+- container facadeとcontext-family coordinationを同一lifetimeにしない。package `CodexModelContextCoordinator`がapp server associationとweak main-context registrationを持ち、各contextはcoordinatorをstrong保持する。これによりcontainer→mainContext→container cycleを作らず、callerがmain contextだけを保持してもmulticast contractをsilentに失わない。public `context.container`は、facade lifetimeを意味論へ誤って持ち込むため公開しない。`CodexModelContext: Equatable, SendableMetatype`、identity equality、unavailable `Sendable`を公開契約とし、`CodexModelContainer: Equatable, Sendable`はchecked conformanceを維持する。
 - generic public `CodexModelExecutor` / `CodexSerialModelExecutor` protocolsとそれら旧protocolのpublic context getterは削除する。実consumerが使う`CodexModelActor` requirementをconcrete `CodexDefaultSerialModelExecutor`へ縮め、executorのprivate contextはserial queue上のjobからだけaccessする。actor-isolated `CodexModelActor.modelContext` computed propertyはactor body内でだけ使用でき、non-Sendable contextをcross-actorへ返すcallはSwift 6 compile failureにする。`@unchecked Sendable` invariantはprivate context、private queue、`enqueue` entryだけで閉じ、negative compile fixtureでescape不能を検証する。
-- `CodexQuery` のkey-path convenience initializer familyも`CodexSortDescriptor`と同じrequired/optional ComparableおよびString comparator + `SortOrder`へ置換する。`CodexQueryResults` / `CodexFetchedResults` / controllerの`lastErrorDescription`は削除し、read-only `CodexFetchPhase`だけをfailure ownerにする。
-- FRC transactionは`oldSnapshot/newSnapshot`のfull identity snapshotを常に含み、public streamは`bufferingNewest(1)`とする。consumerのcurrent snapshotがtransaction.oldと一致すればgranular changesを適用し、不一致ならnew snapshotへreplaceするため、中間transaction dropでも整合する。FRC deinit/explicit owning view teardownでstreamをfinishし、unbounded relayを残さない。
-- 新descriptorはFoundation 26.5 `.swiftinterface` のconstructor setに合わせ、required/optional `Comparable` とrequired/optional `String` + `String.StandardComparator`（`.localizedStandard` / `.localized` / `.lexical`）と`SortOrder`を保持する。optional valueのnil orderingもFoundation parity（forwardはnil first、reverseはnil last）に固定する。`Hashable & Sendable` で、planはkey pathをsupported field IDへlowering/validationする。`CodexFetchDescriptor.sortBy`、`CodexFetchRequest.sortDescriptors`、`CodexQuery` initializers、README/全consumerを同じwaveで `[CodexSortDescriptor<Model>]` へ移す。Foundation APIの完全なparallel DSLは作らない。
+- `CodexFetchDescriptor`を唯一のcanonical query valueとする。Core Dataのentity/result/fault/batch/prefetch/copy semanticsを持たず、descriptorと同じ5 propertyを複製するだけのmutable `CodexFetchRequest`は削除する。`includePendingChanges`も永続化unit-of-workを示す誤った語彙なので、server snapshotから欠落したactive/observed/loading modelをcontext graphからmergeする実意味に合わせて`includeContextChanges`へsource-breaking renameする。
+- `CodexQuery` のkey-path convenience initializer familyも`CodexSortDescriptor`と同じrequired/optional ComparableおよびString comparator + `SortOrder`へ置換する。`CodexQueryResults` / `CodexFetchedResults`の`lastErrorDescription`は削除し、read-only `CodexFetchPhase`だけをfailure ownerにする。environmentにcontextがない状態は空の`.idle`へ落とさずcomposition errorとしてfail fastする。transaction適用に使われていない`animation` initializer parameterは削除する。
+- ordered transactionのconsumer storyはAppKit sidebarに実在するが、別ownerは不要である。`CodexFetchedResults`がquery criteria、items/sections/phase、snapshot、`oldSnapshot/newSnapshot` transaction relayを一意に所有し、全property/methodを転送するだけの`CodexFetchedResultsController`は削除する。public streamは`bufferingNewest(1)`とし、consumerのcurrent snapshotがtransaction.oldと一致すればgranular changesを適用し、不一致ならnew snapshotへreplaceする。owner deinitでstreamをfinishし、unbounded relayを残さない。
+- 新descriptorはFoundation 26.5 `.swiftinterface` のconstructor setに合わせ、required/optional `Comparable` とrequired/optional `String` + `String.StandardComparator`（`.localizedStandard` / `.localized` / `.lexical`）と`SortOrder`を保持する。optional valueのnil orderingもFoundation parity（forwardはnil first、reverseはnil last）に固定する。`Hashable & Sendable` で、planはkey pathをsupported field IDへlowering/validationする。`CodexFetchDescriptor.sortBy`、`CodexQuery` initializers、README/全consumerを同じwaveで `[CodexSortDescriptor<Model>]` へ移す。Foundation APIの完全なparallel DSLは作らない。
 - `CodexSectionDescriptor` initializerはunresolved key pathだけを保持し、model-specific supportはload時にtyped validationする。initializerで `preconditionFailure` しない。
 - plan constructionはthrowing ownerを持つ一方、SwiftUI update比較には成功/失敗どちらにもstable hashable signatureを持つpackage `CodexFetchPlanResult` を返す。同じinvalid descriptorがbody更新ごとに新しいfailure/refreshを発火しない。
 - `CodexFetchPhase.failed(CodexFetchFailure)` がquery failureの唯一のsource of truthである。別の `failure` / `lastErrorDescription` property、generic `CodexDataPhase.failed(String)` は削除する。presentation textはphaseのtyped failureからderiveする。`CodexChat` は別の `CodexChatPhase` を使い、fetchとturn lifecycleを混ぜない。
@@ -1655,7 +1614,9 @@ public struct CodexChatItemLocator: Equatable, Hashable, Sendable {
 - DataKit `CodexTurn.errorDescription` は削除し、lossless `CodexTurnError?` に置換する。status `.failed` ではerrorがrequired、running/completed/interruptedではnilというinvariantをsnapshot/event reducerが守り、failed+missing errorはmodelへcommitする前にmalformed contract failureとする。
 - explicit fetch/loadはtyped errorをthrowし、SwiftUI `CodexQuery` は同じfailureを `.failed` phaseへ投影してrender-time crashをなくす。`CancellationError` はphaseへ保存せず、直前のstable phaseへ戻す。
 - nil predicate は active-only。明示 predicate が archive 条件を含まない場合は active+archived を literal に評価する。implicit `archived == false` 注入は行わない。
-- `.both` archive scopeはserver cursorを共有できないmulti-scope queryとして扱う。`archived:false` と `archived:true` を別々にserver endまで全page取得し、eligible pending/live context modelsをmerge（`includePendingChanges == false` なら省略）→ thread IDでdedupe → literal predicate → local effective sort → local offset → local limitの順に適用する。effective sortは明示descriptor、空ならpinned upstream `thread/list` と同じ `createdAt` descending、その後はprimary descriptorと同方向のthread ID tie-breakである。server-ordered single-page pathや一方のcursorをもう一方へ流用する経路へ入れない。`.both` resultは取得時点でserver endなので、そのsnapshotに対する `loadNextPage()` はno-opである。
+- 全query orderingはquery-plan ownerがstable semantic ID tie-breakを末尾へ追加する。明示sortが空なら`createdAt` descending + thread ID descendingをeffective defaultとする。pinned upstreamのcreated/updated cursorはthread IDを含まず同timestamp page boundaryで欠落し得るため、その2 sortとlocal predicate/sort pathは`recencyAt` + thread ID cursorでserver endまでenumerateしてからrequested effective sortをlocal適用する。server-ordered pagingを使えるのはupstream cursorと同じ`recencyAt` + thread ID orderingだけである。workspace/group local sortも同値時はtyped IDで決着し、transaction diffの順序を入力配列の偶然へ依存させない。
+- `.both` archive scopeはserver cursorを共有できないmulti-scope queryとして扱う。`archived:false` と `archived:true` を別々にserver endまで全page取得し、eligible active/observed/loading context modelsをmerge（`includeContextChanges == false` なら省略）→ thread IDでdedupe → literal predicate → local effective sort → local offset → local limitの順に適用する。server-ordered single-page pathや一方のcursorをもう一方へ流用する経路へ入れない。`.both` resultは取得時点でserver endなので、そのsnapshotに対する `loadNextPage()` はno-opである。
+- sectioningはeffective global sort、offset、limitの後に行うprojectionである。section keyをprimary sortへ挿入しない。同じsection IDのitemsは1 sectionへ集約し、section順はfirst occurrence、member順はglobal orderを維持する。この差異をApple `ResultsObserver`のsection-contiguity contractとの意図的な相違としてREADMEへ記録する。
 - freshness は同一 context の mutation/observationだけ live。外部 processの list changeは `refresh()` が必要。
 - load intents はcontext-isolated coordinator内で直列化する。initial `performFetch()` はpage 1を取得する。2回目以降の `performFetch()` と `refresh()` / mutation refreshは実行開始時のloaded countをtarget windowとしてcaptureするが、targetが0でも必ずserver page 1を取得し、その後eligible merged resultがtarget以上またはserver endになるまで全pageをstagingする。これによりempty snapshot後の新規itemも発見する。items/cursors/phaseは成功時に1回だけatomic commitし、途中pageをobservable stateへ出さない。
 - queued intentのcaller cancellationはqueueから除去する。in-flight cancellationはstagingを破棄し、旧items/cursors/stable phaseを維持してfailureを保存しない。`loadNextPage()` は実行開始時のcurrent cursorを読み、nilならno-op、成功時だけappend + cursorをatomic commitする。coordinatorから別actorへnon-Sendable modelを送らない。
@@ -2938,7 +2899,7 @@ package struct BackendReviewAttempt: Sendable {
 
 - `ReviewRunID` / `ReviewAttemptID` / `ReviewThreadID` / `ReviewTurnID` / `NonEmptyReviewOutput`はtrimmed valueが空ならthrowするfailable boundaryで、保存するraw text自体はtrim/normalizeしない。各`init(from:)`はsingle Stringをdecodeした後に必ず同じvalidating initializerを呼び、synthesized `Codable`で検証を迂回しない。SDK ID→CRK mapping、persistence decode、MCP request decodeの3境界でtyped wrapperを構築し、失敗は`.protocolViolation`またはdecode failureとしてsurfaceする。run registry/key、`ReviewAttempt`、`ReviewThreadIdentity`、restart token contextはこれらのtyped IDだけを受ける。`ReviewCompletion`もadapterで`response.transcript.reviewOutputText`を取得後に`NonEmptyReviewOutput`を構築し、nil/empty/whitespace-onlyを`.missingReviewOutput`へmapする。
 - adapter は `CodexReviewIdentity` と `CodexTurnOutcome` を一度だけ CRK typeへmapする。
-- SDK `.completed` は`observeTerminal` / `observedTerminalIfKnown`の共通mapperで`response.transcript.reviewOutputText`から`NonEmptyReviewOutput`を一度だけ構築し、nil/emptyは`.failed(.missingReviewOutput)`、`finalAnswer` fallbackは使わない。valid completedはbarrier前の`ReviewCompletionCandidate(turnID, expectedOutput)`として`ReviewBackendObservedTerminal.completed`を返し、この時点でfinal `.completed`を生成しない。result childは通常observeでもcancellation-time probeでも得たobserved valueを同じ`finalizeTerminal`へexactly once渡す。finalizerだけが`ReviewOutputPublicationBarrier`を実行し、active review thread/turnを`CodexChat.refresh(includeTurns: true)`で**一度だけauthoritative refresh**し、そのrefresh transactionがcommitしたcursorのitemsを同じmodel-context isolationで読む。projection側も別のassistant-last heuristicを持たず、`CodexTranscript(items: refreshedItems.map(\.threadItem)).reviewOutputText`というASKの同じKEEP ownerでoutputを抽出する。projected review outputが存在しnonemptyでexpected raw valueと完全一致した場合だけ`.completed(ReviewCompletion)`を返せる。
+- SDK `.completed` は`observeTerminal` / `observedTerminalIfKnown`の共通mapperで`response.transcript.reviewOutputText`から`NonEmptyReviewOutput`を一度だけ構築し、nil/emptyは`.failed(.missingReviewOutput)`、`finalAnswer` fallbackは使わない。valid completedはbarrier前の`ReviewCompletionCandidate(turnID, expectedOutput)`として`ReviewBackendObservedTerminal.completed`を返し、この時点でfinal `.completed`を生成しない。result childは通常observeでもcancellation-time probeでも得たobserved valueを同じ`finalizeTerminal`へexactly once渡す。finalizerだけが`ReviewOutputPublicationBarrier`を実行し、active review thread/turnを`CodexChat.refresh(includeTurns: true)`で**一度だけauthoritative refresh**し、そのrefresh transactionがcommitしたcursorのitemsを同じmodel-context isolationで読む。projection側も別のassistant-last heuristicを持たず、DataKitのchat ownerが構築する`chat.transcript(in: turnID).reviewOutputText`というASKの同じKEEP ownerでoutputを抽出する。projected review outputが存在しnonemptyでexpected raw valueと完全一致した場合だけ`.completed(ReviewCompletion)`を返せる。
 - barrierのrefresh failure、unavailable、empty、mismatchは`finalizeTerminal`がそれぞれtyped `ReviewOutputPublicationFailure`へmapし、terminalを`.failed(.outputPublication(...))`としてstoreへ返す。expected/projected全文はdiagnosticやfailureに複製せず、turn IDとfailure kindだけを保持する。worker cancellationはrefresh waiterを外すが、finalizerは一度開始したbarrierをcancellation-shieldedに完遂し、accepted product cancellation arbiterが最終stateを裁定する。barrier完了前に`.succeeded`をpublishする経路、delay/retry/sleep、stored-core output fallbackは作らない。SDK `CodexTurnError` / status / connection terminationもobserved-terminal mapperで一度だけtransport-independent CRK failureへ変換し、`ReviewRunCore.startFailed/failed`までtyped valueを保つ。`localizedDescription` だけを保存するmailbox terminalは削除する。
 - review backend operation boundaryはthrowしたoperationを保持し、SDK errorを次の表でexhaustiveにmapする。`CodexReviewBackend` 実装がthrowしてよい値は `ReviewBackendFailure` とcaller `CancellationError` だけとし、未知error typeは `.protocolViolation` + diagnosticで表面化させる。
 
@@ -2955,7 +2916,7 @@ package struct BackendReviewAttempt: Sendable {
 
 - request server/retry mappingはSDK `CodexServerError.turnError` があれば既存 `ReviewTurnFailure` へ変換して`RequestKind`に保持する。CRKへraw JSON dataを持ち込まず、既知code/info/additionalDetailsをStringへ落とさない。
 - direct backend operationのfailureはconnection terminationを含め必ず`ReviewBackendOperationFailure.operation`を保持する。top-level `.connectionTerminated`は既に開始済みの`CodexReviewSession.collect()`がoperation call外のconnection terminalで完了した場合だけに使い、start/interrupt/prepare/restartのどのcall中かを失わない。public review event streamは存在しない。
-- `BackendReviewAttempt.observeTerminal` はadapter registryが保持するSDK `CodexReviewSession`をcaptureし、`collect()`のcached typed outcomeを`ReviewBackendObservedTerminal`へmapするoperationである。`observedTerminalIfKnown`は同じgeneration handle stateのcompact SDK terminalをnonblockingに読み、同じobserved mapperへ通すpackage operationで、未知ならnilを返しwire request/collector/barrierを開始しない。これはparent phase reducerから呼ばず、result child自身がphase cancellationで`CancellationError`を受けたcatch内だけでexactly once呼ぶ。knownなら同じchildがobserved valueをsingle `finalizeTerminal`へ渡し、completed barrierをcancellation-shieldedに完遂して`.backendTerminal`をemitする。unknownの場合だけ`.resultWaitCancelled`をemitする。したがってparent drainはterminal candidateかwaiter-cancelのどちらかを1回受け、adapter側collector Task/single-assignment terminal state/event mailbox/producer bridgeやparent側の二回目refreshを追加しない。product cancellationは別のbackend interrupt→cleanup pathが所有する。SDK sessionがtyped terminalなしでfinishした場合はobserved `.failed(.protocolViolation)`、connectionが先ならobserved `.failed(.connectionTerminated)`とし、empty finishをsuccess/cancelへ補完しない。
+- `BackendReviewAttempt.observeTerminal` はadapter registryが保持するSDK `CodexReviewSession`をcaptureし、`collect()`のcached typed outcomeを`ReviewBackendObservedTerminal`へmapするoperationである。`observedTerminalIfKnown`はSDK `terminalOutcomeIfKnown()`から同じgeneration handle stateのcompact SDK terminalをnonblockingに読み、同じobserved mapperへ通すpackage operationで、未知ならnilを返しwire request/collector/barrierを開始しない。このpublic SDK affordanceは別packageのCRK adapterがgeneration stateを推測・mirrorせず読むためだけのread-only操作である。これはparent phase reducerから呼ばず、result child自身がphase cancellationで`CancellationError`を受けたcatch内だけでexactly once呼ぶ。knownなら同じchildがobserved valueをsingle `finalizeTerminal`へ渡し、completed barrierをcancellation-shieldedに完遂して`.backendTerminal`をemitする。unknownの場合だけ`.resultWaitCancelled`をemitする。したがってparent drainはterminal candidateかwaiter-cancelのどちらかを1回受け、adapter側collector Task/single-assignment terminal state/event mailbox/producer bridgeやparent側の二回目refreshを追加しない。product cancellationは別のbackend interrupt→cleanup pathが所有する。SDK sessionがtyped terminalなしでfinishした場合はobserved `.failed(.protocolViolation)`、connectionが先ならobserved `.failed(.connectionTerminated)`とし、empty finishをsuccess/cancelへ補完しない。
 - `observeTerminal`がthrowしてよいのは呼出Task自身の`CancellationError`だけである。SDK/transport/protocol/turn failureはobserved `.failed(ReviewBackendFailure)`へmapし、`finalizeTerminal`はnonthrowingでfinal `.failed`を返す。throwing failureと`.failed`の二重channelを作らない。
 - review content/progressはCodexChat projectionがownerなのでbackend event queueへ複製しない。既存`ReviewBackendEventSession` / `BackendReviewEventMailbox` / `ReviewWorkerInputQueue` / `ReviewWorkerEventSource` / unbounded buffered eventsを削除する。adapter attempt registryはTaskを持たずSDK sessionだけをattempt IDで保持し、interrupt/cleanup/restartのauthorityを維持する。
 - backend startがrequired identity付き`BackendReviewAttempt`を返したら、MainActorの`.running` publicationより**前**に`ReviewThreadRetentionRegistry`がin-memory `pendingOwnership`へrun ID + account/home + identityを同期claimし、その後atomic crash journalへcommitする。restart successもnew attemptをgeneration swapする前にsame claim→durable mergeを行う。commit成功でpending claimをpersisted entryへ置換して初めてattemptをpublishでき、known identityがregistry ownershipより先にvisibleになる経路はない。
@@ -3859,10 +3820,10 @@ Phase 4ではこのinventoryを作るのではなく、recursive `public/open` s
 
 | Action | Declaration family | Planned public contract | Direct real consumer |
 |---|---|---|---|
-| `CHANGE` | `CodexAppServer`; nested `Configuration`, `LocalProcess` | public init/close、connection/account streams、thread start/resume/fork/list/archive/unarchive/delete、review start/resume/prepare-restart/restart/cleanup、model/account/rate/config read-write、stock `loginChatGPT`/logoutだけを残す。custom server-request handlerはpublic configurationから除く | `CodexReviewAppServer`, `CodexReviewHost`, `CodexDataKit` |
+| `CHANGE` | `CodexAppServer`; nested `Configuration`, `LocalProcess` | public init/close、connection/account streams、thread start/resume/fork/list/archive/unarchive/delete、review start/resume/prepare-restart/restart/discard-one/discard-all/cleanup、model/account/rate/config read-write、stock `loginChatGPT`/logoutだけを残す。discardはretained identityを返すprepared-resource close authorityで、coordinator stateは公開しない。custom server-request handlerはpublic configurationから除く | `CodexReviewAppServer`, `CodexReviewHost`, `CodexDataKit` |
 | `NEW` | `CodexAppServer.Configuration.Deadlines` | §5.2のrequest/handshake deadline configuration | Host, Testing |
 | `CHANGE` | `CodexThread`; nested `Options`, `ResumeOptions` | ID/workspace/model、`respond`→`CodexTurnOutcome`、review start、read/listTurns、rename/compact/archive/unarchive/delete、`cancelActiveTurn`、`closeConnection`。`streamResponse`、public event/message/transcript/log accessors、public rollbackは除く | `CodexReviewAppServer`, `CodexDataKit` |
-| `CHANGE` | `CodexReviewSession` | review/source/turn identity、`collect(timeout:)`, `cancel()`, `closeConnection()`だけ。public `AsyncSequence`/progress streamを公開しない | CRK adapter |
+| `CHANGE` | `CodexReviewSession` | review/source/turn identity、`collect(timeout:)`, nonwaiting `terminalOutcomeIfKnown()`, `cancel()`, `closeConnection()`だけ。public `AsyncSequence`/progress streamを公開しない | CRK adapter |
 | `KEEP` | `CodexReviewTarget`, `CodexReviewDelivery`, `CodexReviewIdentity`, `CodexReviewRestartToken`, `CodexTurnCancellation` | value semanticsと現行public construction/read surfaceを維持 | CRK adapter/restart/cancel path |
 | `NEW` | `CodexTurnOutcome`, `CodexFailedTurn` | §5.1のexhaustive terminal value。failed turn initializerはpackage | CRK adapter, DataKit |
 | `CHANGE` | `CodexResponse` | responseはidentity/transcript/usage + `startedAt/completedAt/duration` timing。`finalAnswer`, `errorMessage`, status-derived predicatesを削除し、typed failureはoutcomeに置く | CRK adapter, DataKit, ReviewChatLogUI |
@@ -3900,10 +3861,12 @@ Phase 4ではこのinventoryを作るのではなく、recursive `public/open` s
 | `CHANGE` | `CodexModelContainer`, `CodexModelContext`, `CodexModelContextError`, `CodexModelActor`, `CodexDefaultSerialModelExecutor` | §5.6のeager MainActor context、async fetch/action APIs、concrete executorだけ。context escapeを許さない | Host composition, adapter, external fixture |
 | `DELETE` | generic `CodexModelExecutor`, `CodexSerialModelExecutor` protocols and those legacy executor protocols' public context getters | concrete executor contractへ置換。`CodexModelActor.modelContext` はactor body内だけで使えるcomputed requirementとして残す | replacement above |
 | `NEW` | `CodexSortDescriptor` | supported key-path/comparator/orderを保持しFoundation parityのnil orderingを持つ | ReviewUI queries, fixture |
-| `CHANGE` | `CodexSectionDescriptor`, `CodexFetchDescriptor`, `CodexFetchRequest`, `CodexQuery`, `CodexQueryResults`; query environment modifiers | §5.6のpredicate/sort/limit/offset/pending fieldsとtyped phase。initializer crash/string failureを除く | ReviewUI, external fixture |
+| `CHANGE` | `CodexSectionDescriptor`, `CodexFetchDescriptor`, `CodexQuery`, `CodexQueryResults`; query environment modifiers | §5.6のpredicate/sort/limit/offset/context-merge fields、stable ID ordering、typed phase。initializer crash/string failureを除く | ReviewUI, external fixture |
+| `DELETE` | `CodexFetchRequest` | canonical value `CodexFetchDescriptor`へ統合。Core Dataの名前だけを借りたmutable duplicateを残さない | replacement above |
 | `NEW` | `CodexFetchValidationError`, `CodexFetchFailure`, `CodexFetchPhase` | validation/app-server failureの唯一owner | ReviewUI, MCP projection |
 | `KEEP` | `CodexFetchSectionID`, `CodexFetchSection`; `CodexFetchedResultsIndexPath`, `CodexFetchedResultsSnapshot`/`Section`, `CodexFetchedResultsSectionChange`, `CodexFetchedResultsItemChange`, `CodexFetchedResultsTransactionReason`, `CodexFetchedResultsTransaction` | current full identity/value transaction interfaceを維持 | ReviewUI and package UI tests |
-| `CHANGE` | `CodexFetchedResults`, `CodexFetchedResultsController` | typed phase、newest-1 relay lifecycle。String error fieldなし | ReviewUI and package UI tests |
+| `CHANGE` | `CodexFetchedResults` | query/current value/typed phase/snapshot/newest-1 relayの単一owner。String error fieldなし | ReviewUI and package UI tests |
+| `DELETE` | `CodexFetchedResultsController` | forwarding-only wrapperを削除し、AppKit consumerは`CodexFetchedResults`を直接保持 | replacement above |
 | `NEW` | `CodexTurnTerminalDisposition`, `CodexChatPhase`, `CodexChatSnapshotReason`, `CodexChatObservationSnapshot`, `CodexChatObservationEvent`/`Payload`, `CodexChatItemLocator` | immutable terminal/failure/snapshot/cursor facts and unique item targets | ReviewChatLogUI |
 | `CHANGE` | `CodexChatUpdates` concrete sequence/iterator, `CodexChatObservation`, `CodexChatUpdate`, `CodexChat.observe` | §5.6のself-contained sequenced updates、single iterator、explicit close | ReviewChatLogUI |
 | `PACKAGE` | `CodexFetchPlanResult`, `CodexThreadQueryPlan`, predicate/sort lowering, mutation strategy, `FetchedResultsLoadCoordinator`, transaction relay, `ChatObservationOwner`, waiter tokens | validation/load/observation owner implementation | CodexDataKit implementation |
@@ -4064,8 +4027,8 @@ Terminal status は upstream が定義する closed enum であり plugin-style 
 | MCP Swift SDK dependency | 0.12.1 untracked request Task / early stop return | fork receive-loop structured child ownership、concurrent requests、handler failure/cancel、stop admission close、transport disconnect、request children + receive-loop + pending continuation join、handler exit signal no self-await、double stop、stop return時task count 0 |
 | server requests | process-backed approval | integer/string request ID round-trip、9 current-v2 cases/default policies、shared-codec injection、mismatch/throw internal error、required-thread resolved→noResponse、close→noResponse、no hung continuation、unknown reject |
 | item/rate/account merge | command/file partial fixture、account read | started→multiple delta→completed metadata、package canonical DTOでpinned全item/turn/thread variant exhaustive round-trip、opaque public fixture projection一致、patch snapshot、missing-ID malformed、sparse rate merge、accountChanged coalescing + explicit refetch、全notification disposition fixture。pinned inventoryにない`item/updated` emitterは作らない |
-| query/load/FRC | existing mutation and pagination tests | serialized intent/cancellation matrix、atomic target-window refresh across pages、2nd performFetch、empty→new item page-1 refresh、nil cursor no-op、single strategy table、no stale commit、slow transaction consumer newest-1 drop→old mismatch→new snapshot replace、subscriber cancellation/deinit finish |
-| query validation/scope | supported predicate/sort cases | stable success/failure signature、single typed phase、negative limit/offset、unresolved section、optional Date/String comparator nil forward/reverse、nil active-only、`.both` active+archived/pending merge/dedupe/explicit-or-createdAt-desc sort + same-direction ID tie-break/offset/limit with pending on/off、Mirror removal |
+| query/load/results | existing mutation and pagination tests | serialized intent/cancellation matrix、atomic target-window refresh across pages、2nd performFetch、empty→new item page-1 refresh、nil cursor no-op、single strategy table、no stale commit、slow transaction consumer newest-1 drop→old mismatch→new snapshot replace、subscriber cancellation/deinit finish、forwarding controller 0 |
+| query validation/scope | supported predicate/sort cases | stable success/failure signature、single typed phase、negative limit/offset、unresolved section、optional Date/String comparator nil forward/reverse、missing SwiftUI context fail-fast、nil active-only、`.both` active+archived/context merge/dedupe、全effective sortのsame-direction typed-ID tie-break、created/updated同timestampを跨ぐrecency-cursor exhaustive enumeration、global order後section first-occurrence projection、Mirror/FetchRequest removal |
 | fake | current thread store/list | exclusive queued/store modes、archived seed/sort/pagination、explicit planned start/fork fixture consumption + request mismatch reject、resume/read/mutation、fork source immutability、thread runtime metadata full response、opaque model page required description/default effort/modalities/service tiers、account ChatGPT required plan/Bedrock credential source、rate primary/map/credits/reset metadata、config read required origins/layers、rollback/login-cancel/config-write nonempty responses、semantic recorded request associated values、typed queue/gate/emitter wire shape、raw API package-only、unstubbed→typed contractViolation、cancel/late response parity、waiter/runtime close drain |
 | observation | multicast relay and active-slot rejection | atomic first snapshot→delta、join current revision、strict `(generation,sequence)` cursor、generation restart seq0 + old pending discard、refresh/includeTurns snapshot barrier、257th event compaction、second overflow supersede、fast/slow isolation、single iterator fail-fast、self-contained update/no live graph read、invalid target/index、failure before first snapshot、failure with buffer、close-vs-failure、finished-generation event rejection、non-last/last close completion、ReleaseSignal close/deinit race dedupe、deinit actor Task 0、owner close receiver join |
 | login handle | existing broad completion stream/native login | pending conflict + start cleanup、matching/missing/stale ID、`login/completed(success)`時点ではresult未完→post-success `account/updated(authMode:.chatGPT)`だけでsuccess、先行update無視、nil/non-ChatGPT auth mode/malformed update→committed-needs-reconciliation、no-auth→B/A→B stale read characterization、success-update間connection death→committed-needs-reconciliation、start-owned readiness deadline + multi-result waiter isolation/replay、first cancel claimant-owned deadline + concurrent join、cancel canceled/notFound first-terminal-wins、success-pending中late cancel、root drop/close lease release |
