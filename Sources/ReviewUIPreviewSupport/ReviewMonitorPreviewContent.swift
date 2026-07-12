@@ -34,6 +34,18 @@ public final class ReviewMonitorPreviewContentSource {
         runtime.startStreaming(interval: interval)
     }
 
+    package func startStreamingForTesting(interval: Duration) {
+        runtime.startStreaming(interval: interval)
+    }
+
+    package func cancelStreamingForTesting() {
+        runtime.cancelStreaming()
+    }
+
+    package func stopStreamingForTesting() async {
+        await runtime.stopStreaming()
+    }
+
     @discardableResult
     public func appendPreviewChatLogStreamTick(
         after tick: Int = 0,
@@ -122,7 +134,7 @@ public enum ReviewMonitorPreviewContent {
             itemName: String? = nil,
             kind: CodexThreadItem.Kind,
             content: CodexThreadItem.Content,
-            mode: PreviewStreamMode = .complete,
+            mode: PreviewStreamMode,
             deltaText: String? = nil,
             chunkByWord: Bool = false,
             delayBeforeFrameCount: Int,
@@ -362,6 +374,7 @@ public enum ReviewMonitorPreviewContent {
                 role: .assistant,
                 text: "Turn started: \(previewTurnID(1))"
             )),
+            mode: .complete,
             delayBeforeFrameCount: 1
         ),
         .init(
@@ -373,6 +386,7 @@ public enum ReviewMonitorPreviewContent {
                         [in_progress] Preserve active find UI while streaming
                         [pending] Run focused UI tests
                         """),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -402,6 +416,7 @@ public enum ReviewMonitorPreviewContent {
                     exitCode: 0,
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
@@ -413,6 +428,7 @@ public enum ReviewMonitorPreviewContent {
                     result: "MCP codex_review.review_read started.",
                     status: .inProgress
                 )),
+            mode: .update,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -456,6 +472,7 @@ public enum ReviewMonitorPreviewContent {
                     exitCode: 0,
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: commandCompletionDelayFrameCount
         ),
         .init(
@@ -477,6 +494,7 @@ public enum ReviewMonitorPreviewContent {
                 role: .assistant,
                 text: "Context automatically compacted"
             )),
+            mode: .complete,
             delayBeforeFrameCount: compactionCompletionDelayFrameCount
         ),
         .init(
@@ -488,6 +506,7 @@ public enum ReviewMonitorPreviewContent {
                     result: "File changes updated.",
                     status: .completed
                 )),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
         .init(
@@ -520,6 +539,7 @@ public enum ReviewMonitorPreviewContent {
                     text:
                         "The preview stream now mixes commands, tool events, reasoning summaries, and visible assistant output instead of one repeated message kind.\n",
                 )),
+            mode: .complete,
             delayBeforeFrameCount: interItemDelayFrameCount
         ),
     ]

@@ -103,6 +103,17 @@ extension ReviewUITests {
                 isChatActive: true
             ) == .directChat
         )
+        _ = try await advancePreviewStreamBeyondMCPFixture(
+            previewContent,
+            transport: transport,
+            selectedChatID: selectedChatID
+        )
+        let remainingRunningChatID = CodexThreadID(rawValue: "preview-thread-0-1")
+        let remainingItemCount = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        ).items.count
+        previewContent.startStreamingForTesting(interval: .milliseconds(1))
+        defer { previewContent.cancelStreamingForTesting() }
 
         var presentedCancelItem = false
         var cancelItemWasEnabled = false
@@ -166,6 +177,20 @@ extension ReviewUITests {
         }
         #expect(presentedCancelItemAfterCancellation)
         #expect(cancelItemEnabledAfterCancellation == false)
+
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.snapshotForTesting(chatID: remainingRunningChatID)?.items.count
+                == remainingItemCount
+            {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        let updatedRemainingSnapshot = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        )
+        #expect(updatedRemainingSnapshot.items.count > remainingItemCount)
+        await previewContent.stopStreamingForTesting()
     }
 
     @Test func inactiveChatContextMenuArchiveSkipsConfirmationAndRemovesSidebarChat() async throws {
@@ -359,11 +384,24 @@ extension ReviewUITests {
         viewController.loadViewIfNeeded()
         viewController.view.layoutSubtreeIfNeeded()
 
-        let sidebar = viewController.splitViewControllerForTesting.sidebarViewControllerForTesting
+        let splitViewController = viewController.splitViewControllerForTesting
+        let sidebar = splitViewController.sidebarViewControllerForTesting
+        let transport = splitViewController.transportViewControllerForTesting
         try await waitForCondition {
             sidebar.sidebarKindForTesting == .chatList
                 && sidebar.codexSidebarNodeTitleForTesting(rowID: .chat(selectedChatID)) != nil
         }
+        _ = try await advancePreviewStreamBeyondMCPFixture(
+            previewContent,
+            transport: transport,
+            selectedChatID: selectedChatID
+        )
+        let remainingRunningChatID = CodexThreadID(rawValue: "preview-thread-0-1")
+        let remainingItemCount = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        ).items.count
+        previewContent.startStreamingForTesting(interval: .milliseconds(1))
+        defer { previewContent.cancelStreamingForTesting() }
 
         var confirmedChatIDs: [CodexThreadID] = []
         sidebar.setChatArchiveConfirmationForTesting { chatID, _ in
@@ -390,6 +428,20 @@ extension ReviewUITests {
         }
         #expect(await previewContent.archiveRequestCountForTesting() == 1)
         #expect(confirmedChatIDs == [selectedChatID])
+
+        try await withTestTimeout(.seconds(2)) {
+            while await previewContent.snapshotForTesting(chatID: remainingRunningChatID)?.items.count
+                == remainingItemCount
+            {
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+        }
+        let updatedRemainingSnapshot = try #require(
+            await previewContent.snapshotForTesting(chatID: remainingRunningChatID)
+        )
+        #expect(updatedRemainingSnapshot.items.count > remainingItemCount)
+        await previewContent.stopStreamingForTesting()
     }
 
     @Test func activeChatContextMenuCancelFallsBackWhenMatchingReviewRunIsTerminal() async throws {
@@ -2264,6 +2316,30 @@ private func performChatContextMenuItemForTesting(
         menu.performActionForItem(at: itemIndex)
     }
     return (presented: presented, enabled: enabled)
+}
+
+@MainActor
+private func advancePreviewStreamBeyondMCPFixture(
+    _ previewContent: ReviewMonitorPreviewContentSource,
+    transport: ReviewMonitorTransportViewController,
+    selectedChatID: CodexThreadID
+) async throws -> Int {
+    var tick = 0
+    for _ in 0..<220 {
+        tick = await previewContent.appendPreviewChatLogStreamTick(
+            after: tick,
+            emitsNotifications: true
+        )
+    }
+
+    _ = try await awaitTransportRender(
+        transport,
+        expectedSelection: .chat(selectedChatID.rawValue),
+        timeout: .seconds(5)
+    ) { snapshot in
+        snapshot.log.contains("Checking whether")
+    }
+    return tick
 }
 
 @MainActor

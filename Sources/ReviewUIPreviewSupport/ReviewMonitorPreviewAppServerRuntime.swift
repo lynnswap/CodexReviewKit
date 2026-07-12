@@ -123,6 +123,12 @@ final class ReviewMonitorPreviewAppServerRuntime {
         )
     }
 
+    isolated deinit {
+        startTask?.cancel()
+        streamTask?.cancel()
+        notificationTask?.cancel()
+    }
+
     var initialChatID: CodexThreadID? {
         fixtures.first?.chatID
     }
@@ -213,6 +219,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
                     runtime: runtime
                 )
             } catch {
+                preconditionFailure("Failed to append Preview text: \(error)")
             }
         }
     }
@@ -233,6 +240,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
             do {
                 try await self?.startNow()
             } catch {
+                preconditionFailure("Failed to start the Preview app-server runtime: \(error)")
             }
         }
     }
@@ -256,15 +264,29 @@ final class ReviewMonitorPreviewAppServerRuntime {
         }
     }
 
+    func cancelStreaming() {
+        streamTask?.cancel()
+    }
+
+    func stopStreaming() async {
+        let task = streamTask
+        streamTask = nil
+        task?.cancel()
+        await task?.value
+        await notificationTask?.value
+    }
+
     @discardableResult
     func appendPreviewStreamTick(
         after currentTick: Int = 0,
         emitsNotifications: Bool = false
     ) async -> Int {
-        var runningFixtures: [ReviewMonitorPreviewChatLogFixture] = []
-        for fixture in fixtures where fixture.isRunning {
-            if await cancelledChatIDs.contains(fixture.chatID) == false {
-                runningFixtures.append(fixture)
+        var runningFixtures: [(index: Int, fixture: ReviewMonitorPreviewChatLogFixture)] = []
+        for (index, fixture) in fixtures.filter(\.isRunning).enumerated() {
+            if await cancelledChatIDs.contains(fixture.chatID) == false,
+                await archivedChatIDs.contains(fixture.chatID) == false
+            {
+                runningFixtures.append((index, fixture))
             }
         }
         guard runningFixtures.isEmpty == false else {
@@ -275,26 +297,28 @@ final class ReviewMonitorPreviewAppServerRuntime {
             do {
                 try await ensureStarted()
             } catch {
-                return currentTick
+                preconditionFailure("Failed to start the Preview app-server runtime while streaming: \(error)")
             }
         }
 
         let nextTick = currentTick + 1
-        for (index, fixture) in runningFixtures.enumerated() {
-            guard let frame = ReviewMonitorPreviewContent.streamFrame(
-                forRunningChatAt: index,
-                tick: nextTick
-            ) else {
+        for (index, fixture) in runningFixtures {
+            guard
+                let frame = ReviewMonitorPreviewContent.streamFrame(
+                    forRunningChatAt: index,
+                    tick: nextTick
+                )
+            else {
                 continue
             }
-        guard let storedItem = await apply(frame.step, cycle: frame.cycle, for: fixture) else {
-            continue
-        }
-        if emitsNotifications {
-            enqueueNotification { [weak self] in
-                await self?.emit(frame.step, storedItem: storedItem, for: fixture)
+            guard let storedItem = await apply(frame.step, cycle: frame.cycle, for: fixture) else {
+                continue
             }
-        }
+            if emitsNotifications {
+                enqueueNotification { [weak self] in
+                    await self?.emit(frame.step, storedItem: storedItem, for: fixture)
+                }
+            }
         }
         tick = nextTick
         return nextTick
@@ -411,6 +435,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
                 }
             }
         } catch {
+            preconditionFailure("Failed to emit a Preview stream item: \(error)")
         }
     }
 
@@ -537,8 +562,11 @@ final class ReviewMonitorPreviewAppServerRuntime {
     ) async -> ReviewMonitorPreviewStoredThreadItem? {
         await snapshotMutationQueue.run { @MainActor [weak self] in
             guard let self,
-                  var snapshot = await self.threadStore.snapshot(id: fixture.chatID),
-                  let item = mutation(&snapshot) else {
+                await self.cancelledChatIDs.contains(fixture.chatID) == false,
+                await self.archivedChatIDs.contains(fixture.chatID) == false,
+                var snapshot = await self.threadStore.snapshot(id: fixture.chatID),
+                let item = mutation(&snapshot)
+            else {
                 return nil
             }
             await self.replaceThreadStorePreservingFixtureOrder(
@@ -596,6 +624,7 @@ final class ReviewMonitorPreviewAppServerRuntime {
                 try await rebindRuntimeToCurrentThreadStore(runtime)
             }
         } catch {
+            preconditionFailure("Failed to rebind the Preview thread store: \(error)")
         }
     }
 

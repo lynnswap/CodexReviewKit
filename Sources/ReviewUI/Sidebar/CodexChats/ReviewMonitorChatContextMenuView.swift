@@ -2,7 +2,13 @@ import AppKit
 import CodexAppServerKit
 import CodexDataKit
 import CodexReviewKit
+import OSLog
 import SwiftUI
+
+private let chatContextMenuLogger = Logger(
+    subsystem: "CodexReviewKit",
+    category: "chat-context-menu"
+)
 
 @MainActor
 struct ReviewMonitorChatArchiveConfirmation: Sendable {
@@ -62,13 +68,19 @@ struct ReviewMonitorChatContextMenuView: View {
         let chatID = chat.id.rawValue
         let action = cancellationCapability.action
         Task {
-            switch action {
-            case .some(.reviewRun):
-                _ = try? await store.cancelReview(chatID: chatID, cancellation: .userInterface())
-            case .some(.directChat):
-                _ = try? await chat.cancel()
-            case nil:
-                break
+            do {
+                switch action {
+                case .some(.reviewRun):
+                    _ = try await store.cancelReview(chatID: chatID, cancellation: .userInterface())
+                case .some(.directChat):
+                    try await chat.cancel()
+                case nil:
+                    break
+                }
+            } catch {
+                chatContextMenuLogger.error(
+                    "Failed to cancel chat \(chatID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
             }
         }
     }
@@ -85,7 +97,13 @@ struct ReviewMonitorChatContextMenuView: View {
                     return
                 }
             }
-            try? await chat.archive()
+            do {
+                try await chat.archive()
+            } catch {
+                chatContextMenuLogger.error(
+                    "Failed to archive chat \(chat.id.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 
