@@ -232,6 +232,262 @@ struct CodexReviewHostTests {
         #expect(observedLifecycleStates == [true, false])
     }
 
+    @Test func liveStoreDoesNotPublishLifecycleWhenMCPStagingFails() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        let mcpServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stageFailure: .stagingFailed
+        )
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, _, _ in mcpServer },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in transport }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+
+        guard case .failed = store.serverState else {
+            Issue.record("Expected failed server state.")
+            return
+        }
+        #expect(store.serverURL == nil)
+        #expect(observedLifecycleStates.isEmpty)
+        #expect(await mcpServer.snapshot() == .init(stageCount: 1, activateCount: 0, stopCount: 1))
+    }
+
+    @Test func liveStoreStopWinsOverLateMCPStagingCompletion() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        let stageGate = CodexAppServerTestGate()
+        let mcpServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stageGate: stageGate
+        )
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, _, _ in mcpServer },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in transport }
+        )
+
+        let start = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        await stageGate.waitUntilBlocked()
+        await store.stop()
+
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(observedLifecycleStates.isEmpty)
+        #expect(await mcpServer.snapshot() == .init(stageCount: 1, activateCount: 0, stopCount: 1))
+
+        await stageGate.open()
+        await start.value
+
+        #expect(store.serverState == .stopped)
+        #expect(store.serverURL == nil)
+        #expect(observedLifecycleStates.isEmpty)
+        #expect(await mcpServer.snapshot() == .init(stageCount: 1, activateCount: 0, stopCount: 1))
+    }
+
+    @Test func liveStoreJoinsConcurrentStopsIntoOneRuntimeTeardown() async throws {
+        let homeURL = try temporaryHome()
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await transport.enqueueModels(.init(models: []))
+        let stopGate = CodexAppServerTestGate()
+        let secondStopStarted = CodexAppServerTestGate()
+        let mcpServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stopGate: stopGate
+        )
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, _, _ in mcpServer },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in transport }
+        )
+        await store.start(forceRestartIfNeeded: true)
+
+        let firstStop = Task { @MainActor in
+            await store.stop()
+        }
+        await stopGate.waitUntilBlocked()
+        let secondStopStartedWaiter = Task {
+            await secondStopStarted.waitIgnoringCancellation()
+        }
+        await secondStopStarted.waitUntilBlocked()
+        let secondStop = Task { @MainActor in
+            await secondStopStarted.open()
+            await store.stop()
+        }
+        await secondStopStartedWaiter.value
+        await stopGate.open()
+        await firstStop.value
+        await secondStop.value
+
+        #expect(await mcpServer.snapshot().stopCount == 1)
+        #expect(observedLifecycleStates == [true, false])
+    }
+
+    @Test func liveStoreIgnoresLateStagingGenerationCompletion() async throws {
+        let homeURL = try temporaryHome()
+        let firstFactoryGate = CodexAppServerTestGate()
+        let firstTransport = FakeCodexAppServerTransport()
+        let secondTransport = FakeCodexAppServerTransport()
+        try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        for _ in 0..<2 {
+            try await secondTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+            try await secondTransport.enqueueModels(.init(models: []))
+        }
+        var factoryCallCount = 0
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, configuration, _ in
+                NoopMCPHTTPServer(endpoint: configuration.url())
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in
+                factoryCallCount += 1
+                if factoryCallCount == 1 {
+                    await firstFactoryGate.waitIgnoringCancellation()
+                    return firstTransport
+                }
+                return secondTransport
+            }
+        )
+
+        let oldStart = Task { @MainActor in
+            await store.start(forceRestartIfNeeded: true)
+        }
+        await firstFactoryGate.waitUntilBlocked()
+        await store.stop()
+        await store.start(forceRestartIfNeeded: true)
+        #expect(store.serverState == .running)
+        #expect(observedLifecycleStates == [true])
+
+        await firstFactoryGate.open()
+        await oldStart.value
+
+        #expect(store.serverState == .running)
+        #expect(store.serverURL != nil)
+        #expect(observedLifecycleStates == [true])
+        await store.stop()
+        #expect(observedLifecycleStates == [true, false])
+    }
+
+    @Test func liveStoreFinalStopRetiresRunsWhileReplacementIsStaging() async throws {
+        let homeURL = try temporaryHome()
+        let firstTransport = FakeCodexAppServerTransport()
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueConfiguration(try makeHostConfigurationReadResult())
+        try await firstTransport.enqueueModels(.init(models: []))
+        try await firstTransport.enqueueThreadStart(threadID: "thread-1", model: "gpt-5")
+        try await firstTransport.enqueueReviewStart(turnID: "turn-1", reviewThreadID: "thread-1")
+
+        let secondTransport = FakeCodexAppServerTransport()
+        try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await secondTransport.enqueueSuccess(for: .threadDelete)
+        var transports = [firstTransport, secondTransport]
+        let replacementStageGate = CodexAppServerTestGate()
+        let replacementMCPServer = MCPHTTPServerProbe(
+            endpoint: URL(string: "http://127.0.0.1:9417/mcp")!,
+            stageGate: replacementStageGate
+        )
+        var mcpFactoryCallCount = 0
+        var observedLifecycleStates: [Bool] = []
+        let store = CodexReviewStore.makeLiveStoreForTesting(
+            environment: ["HOME": homeURL.path],
+            mcpHTTPServerFactory: { _, configuration, _ in
+                mcpFactoryCallCount += 1
+                if mcpFactoryCallCount == 1 {
+                    return NoopMCPHTTPServer(endpoint: configuration.url())
+                }
+                return replacementMCPServer
+            },
+            mcpHTTPServerBindChecker: { _ in },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
+            transportFactory: { _ in transports.removeFirst() }
+        )
+
+        await store.start(forceRestartIfNeeded: true)
+        let review = Task { @MainActor in
+            try await store.startReview(
+                sessionID: "session-1",
+                request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
+            )
+        }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-1"
+        })
+        let reviewOutput = try CodexAppServerTestItem.exitedReviewMode(
+            id: "review-output",
+            review: "No issues found."
+        )
+        let completedTurn = try CodexAppServerTestTurn(
+            snapshot: .init(
+                id: "turn-1",
+                state: .completed,
+                items: [reviewOutput.domainProjection]
+            ),
+            items: [reviewOutput]
+        )
+        try await firstTransport.enqueueThreadRead(
+            makeHostStoredThread(id: "thread-1", turns: [completedTurn])
+        )
+        try await firstTransport.notificationEmitter.emitTurnCompleted(
+            threadID: "thread-1",
+            turn: completedTurn
+        )
+        #expect(try await review.value.presentation.status == .succeeded)
+
+        let restart = Task { @MainActor in
+            await store.restart()
+        }
+        await replacementStageGate.waitUntilBlocked()
+        #expect(store.reviewRuns.count == 1)
+
+        await store.stop()
+
+        #expect(store.serverState == .stopped)
+        #expect(store.reviewRuns.isEmpty)
+        #expect(await secondTransport.recordedRequests(for: .threadDelete).count == 1)
+        #expect(observedLifecycleStates == [true, false])
+        #expect(await replacementMCPServer.snapshot() == .init(
+            stageCount: 1,
+            activateCount: 0,
+            stopCount: 1
+        ))
+
+        await replacementStageGate.open()
+        await restart.value
+        #expect(store.serverState == .stopped)
+        #expect(observedLifecycleStates == [true, false])
+    }
+
     @Test func liveStorePassesRuntimePreferenceMCPPortAndPathToHTTPServerFactory() async throws {
         let homeURL = try temporaryHome()
         let transport = FakeCodexAppServerTransport()
@@ -272,11 +528,14 @@ struct CodexReviewHostTests {
         await store.stop()
     }
 
-    @Test func liveStoreReportsMCPPortOwnerWhenEndpointPortInUseAndDoesNotLaunchAppServer() async throws {
+    @Test func liveStoreReportsMCPPortOwnerAfterStagingAppServer() async throws {
         let homeURL = try temporaryHome()
         let port = 54321
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
 
         var didLaunchAppServer = false
+        var observedLifecycleStates: [Bool] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
             runtimePreferences: .init(mcpHost: "127.0.0.1", mcpPort: port),
@@ -296,15 +555,19 @@ struct CodexReviewHostTests {
                     port: configuration.port
                 )
             },
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
             transportFactory: { _ in
                 didLaunchAppServer = true
-                return FakeCodexAppServerTransport()
+                return transport
             }
         )
 
         await store.start(forceRestartIfNeeded: true)
 
-        #expect(didLaunchAppServer == false)
+        #expect(didLaunchAppServer)
+        #expect(observedLifecycleStates.isEmpty)
         guard case .failed(let message) = store.serverState else {
             Issue.record("Expected failed server state.")
             return
@@ -314,9 +577,11 @@ struct CodexReviewHostTests {
         #expect(message.contains("Quit that process or change the MCP port in Settings"))
     }
 
-    @Test func liveStoreReportsMCPPortInUseWhenOwnerCannotBeResolved() async throws {
+    @Test func liveStoreReportsMCPPortInUseWithoutOwnerAfterStagingAppServer() async throws {
         let homeURL = try temporaryHome()
         let port = 54322
+        let transport = FakeCodexAppServerTransport()
+        try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
 
         var didLaunchAppServer = false
         let store = CodexReviewStore.makeLiveStoreForTesting(
@@ -334,13 +599,13 @@ struct CodexReviewHostTests {
             },
             transportFactory: { _ in
                 didLaunchAppServer = true
-                return FakeCodexAppServerTransport()
+                return transport
             }
         )
 
         await store.start(forceRestartIfNeeded: true)
 
-        #expect(didLaunchAppServer == false)
+        #expect(didLaunchAppServer)
         guard case .failed(let message) = store.serverState else {
             Issue.record("Expected failed server state.")
             return
@@ -693,7 +958,9 @@ struct CodexReviewHostTests {
         async let cancel: Void = store.cancelAuthentication()
         await transport.waitForRequest(.accountLoginCancel)
         async let stop: Void = store.stop()
-        await waitUntil { appServerLifecycleStates == [true, false] }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            appServerLifecycleStates == [true, false]
+        })
 
         #expect(await transport.recordedRequests(for: .accountLoginCancel).count == 1)
         await cancelGate.open()
@@ -782,9 +1049,9 @@ struct CodexReviewHostTests {
         await loginStartGate.open()
         try await firstLogin.value
 
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             failedMessage(from: store.auth.phase) == "login completed before handle publication"
-        }
+        })
         #expect(
             failedMessage(from: store.auth.phase)
                 == "login completed before handle publication"
@@ -925,9 +1192,9 @@ struct CodexReviewHostTests {
             .write(to: capturedRefreshCodexHomeURL.appendingPathComponent("auth.json"))
         await refreshGate.open()
         await refresh
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44
-        }
+        })
 
         #expect(store.auth.selectedAccount?.accountKey == "active@example.com")
         #expect(store.auth.persistedAccounts.first { $0.accountKey == "new@example.com" }?.rateLimits.first?.usedPercent == 44)
@@ -1060,10 +1327,10 @@ struct CodexReviewHostTests {
             planType: .plus
         ))
         await transport.waitForRequestCount(7)
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             store.auth.selectedAccount?.accountKey == "new@example.com"
                 && store.auth.selectedAccount?.rateLimits.first?.usedPercent == 20
-        }
+        })
 
         #expect(store.auth.persistedActiveAccountKey == "new@example.com")
         #expect(try activeAccountKey(homeURL: homeURL) == "new@example.com")
@@ -1281,7 +1548,9 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-first" }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-first"
+        })
 
         try await store.switchAccount(CodexReviewKit.CodexReviewAccount(email: "second@example.com"))
         let result = try await reviewRead
@@ -1344,7 +1613,9 @@ struct CodexReviewHostTests {
             sessionID: "session-1",
             request: .init(cwd: "/tmp/project", target: .uncommittedChanges)
         )
-        await waitUntil { store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-active" }
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            store.reviewRuns.first?.core.attempt?.turnID.rawValue == "turn-active"
+        })
 
         await store.logout()
         let result = try await reviewRead
@@ -1570,20 +1841,24 @@ struct CodexReviewHostTests {
         try await transport.enqueueAccount(nil, requiresOpenAIAuth: false)
         try await transport.enqueueConfiguration(try makeHostConfigurationReadResult())
         try await transport.enqueueModels(.init(models: []))
+        var observedLifecycleStates: [Bool] = []
         let store = CodexReviewStore.makeLiveStoreForTesting(
             environment: ["HOME": homeURL.path],
+            appServerLifecycleHandler: { container in
+                observedLifecycleStates.append(container != nil)
+            },
             transport: transport
         )
 
         await store.start(forceRestartIfNeeded: true)
         await transport.waitForNotificationStreamCount(1)
         await transport.failConnection(.closed)
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             if case .failed = store.serverState {
                 return true
             }
             return false
-        }
+        })
 
         guard case .failed(let message) = store.serverState else {
             Issue.record("Expected failed server state.")
@@ -1591,6 +1866,10 @@ struct CodexReviewHostTests {
         }
         #expect(message.contains("The Codex app-server transport is closed."))
         #expect(store.serverURL == nil)
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            observedLifecycleStates == [true, false]
+        })
+        #expect(observedLifecycleStates == [true, false])
     }
 
     @Test func liveStoreDoesNotResumeActiveReviewAfterConnectionTerminates() async throws {
@@ -1684,15 +1963,15 @@ struct CodexReviewHostTests {
         #expect(externalURLOpener.openedURLs == [testAuthenticationURL])
 
         await mainTransport.failConnection(.closed)
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
             if case .failed = store.serverState {
                 return true
             }
             return false
-        }
-        await waitUntil {
+        })
+        try #require(await waitUntil(timeout: .seconds(2)) {
             FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
-        }
+        })
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
         #expect(await loginTransport.recordedRequests(for: .accountLoginCancel).count == 1)
         #expect(store.auth.isAuthenticating == false)
@@ -1780,6 +2059,7 @@ struct CodexReviewHostTests {
         ))
         try await firstTransport.enqueueSuccess(for: .accountLogout)
         try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
+        try await firstTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
         await firstTransport.holdNext(.accountLogout, gate: logoutGate)
         let secondTransport = FakeCodexAppServerTransport()
         try await secondTransport.enqueueAccount(nil, requiresOpenAIAuth: false)
@@ -1821,6 +2101,11 @@ struct CodexReviewHostTests {
             try Data(contentsOf: accountMutationJournalURL(homeURL: homeURL))
                 == journalData
         )
+        try await firstTransport.notificationEmitter.emitAccountChanged(.init(
+            authMode: .chatGPT,
+            planType: .pro
+        ))
+        await firstTransport.waitForRequest(.accountRead, count: 2)
 
         let recoveryHomeURL = try temporaryHome()
         let recoveryAccountsURL = recoveryHomeURL
@@ -2052,10 +2337,12 @@ struct CodexReviewHostTests {
         )
 
         let resolvedIsolatedCodexHomeURL = try #require(isolatedCodexHomeURL)
-        await waitUntil { failedMessage(from: store.auth.phase) == "login completion failed" }
-        await waitUntil {
+        try #require(await waitUntil(timeout: .seconds(2)) {
+            failedMessage(from: store.auth.phase) == "login completion failed"
+        })
+        try #require(await waitUntil(timeout: .seconds(2)) {
             FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false
-        }
+        })
         #expect(FileManager.default.fileExists(atPath: resolvedIsolatedCodexHomeURL.path) == false)
         #expect(await loginTransport.recordedRequests().map(\.request.operation) == [
             .initialize,
@@ -2180,7 +2467,8 @@ private func makeHostRateLimits(
 
 private func makeHostStoredThread(
     id: CodexThreadID,
-    model: String = "gpt-5"
+    model: String = "gpt-5",
+    turns: [CodexAppServerTestTurn] = []
 ) throws -> CodexAppServerTestStoredThread {
     let workspace = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
     return try .init(
@@ -2194,9 +2482,9 @@ private func makeHostStoredThread(
             updatedAt: Date(timeIntervalSince1970: 2),
             status: .idle,
             ephemeral: false,
-            turns: []
+            turns: turns.map(\.snapshot)
         ),
-        turns: [],
+        turns: turns,
         metadata: .init(
             sessionID: "session-\(id.rawValue)",
             cliVersion: "host-test-cli",
@@ -2387,6 +2675,93 @@ private func failedMessage(from phase: CodexReviewAuthModel.Phase) -> String? {
     return failure.localizedDescription
 }
 
+private enum MCPHTTPServerProbeError: Error, Sendable {
+    case stagingFailed
+}
+
+private actor MCPHTTPServerProbeState {
+    private(set) var stageCount = 0
+    private(set) var activateCount = 0
+    private(set) var stopCount = 0
+
+    func recordStage() {
+        stageCount += 1
+    }
+
+    func recordActivation() {
+        activateCount += 1
+    }
+
+    func recordStop() {
+        stopCount += 1
+    }
+
+    func snapshot() -> MCPHTTPServerProbe.Snapshot {
+        .init(
+            stageCount: stageCount,
+            activateCount: activateCount,
+            stopCount: stopCount
+        )
+    }
+}
+
+private final class MCPHTTPServerProbe: CodexReviewMCPHTTPServing, @unchecked Sendable {
+    struct Snapshot: Equatable, Sendable {
+        var stageCount: Int
+        var activateCount: Int
+        var stopCount: Int
+    }
+
+    private let endpoint: URL
+    private let stageFailure: MCPHTTPServerProbeError?
+    private let stageGate: CodexAppServerTestGate?
+    private let stopGate: CodexAppServerTestGate?
+    private let state = MCPHTTPServerProbeState()
+
+    init(
+        endpoint: URL,
+        stageFailure: MCPHTTPServerProbeError? = nil,
+        stageGate: CodexAppServerTestGate? = nil,
+        stopGate: CodexAppServerTestGate? = nil
+    ) {
+        self.endpoint = endpoint
+        self.stageFailure = stageFailure
+        self.stageGate = stageGate
+        self.stopGate = stopGate
+    }
+
+    var url: URL {
+        get async {
+            endpoint
+        }
+    }
+
+    func start() async throws {
+        try await stage()
+    }
+
+    func stage() async throws {
+        await state.recordStage()
+        await stageGate?.waitIgnoringCancellation()
+        if let stageFailure {
+            throw stageFailure
+        }
+    }
+
+    func activate() async {
+        await state.recordActivation()
+    }
+
+    func stop() async {
+        await state.recordStop()
+        await stopGate?.waitIgnoringCancellation()
+    }
+
+    func snapshot() async -> Snapshot {
+        await state.snapshot()
+    }
+}
+
 private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sendable {
     private let endpoint: URL
 
@@ -2403,20 +2778,6 @@ private final class NoopMCPHTTPServer: CodexReviewMCPHTTPServing, @unchecked Sen
     func start() async throws {}
 
     func stop() async {}
-}
-
-@MainActor
-private func waitUntil(_ condition: @escaping () -> Bool) async {
-    for _ in 0..<100 where condition() == false {
-        await Task.yield()
-    }
-}
-
-@MainActor
-private func waitUntil(_ condition: @escaping () async -> Bool) async {
-    for _ in 0..<100 where await condition() == false {
-        await Task.yield()
-    }
 }
 
 @MainActor

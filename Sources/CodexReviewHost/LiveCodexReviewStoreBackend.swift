@@ -33,6 +33,14 @@ private enum RuntimeReviewCleanupMode {
     case connectionTerminated
 }
 
+private struct HostRuntimeConsumerFailure: Error, LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
 package struct CodexReviewMCPPortOwner: Equatable, Sendable {
     package var processIdentifier: Int32
     package var command: String?
@@ -159,12 +167,9 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
 
     let seed: CodexReviewStoreSeed
 
-    private var appServer: CodexAppServer?
-    private var appServerModelContainer: CodexModelContainer?
-    private var appServerBackend: AppServerCodexReviewBackend?
-    private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
+    private var runtimeSession: HostRuntimeSession?
+    private var nextRuntimeGeneration: UInt64 = 1
     private var loginSession: LoginSession?
-    private var authNotificationTask: Task<Void, Never>?
     private var settingsSnapshot = CodexReviewSettings.Snapshot()
     private let codexHomeURL: URL
     private let mcpHTTPServerConfiguration: CodexReviewMCPHTTPServer.Configuration
@@ -178,6 +183,22 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     private let registryLoadFailure: CodexReviewAuthenticationFailure?
     private let appServerLifecycleHandler: CodexReviewAppServerLifecycleHandler?
     private weak var attachedStore: CodexReviewStore?
+
+    private var appServer: CodexAppServer? {
+        runtimeSession?.activeRuntime?.appServer
+    }
+
+    private var appServerBackend: AppServerCodexReviewBackend? {
+        runtimeSession?.activeRuntime?.backend
+    }
+
+    private var teardownAppServerBackend: AppServerCodexReviewBackend? {
+        runtimeSession?.runtime?.backend
+    }
+
+    private var mcpHTTPServer: (any CodexReviewMCPHTTPServing)? {
+        runtimeSession?.activeMCPHTTPServer
+    }
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -399,32 +420,69 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
             store.transitionToFailed(registryLoadFailure.localizedDescription)
             return
         }
-        if appServerBackend != nil, forceRestartIfNeeded == false {
+        if let session = runtimeSession,
+           session.isActive,
+           forceRestartIfNeeded == false {
             logger.info("Review runtime already has an app-server backend")
             store.transitionToRunning(serverURL: await mcpHTTPServer?.url)
             return
         }
-        if forceRestartIfNeeded {
+        if let session = runtimeSession {
+            if case .stopIncomplete = session.phase {
+                store.transitionToFailed(
+                    "Review thread retention recovery is quarantined; the previous runtime cannot be replaced."
+                )
+                return
+            }
             await stop(store: store, purpose: .runtimeRestartPreservingRuns)
+            guard runtimeSession == nil else {
+                store.transitionToFailed("The previous review runtime did not finish stopping.")
+                return
+            }
         }
 
-        var startedAppServer: CodexAppServer?
-        var startedHTTPServer: (any CodexReviewMCPHTTPServing)?
+        precondition(nextRuntimeGeneration < .max, "Host runtime generations must not wrap.")
+        let session = HostRuntimeSession(
+            generation: nextRuntimeGeneration,
+            lifecycleHandler: appServerLifecycleHandler
+        )
+        nextRuntimeGeneration += 1
+        runtimeSession = session
         do {
-            if mcpHTTPServerFactory != nil {
-                try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
-            }
             let runtime = try await appServerRuntimeFactory(codexHomeURL)
+            guard runtimeSession === session else {
+                await runtime.appServer.close()
+                return
+            }
+            do {
+                try session.requireHealthyStaging()
+            } catch {
+                await runtime.appServer.close()
+                return
+            }
+            session.installRuntime(runtime)
             let appServer = runtime.appServer
             let backend = runtime.backend
             let modelContainer = runtime.modelContainer
-            startedAppServer = appServer
-            self.appServer = appServer
-            self.appServerModelContainer = modelContainer
-            self.appServerBackend = backend
-            appServerLifecycleHandler?(modelContainer)
-            await observeAuthNotifications(appServer: appServer, backend: backend, store: store)
+            try await installRuntimeConsumers(
+                session: session,
+                appServer: appServer,
+                store: store
+            )
+            let authSnapshot = try await backend.readAuth()
+            try requireCurrentStagingSession(session)
+            try await applyAuthSnapshotSerialized(authSnapshot, to: store.auth)
+            try requireCurrentStagingSession(session)
+            switch await store.recoverOrphanedReviewThreads() {
+            case .recovered, .cleanupIncomplete:
+                break
+            case .journalUnavailable(let message):
+                throw ReviewBackendFailure.retentionJournal(message: message)
+            }
+            try requireCurrentStagingSession(session)
             if let mcpHTTPServerFactory {
+                try await mcpHTTPServerBindChecker(mcpHTTPServerConfiguration)
+                try requireCurrentStagingSession(session)
                 let logProjectionProvider = CodexReviewMCPServer.chatLogProjectionProvider(
                     modelContext: modelContainer.mainContext
                 )
@@ -433,35 +491,58 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
                     mcpHTTPServerConfiguration,
                     logProjectionProvider
                 )
+                session.installMCPHTTPServer(mcpHTTPServer)
                 try await mcpHTTPServer.stage()
-                startedHTTPServer = mcpHTTPServer
-                self.mcpHTTPServer = mcpHTTPServer
             }
-            let authSnapshot = try await backend.readAuth()
-            try await applyAuthSnapshotSerialized(authSnapshot, to: store.auth)
-            switch await store.recoverOrphanedReviewThreads() {
-            case .recovered, .cleanupIncomplete:
-                break
-            case .journalUnavailable(let message):
-                throw ReviewBackendFailure.retentionJournal(message: message)
+            try requireCurrentStagingSession(session)
+            let serverURL = await session.mcpHTTPServer?.url
+            try requireCurrentStagingSession(session)
+            store.transitionToRunning(serverURL: serverURL)
+            session.commit()
+            await session.mcpHTTPServer?.activate()
+            guard runtimeSession === session, session.isActive else {
+                return
             }
-            store.transitionToRunning(serverURL: await self.mcpHTTPServer?.url)
-            await self.mcpHTTPServer?.activate()
             await refreshSelectedAccountRateLimits(auth: store.auth)
             logger.info("Review runtime started")
         } catch {
+            let ownsStagingFailure = runtimeSession === session && session.isStaging
+            guard ownsStagingFailure else {
+                _ = await session.waitForStopCompletion()
+                logger.debug("Ignoring a late startup result from a stopped or superseded Host runtime generation")
+                return
+            }
             let failureMessage = await runtimeStartupFailureMessage(for: error)
+            guard runtimeSession === session, session.isStaging else {
+                _ = await session.waitForStopCompletion()
+                logger.debug("Ignoring a late startup failure from a stopped Host runtime generation")
+                return
+            }
             logger.error("Review runtime failed to start: \(failureMessage, privacy: .public)")
-            await startedHTTPServer?.stop()
-            await startedAppServer?.close()
-            self.appServer = nil
-            clearAppServerModelContainer()
-            self.appServerBackend = nil
-            self.mcpHTTPServer = nil
-            authNotificationTask?.cancel()
-            authNotificationTask = nil
-            store.transitionToFailed(failureMessage)
+            let stopTask = session.requestStop(purpose: .runtimeRestartPreservingRuns) { session in
+                await self.performRuntimeStop(
+                    session: session,
+                    store: store,
+                    reviewCleanupMode: .connected,
+                    reviewCancellation: .system(message: "Review runtime staging failed."),
+                    loginTerminationReason: .runtimeFailure(.runtime(message: failureMessage))
+                )
+            }
+            if let stopTask, await stopTask.value == false {
+                return
+            }
+            if runtimeSession === session {
+                runtimeSession = nil
+                store.transitionToFailed(failureMessage)
+            }
         }
+    }
+
+    private func requireCurrentStagingSession(_ session: HostRuntimeSession) throws {
+        guard runtimeSession === session else {
+            throw HostRuntimeConsumerFailure(message: "The Host runtime staging generation was superseded.")
+        }
+        try session.requireHealthyStaging()
     }
 
     private func runtimeStartupFailureMessage(for error: Error) async -> String {
@@ -509,46 +590,75 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func stop(store: CodexReviewStore, purpose: CodexReviewRuntimeStopPurpose) async {
-        let appServer = appServer
-        let appServerBackend = appServerBackend
-        let mcpHTTPServer = mcpHTTPServer
-        let hasRuntimeState = appServer != nil || appServerBackend != nil || mcpHTTPServer != nil
+        let session = runtimeSession
         let loginSession = self.loginSession
-        guard hasRuntimeState || loginSession != nil else {
+        guard let session else {
+            _ = await loginSession?.terminate(reason: .storeStop)
             if purpose.retiresRuns {
                 _ = await store.retireReviewRunsForFinalStoreStop()
             }
             return
         }
         logger.info("Stopping review runtime")
-        await mcpHTTPServer?.stop()
-        self.mcpHTTPServer = nil
-        if let appServerBackend {
-            let reason = ReviewCancellation.system(message: "Review runtime stopped.")
+        let task = session.requestStop(purpose: purpose) { session in
+            await self.performRuntimeStop(
+                session: session,
+                store: store,
+                reviewCleanupMode: .connected,
+                reviewCancellation: .system(message: "Review runtime stopped."),
+                loginTerminationReason: .storeStop
+            )
+        }
+        if let task {
+            let didReleaseResources = await task.value
+            if didReleaseResources, runtimeSession === session {
+                runtimeSession = nil
+            }
+        }
+    }
+
+    private func performRuntimeStop(
+        session: HostRuntimeSession,
+        store: CodexReviewStore,
+        reviewCleanupMode: RuntimeReviewCleanupMode,
+        reviewCancellation: ReviewCancellation,
+        loginTerminationReason: LoginTerminationReason
+    ) async -> Bool {
+        let runtime = session.runtime
+        await session.mcpHTTPServer?.stop()
+        if let appServerBackend = runtime?.backend {
             await cleanupActiveReviewsForRuntimeTeardown(
                 store: store,
                 appServerBackend: appServerBackend,
-                reason: reason,
-                mode: .connected
+                reason: reviewCancellation,
+                mode: reviewCleanupMode
             )
         }
-        _ = await loginSession?.terminate(reason: .storeStop)
-        if purpose.retiresRuns {
+        _ = await loginSession?.terminate(reason: loginTerminationReason)
+        if let appServer = runtime?.appServer {
+            let retainedRestartIdentities = await appServer.discardAllPreparedReviewRestarts()
+            precondition(
+                retainedRestartIdentities.values.allSatisfy(\.isEmpty),
+                "Review workers must transfer every prepared-restart identity before runtime teardown."
+            )
+        }
+        if session.shouldRetireRuns {
             guard await store.retireReviewRunsForFinalStoreStop() else {
                 logger.error("Review runtime remains open because an unpersisted cleanup quarantine is unresolved")
-                return
+                return false
             }
         }
-        self.appServer = nil
-        clearAppServerModelContainer()
-        authNotificationTask?.cancel()
-        authNotificationTask = nil
-        self.appServerBackend = nil
-        await appServer?.close()
+        await session.cancelConsumersAndWait()
+        await runtime?.appServer.close()
         logger.info("Review runtime stopped")
+        return true
     }
 
-    func waitUntilStopped() async {}
+    func waitUntilStopped() async {
+        if let task = runtimeSession?.stopTask {
+            _ = await task.value
+        }
+    }
 
     func refreshSettings() async throws -> CodexReviewSettings.Snapshot {
         guard let appServerBackend else {
@@ -1285,7 +1395,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func interruptReview(_ attempt: ReviewAttempt, reason: CodexReviewBackendModel.CancellationReason) async throws {
-        guard let appServerBackend else {
+        guard let appServerBackend = teardownAppServerBackend else {
             throw CodexReviewAPI.Error.io("Review runtime is not running.")
         }
         try await appServerBackend.interruptReview(attempt, reason: reason)
@@ -1311,7 +1421,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     func discardPreparedReviewRestart(
         _ token: CodexReviewBackendModel.Review.RestartToken
     ) async -> [ReviewAttempt] {
-        guard let appServerBackend else {
+        guard let appServerBackend = teardownAppServerBackend else {
             preconditionFailure(
                 "A prepared review restart must retain its matching app-server runtime until discard completes."
             )
@@ -1320,7 +1430,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     func cleanupReview(_ attempt: ReviewAttempt) async {
-        guard let appServerBackend else {
+        guard let appServerBackend = teardownAppServerBackend else {
             return
         }
         await appServerBackend.cleanupReview(attempt)
@@ -1330,7 +1440,7 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         _ attempts: [ReviewAttempt],
         additionalThreadIDs: [ReviewThreadID]
     ) async -> ReviewRetainedThreadCleanupResult {
-        guard let appServerBackend else {
+        guard let appServerBackend = teardownAppServerBackend else {
             let attemptFailures = attempts.flatMap { attempt -> [ReviewRetainedThreadCleanupFailure] in
                 if attempt.threadIdentity.activeTurnThreadID == attempt.threadIdentity.sourceThreadID {
                     return [.init(
@@ -1451,87 +1561,125 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
         return auth.persistedAccounts.first(where: { $0.accountKey == persistedAccount.accountKey })
     }
 
-    private func observeAuthNotifications(
+    private func installRuntimeConsumers(
+        session: HostRuntimeSession,
         appServer: CodexAppServer,
-        backend: AppServerCodexReviewBackend,
         store: CodexReviewStore
-    ) async {
-        authNotificationTask?.cancel()
-        let stream = await appServer.accountEvents()
-        authNotificationTask = Task { @MainActor [weak self, weak store] in
-            guard let self, let store else {
-                return
-            }
-            do {
-                for try await event in stream {
-                    await self.handleAuthNotification(
-                        event,
-                        backend: backend,
-                        auth: store.auth
-                    )
-                }
-            } catch is CancellationError {
-            } catch {
-                logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
-                await markRuntimeFailedAfterNotificationStreamError(error, store: store)
-            }
+    ) async throws {
+        let generation = session.generation
+        let connectionEvents = await appServer.connectionEvents()
+        do {
+            try requireCurrentStagingSession(session)
+        } catch {
+            await connectionEvents.cancel()
+            throw error
         }
+        let accountEvents = await appServer.accountEvents()
+        do {
+            try requireCurrentStagingSession(session)
+        } catch {
+            await accountEvents.cancel()
+            await connectionEvents.cancel()
+            throw error
+        }
+        session.installConsumers(
+            accountEvents: accountEvents,
+            connectionEvents: connectionEvents,
+            accountEventSink: { @MainActor [weak self, weak store] event in
+                guard let self, let store else {
+                    return
+                }
+                await self.handleRuntimeAccountEvent(
+                    event,
+                    generation: generation,
+                    store: store
+                )
+            },
+            exitSink: { @MainActor [weak self, weak store] failure in
+                guard let self, let store else {
+                    return
+                }
+                self.runtimeConsumerDidExit(
+                    generation: generation,
+                    failure: failure,
+                    store: store
+                )
+            }
+        )
     }
 
-    // Dropping the container must always reach the lifecycle handler, or the
-    // ReviewMonitor window keeps its model source pointed at a closed
-    // app-server container.
-    private func clearAppServerModelContainer() {
-        appServerModelContainer = nil
-        appServerLifecycleHandler?(nil)
-    }
-
-    private func markRuntimeFailedAfterNotificationStreamError(
-        _ error: any Error,
+    private func handleRuntimeAccountEvent(
+        _ event: CodexAccountEvent,
+        generation: UInt64,
         store: CodexReviewStore
     ) async {
-        let loginSession = self.loginSession
-        guard appServer != nil || appServerBackend != nil || mcpHTTPServer != nil || loginSession != nil else {
+        guard let session = runtimeSession,
+              session.generation == generation,
+              let backend = session.activeRuntime?.backend else {
             return
         }
-        let message = "Review runtime stopped unexpectedly: \(error.localizedDescription)"
-        let failedAppServer = appServer
-        let failedMCPHTTPServer = mcpHTTPServer
-        await failedMCPHTTPServer?.stop()
-        mcpHTTPServer = nil
-        if let appServerBackend {
-            let reason = ReviewCancellation.system(message: message)
-            await cleanupActiveReviewsForRuntimeTeardown(
-                store: store,
-                appServerBackend: appServerBackend,
-                reason: reason,
-                mode: .connectionTerminated
-            )
-        }
-        _ = await loginSession?.terminate(
-            reason: .runtimeFailure(.runtime(message: message))
+        await handleAuthNotification(
+            event,
+            generation: generation,
+            backend: backend,
+            store: store
         )
-        appServer = nil
-        clearAppServerModelContainer()
-        appServerBackend = nil
-        authNotificationTask = nil
-        store.transitionToFailed(message)
-        await failedAppServer?.close()
+    }
+
+    private func runtimeConsumerDidExit(
+        generation: UInt64,
+        failure: HostRuntimeConsumerFailure,
+        store: CodexReviewStore
+    ) {
+        guard let session = runtimeSession,
+              session.generation == generation else {
+            return
+        }
+        switch session.phase {
+        case .staging:
+            session.recordStagingFailure(failure)
+        case .active:
+            let message = "Review runtime stopped unexpectedly: \(failure.message)"
+            store.transitionToFailed(message)
+            _ = session.requestStop(purpose: .runtimeRestartPreservingRuns) { session in
+                let didReleaseResources = await self.performRuntimeStop(
+                    session: session,
+                    store: store,
+                    reviewCleanupMode: .connectionTerminated,
+                    reviewCancellation: .system(message: message),
+                    loginTerminationReason: .runtimeFailure(.runtime(message: message))
+                )
+                if didReleaseResources, self.runtimeSession === session {
+                    self.runtimeSession = nil
+                }
+                return didReleaseResources
+            }
+        case .stopping, .stopIncomplete, .stopped:
+            return
+        }
     }
 
     private func handleAuthNotification(
         _ event: CodexAccountEvent,
+        generation: UInt64,
         backend: AppServerCodexReviewBackend,
-        auth: CodexReviewAuthModel
+        store: CodexReviewStore
     ) async {
         switch event {
         case .accountUpdated:
             if loginSession != nil {
                 return
             }
-            await refreshAuthAfterAccountNotification(backend: backend, auth: auth)
+            await refreshAuthAfterAccountNotification(
+                generation: generation,
+                backend: backend,
+                store: store
+            )
         case .rateLimitsUpdated(let rateLimits):
-            await applyRateLimitsUpdatedNotification(rateLimits, auth: auth)
+            guard acceptsRuntimeEvent(generation: generation) else {
+                return
+            }
+            await applyRateLimitsUpdatedNotification(rateLimits, auth: store.auth)
         case .malformed(let method, let message):
             logger.error("Malformed account notification \(method, privacy: .public): \(message, privacy: .public)")
         case .unknown:
@@ -1540,15 +1688,44 @@ private final class LiveCodexReviewStoreBackend: CodexReviewStoreBackend {
     }
 
     private func refreshAuthAfterAccountNotification(
+        generation: UInt64,
         backend: AppServerCodexReviewBackend,
-        auth: CodexReviewAuthModel
+        store: CodexReviewStore
     ) async {
         do {
-            try await applyAuthSnapshot(try await backend.readAuth(), to: auth)
-            await refreshSelectedAccountRateLimits(auth: auth)
+            let snapshot = try await backend.readAuth()
+            guard acceptsRuntimeEvent(generation: generation) else {
+                return
+            }
+            do {
+                try await accountRuntimeTransitionCoordinator.perform {
+                    guard self.acceptsRuntimeEvent(generation: generation) else {
+                        return
+                    }
+                    try await self.applyAuthSnapshotSerialized(snapshot, to: store.auth)
+                }
+            } catch CodexReviewAuthenticationFailure.accountMutationBlockedByAuthentication {
+                logger.debug("Dropping an account notification while an account transition owns publication")
+                return
+            }
+            guard acceptsRuntimeEvent(generation: generation) else {
+                return
+            }
+            await refreshSelectedAccountRateLimits(auth: store.auth)
         } catch {
-            auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
+            guard acceptsRuntimeEvent(generation: generation) else {
+                return
+            }
+            store.auth.updatePhase(.failed(.runtime(message: error.localizedDescription)))
         }
+    }
+
+    private func acceptsRuntimeEvent(generation: UInt64) -> Bool {
+        guard let session = runtimeSession,
+              session.generation == generation else {
+            return false
+        }
+        return session.isActive
     }
 
     private func applyRateLimitsUpdatedNotification(
@@ -1803,6 +1980,254 @@ private struct AppServerRuntime: Sendable {
     var appServer: CodexAppServer
     var modelContainer: CodexModelContainer
     var backend: AppServerCodexReviewBackend
+}
+
+@MainActor
+private final class HostRuntimeSession {
+    enum Phase {
+        case staging
+        case active
+        case stopping
+        case stopIncomplete
+        case stopped
+    }
+
+    let generation: UInt64
+
+    private(set) var phase: Phase = .staging
+    private(set) var runtime: AppServerRuntime?
+    private(set) var mcpHTTPServer: (any CodexReviewMCPHTTPServing)?
+    private(set) var accountEvents: CodexAccountEvents?
+    private(set) var accountConsumerTask: Task<Void, Never>?
+    private(set) var connectionEvents: CodexConnectionEvents?
+    private(set) var connectionConsumerTask: Task<Void, Never>?
+    private(set) var stopTask: Task<Bool, Never>?
+    private(set) var shouldRetireRuns = false
+
+    private let lifecycleHandler: CodexReviewAppServerLifecycleHandler?
+    private var didPublishLifecycle = false
+    private var stagingFailure: HostRuntimeConsumerFailure?
+
+    init(
+        generation: UInt64,
+        lifecycleHandler: CodexReviewAppServerLifecycleHandler?
+    ) {
+        self.generation = generation
+        self.lifecycleHandler = lifecycleHandler
+    }
+
+    var activeRuntime: AppServerRuntime? {
+        guard case .active = phase else {
+            return nil
+        }
+        return runtime
+    }
+
+    var activeMCPHTTPServer: (any CodexReviewMCPHTTPServing)? {
+        guard case .active = phase else {
+            return nil
+        }
+        return mcpHTTPServer
+    }
+
+    var isActive: Bool {
+        if case .active = phase {
+            return true
+        }
+        return false
+    }
+
+    func installRuntime(_ runtime: AppServerRuntime) {
+        precondition(self.runtime == nil, "A Host runtime session can install its app-server runtime only once.")
+        precondition(isStaging, "An app-server runtime can be installed only while staging.")
+        self.runtime = runtime
+    }
+
+    func installMCPHTTPServer(_ server: any CodexReviewMCPHTTPServing) {
+        precondition(mcpHTTPServer == nil, "A Host runtime session can install its MCP server only once.")
+        precondition(isStaging, "An MCP server can be installed only while staging.")
+        mcpHTTPServer = server
+    }
+
+    func installConsumers(
+        accountEvents: CodexAccountEvents,
+        connectionEvents: CodexConnectionEvents,
+        accountEventSink: @escaping @MainActor @Sendable (CodexAccountEvent) async -> Void,
+        exitSink: @escaping @MainActor @Sendable (HostRuntimeConsumerFailure) -> Void
+    ) {
+        precondition(
+            self.accountEvents == nil && accountConsumerTask == nil
+                && self.connectionEvents == nil && connectionConsumerTask == nil,
+            "A Host runtime session can install its event consumers only once."
+        )
+        precondition(isStaging, "Runtime consumers can be installed only while staging.")
+        self.accountEvents = accountEvents
+        accountConsumerTask = Task { @MainActor in
+            do {
+                for try await event in accountEvents {
+                    await accountEventSink(event)
+                }
+                if Task.isCancelled == false {
+                    exitSink(.init(message: "The Codex account event stream ended unexpectedly."))
+                }
+            } catch is CancellationError {
+            } catch {
+                logger.error("Auth notification stream ended: \(error.localizedDescription, privacy: .public)")
+                exitSink(.init(message: error.localizedDescription))
+            }
+        }
+        self.connectionEvents = connectionEvents
+        connectionConsumerTask = Task { @MainActor in
+            for await event in connectionEvents {
+                switch event {
+                case .warning(let diagnostic):
+                    logger.warning("App-server warning: \(diagnostic.message, privacy: .public)")
+                case .retrying(let diagnostic):
+                    logger.warning("App-server retrying \(diagnostic.method, privacy: .public) attempt \(diagnostic.attempt, privacy: .public)")
+                case .deprecation(let notice):
+                    logger.warning("App-server deprecation: \(notice.summary, privacy: .public)")
+                case .unknown:
+                    logger.debug("Unknown app-server notification")
+                case .terminated(let termination):
+                    exitSink(.init(message: Self.failureMessage(for: termination)))
+                    return
+                }
+            }
+            if Task.isCancelled == false {
+                exitSink(.init(message: "The Codex connection event stream ended unexpectedly."))
+            }
+        }
+    }
+
+    func commit() {
+        precondition(isStaging, "Only a staged Host runtime session can become active.")
+        guard let modelContainer = runtime?.modelContainer else {
+            preconditionFailure("A Host runtime session requires a model container before publication.")
+        }
+        phase = .active
+        didPublishLifecycle = true
+        lifecycleHandler?(modelContainer)
+    }
+
+    func recordStagingFailure(_ failure: HostRuntimeConsumerFailure) {
+        guard isStaging, stagingFailure == nil else {
+            return
+        }
+        stagingFailure = failure
+    }
+
+    func requireHealthyStaging() throws {
+        guard isStaging else {
+            throw HostRuntimeConsumerFailure(message: "The Host runtime staging generation was superseded.")
+        }
+        if let stagingFailure {
+            throw stagingFailure
+        }
+    }
+
+    func beginStopping() {
+        switch phase {
+        case .staging, .active, .stopIncomplete:
+            phase = .stopping
+        case .stopping, .stopped:
+            return
+        }
+        if didPublishLifecycle {
+            didPublishLifecycle = false
+            lifecycleHandler?(nil)
+        }
+    }
+
+    func cancelConsumersAndWait() async {
+        await connectionEvents?.cancel()
+        await accountEvents?.cancel()
+        connectionConsumerTask?.cancel()
+        accountConsumerTask?.cancel()
+        await connectionConsumerTask?.value
+        await accountConsumerTask?.value
+        connectionEvents = nil
+        connectionConsumerTask = nil
+        accountEvents = nil
+        accountConsumerTask = nil
+    }
+
+    func waitForStopCompletion() async -> Bool? {
+        guard let stopTask else {
+            return nil
+        }
+        return await stopTask.value
+    }
+
+    func finishStopping(didReleaseResources: Bool) {
+        precondition(stopTask == nil, "The shared stop task must clear itself before stop completion is published.")
+        if didReleaseResources {
+            runtime = nil
+            mcpHTTPServer = nil
+            accountEvents = nil
+            accountConsumerTask = nil
+            connectionEvents = nil
+            connectionConsumerTask = nil
+            phase = .stopped
+        } else {
+            phase = .stopIncomplete
+        }
+    }
+
+    func requestStop(
+        purpose: CodexReviewRuntimeStopPurpose,
+        _ operation: @escaping @MainActor @Sendable (HostRuntimeSession) async -> Bool
+    ) -> Task<Bool, Never>? {
+        if purpose.retiresRuns {
+            shouldRetireRuns = true
+        }
+        if let stopTask {
+            return stopTask
+        }
+        switch phase {
+        case .stopped:
+            return nil
+        case .stopping:
+            preconditionFailure("A stopping Host runtime session must retain its shared stop completion.")
+        case .staging, .active, .stopIncomplete:
+            break
+        }
+        beginStopping()
+        let task = Task { @MainActor [weak self] in
+            guard let self else {
+                return true
+            }
+            let didReleaseResources = await operation(self)
+            self.stopTask = nil
+            self.finishStopping(didReleaseResources: didReleaseResources)
+            return didReleaseResources
+        }
+        stopTask = task
+        return task
+    }
+
+    var isStaging: Bool {
+        if case .staging = phase {
+            return true
+        }
+        return false
+    }
+
+    private nonisolated static func failureMessage(
+        for termination: CodexConnectionTermination
+    ) -> String {
+        switch termination {
+        case .closedByCaller:
+            "The Codex app-server connection was closed by the caller."
+        case .transportFailure(let failure):
+            failure.localizedDescription
+        case .processExited(let status):
+            if let status {
+                "The Codex app-server process exited with status \(status)."
+            } else {
+                "The Codex app-server process exited."
+            }
+        }
+    }
 }
 
 @MainActor
